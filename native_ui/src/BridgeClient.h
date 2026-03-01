@@ -106,4 +106,5 @@ private:
     QVector<QStringList> m_libraryAlbumPaths;
     bool m_libraryScanInProgress{false};
     bool m_connected{false};
+    bool m_stdoutPumpScheduled{false};
 };

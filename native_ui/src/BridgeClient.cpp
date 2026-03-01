@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -10,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QMetaObject>
 
 BridgeClient::BridgeClient(QObject *parent)
     : QObject(parent) {
@@ -263,8 +265,12 @@ void BridgeClient::sendJson(const QJsonObject &obj) {
 }
 
 void BridgeClient::handleStdoutReady() {
+    m_stdoutPumpScheduled = false;
     bool anySnapshotChanged = false;
-    while (m_process.canReadLine()) {
+    int processedLines = 0;
+    constexpr int kMaxLinesPerPass = 48;
+    while (m_process.canReadLine() && processedLines < kMaxLinesPerPass) {
+        processedLines++;
         const QByteArray line = m_process.readLine().trimmed();
         if (line.isEmpty()) {
             continue;
@@ -369,6 +375,11 @@ void BridgeClient::handleStdoutReady() {
                 }
                 if (!rowsDelta.isEmpty()) {
                     m_spectrogramRowsDelta += rowsDelta;
+                    constexpr int kMaxPendingSpectrogramRows = 64;
+                    if (m_spectrogramRowsDelta.size() > kMaxPendingSpectrogramRows) {
+                        m_spectrogramRowsDelta = m_spectrogramRowsDelta.mid(
+                            m_spectrogramRowsDelta.size() - kMaxPendingSpectrogramRows);
+                    }
                     changed = true;
                 }
             }
@@ -448,12 +459,29 @@ void BridgeClient::handleStdoutReady() {
     if (anySnapshotChanged) {
         emit snapshotChanged();
     }
+    if (m_process.canReadLine() && !m_stdoutPumpScheduled) {
+        m_stdoutPumpScheduled = true;
+        QMetaObject::invokeMethod(this, [this]() { handleStdoutReady(); }, Qt::QueuedConnection);
+    }
 }
 
 void BridgeClient::handleStderrReady() {
-    const QString text = QString::fromUtf8(m_process.readAllStandardError()).trimmed();
-    if (!text.isEmpty()) {
-        emit bridgeError(text);
+    const QByteArray chunk = m_process.readAllStandardError();
+    if (chunk.isEmpty()) {
+        return;
+    }
+    const QList<QByteArray> lines = chunk.split('\n');
+    for (const QByteArray &rawLine : lines) {
+        const QString line = QString::fromUtf8(rawLine).trimmed();
+        if (line.isEmpty()) {
+            continue;
+        }
+        // Keep high-frequency profiling output out of QML signal path to avoid UI stalls.
+        if (line.startsWith(QStringLiteral("[analysis]")) || line.startsWith(QStringLiteral("[gst]"))) {
+            std::fprintf(stderr, "%s\n", line.toLocal8Bit().constData());
+            continue;
+        }
+        emit bridgeError(line);
     }
 }
 
