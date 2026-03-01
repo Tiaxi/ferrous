@@ -118,12 +118,8 @@ int BridgeClient::selectedQueueIndex() const {
     return m_selectedQueueIndex;
 }
 
-QVariantList BridgeClient::waveformPeaks() const {
-    return m_waveformPeaks;
-}
-
-QVariantList BridgeClient::spectrogramRowsDelta() const {
-    return m_spectrogramRowsDelta;
+QByteArray BridgeClient::waveformPeaksPacked() const {
+    return m_waveformPeaksPacked;
 }
 
 bool BridgeClient::spectrogramReset() const {
@@ -268,11 +264,13 @@ void BridgeClient::scanDefaultMusicRoot() {
     scanRoot(music);
 }
 
-QVariantList BridgeClient::takeSpectrogramRowsDelta() {
-    QVariantList out = m_spectrogramRowsDelta;
-    if (!m_spectrogramRowsDelta.isEmpty()) {
-        m_spectrogramRowsDelta.clear();
-    }
+QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
+    QVariantMap out;
+    out.insert(QStringLiteral("rows"), m_spectrogramPackedRows);
+    out.insert(QStringLiteral("bins"), m_spectrogramPackedBins);
+    out.insert(QStringLiteral("data"), m_spectrogramRowsPacked);
+    m_spectrogramRowsPacked.clear();
+    m_spectrogramPackedRows = 0;
     return out;
 }
 
@@ -393,14 +391,10 @@ void BridgeClient::handleAnalysisSocketReady() {
         }
 
         if ((flags & kAnalysisFlagWaveform) != 0) {
-            QVariantList peaks;
-            peaks.reserve(waveformLen);
-            for (quint16 i = 0; i < waveformLen; ++i) {
-                peaks.push_back(static_cast<double>(cursor[i]) / 255.0);
-            }
+            QByteArray peaks(reinterpret_cast<const char *>(cursor), waveformLen);
             cursor += waveformLen;
-            if (m_waveformPeaks != peaks) {
-                m_waveformPeaks = peaks;
+            if (m_waveformPeaksPacked != peaks) {
+                m_waveformPeaksPacked = peaks;
                 changed = true;
             }
         } else {
@@ -408,25 +402,24 @@ void BridgeClient::handleAnalysisSocketReady() {
         }
 
         if ((flags & kAnalysisFlagSpectrogram) != 0 && rowCount > 0 && binCount > 0) {
-            QVariantList rowsDelta;
-            rowsDelta.reserve(rowCount);
-            for (quint16 r = 0; r < rowCount; ++r) {
-                QVariantList row;
-                row.reserve(binCount);
-                const uchar *rowBase = cursor + static_cast<qsizetype>(r) * static_cast<qsizetype>(binCount);
-                for (quint16 b = 0; b < binCount; ++b) {
-                    row.push_back(static_cast<int>(rowBase[b]));
-                }
-                rowsDelta.push_back(row);
+            if (m_spectrogramPackedRows == 0) {
+                m_spectrogramPackedBins = binCount;
             }
-            if (!rowsDelta.isEmpty()) {
-                m_spectrogramRowsDelta += rowsDelta;
+            if (m_spectrogramPackedBins == static_cast<int>(binCount)) {
+                const qsizetype bytes = static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
+                m_spectrogramRowsPacked.append(reinterpret_cast<const char *>(cursor), bytes);
+                m_spectrogramPackedRows += rowCount;
                 constexpr int kMaxPendingSpectrogramRows = 512;
-                if (m_spectrogramRowsDelta.size() > kMaxPendingSpectrogramRows) {
-                    m_spectrogramRowsDelta = m_spectrogramRowsDelta.mid(
-                        m_spectrogramRowsDelta.size() - kMaxPendingSpectrogramRows);
+                if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows && m_spectrogramPackedBins > 0) {
+                    const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;
+                    const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
+                        * static_cast<qsizetype>(m_spectrogramPackedBins);
+                    m_spectrogramRowsPacked.remove(0, dropBytes);
+                    m_spectrogramPackedRows = kMaxPendingSpectrogramRows;
                 }
-                changed = true;
+                if (m_spectrogramPackedRows > 0) {
+                    changed = true;
+                }
             }
         }
     }
@@ -601,26 +594,40 @@ void BridgeClient::handleStdoutReady() {
                 const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
                 if (spectrogramRowsValue.isArray()) {
                     const QJsonArray rowsArr = spectrogramRowsValue.toArray();
-                    QVariantList rowsDelta;
-                    rowsDelta.reserve(rowsArr.size());
+                    int rowsAdded = 0;
+                    int bins = m_spectrogramPackedBins;
                     for (const QJsonValue &rowValue : rowsArr) {
                         const QJsonArray rowArr = rowValue.toArray();
                         if (rowArr.isEmpty()) {
                             continue;
                         }
-                        QVariantList row;
-                        row.reserve(rowArr.size());
-                        for (const QJsonValue &v : rowArr) {
-                            row.push_back(v.toDouble());
+                        if (bins == 0) {
+                            bins = rowArr.size();
+                            m_spectrogramPackedBins = bins;
                         }
-                        rowsDelta.push_back(row);
+                        if (rowArr.size() != bins) {
+                            continue;
+                        }
+                        QByteArray packedRow;
+                        packedRow.resize(bins);
+                        for (qsizetype i = 0; i < rowArr.size(); ++i) {
+                            const double raw = rowArr[static_cast<int>(i)].toDouble();
+                            const int u8 = std::clamp<int>(static_cast<int>(std::lround(raw)), 0, 255);
+                            packedRow[i] = static_cast<char>(u8);
+                        }
+                        m_spectrogramRowsPacked.append(packedRow);
+                        rowsAdded++;
                     }
-                    if (!rowsDelta.isEmpty()) {
-                        m_spectrogramRowsDelta += rowsDelta;
+                    if (rowsAdded > 0) {
+                        m_spectrogramPackedRows += rowsAdded;
                         constexpr int kMaxPendingSpectrogramRows = 512;
-                        if (m_spectrogramRowsDelta.size() > kMaxPendingSpectrogramRows) {
-                            m_spectrogramRowsDelta = m_spectrogramRowsDelta.mid(
-                                m_spectrogramRowsDelta.size() - kMaxPendingSpectrogramRows);
+                        if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows
+                            && m_spectrogramPackedBins > 0) {
+                            const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;
+                            const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
+                                * static_cast<qsizetype>(m_spectrogramPackedBins);
+                            m_spectrogramRowsPacked.remove(0, dropBytes);
+                            m_spectrogramPackedRows = kMaxPendingSpectrogramRows;
                         }
                         changed = true;
                     }
@@ -679,14 +686,17 @@ void BridgeClient::handleStdoutReady() {
             if (!m_analysisSocketConnected) {
                 const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
                 if (waveformValue.isArray()) {
-                    QVariantList peaks;
                     const QJsonArray arr = waveformValue.toArray();
-                    peaks.reserve(arr.size());
+                    QByteArray peaks;
+                    peaks.resize(arr.size());
+                    qsizetype i = 0;
                     for (const QJsonValue &v : arr) {
-                        peaks.push_back(v.toDouble());
+                        const double f = std::clamp(v.toDouble(), 0.0, 1.0);
+                        const int u8 = std::clamp<int>(static_cast<int>(std::lround(f * 255.0)), 0, 255);
+                        peaks[i++] = static_cast<char>(u8);
                     }
-                    if (m_waveformPeaks != peaks) {
-                        m_waveformPeaks = peaks;
+                    if (m_waveformPeaksPacked != peaks) {
+                        m_waveformPeaksPacked = peaks;
                         changed = true;
                     }
                 }

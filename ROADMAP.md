@@ -72,9 +72,9 @@ Acceptance criteria:
 - [x] **Next slice**: remove analysis payload from JSON snapshots when binary analysis channel is active; keep control/state in JSON.
 - [x] **Next slice**: add dedicated high-rate binary analysis channel for spectrogram rows + waveform peaks (Unix local socket path, fallback to JSON analysis when unavailable).
 - [ ] Low-rate channel (JSON/properties): playback state, queue, library, settings.
-- [ ] High-rate channel (binary ring/shared memory): spectrogram rows + waveform peaks.
+- [x] High-rate channel (binary transport path): spectrogram rows + waveform peaks.
 - [x] Explicit frame sequencing and drop policy for high-rate visuals (binary frame seq + stale-frame drop + socket queue drop counters).
-- [ ] Eliminate repeated parse/alloc on UI thread for high-rate analysis data.
+- [x] Eliminate repeated parse/alloc on UI thread for high-rate analysis data (packed rows/peaks + C++ waveform/spectrogram paint path).
 
 Acceptance criteria:
 - High-rate analysis visuals do not block command/control responsiveness.

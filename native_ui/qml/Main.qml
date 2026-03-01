@@ -15,23 +15,66 @@ Kirigami.ApplicationWindow {
     title: "Ferrous"
     property int selectedLibraryAlbumIndex: -1
     property int lastCenteredQueueIndex: -2
+    readonly property var uiBridge: bridge ? bridge : bridgeFallback
+
+    QtObject {
+        id: bridgeFallback
+        property string playbackState: "Stopped"
+        property string positionText: "00:00"
+        property string durationText: "00:00"
+        property real positionSeconds: 0
+        property real durationSeconds: 0
+        property real volume: 1.0
+        property int queueLength: 0
+        property var queueItems: []
+        property int selectedQueueIndex: -1
+        property var waveformPeaksPacked: ""
+        property bool spectrogramReset: false
+        property real dbRange: 90
+        property bool logScale: false
+        property int sampleRateHz: 48000
+        property var libraryAlbums: []
+        property bool libraryScanInProgress: false
+        property bool connected: false
+        signal snapshotChanged()
+        signal bridgeError(string message)
+        function play() {}
+        function pause() {}
+        function stop() {}
+        function next() {}
+        function previous() {}
+        function seek(seconds) {}
+        function setVolume(value) {}
+        function playAt(index) {}
+        function selectQueueIndex(index) {}
+        function removeAt(index) {}
+        function moveQueue(from, to) {}
+        function clearQueue() {}
+        function replaceAlbumAt(index) {}
+        function appendAlbumAt(index) {}
+        function scanRoot(path) {}
+        function scanDefaultMusicRoot() {}
+        function requestSnapshot() {}
+        function shutdown() {}
+        function takeSpectrogramRowsDeltaPacked() { return ({ rows: 0, bins: 0, data: "" }) }
+    }
 
     function togglePlayPause() {
-        if (bridge.playbackState === "Playing") {
-            bridge.pause()
+        if (uiBridge.playbackState === "Playing") {
+            uiBridge.pause()
         } else {
-            bridge.play()
+            uiBridge.play()
         }
     }
 
     function moveSelected(delta) {
-        const from = bridge.selectedQueueIndex
-        if (from < 0 || bridge.queueLength <= 0) {
+        const from = uiBridge.selectedQueueIndex
+        if (from < 0 || uiBridge.queueLength <= 0) {
             return
         }
-        const to = Math.max(0, Math.min(bridge.queueLength - 1, from + delta))
+        const to = Math.max(0, Math.min(uiBridge.queueLength - 1, from + delta))
         if (to !== from) {
-            bridge.moveQueue(from, to)
+            uiBridge.moveQueue(from, to)
         }
     }
 
@@ -46,40 +89,40 @@ Kirigami.ApplicationWindow {
         text: "Previous"
         icon.name: "media-skip-backward"
         shortcut: "Ctrl+Left"
-        onTriggered: bridge.previous()
+        onTriggered: uiBridge.previous()
     }
     Action {
         id: playAction
         text: "Play"
         icon.name: "media-playback-start"
         shortcut: "Media Play"
-        onTriggered: bridge.play()
+        onTriggered: uiBridge.play()
     }
     Action {
         id: pauseAction
         text: "Pause"
         icon.name: "media-playback-pause"
         shortcut: "Media Pause"
-        onTriggered: bridge.pause()
+        onTriggered: uiBridge.pause()
     }
     Action {
         id: stopAction
         text: "Stop"
         icon.name: "media-playback-stop"
         shortcut: "Media Stop"
-        onTriggered: bridge.stop()
+        onTriggered: uiBridge.stop()
     }
     Action {
         id: nextAction
         text: "Next"
         icon.name: "media-skip-forward"
         shortcut: "Ctrl+Right"
-        onTriggered: bridge.next()
+        onTriggered: uiBridge.next()
     }
     Action {
         id: clearPlaylistAction
         text: "Clear Playlist"
-        onTriggered: bridge.clearQueue()
+        onTriggered: uiBridge.clearQueue()
     }
     Action {
         id: moveTrackUpAction
@@ -109,8 +152,8 @@ Kirigami.ApplicationWindow {
     Shortcut {
         sequence: "Delete"
         onActivated: {
-            if (bridge.selectedQueueIndex >= 0) {
-                bridge.removeAt(bridge.selectedQueueIndex)
+            if (uiBridge.selectedQueueIndex >= 0) {
+                uiBridge.removeAt(uiBridge.selectedQueueIndex)
             }
         }
     }
@@ -149,10 +192,10 @@ Kirigami.ApplicationWindow {
             spacing: 8
             Label {
                 Layout.fillWidth: true
-                text: bridge.connected
-                    ? (bridge.playbackState.toLowerCase() + " | "
-                       + bridge.positionText + "/" + bridge.durationText
-                       + " | tracks " + bridge.queueLength)
+                text: uiBridge.connected
+                    ? (uiBridge.playbackState.toLowerCase() + " | "
+                       + uiBridge.positionText + "/" + uiBridge.durationText
+                       + " | tracks " + uiBridge.queueLength)
                     : "bridge disconnected"
                 elide: Text.ElideRight
             }
@@ -187,11 +230,11 @@ Kirigami.ApplicationWindow {
                     id: seekSlider
                     Layout.fillWidth: true
                     from: 0
-                    to: Math.max(bridge.durationSeconds, 1.0)
+                    to: Math.max(uiBridge.durationSeconds, 1.0)
                     stepSize: 0
                     onPressedChanged: {
                         if (!pressed) {
-                            bridge.seek(value)
+                            uiBridge.seek(value)
                         }
                     }
 
@@ -206,57 +249,13 @@ Kirigami.ApplicationWindow {
                             radius: 1
                         }
 
-                        Canvas {
-                            id: waveformCanvas
+                        WaveformItem {
+                            id: waveformItem
                             anchors.fill: parent
                             anchors.margins: 1
-                            antialiasing: false
-
-                            onPaint: {
-                                const ctx = getContext("2d")
-                                ctx.reset()
-                                const w = width
-                                const h = height
-                                if (w <= 0 || h <= 0) {
-                                    return
-                                }
-
-                                const peaks = bridge.waveformPeaks
-                                ctx.fillStyle = "#ffffff"
-                                ctx.fillRect(0, 0, w, h)
-
-                                if (peaks.length > 0) {
-                                    ctx.fillStyle = "#0f2e5d"
-                                    const centerY = h / 2
-                                    for (let x = 0; x < w; x++) {
-                                        const idx = Math.floor((x / Math.max(1, w - 1)) * (peaks.length - 1))
-                                        const peak = Math.max(0.0, Math.min(1.0, Number(peaks[idx])))
-                                        const bar = Math.max(1, Math.floor(peak * (h / 2)))
-                                        ctx.fillRect(x, centerY - bar, 1, bar * 2)
-                                    }
-                                }
-
-                                const progress = bridge.durationSeconds > 0
-                                    ? Math.max(0, Math.min(1, bridge.positionSeconds / bridge.durationSeconds))
-                                    : 0
-                                const progressX = Math.floor(progress * w)
-
-                                ctx.fillStyle = "rgba(120, 190, 255, 0.26)"
-                                ctx.fillRect(0, 0, progressX, h)
-
-                                ctx.fillStyle = "#2f7cd6"
-                                ctx.fillRect(progressX, 0, 1, h)
-                            }
-
-                            onWidthChanged: requestPaint()
-                            onHeightChanged: requestPaint()
-
-                            Connections {
-                                target: bridge
-                                function onSnapshotChanged() {
-                                    waveformCanvas.requestPaint()
-                                }
-                            }
+                            peaksData: uiBridge.waveformPeaksPacked
+                            positionSeconds: uiBridge.positionSeconds
+                            durationSeconds: uiBridge.durationSeconds
                         }
                     }
 
@@ -274,12 +273,12 @@ Kirigami.ApplicationWindow {
                 Binding {
                     target: seekSlider
                     property: "value"
-                    value: bridge.positionSeconds
+                    value: uiBridge.positionSeconds
                     when: !seekSlider.pressed
                 }
 
                 Label {
-                    text: bridge.positionText + "/" + bridge.durationText
+                    text: uiBridge.positionText + "/" + uiBridge.durationText
                     horizontalAlignment: Text.AlignRight
                     Layout.minimumWidth: 96
                 }
@@ -297,10 +296,10 @@ Kirigami.ApplicationWindow {
                     from: 0
                     to: 1
                     stepSize: 0
-                    onMoved: bridge.setVolume(value)
+                    onMoved: uiBridge.setVolume(value)
                     onPressedChanged: {
                         if (!pressed) {
-                            bridge.setVolume(value)
+                            uiBridge.setVolume(value)
                         }
                     }
                 }
@@ -308,7 +307,7 @@ Kirigami.ApplicationWindow {
                 Binding {
                     target: volumeSlider
                     property: "value"
-                    value: bridge.volume
+                    value: uiBridge.volume
                     when: !volumeSlider.pressed
                 }
             }
@@ -364,7 +363,7 @@ Kirigami.ApplicationWindow {
                                 }
                                 Button {
                                     text: "Scan Music"
-                                    onClicked: bridge.scanDefaultMusicRoot()
+                                    onClicked: uiBridge.scanDefaultMusicRoot()
                                 }
                             }
 
@@ -378,7 +377,7 @@ Kirigami.ApplicationWindow {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                model: bridge.libraryAlbums
+                                model: uiBridge.libraryAlbums
 
                                 delegate: Rectangle {
                                     width: ListView.view.width
@@ -411,26 +410,26 @@ Kirigami.ApplicationWindow {
                                                 albumMenu.popup()
                                             }
                                         }
-                                        onDoubleClicked: bridge.replaceAlbumAt(index)
+                                        onDoubleClicked: uiBridge.replaceAlbumAt(index)
                                     }
 
                                     Menu {
                                         id: albumMenu
                                         MenuItem {
                                             text: "Play Album"
-                                            onTriggered: bridge.replaceAlbumAt(index)
+                                            onTriggered: uiBridge.replaceAlbumAt(index)
                                         }
                                         MenuItem {
                                             text: "Append Album"
-                                            onTriggered: bridge.appendAlbumAt(index)
+                                            onTriggered: uiBridge.appendAlbumAt(index)
                                         }
                                     }
                                 }
                             }
 
                             Label {
-                                visible: bridge.libraryAlbums.length === 0
-                                text: bridge.libraryScanInProgress ? "Scanning library..." : "No albums indexed"
+                                visible: uiBridge.libraryAlbums.length === 0
+                                text: uiBridge.libraryScanInProgress ? "Scanning library..." : "No albums indexed"
                                 color: Kirigami.Theme.disabledTextColor
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignHCenter
@@ -476,12 +475,12 @@ Kirigami.ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
-                            model: bridge.queueItems
+                            model: uiBridge.queueItems
 
                             delegate: Rectangle {
                                 width: ListView.view.width
                                 height: 24
-                                color: index === bridge.selectedQueueIndex
+                                color: index === uiBridge.selectedQueueIndex
                                     ? Kirigami.Theme.highlightColor
                                     : (index % 2 === 0 ? Kirigami.Theme.backgroundColor
                                                         : Kirigami.Theme.alternateBackgroundColor)
@@ -493,7 +492,7 @@ Kirigami.ApplicationWindow {
                                     Label {
                                         text: (index + 1).toString().padStart(2, "0")
                                         Layout.preferredWidth: 24
-                                        color: index === bridge.selectedQueueIndex
+                                        color: index === uiBridge.selectedQueueIndex
                                             ? Kirigami.Theme.highlightedTextColor
                                             : Kirigami.Theme.textColor
                                     }
@@ -501,7 +500,7 @@ Kirigami.ApplicationWindow {
                                         text: modelData
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
-                                        color: index === bridge.selectedQueueIndex
+                                        color: index === uiBridge.selectedQueueIndex
                                             ? Kirigami.Theme.highlightedTextColor
                                             : Kirigami.Theme.textColor
                                     }
@@ -509,7 +508,7 @@ Kirigami.ApplicationWindow {
                                         text: ""
                                         Layout.preferredWidth: 72
                                         horizontalAlignment: Text.AlignRight
-                                        color: index === bridge.selectedQueueIndex
+                                        color: index === uiBridge.selectedQueueIndex
                                             ? Kirigami.Theme.highlightedTextColor
                                             : Kirigami.Theme.textColor
                                     }
@@ -518,14 +517,14 @@ Kirigami.ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     acceptedButtons: Qt.LeftButton
-                                    onPressed: bridge.selectQueueIndex(index)
-                                    onDoubleClicked: bridge.playAt(index)
+                                    onPressed: uiBridge.selectQueueIndex(index)
+                                    onDoubleClicked: uiBridge.playAt(index)
                                 }
                             }
                         }
 
                         Label {
-                            visible: bridge.queueLength === 0
+                            visible: uiBridge.queueLength === 0
                             text: "Playlist is empty"
                             color: Kirigami.Theme.disabledTextColor
                             horizontalAlignment: Text.AlignHCenter
@@ -535,13 +534,13 @@ Kirigami.ApplicationWindow {
                         }
 
                         Connections {
-                            target: bridge
+                            target: uiBridge
                             function onSnapshotChanged() {
-                                if (bridge.selectedQueueIndex >= 0
-                                        && bridge.selectedQueueIndex !== root.lastCenteredQueueIndex) {
-                                    playlistView.positionViewAtIndex(bridge.selectedQueueIndex, ListView.Contain)
-                                    root.lastCenteredQueueIndex = bridge.selectedQueueIndex
-                                } else if (bridge.selectedQueueIndex < 0) {
+                                if (uiBridge.selectedQueueIndex >= 0
+                                        && uiBridge.selectedQueueIndex !== root.lastCenteredQueueIndex) {
+                                    playlistView.positionViewAtIndex(uiBridge.selectedQueueIndex, ListView.Contain)
+                                    root.lastCenteredQueueIndex = uiBridge.selectedQueueIndex
+                                } else if (uiBridge.selectedQueueIndex < 0) {
                                     root.lastCenteredQueueIndex = -2
                                 }
                             }
@@ -560,29 +559,29 @@ Kirigami.ApplicationWindow {
                         id: spectrogramItem
                         anchors.fill: parent
                         maxColumns: Math.max(640, Math.floor(width))
-                        dbRange: bridge.dbRange
-                        logScale: bridge.logScale
-                        sampleRateHz: bridge.sampleRateHz
+                        dbRange: uiBridge.dbRange
+                        logScale: uiBridge.logScale
+                        sampleRateHz: uiBridge.sampleRateHz
                     }
                 }
             }
         }
     }
 
-    onClosing: function(close) { bridge.shutdown() }
+    onClosing: function(close) { uiBridge.shutdown() }
 
     Connections {
-        target: bridge
+        target: uiBridge
         function onSnapshotChanged() {
-            if (root.selectedLibraryAlbumIndex >= bridge.libraryAlbums.length) {
-                root.selectedLibraryAlbumIndex = bridge.libraryAlbums.length - 1
+            if (root.selectedLibraryAlbumIndex >= uiBridge.libraryAlbums.length) {
+                root.selectedLibraryAlbumIndex = uiBridge.libraryAlbums.length - 1
             }
-            if (bridge.spectrogramReset) {
+            if (uiBridge.spectrogramReset) {
                 spectrogramItem.reset()
             }
-            const delta = bridge.takeSpectrogramRowsDelta()
-            if (delta.length > 0) {
-                spectrogramItem.appendRows(delta)
+            const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
+            if (delta.rows > 0 && delta.bins > 0) {
+                spectrogramItem.appendPackedRows(delta.data, delta.rows, delta.bins)
             }
         }
         function onBridgeError(message) {

@@ -10,6 +10,7 @@
 #include <QStringList>
 #include <QTimer>
 #include <QVariantList>
+#include <QVariantMap>
 
 class BridgeClient : public QObject {
     Q_OBJECT
@@ -22,8 +23,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
-    Q_PROPERTY(QVariantList waveformPeaks READ waveformPeaks NOTIFY snapshotChanged)
-    Q_PROPERTY(QVariantList spectrogramRowsDelta READ spectrogramRowsDelta NOTIFY snapshotChanged)
+    Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY snapshotChanged)
     Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY snapshotChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY snapshotChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
@@ -45,8 +45,7 @@ public:
     int queueLength() const;
     QStringList queueItems() const;
     int selectedQueueIndex() const;
-    QVariantList waveformPeaks() const;
-    QVariantList spectrogramRowsDelta() const;
+    QByteArray waveformPeaksPacked() const;
     bool spectrogramReset() const;
     int sampleRateHz() const;
     double dbRange() const;
@@ -71,7 +70,7 @@ public:
     Q_INVOKABLE void appendAlbumAt(int index);
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
-    Q_INVOKABLE QVariantList takeSpectrogramRowsDelta();
+    Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
 
@@ -105,8 +104,10 @@ private:
     int m_queueLength{0};
     QStringList m_queueItems;
     int m_selectedQueueIndex{-1};
-    QVariantList m_waveformPeaks;
-    QVariantList m_spectrogramRowsDelta;
+    QByteArray m_waveformPeaksPacked;
+    QByteArray m_spectrogramRowsPacked;
+    int m_spectrogramPackedRows{0};
+    int m_spectrogramPackedBins{0};
     bool m_spectrogramReset{false};
     int m_sampleRateHz{48000};
     double m_dbRange{90.0};

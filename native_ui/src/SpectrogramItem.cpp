@@ -146,6 +146,37 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     update();
 }
 
+void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow) {
+    if (packedRows.isEmpty() || rowCount <= 0 || binsPerRow <= 0) {
+        return;
+    }
+    const qsizetype expected = static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binsPerRow);
+    if (packedRows.size() < expected) {
+        return;
+    }
+
+    if (m_binsPerColumn <= 0) {
+        m_binsPerColumn = binsPerRow;
+        invalidateMapping();
+    }
+    if (m_binsPerColumn != binsPerRow) {
+        return;
+    }
+
+    const auto *src = reinterpret_cast<const quint8 *>(packedRows.constData());
+    for (int r = 0; r < rowCount; ++r) {
+        std::vector<quint8> col(static_cast<size_t>(binsPerRow));
+        std::copy_n(src + static_cast<qsizetype>(r) * static_cast<qsizetype>(binsPerRow),
+                    binsPerRow,
+                    col.begin());
+        m_columns.emplace_back(std::move(col));
+    }
+    while (static_cast<int>(m_columns.size()) > m_maxColumns) {
+        m_columns.pop_front();
+    }
+    update();
+}
+
 void SpectrogramItem::paint(QPainter *painter) {
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));

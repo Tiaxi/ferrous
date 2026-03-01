@@ -13,6 +13,7 @@ qt_add_executable(ferrous_kirigami_shell
     src/main.cpp
     src/BridgeClient.cpp
     src/SpectrogramItem.cpp
+    src/WaveformItem.cpp
 )
 
 target_include_directories(ferrous_kirigami_shell PRIVATE src)

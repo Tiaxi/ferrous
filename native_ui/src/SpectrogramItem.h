@@ -3,6 +3,7 @@
 #include <QImage>
 #include <QQuickPaintedItem>
 #include <QTimer>
+#include <QByteArray>
 #include <QVariantList>
 
 #include <array>
@@ -33,6 +34,7 @@ public:
 
     Q_INVOKABLE void reset();
     Q_INVOKABLE void appendRows(const QVariantList &rows);
+    Q_INVOKABLE void appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow);
 
     void paint(QPainter *painter) override;
 
