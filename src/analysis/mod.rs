@@ -78,7 +78,7 @@ impl AnalysisEngine {
             let mut waveform_dirty = false;
             let mut last_emit = std::time::Instant::now();
 
-            let mut stft = StftComputer::new(8192, 2048);
+            let mut stft = StftComputer::new(8192, 1024);
             let mut decimator = SpectrogramDecimator::new(1);
             let mut active_track_token = 0u64;
             let mut active_track_path: Option<PathBuf> = None;
@@ -197,7 +197,7 @@ impl AnalysisEngine {
                             }
                             AnalysisCommand::SetFftSize(size) => {
                                 let fft = size.clamp(512, 8192).next_power_of_two();
-                                let hop = (fft / 4).max(64);
+                                let hop = (fft / 8).max(64);
                                 stft = StftComputer::new(fft, hop);
                                 decimator.reset();
                                 pending_rows.clear();

@@ -27,6 +27,65 @@ Ship a Kirigami frontend that reaches current Ferrous behavior parity, then cont
 - Migrate screen-by-screen with runnable checkpoints.
 - Keep one source of truth for queue/playback/library state (no duplicated state machines in QML).
 - Performance target: minimum 60 FPS rendering, with design choices favoring display refresh-rate rendering when feasible.
+- Performance is a hard requirement (no degraded responsiveness accepted for feature parity).
+
+## Critical Path: Performance Architecture Rework (Started)
+
+Current issue summary:
+- Rust backend processing is healthy under load.
+- UI stalls come from high-rate JSON/stdout transport + Qt main-thread parsing + QML `Canvas` heavy per-pixel JS work.
+
+Decision:
+- Keep Rust backend.
+- Replace high-rate JSON data path with native/binary UI data flow.
+- Keep JSON/command bridge only for low-rate control/state until in-process FFI path is in place.
+
+### Phase P0: Stabilize Current Path During Development
+
+- [x] Bound bridge queues and drop stale snapshots under backpressure.
+- [x] Remove heavyweight metadata cloning from per-frame snapshots.
+- [x] Add bridge profiling counters (`sent/drop`, payload size, write latency).
+- [x] Throttle Qt `snapshotChanged` notifications.
+- [x] Reduce spectrogram UI paint cadence and cap history width.
+- [x] Add backend snapshot emission pacing (fixed UI rate instead of per-tick flood).
+- [x] Smooth playback control path (single-shot seek on release, volume ramping to avoid zipper noise/pops).
+- [x] Revert temporary spectrogram quality caps after native C++ path stabilization (higher bin/row throughput restored).
+
+Acceptance criteria:
+- App remains interactive during playback (no 40s+ UI lockups).
+- Memory usage remains bounded during long playback sessions.
+
+### Phase P1: Native Spectrogram Render Path (C++ Item)
+
+- [x] Replace QML `Canvas` spectrogram with C++ render item (`QQuickPaintedItem` baseline landed).
+- [ ] Move palette mapping + bin projection to C++ (no per-frame JS loops).
+- [ ] Keep DeaDBeeF-like color mapping and dB behavior parity.
+- [ ] Keep rolling history and seek behavior parity.
+
+Acceptance criteria:
+- Spectrogram rendering no longer causes observable UI hitching.
+- Playlist/library interactions remain responsive while spectrogram is active.
+
+### Phase P2: Split Transport by Data Rate
+
+- [ ] Low-rate channel (JSON/properties): playback state, queue, library, settings.
+- [ ] High-rate channel (binary ring/shared memory): spectrogram rows + waveform peaks.
+- [ ] Explicit frame sequencing and drop policy for high-rate visuals.
+- [ ] Eliminate repeated parse/alloc on UI thread for high-rate analysis data.
+
+Acceptance criteria:
+- High-rate analysis visuals do not block command/control responsiveness.
+- Predictable CPU usage and bounded latency at target refresh rates.
+
+### Phase P3: In-Process Integration (Bridge Replacement)
+
+- [ ] Introduce in-process Rust backend integration for native UI (FFI boundary).
+- [ ] Remove stdout JSON process bridge from steady-state runtime for both control and analysis paths.
+- [ ] Keep CLI/debug bridge as optional developer fallback tool.
+
+Acceptance criteria:
+- No pipe/stdio backpressure risk in production UI path.
+- Native frontend + Rust backend run as one process with explicit threading model.
 
 ## Milestone A: Frontend Foundation (QML/Kirigami bootstrap)
 

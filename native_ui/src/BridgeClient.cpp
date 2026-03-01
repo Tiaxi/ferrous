@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QDir>
 #include <QJsonArray>
@@ -19,6 +20,14 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_process, &QProcess::readyReadStandardError, this, &BridgeClient::handleStderrReady);
     connect(&m_process, &QProcess::started, this, &BridgeClient::handleProcessStarted);
     connect(&m_process, &QProcess::finished, this, &BridgeClient::handleProcessFinished);
+    m_snapshotNotifyTimer.setSingleShot(true);
+    m_snapshotNotifyTimer.setInterval(8);
+    connect(&m_snapshotNotifyTimer, &QTimer::timeout, this, [this]() {
+        if (m_snapshotChangedPending) {
+            m_snapshotChangedPending = false;
+            emit snapshotChanged();
+        }
+    });
     startBridgeProcess();
 }
 
@@ -126,10 +135,25 @@ void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;
     }
+    if (m_selectedQueueIndex != index) {
+        m_selectedQueueIndex = index;
+        emit snapshotChanged();
+    }
+    m_pendingQueueSelection = index;
+    m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
     sendCommand(QStringLiteral("play_at"), static_cast<double>(index));
 }
 
 void BridgeClient::selectQueueIndex(int index) {
+    if (index < 0) {
+        return;
+    }
+    if (m_selectedQueueIndex != index) {
+        m_selectedQueueIndex = index;
+        emit snapshotChanged();
+    }
+    m_pendingQueueSelection = index;
+    m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
     sendCommand(QStringLiteral("select_queue"), static_cast<double>(index));
 }
 
@@ -262,22 +286,9 @@ void BridgeClient::handleStdoutReady() {
     m_stdoutPumpScheduled = false;
     bool anySnapshotChanged = false;
     int processedLines = 0;
-    constexpr int kMaxLinesPerPass = 48;
-    while (m_process.canReadLine() && processedLines < kMaxLinesPerPass) {
-        processedLines++;
-        const QByteArray line = m_process.readLine().trimmed();
-        if (line.isEmpty()) {
-            continue;
-        }
+    constexpr int kMaxLinesPerPass = 256;
 
-        QJsonParseError err;
-        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
-        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-            emit bridgeError(QStringLiteral("invalid bridge json: %1").arg(QString::fromUtf8(line)));
-            continue;
-        }
-
-        const QJsonObject root = doc.object();
+    auto processRoot = [&](const QJsonObject &root) {
         const QString event = root.value(QStringLiteral("event")).toString();
         if (event == QStringLiteral("snapshot")) {
             const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
@@ -324,6 +335,10 @@ void BridgeClient::handleStdoutReady() {
             if (m_queueLength != qlen) {
                 m_queueLength = qlen;
                 changed = true;
+                if (m_pendingQueueSelection >= qlen) {
+                    m_pendingQueueSelection = -1;
+                    m_pendingQueueSelectionUntilMs = 0;
+                }
             }
             const QJsonValue queueTracksValue = queue.value(QStringLiteral("tracks"));
             if (queueTracksValue.isArray()) {
@@ -341,7 +356,24 @@ void BridgeClient::handleStdoutReady() {
                     changed = true;
                 }
             }
-            if (m_selectedQueueIndex != selected) {
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            if (m_pendingQueueSelection >= 0) {
+                if (selected == m_pendingQueueSelection) {
+                    m_pendingQueueSelection = -1;
+                    m_pendingQueueSelectionUntilMs = 0;
+                    if (m_selectedQueueIndex != selected) {
+                        m_selectedQueueIndex = selected;
+                        changed = true;
+                    }
+                } else if (nowMs >= m_pendingQueueSelectionUntilMs) {
+                    m_pendingQueueSelection = -1;
+                    m_pendingQueueSelectionUntilMs = 0;
+                    if (m_selectedQueueIndex != selected) {
+                        m_selectedQueueIndex = selected;
+                        changed = true;
+                    }
+                }
+            } else if (m_selectedQueueIndex != selected) {
                 m_selectedQueueIndex = selected;
                 changed = true;
             }
@@ -369,7 +401,7 @@ void BridgeClient::handleStdoutReady() {
                 }
                 if (!rowsDelta.isEmpty()) {
                     m_spectrogramRowsDelta += rowsDelta;
-                    constexpr int kMaxPendingSpectrogramRows = 64;
+                    constexpr int kMaxPendingSpectrogramRows = 256;
                     if (m_spectrogramRowsDelta.size() > kMaxPendingSpectrogramRows) {
                         m_spectrogramRowsDelta = m_spectrogramRowsDelta.mid(
                             m_spectrogramRowsDelta.size() - kMaxPendingSpectrogramRows);
@@ -451,9 +483,28 @@ void BridgeClient::handleStdoutReady() {
                 emit connectedChanged();
             }
         }
+    };
+
+    while (m_process.canReadLine() && processedLines < kMaxLinesPerPass) {
+        processedLines++;
+        const QByteArray line = m_process.readLine().trimmed();
+        if (line.isEmpty()) {
+            continue;
+        }
+
+        QJsonParseError err;
+        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
+        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+            emit bridgeError(QStringLiteral("invalid bridge json: %1").arg(QString::fromUtf8(line)));
+            continue;
+        }
+        processRoot(doc.object());
     }
     if (anySnapshotChanged) {
-        emit snapshotChanged();
+        m_snapshotChangedPending = true;
+        if (!m_snapshotNotifyTimer.isActive()) {
+            m_snapshotNotifyTimer.start();
+        }
     }
     if (m_process.canReadLine() && !m_stdoutPumpScheduled) {
         m_stdoutPumpScheduled = true;
@@ -466,14 +517,23 @@ void BridgeClient::handleStderrReady() {
     if (chunk.isEmpty()) {
         return;
     }
-    const QList<QByteArray> lines = chunk.split('\n');
-    for (const QByteArray &rawLine : lines) {
+    m_stderrBuffer += chunk;
+    for (;;) {
+        const qsizetype newline = m_stderrBuffer.indexOf('\n');
+        if (newline < 0) {
+            break;
+        }
+        const QByteArray rawLine = m_stderrBuffer.left(newline);
+        m_stderrBuffer.remove(0, newline + 1);
         const QString line = QString::fromUtf8(rawLine).trimmed();
         if (line.isEmpty()) {
             continue;
         }
         // Keep high-frequency profiling output out of QML signal path to avoid UI stalls.
-        if (line.startsWith(QStringLiteral("[analysis]")) || line.startsWith(QStringLiteral("[gst]"))) {
+        if (line.contains(QStringLiteral("[analysis]"))
+            || line.contains(QStringLiteral("[gst]"))
+            || line.contains(QStringLiteral("[bridge]"))
+            || line.contains(QStringLiteral("[bridge-json]"))) {
             std::fprintf(stderr, "%s\n", line.toLocal8Bit().constData());
             continue;
         }

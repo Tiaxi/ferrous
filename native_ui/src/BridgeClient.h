@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QObject>
+#include <QByteArray>
 #include <QJsonObject>
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QVariantList>
 
 class BridgeClient : public QObject {
@@ -107,4 +109,9 @@ private:
     bool m_libraryScanInProgress{false};
     bool m_connected{false};
     bool m_stdoutPumpScheduled{false};
+    bool m_snapshotChangedPending{false};
+    int m_pendingQueueSelection{-1};
+    qint64 m_pendingQueueSelectionUntilMs{0};
+    QTimer m_snapshotNotifyTimer;
+    QByteArray m_stderrBuffer;
 };

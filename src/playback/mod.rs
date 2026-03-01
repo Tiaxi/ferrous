@@ -398,11 +398,22 @@ mod backend {
         let bus = playbin.bus().context("playbin has no bus")?;
         let mut snapshot = PlaybackSnapshot::default();
         snapshot.volume = 1.0;
+        let mut target_volume = 1.0f64;
+        let mut applied_volume = 1.0f64;
+        playbin.set_property("volume", applied_volume);
 
         loop {
             match cmd_rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(cmd) => {
-                    apply_command(&playbin, &queue_state, &event_tx, &mut snapshot, cmd);
+                    apply_command(
+                        &playbin,
+                        &queue_state,
+                        &event_tx,
+                        &mut snapshot,
+                        &mut target_volume,
+                        &mut applied_volume,
+                        cmd,
+                    );
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -422,6 +433,8 @@ mod backend {
         queue_state: &Arc<Mutex<GaplessQueue>>,
         event_tx: &Sender<PlaybackEvent>,
         snapshot: &mut PlaybackSnapshot,
+        target_volume: &mut f64,
+        applied_volume: &mut f64,
         cmd: PlaybackCommand,
     ) {
         match cmd {
@@ -510,16 +523,28 @@ mod backend {
                 let nanos = pos.as_nanos().min(u64::MAX as u128) as u64;
                 let target = gst::ClockTime::from_nseconds(nanos);
                 let _ =
-                    playbin.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, target);
+                    playbin.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, target);
+                snapshot.position = pos.min(snapshot.duration);
                 let _ = event_tx.send(PlaybackEvent::Seeked);
             }
             PlaybackCommand::SetVolume(vol) => {
-                let v = vol.clamp(0.0, 1.0) as f64;
-                playbin.set_property("volume", v);
-                snapshot.volume = v as f32;
+                *target_volume = vol.clamp(0.0, 1.0) as f64;
+                snapshot.volume = *target_volume as f32;
                 let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
             PlaybackCommand::Poll => {
+                let delta = *target_volume - *applied_volume;
+                if delta.abs() > f64::EPSILON {
+                    // Apply a short gain ramp to avoid zipper noise / clicks when dragging volume.
+                    let step = 0.03_f64;
+                    if delta.abs() <= step {
+                        *applied_volume = *target_volume;
+                    } else {
+                        *applied_volume += delta.signum() * step;
+                    }
+                    playbin.set_property("volume", *applied_volume);
+                    snapshot.volume = *applied_volume as f32;
+                }
                 if let Some(pos) = playbin.query_position::<gst::ClockTime>() {
                     snapshot.position = Duration::from_nanos(pos.nseconds());
                 }

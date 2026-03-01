@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQml 2.15
+import FerrousNative 1.0
 import org.kde.kirigami 2.20 as Kirigami
 
 Kirigami.ApplicationWindow {
@@ -13,7 +14,7 @@ Kirigami.ApplicationWindow {
     visible: true
     title: "Ferrous"
     property int selectedLibraryAlbumIndex: -1
-    property var spectrogramColumns: []
+    property int lastCenteredQueueIndex: -2
 
     function togglePlayPause() {
         if (bridge.playbackState === "Playing") {
@@ -188,7 +189,6 @@ Kirigami.ApplicationWindow {
                     from: 0
                     to: Math.max(bridge.durationSeconds, 1.0)
                     stepSize: 0
-                    onMoved: bridge.seek(value)
                     onPressedChanged: {
                         if (!pressed) {
                             bridge.seek(value)
@@ -296,7 +296,7 @@ Kirigami.ApplicationWindow {
                     Layout.preferredWidth: 140
                     from: 0
                     to: 1
-                    stepSize: 0.01
+                    stepSize: 0
                     onMoved: bridge.setVolume(value)
                     onPressedChanged: {
                         if (!pressed) {
@@ -518,7 +518,7 @@ Kirigami.ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     acceptedButtons: Qt.LeftButton
-                                    onClicked: bridge.selectQueueIndex(index)
+                                    onPressed: bridge.selectQueueIndex(index)
                                     onDoubleClicked: bridge.playAt(index)
                                 }
                             }
@@ -537,8 +537,12 @@ Kirigami.ApplicationWindow {
                         Connections {
                             target: bridge
                             function onSnapshotChanged() {
-                                if (bridge.selectedQueueIndex >= 0) {
+                                if (bridge.selectedQueueIndex >= 0
+                                        && bridge.selectedQueueIndex !== root.lastCenteredQueueIndex) {
                                     playlistView.positionViewAtIndex(bridge.selectedQueueIndex, ListView.Contain)
+                                    root.lastCenteredQueueIndex = bridge.selectedQueueIndex
+                                } else if (bridge.selectedQueueIndex < 0) {
+                                    root.lastCenteredQueueIndex = -2
                                 }
                             }
                         }
@@ -552,97 +556,13 @@ Kirigami.ApplicationWindow {
                     color: "#0b0b0f"
                     border.color: Qt.rgba(0, 0, 0, 0.25)
 
-                    Canvas {
-                        id: spectrogramCanvas
+                    SpectrogramItem {
+                        id: spectrogramItem
                         anchors.fill: parent
-                        antialiasing: false
-
-                        function ddbColor(norm) {
-                            const colors = [
-                                [255, 255, 255],
-                                [255, 255, 255],
-                                [255, 247, 0],
-                                [242, 54, 0],
-                                [176, 0, 91],
-                                [48, 0, 115],
-                                [4, 1, 71]
-                            ]
-                            const clamped = Math.max(0.0, Math.min(1.0, norm))
-                            const pos = (1.0 - clamped) * (colors.length - 1)
-                            const i0 = Math.floor(pos)
-                            const i1 = Math.min(colors.length - 1, i0 + 1)
-                            const t = pos - i0
-                            const c0 = colors[i0]
-                            const c1 = colors[i1]
-                            return [
-                                Math.round(c0[0] + (c1[0] - c0[0]) * t),
-                                Math.round(c0[1] + (c1[1] - c0[1]) * t),
-                                Math.round(c0[2] + (c1[2] - c0[2]) * t)
-                            ]
-                        }
-
-                        onPaint: {
-                            const ctx = getContext("2d")
-                            ctx.reset()
-                            const w = Math.max(1, Math.floor(width))
-                            const h = Math.max(1, Math.floor(height))
-                            ctx.fillStyle = "#0b0b0f"
-                            ctx.fillRect(0, 0, w, h)
-
-                            const rows = root.spectrogramColumns
-                            if (rows.length === 0) {
-                                return
-                            }
-
-                            const cols = Math.min(rows.length, w)
-                            const start = rows.length - cols
-                            const img = ctx.createImageData(cols, h)
-                            const pixels = img.data
-
-                            const sampleRate = Math.max(1000, bridge.sampleRateHz)
-                            const dbRange = Math.max(50.0, Math.min(120.0, bridge.dbRange))
-                            const useLogScale = bridge.logScale
-                            const minFreq = 25.0
-                            const nyquist = Math.max(sampleRate * 0.5, minFreq * 1.1)
-                            const logStep = (Math.log2(nyquist) - Math.log2(minFreq)) / Math.max(1, h)
-
-                            for (let x = 0; x < cols; x++) {
-                                const row = rows[start + x]
-                                const bins = row.length
-                                if (bins <= 0) {
-                                    continue
-                                }
-                                const freqRes = Math.max(1.0, sampleRate / (2.0 * Math.max(1, bins - 1)))
-                                for (let y = 0; y < h; y++) {
-                                    const i = h - 1 - y
-                                    let bin
-                                    if (useLogScale) {
-                                        const freq = Math.pow(2.0, i * logStep + Math.log2(minFreq))
-                                        bin = Math.round(freq / freqRes)
-                                    } else {
-                                        bin = Math.floor((i / Math.max(1, h - 1)) * (bins - 1))
-                                    }
-                                    bin = Math.max(0, Math.min(bins - 1, bin))
-
-                                    const power = Number(row[bin])
-                                    const db = power > 0.0 ? (10.0 * Math.log(power) / Math.log(10.0)) : -200.0
-                                    const xdb = Math.max(0.0, Math.min(dbRange, db + dbRange - 63.0))
-                                    const [r, g, b] = ddbColor(xdb / dbRange)
-
-                                    const p = (y * cols + x) * 4
-                                    pixels[p + 0] = r
-                                    pixels[p + 1] = g
-                                    pixels[p + 2] = b
-                                    pixels[p + 3] = 255
-                                }
-                            }
-
-                            const offsetX = w - cols
-                            ctx.putImageData(img, offsetX, 0)
-                        }
-
-                        onWidthChanged: requestPaint()
-                        onHeightChanged: requestPaint()
+                        maxColumns: Math.max(640, Math.floor(width))
+                        dbRange: bridge.dbRange
+                        logScale: bridge.logScale
+                        sampleRateHz: bridge.sampleRateHz
                     }
                 }
             }
@@ -658,23 +578,20 @@ Kirigami.ApplicationWindow {
                 root.selectedLibraryAlbumIndex = bridge.libraryAlbums.length - 1
             }
             if (bridge.spectrogramReset) {
-                root.spectrogramColumns = []
+                spectrogramItem.reset()
             }
             const delta = bridge.takeSpectrogramRowsDelta()
             if (delta.length > 0) {
-                const merged = root.spectrogramColumns.slice()
-                for (let i = 0; i < delta.length; i++) {
-                    merged.push(delta[i])
-                }
-                const maxCols = Math.max(512, Math.floor(spectrogramCanvas.width))
-                if (merged.length > maxCols) {
-                    merged.splice(0, merged.length - maxCols)
-                }
-                root.spectrogramColumns = merged
+                spectrogramItem.appendRows(delta)
             }
-            spectrogramCanvas.requestPaint()
         }
         function onBridgeError(message) {
+            if (message.indexOf("[analysis]") !== -1
+                    || message.indexOf("[gst]") !== -1
+                    || message.indexOf("[bridge]") !== -1
+                    || message.indexOf("[bridge-json]") !== -1) {
+                return
+            }
             console.warn("bridge error:", message)
         }
     }

@@ -86,7 +86,6 @@ pub enum BridgeEvent {
 pub struct BridgeSnapshot {
     pub playback: PlaybackSnapshot,
     pub analysis: AnalysisSnapshot,
-    pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
     pub queue: Vec<PathBuf>,
     pub selected_queue_index: Option<usize>,
@@ -128,7 +127,6 @@ impl BridgeState {
         BridgeSnapshot {
             playback: self.playback.clone(),
             analysis: self.analysis.clone(),
-            metadata: self.metadata.clone(),
             library: self.library.clone(),
             queue: self.queue.clone(),
             selected_queue_index: self.selected_queue_index,
@@ -145,8 +143,8 @@ pub struct FrontendBridgeHandle {
 impl FrontendBridgeHandle {
     pub fn spawn() -> Self {
         let (cmd_tx, cmd_rx) = unbounded::<BridgeCommand>();
-        // Keep snapshot/event queue bounded so a slow UI consumer cannot cause unbounded RAM growth.
-        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        // Keep snapshot/event queue bounded so a slow UI consumer cannot grow memory unbounded.
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
 
         std::thread::spawn(move || run_bridge_loop(cmd_rx, event_tx));
         Self {
@@ -188,6 +186,9 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
     let mut profile_last = Instant::now();
     let mut prof_snapshots_sent = 0usize;
     let mut prof_snapshots_dropped = 0usize;
+    let snapshot_interval = Duration::from_millis(12);
+    let mut last_snapshot_emit = Instant::now();
+    let mut snapshot_dirty = false;
 
     if send_snapshot_event(&event_tx, &state) {
         prof_snapshots_sent += 1;
@@ -200,6 +201,7 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => {
+                        let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
                         let changed = handle_bridge_command(
                             cmd,
                             &mut state,
@@ -211,11 +213,16 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
                             &mut settings_dirty,
                         );
                         if changed {
+                            snapshot_dirty = true;
+                        }
+                        if force_snapshot && running {
                             if send_snapshot_event(&event_tx, &state) {
                                 prof_snapshots_sent += 1;
                             } else {
                                 prof_snapshots_dropped += 1;
                             }
+                            last_snapshot_emit = Instant::now();
+                            snapshot_dirty = false;
                         }
                     }
                     Err(_) => break,
@@ -233,11 +240,16 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
         changed |= pump_library_events(&library_rx, &mut state);
 
         if changed {
+            snapshot_dirty = true;
+        }
+        if snapshot_dirty && last_snapshot_emit.elapsed() >= snapshot_interval {
             if send_snapshot_event(&event_tx, &state) {
                 prof_snapshots_sent += 1;
             } else {
                 prof_snapshots_dropped += 1;
             }
+            snapshot_dirty = false;
+            last_snapshot_emit = Instant::now();
         }
 
         if profile_enabled && profile_last.elapsed() >= Duration::from_secs(1) {

@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::unbounded;
+use crossbeam_channel::{bounded, unbounded, Sender, TrySendError};
 use ferrous::frontend_bridge::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSnapshot, FrontendBridgeHandle,
@@ -129,12 +131,25 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
         let _ = input_tx.send(InputMsg::Eof);
     });
 
+    let dropped_counter = Arc::new(AtomicUsize::new(0));
+    let out_tx = spawn_json_writer(
+        std::env::var_os("FERROUS_PROFILE").is_some(),
+        dropped_counter.clone(),
+    );
+
     let mut emit_state = JsonEmitState {
         profile_enabled: std::env::var_os("FERROUS_PROFILE").is_some(),
+        dropped_counter,
         ..JsonEmitState::default()
     };
     bridge.command(BridgeCommand::RequestSnapshot);
-    drain_bridge_events_as_json(&bridge, 32, Duration::from_millis(1), &mut emit_state);
+    drain_bridge_events_as_json(
+        &bridge,
+        &out_tx,
+        32,
+        Duration::from_millis(1),
+        &mut emit_state,
+    );
 
     let mut eof_seen = false;
     loop {
@@ -149,8 +164,11 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
                         Ok(Some(cmd)) => {
                             if matches!(cmd, BridgeCommand::Shutdown) {
                                 bridge.command(BridgeCommand::Shutdown);
-                                let _ =
-                                    emit_json_line(&json!({ "event": "stopped" }), &mut emit_state);
+                                let _ = emit_json_line(
+                                    &json!({ "event": "stopped" }),
+                                    &out_tx,
+                                    &mut emit_state,
+                                );
                                 return;
                             }
                             bridge.command(cmd);
@@ -159,6 +177,7 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
                         Err(err) => {
                             let _ = emit_json_line(
                                 &json!({ "event": "error", "message": err }),
+                                &out_tx,
                                 &mut emit_state,
                             );
                         }
@@ -170,11 +189,17 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
             }
         }
 
-        drain_bridge_events_as_json(&bridge, 64, Duration::from_millis(1), &mut emit_state);
+        drain_bridge_events_as_json(
+            &bridge,
+            &out_tx,
+            64,
+            Duration::from_millis(1),
+            &mut emit_state,
+        );
 
         if eof_seen {
             bridge.command(BridgeCommand::Shutdown);
-            let _ = emit_json_line(&json!({ "event": "stopped" }), &mut emit_state);
+            let _ = emit_json_line(&json!({ "event": "stopped" }), &out_tx, &mut emit_state);
             return;
         }
 
@@ -201,11 +226,7 @@ struct JsonEmitState {
     last_queue_digest: Option<QueueDigest>,
     last_spectrogram_seq: u64,
     profile_enabled: bool,
-    profile_last: Option<Instant>,
-    profile_snapshots: usize,
-    profile_bytes: usize,
-    profile_max_payload_bytes: usize,
-    profile_max_write_ms: f64,
+    dropped_counter: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +388,7 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
 
 fn drain_bridge_events_as_json(
     bridge: &FrontendBridgeHandle,
+    out_tx: &Sender<Vec<u8>>,
     max_events: usize,
     timeout: Duration,
     emit_state: &mut JsonEmitState,
@@ -384,11 +406,14 @@ fn drain_bridge_events_as_json(
         match event {
             BridgeEvent::Snapshot(s) => latest_snapshot = Some(s),
             BridgeEvent::Error(message) => {
-                let _ =
-                    emit_json_line(&json!({ "event": "error", "message": message }), emit_state);
+                let _ = emit_json_line(
+                    &json!({ "event": "error", "message": message }),
+                    out_tx,
+                    emit_state,
+                );
             }
             BridgeEvent::Stopped => {
-                let _ = emit_json_line(&json!({ "event": "stopped" }), emit_state);
+                let _ = emit_json_line(&json!({ "event": "stopped" }), out_tx, emit_state);
                 return;
             }
         }
@@ -396,7 +421,7 @@ fn drain_bridge_events_as_json(
 
     if let Some(s) = latest_snapshot {
         let payload = encode_snapshot_payload(&s, emit_state);
-        let _ = emit_json_line(&payload, emit_state);
+        let _ = emit_json_line(&payload, out_tx, emit_state);
     }
 }
 
@@ -519,13 +544,13 @@ fn encode_snapshot_payload(
     let spectrogram_rows = if spectrogram_delta > 0 && !s.analysis.spectrogram_rows.is_empty() {
         let tail = spectrogram_delta
             .min(s.analysis.spectrogram_rows.len())
-            .min(3);
+            .min(8);
         let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
         serde_json::Value::Array(
             s.analysis.spectrogram_rows[start..]
                 .iter()
                 .map(|row| {
-                    let reduced = downsample_spectrogram_row(row, 160);
+                    let reduced = downsample_spectrogram_row(row, 512);
                     serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
                 })
                 .collect(),
@@ -574,44 +599,70 @@ fn encode_snapshot_payload(
     })
 }
 
-fn emit_json_line(payload: &serde_json::Value, emit_state: &mut JsonEmitState) -> io::Result<()> {
-    let started = Instant::now();
+fn emit_json_line(
+    payload: &serde_json::Value,
+    out_tx: &Sender<Vec<u8>>,
+    emit_state: &mut JsonEmitState,
+) -> io::Result<()> {
     let bytes = serde_json::to_vec(payload)?;
-    let mut out = io::stdout().lock();
-    out.write_all(&bytes)?;
-    out.write_all(b"\n")?;
-    out.flush()?;
-
-    if emit_state.profile_enabled {
-        emit_state.profile_snapshots = emit_state.profile_snapshots.saturating_add(1);
-        emit_state.profile_bytes = emit_state.profile_bytes.saturating_add(bytes.len());
-        emit_state.profile_max_payload_bytes =
-            emit_state.profile_max_payload_bytes.max(bytes.len());
-        let write_ms = started.elapsed().as_secs_f64() * 1000.0;
-        emit_state.profile_max_write_ms = emit_state.profile_max_write_ms.max(write_ms);
-
-        let now = Instant::now();
-        let should_report = emit_state
-            .profile_last
-            .map(|t| now.duration_since(t) >= Duration::from_secs(1))
-            .unwrap_or(true);
-        if should_report {
-            eprintln!(
-                "[bridge-json] snaps/s={} bytes/s={} max_payload={}B max_write_ms={:.2}",
-                emit_state.profile_snapshots,
-                emit_state.profile_bytes,
-                emit_state.profile_max_payload_bytes,
-                emit_state.profile_max_write_ms
-            );
-            emit_state.profile_last = Some(now);
-            emit_state.profile_snapshots = 0;
-            emit_state.profile_bytes = 0;
-            emit_state.profile_max_payload_bytes = 0;
-            emit_state.profile_max_write_ms = 0.0;
+    match out_tx.try_send(bytes) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => {
+            if emit_state.profile_enabled {
+                emit_state.dropped_counter.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
         }
+        Err(TrySendError::Disconnected(_)) => Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "json writer disconnected",
+        )),
     }
+}
 
-    Ok(())
+fn spawn_json_writer(profile_enabled: bool, dropped_counter: Arc<AtomicUsize>) -> Sender<Vec<u8>> {
+    let (tx, rx) = bounded::<Vec<u8>>(32);
+    std::thread::spawn(move || {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        let mut snaps = 0usize;
+        let mut bytes = 0usize;
+        let mut max_payload = 0usize;
+        let mut max_write_ms = 0.0f64;
+        let mut last_report = Instant::now();
+        while let Ok(line) = rx.recv() {
+            let started = Instant::now();
+            if out.write_all(&line).is_err() {
+                break;
+            }
+            if out.write_all(b"\n").is_err() {
+                break;
+            }
+            if out.flush().is_err() {
+                break;
+            }
+            if profile_enabled {
+                snaps = snaps.saturating_add(1);
+                bytes = bytes.saturating_add(line.len());
+                max_payload = max_payload.max(line.len());
+                let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+                max_write_ms = max_write_ms.max(write_ms);
+                if last_report.elapsed() >= Duration::from_secs(1) {
+                    let dropped = dropped_counter.swap(0, Ordering::Relaxed);
+                    eprintln!(
+                        "[bridge-json] snaps/s={} bytes/s={} max_payload={}B max_write_ms={:.2} dropped/s={}",
+                        snaps, bytes, max_payload, max_write_ms, dropped
+                    );
+                    snaps = 0;
+                    bytes = 0;
+                    max_payload = 0;
+                    max_write_ms = 0.0;
+                    last_report = Instant::now();
+                }
+            }
+        }
+    });
+    tx
 }
 
 fn downsample_spectrogram_row(row: &[f32], max_bins: usize) -> Vec<f32> {
