@@ -400,6 +400,7 @@ mod backend {
         snapshot.volume = 1.0;
         let mut target_volume = 1.0f64;
         let mut applied_volume = 1.0f64;
+        let mut startup_gain_ramp = false;
         playbin.set_property("volume", applied_volume);
 
         loop {
@@ -412,6 +413,7 @@ mod backend {
                         &mut snapshot,
                         &mut target_volume,
                         &mut applied_volume,
+                        &mut startup_gain_ramp,
                         cmd,
                     );
                 }
@@ -435,6 +437,7 @@ mod backend {
         snapshot: &mut PlaybackSnapshot,
         target_volume: &mut f64,
         applied_volume: &mut f64,
+        startup_gain_ramp: &mut bool,
         cmd: PlaybackCommand,
     ) {
         match cmd {
@@ -464,6 +467,7 @@ mod backend {
                     state.clear();
                 }
                 let _ = playbin.set_state(gst::State::Ready);
+                *startup_gain_ramp = false;
                 snapshot.current = None;
                 snapshot.state = PlaybackState::Stopped;
                 snapshot.position = Duration::ZERO;
@@ -504,8 +508,15 @@ mod backend {
                 }
             }
             PlaybackCommand::Play => {
+                let was_stopped = snapshot.state == PlaybackState::Stopped;
                 if playbin.set_state(gst::State::Playing).is_ok() {
                     snapshot.state = PlaybackState::Playing;
+                    if was_stopped {
+                        // Fade in from silence at track start to suppress startup pops.
+                        *applied_volume = 0.0;
+                        playbin.set_property("volume", *applied_volume);
+                        *startup_gain_ramp = true;
+                    }
                 }
             }
             PlaybackCommand::Pause => {
@@ -515,6 +526,7 @@ mod backend {
             }
             PlaybackCommand::Stop => {
                 if playbin.set_state(gst::State::Ready).is_ok() {
+                    *startup_gain_ramp = false;
                     snapshot.state = PlaybackState::Stopped;
                     snapshot.position = Duration::ZERO;
                 }
@@ -536,9 +548,14 @@ mod backend {
                 let delta = *target_volume - *applied_volume;
                 if delta.abs() > f64::EPSILON {
                     // Apply a short gain ramp to avoid zipper noise / clicks when dragging volume.
-                    let step = 0.03_f64;
+                    let step = if *startup_gain_ramp {
+                        0.18_f64
+                    } else {
+                        0.03_f64
+                    };
                     if delta.abs() <= step {
                         *applied_volume = *target_volume;
+                        *startup_gain_ramp = false;
                     } else {
                         *applied_volume += delta.signum() * step;
                     }

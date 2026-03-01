@@ -81,6 +81,7 @@ signals:
     void bridgeError(const QString &message);
 
 private:
+    void teardownAnalysisSocket(bool immediateDelete);
     void setupAnalysisSocketServer();
     void handleAnalysisSocketConnected();
     void handleAnalysisSocketReady();

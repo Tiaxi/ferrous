@@ -43,11 +43,7 @@ BridgeClient::BridgeClient(QObject *parent)
 }
 
 BridgeClient::~BridgeClient() {
-    if (m_analysisSocket != nullptr) {
-        m_analysisSocket->close();
-        m_analysisSocket->deleteLater();
-        m_analysisSocket = nullptr;
-    }
+    teardownAnalysisSocket(true);
     if (m_analysisServer.isListening()) {
         const QString serverName = m_analysisServer.fullServerName();
         m_analysisServer.close();
@@ -61,6 +57,23 @@ BridgeClient::~BridgeClient() {
             m_process.kill();
             m_process.waitForFinished(500);
         }
+    }
+}
+
+void BridgeClient::teardownAnalysisSocket(bool immediateDelete) {
+    QLocalSocket *socket = m_analysisSocket;
+    m_analysisSocket = nullptr;
+    m_analysisSocketConnected = false;
+    m_analysisBuffer.clear();
+    if (socket == nullptr) {
+        return;
+    }
+    socket->disconnect(this);
+    socket->close();
+    if (immediateDelete) {
+        delete socket;
+    } else {
+        socket->deleteLater();
     }
 }
 
@@ -289,12 +302,7 @@ void BridgeClient::setupAnalysisSocketServer() {
 }
 
 void BridgeClient::handleAnalysisSocketConnected() {
-    if (m_analysisSocket != nullptr) {
-        m_analysisSocket->disconnect(this);
-        m_analysisSocket->close();
-        m_analysisSocket->deleteLater();
-        m_analysisSocket = nullptr;
-    }
+    teardownAnalysisSocket(false);
 
     m_analysisSocket = m_analysisServer.nextPendingConnection();
     if (m_analysisSocket == nullptr) {
@@ -303,13 +311,14 @@ void BridgeClient::handleAnalysisSocketConnected() {
     m_analysisBuffer.clear();
     m_analysisSocketConnected = true;
     connect(m_analysisSocket, &QLocalSocket::readyRead, this, &BridgeClient::handleAnalysisSocketReady);
-    connect(m_analysisSocket, &QLocalSocket::disconnected, this, [this]() {
-        if (m_analysisSocket != nullptr) {
-            m_analysisSocket->deleteLater();
+    QLocalSocket *socket = m_analysisSocket;
+    connect(socket, &QLocalSocket::disconnected, this, [this, socket]() {
+        if (m_analysisSocket == socket) {
             m_analysisSocket = nullptr;
+            m_analysisSocketConnected = false;
+            m_analysisBuffer.clear();
         }
-        m_analysisSocketConnected = false;
-        m_analysisBuffer.clear();
+        socket->deleteLater();
     });
 }
 
@@ -744,13 +753,7 @@ void BridgeClient::handleProcessStarted() {
 }
 
 void BridgeClient::handleProcessFinished() {
-    m_analysisSocketConnected = false;
-    m_analysisBuffer.clear();
-    if (m_analysisSocket != nullptr) {
-        m_analysisSocket->close();
-        m_analysisSocket->deleteLater();
-        m_analysisSocket = nullptr;
-    }
+    teardownAnalysisSocket(false);
     if (m_connected) {
         m_connected = false;
         emit connectedChanged();
