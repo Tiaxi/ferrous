@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{select, tick, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TrySendError};
 
 use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
 use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot};
@@ -84,7 +85,7 @@ pub struct BridgeSnapshot {
     pub playback: PlaybackSnapshot,
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
-    pub library: LibrarySnapshot,
+    pub library: Arc<LibrarySnapshot>,
     pub queue: Vec<PathBuf>,
     pub selected_queue_index: Option<usize>,
     pub settings: BridgeSettings,
@@ -114,7 +115,7 @@ struct BridgeState {
     playback: PlaybackSnapshot,
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
-    library: LibrarySnapshot,
+    library: Arc<LibrarySnapshot>,
     queue: Vec<PathBuf>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
@@ -142,7 +143,8 @@ pub struct FrontendBridgeHandle {
 impl FrontendBridgeHandle {
     pub fn spawn() -> Self {
         let (cmd_tx, cmd_rx) = unbounded::<BridgeCommand>();
-        let (event_tx, event_rx) = unbounded::<BridgeEvent>();
+        // Keep snapshot/event queue bounded so a slow UI consumer cannot cause unbounded RAM growth.
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
 
         std::thread::spawn(move || run_bridge_loop(cmd_rx, event_tx));
         Self {
@@ -181,7 +183,7 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
     let mut last_settings_save = Instant::now();
     let ticker = tick(Duration::from_millis(16));
 
-    let _ = event_tx.send(BridgeEvent::Snapshot(state.snapshot()));
+    send_snapshot_event(&event_tx, &state);
 
     while running {
         select! {
@@ -199,7 +201,7 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
                             &mut settings_dirty,
                         );
                         if changed {
-                            let _ = event_tx.send(BridgeEvent::Snapshot(state.snapshot()));
+                            send_snapshot_event(&event_tx, &state);
                         }
                     }
                     Err(_) => break,
@@ -217,7 +219,7 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
         changed |= pump_library_events(&library_rx, &mut state);
 
         if changed {
-            let _ = event_tx.send(BridgeEvent::Snapshot(state.snapshot()));
+            send_snapshot_event(&event_tx, &state);
         }
 
         if settings_dirty && last_settings_save.elapsed() >= Duration::from_secs(2) {
@@ -228,7 +230,22 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
     }
 
     save_settings(&state.settings);
-    let _ = event_tx.send(BridgeEvent::Stopped);
+    let _ = try_send_event(&event_tx, BridgeEvent::Stopped);
+}
+
+fn try_send_event(
+    event_tx: &Sender<BridgeEvent>,
+    event: BridgeEvent,
+) -> Result<(), TrySendError<BridgeEvent>> {
+    event_tx.try_send(event)
+}
+
+fn send_snapshot_event(event_tx: &Sender<BridgeEvent>, state: &BridgeState) {
+    // Drop stale snapshot updates when the consumer is behind; next snapshot will replace it.
+    if event_tx.is_full() {
+        return;
+    }
+    let _ = try_send_event(event_tx, BridgeEvent::Snapshot(state.snapshot()));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -358,9 +375,10 @@ fn handle_queue_command(
                 state.selected_queue_index = Some(idx);
                 true
             } else {
-                let _ = event_tx.send(BridgeEvent::Error(format!(
-                    "queue index {idx} out of bounds"
-                )));
+                let _ = try_send_event(
+                    event_tx,
+                    BridgeEvent::Error(format!("queue index {idx} out of bounds")),
+                );
                 false
             }
         }
@@ -536,7 +554,7 @@ fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeSt
         };
         match event {
             LibraryEvent::Snapshot(snapshot) => {
-                state.library = snapshot;
+                state.library = Arc::new(snapshot);
                 changed = true;
             }
         }

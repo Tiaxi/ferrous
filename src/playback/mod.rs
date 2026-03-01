@@ -608,9 +608,20 @@ mod backend {
         let queue_out = gst::ElementFactory::make("queue")
             .build()
             .map_err(|_| anyhow!("missing queue element"))?;
-        let sink_out = gst::ElementFactory::make("autoaudiosink")
+        let output_sink_name = std::env::var("FERROUS_GST_OUTPUT_SINK")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "autoaudiosink".to_string());
+        let sink_out = gst::ElementFactory::make(&output_sink_name)
             .build()
-            .map_err(|_| anyhow!("missing autoaudiosink element"))?;
+            .or_else(|_| {
+                tracing::warn!(
+                    "failed to build output sink '{}', falling back to autoaudiosink",
+                    output_sink_name
+                );
+                gst::ElementFactory::make("autoaudiosink").build()
+            })
+            .map_err(|_| anyhow!("missing output sink element"))?;
 
         let queue_tap = gst::ElementFactory::make("queue")
             .build()
