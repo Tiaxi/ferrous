@@ -186,7 +186,7 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
     let mut profile_last = Instant::now();
     let mut prof_snapshots_sent = 0usize;
     let mut prof_snapshots_dropped = 0usize;
-    let snapshot_interval = Duration::from_millis(12);
+    let snapshot_interval = Duration::from_millis(8);
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;
 

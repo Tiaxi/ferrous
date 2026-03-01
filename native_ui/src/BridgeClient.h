@@ -3,6 +3,8 @@
 #include <QObject>
 #include <QByteArray>
 #include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QProcess>
 #include <QString>
 #include <QStringList>
@@ -32,6 +34,7 @@ class BridgeClient : public QObject {
 
 public:
     explicit BridgeClient(QObject *parent = nullptr);
+    ~BridgeClient() override;
 
     QString playbackState() const;
     QString positionText() const;
@@ -78,6 +81,10 @@ signals:
     void bridgeError(const QString &message);
 
 private:
+    void setupAnalysisSocketServer();
+    void handleAnalysisSocketConnected();
+    void handleAnalysisSocketReady();
+    void scheduleSnapshotChanged();
     void startBridgeProcess();
     void sendJson(const QJsonObject &obj);
     void sendCommand(const QString &cmd, double value = -1.0);
@@ -114,4 +121,9 @@ private:
     qint64 m_pendingQueueSelectionUntilMs{0};
     QTimer m_snapshotNotifyTimer;
     QByteArray m_stderrBuffer;
+    QLocalServer m_analysisServer;
+    QLocalSocket *m_analysisSocket{nullptr};
+    QByteArray m_analysisBuffer;
+    QString m_analysisSocketName;
+    bool m_analysisSocketConnected{false};
 };

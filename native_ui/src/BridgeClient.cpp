@@ -8,11 +8,21 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QDir>
+#include <QProcessEnvironment>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QMetaObject>
+#include <QtEndian>
+
+namespace {
+constexpr quint8 kAnalysisFrameMagic = 0xA1;
+constexpr quint8 kAnalysisFlagWaveform = 0x01;
+constexpr quint8 kAnalysisFlagReset = 0x02;
+constexpr quint8 kAnalysisFlagSpectrogram = 0x04;
+constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
+} // namespace
 
 BridgeClient::BridgeClient(QObject *parent)
     : QObject(parent) {
@@ -28,7 +38,30 @@ BridgeClient::BridgeClient(QObject *parent)
             emit snapshotChanged();
         }
     });
+    setupAnalysisSocketServer();
     startBridgeProcess();
+}
+
+BridgeClient::~BridgeClient() {
+    if (m_analysisSocket != nullptr) {
+        m_analysisSocket->close();
+        m_analysisSocket->deleteLater();
+        m_analysisSocket = nullptr;
+    }
+    if (m_analysisServer.isListening()) {
+        const QString serverName = m_analysisServer.fullServerName();
+        m_analysisServer.close();
+        if (!serverName.isEmpty()) {
+            QLocalServer::removeServer(serverName);
+        }
+    }
+    if (m_process.state() != QProcess::NotRunning) {
+        m_process.terminate();
+        if (!m_process.waitForFinished(500)) {
+            m_process.kill();
+            m_process.waitForFinished(500);
+        }
+    }
 }
 
 QString BridgeClient::playbackState() const {
@@ -233,6 +266,161 @@ void BridgeClient::shutdown() {
     sendCommand(QStringLiteral("shutdown"));
 }
 
+void BridgeClient::setupAnalysisSocketServer() {
+    connect(&m_analysisServer, &QLocalServer::newConnection, this, &BridgeClient::handleAnalysisSocketConnected);
+
+#ifdef Q_OS_UNIX
+    const QString socketBase = QStringLiteral("ferrous-analysis-%1-%2.sock")
+                                   .arg(QCoreApplication::applicationPid())
+                                   .arg(QDateTime::currentMSecsSinceEpoch());
+    m_analysisSocketName = QDir::temp().filePath(socketBase);
+#else
+    m_analysisSocketName = QStringLiteral("ferrous-analysis-%1-%2")
+                               .arg(QCoreApplication::applicationPid())
+                               .arg(QDateTime::currentMSecsSinceEpoch());
+#endif
+
+    QLocalServer::removeServer(m_analysisSocketName);
+    if (!m_analysisServer.listen(m_analysisSocketName)) {
+        emit bridgeError(QStringLiteral("failed to listen analysis socket: %1")
+                             .arg(m_analysisServer.errorString()));
+        m_analysisSocketName.clear();
+    }
+}
+
+void BridgeClient::handleAnalysisSocketConnected() {
+    if (m_analysisSocket != nullptr) {
+        m_analysisSocket->disconnect(this);
+        m_analysisSocket->close();
+        m_analysisSocket->deleteLater();
+        m_analysisSocket = nullptr;
+    }
+
+    m_analysisSocket = m_analysisServer.nextPendingConnection();
+    if (m_analysisSocket == nullptr) {
+        return;
+    }
+    m_analysisBuffer.clear();
+    m_analysisSocketConnected = true;
+    connect(m_analysisSocket, &QLocalSocket::readyRead, this, &BridgeClient::handleAnalysisSocketReady);
+    connect(m_analysisSocket, &QLocalSocket::disconnected, this, [this]() {
+        if (m_analysisSocket != nullptr) {
+            m_analysisSocket->deleteLater();
+            m_analysisSocket = nullptr;
+        }
+        m_analysisSocketConnected = false;
+        m_analysisBuffer.clear();
+    });
+}
+
+void BridgeClient::handleAnalysisSocketReady() {
+    if (m_analysisSocket == nullptr) {
+        return;
+    }
+    const QByteArray chunk = m_analysisSocket->readAll();
+    if (chunk.isEmpty()) {
+        return;
+    }
+    m_analysisBuffer += chunk;
+
+    bool changed = false;
+    while (m_analysisBuffer.size() >= static_cast<qsizetype>(sizeof(quint32))) {
+        const auto *lenPtr = reinterpret_cast<const uchar *>(m_analysisBuffer.constData());
+        const quint32 frameBytes = qFromLittleEndian<quint32>(lenPtr);
+        if (frameBytes == 0 || frameBytes > kMaxAnalysisFrameBytes) {
+            emit bridgeError(QStringLiteral("invalid analysis frame size: %1").arg(frameBytes));
+            m_analysisBuffer.clear();
+            break;
+        }
+        const qsizetype totalBytes = static_cast<qsizetype>(sizeof(quint32) + frameBytes);
+        if (m_analysisBuffer.size() < totalBytes) {
+            break;
+        }
+        QByteArray frame = m_analysisBuffer.mid(sizeof(quint32), frameBytes);
+        m_analysisBuffer.remove(0, totalBytes);
+
+        if (frame.size() < 12) {
+            continue;
+        }
+        const auto *data = reinterpret_cast<const uchar *>(frame.constData());
+        if (data[0] != kAnalysisFrameMagic) {
+            continue;
+        }
+        const quint32 sampleRate = qFromLittleEndian<quint32>(data + 1);
+        const quint8 flags = data[5];
+        const quint16 waveformLen = qFromLittleEndian<quint16>(data + 6);
+        const quint16 rowCount = qFromLittleEndian<quint16>(data + 8);
+        const quint16 binCount = qFromLittleEndian<quint16>(data + 10);
+        const qsizetype expected = 12 + static_cast<qsizetype>(waveformLen)
+            + static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
+        if (frame.size() < expected) {
+            continue;
+        }
+
+        const uchar *cursor = data + 12;
+
+        if (sampleRate > 0 && m_sampleRateHz != static_cast<int>(sampleRate)) {
+            m_sampleRateHz = static_cast<int>(sampleRate);
+            changed = true;
+        }
+
+        const bool spectrogramReset = (flags & kAnalysisFlagReset) != 0;
+        if (m_spectrogramReset != spectrogramReset) {
+            m_spectrogramReset = spectrogramReset;
+            changed = true;
+        }
+
+        if ((flags & kAnalysisFlagWaveform) != 0) {
+            QVariantList peaks;
+            peaks.reserve(waveformLen);
+            for (quint16 i = 0; i < waveformLen; ++i) {
+                peaks.push_back(static_cast<double>(cursor[i]) / 255.0);
+            }
+            cursor += waveformLen;
+            if (m_waveformPeaks != peaks) {
+                m_waveformPeaks = peaks;
+                changed = true;
+            }
+        } else {
+            cursor += waveformLen;
+        }
+
+        if ((flags & kAnalysisFlagSpectrogram) != 0 && rowCount > 0 && binCount > 0) {
+            QVariantList rowsDelta;
+            rowsDelta.reserve(rowCount);
+            for (quint16 r = 0; r < rowCount; ++r) {
+                QVariantList row;
+                row.reserve(binCount);
+                const uchar *rowBase = cursor + static_cast<qsizetype>(r) * static_cast<qsizetype>(binCount);
+                for (quint16 b = 0; b < binCount; ++b) {
+                    row.push_back(static_cast<int>(rowBase[b]));
+                }
+                rowsDelta.push_back(row);
+            }
+            if (!rowsDelta.isEmpty()) {
+                m_spectrogramRowsDelta += rowsDelta;
+                constexpr int kMaxPendingSpectrogramRows = 512;
+                if (m_spectrogramRowsDelta.size() > kMaxPendingSpectrogramRows) {
+                    m_spectrogramRowsDelta = m_spectrogramRowsDelta.mid(
+                        m_spectrogramRowsDelta.size() - kMaxPendingSpectrogramRows);
+                }
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        scheduleSnapshotChanged();
+    }
+}
+
+void BridgeClient::scheduleSnapshotChanged() {
+    m_snapshotChangedPending = true;
+    if (!m_snapshotNotifyTimer.isActive()) {
+        m_snapshotNotifyTimer.start();
+    }
+}
+
 void BridgeClient::startBridgeProcess() {
     QString command = qEnvironmentVariable("FERROUS_BRIDGE_CMD");
     if (command.isEmpty()) {
@@ -260,6 +448,11 @@ void BridgeClient::startBridgeProcess() {
 
     const QString shell = QStringLiteral("/bin/sh");
     const QStringList args{QStringLiteral("-lc"), command};
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    if (!m_analysisSocketName.isEmpty()) {
+        env.insert(QStringLiteral("FERROUS_ANALYSIS_SOCKET_PATH"), m_analysisSocketName);
+    }
+    m_process.setProcessEnvironment(env);
     m_process.start(shell, args);
 }
 
@@ -294,8 +487,8 @@ void BridgeClient::handleStdoutReady() {
             const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
             const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
             const QJsonObject library = root.value(QStringLiteral("library")).toObject();
-            const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
             const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
+            const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
 
             const QString nextState = playback.value(QStringLiteral("state")).toString();
             const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
@@ -377,41 +570,43 @@ void BridgeClient::handleStdoutReady() {
                 m_selectedQueueIndex = selected;
                 changed = true;
             }
-            const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
-            if (m_spectrogramReset != spectrogramReset) {
-                m_spectrogramReset = spectrogramReset;
-                changed = true;
-            }
-            const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
-            if (spectrogramRowsValue.isArray()) {
-                const QJsonArray rowsArr = spectrogramRowsValue.toArray();
-                QVariantList rowsDelta;
-                rowsDelta.reserve(rowsArr.size());
-                for (const QJsonValue &rowValue : rowsArr) {
-                    const QJsonArray rowArr = rowValue.toArray();
-                    if (rowArr.isEmpty()) {
-                        continue;
-                    }
-                    QVariantList row;
-                    row.reserve(rowArr.size());
-                    for (const QJsonValue &v : rowArr) {
-                        row.push_back(v.toDouble());
-                    }
-                    rowsDelta.push_back(row);
-                }
-                if (!rowsDelta.isEmpty()) {
-                    m_spectrogramRowsDelta += rowsDelta;
-                    constexpr int kMaxPendingSpectrogramRows = 256;
-                    if (m_spectrogramRowsDelta.size() > kMaxPendingSpectrogramRows) {
-                        m_spectrogramRowsDelta = m_spectrogramRowsDelta.mid(
-                            m_spectrogramRowsDelta.size() - kMaxPendingSpectrogramRows);
-                    }
+            if (!m_analysisSocketConnected) {
+                const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
+                if (m_spectrogramReset != spectrogramReset) {
+                    m_spectrogramReset = spectrogramReset;
                     changed = true;
                 }
-            }
-            if (m_sampleRateHz != sampleRate) {
-                m_sampleRateHz = sampleRate;
-                changed = true;
+                const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
+                if (spectrogramRowsValue.isArray()) {
+                    const QJsonArray rowsArr = spectrogramRowsValue.toArray();
+                    QVariantList rowsDelta;
+                    rowsDelta.reserve(rowsArr.size());
+                    for (const QJsonValue &rowValue : rowsArr) {
+                        const QJsonArray rowArr = rowValue.toArray();
+                        if (rowArr.isEmpty()) {
+                            continue;
+                        }
+                        QVariantList row;
+                        row.reserve(rowArr.size());
+                        for (const QJsonValue &v : rowArr) {
+                            row.push_back(v.toDouble());
+                        }
+                        rowsDelta.push_back(row);
+                    }
+                    if (!rowsDelta.isEmpty()) {
+                        m_spectrogramRowsDelta += rowsDelta;
+                        constexpr int kMaxPendingSpectrogramRows = 512;
+                        if (m_spectrogramRowsDelta.size() > kMaxPendingSpectrogramRows) {
+                            m_spectrogramRowsDelta = m_spectrogramRowsDelta.mid(
+                                m_spectrogramRowsDelta.size() - kMaxPendingSpectrogramRows);
+                        }
+                        changed = true;
+                    }
+                }
+                if (m_sampleRateHz != sampleRate) {
+                    m_sampleRateHz = sampleRate;
+                    changed = true;
+                }
             }
             const double dbRange = settings.value(QStringLiteral("db_range")).toDouble(m_dbRange);
             if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
@@ -459,17 +654,19 @@ void BridgeClient::handleStdoutReady() {
                     changed = true;
                 }
             }
-            const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
-            if (waveformValue.isArray()) {
-                QVariantList peaks;
-                const QJsonArray arr = waveformValue.toArray();
-                peaks.reserve(arr.size());
-                for (const QJsonValue &v : arr) {
-                    peaks.push_back(v.toDouble());
-                }
-                if (m_waveformPeaks != peaks) {
-                    m_waveformPeaks = peaks;
-                    changed = true;
+            if (!m_analysisSocketConnected) {
+                const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
+                if (waveformValue.isArray()) {
+                    QVariantList peaks;
+                    const QJsonArray arr = waveformValue.toArray();
+                    peaks.reserve(arr.size());
+                    for (const QJsonValue &v : arr) {
+                        peaks.push_back(v.toDouble());
+                    }
+                    if (m_waveformPeaks != peaks) {
+                        m_waveformPeaks = peaks;
+                        changed = true;
+                    }
                 }
             }
             if (changed) {
@@ -501,10 +698,7 @@ void BridgeClient::handleStdoutReady() {
         processRoot(doc.object());
     }
     if (anySnapshotChanged) {
-        m_snapshotChangedPending = true;
-        if (!m_snapshotNotifyTimer.isActive()) {
-            m_snapshotNotifyTimer.start();
-        }
+        scheduleSnapshotChanged();
     }
     if (m_process.canReadLine() && !m_stdoutPumpScheduled) {
         m_stdoutPumpScheduled = true;
@@ -550,6 +744,13 @@ void BridgeClient::handleProcessStarted() {
 }
 
 void BridgeClient::handleProcessFinished() {
+    m_analysisSocketConnected = false;
+    m_analysisBuffer.clear();
+    if (m_analysisSocket != nullptr) {
+        m_analysisSocket->close();
+        m_analysisSocket->deleteLater();
+        m_analysisSocket = nullptr;
+    }
     if (m_connected) {
         m_connected = false;
         emit connectedChanged();

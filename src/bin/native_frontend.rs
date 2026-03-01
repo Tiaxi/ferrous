@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -136,6 +138,10 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
         std::env::var_os("FERROUS_PROFILE").is_some(),
         dropped_counter.clone(),
     );
+    #[cfg(unix)]
+    let mut analysis_writer = AnalysisSocketWriter::from_env();
+    #[cfg(not(unix))]
+    let mut analysis_writer: Option<()> = None;
 
     let mut emit_state = JsonEmitState {
         profile_enabled: std::env::var_os("FERROUS_PROFILE").is_some(),
@@ -149,6 +155,7 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
         32,
         Duration::from_millis(1),
         &mut emit_state,
+        &mut analysis_writer,
     );
 
     let mut eof_seen = false;
@@ -195,6 +202,7 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
             64,
             Duration::from_millis(1),
             &mut emit_state,
+            &mut analysis_writer,
         );
 
         if eof_seen {
@@ -217,6 +225,56 @@ struct JsonCommand {
     path: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+}
+
+const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
+const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
+const ANALYSIS_FLAG_RESET: u8 = 0x02;
+const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
+
+#[derive(Default)]
+struct AnalysisDelta {
+    sample_rate_hz: u32,
+    spectrogram_seq: u64,
+    spectrogram_reset: bool,
+    waveform_len: usize,
+    waveform_changed: bool,
+    waveform_peaks_u8: Vec<u8>,
+    spectrogram_rows_u8: Vec<Vec<u8>>,
+}
+
+#[cfg(unix)]
+struct AnalysisSocketWriter {
+    tx: Sender<Vec<u8>>,
+}
+
+#[cfg(unix)]
+impl AnalysisSocketWriter {
+    fn from_env() -> Option<Self> {
+        let path = std::env::var("FERROUS_ANALYSIS_SOCKET_PATH").ok()?;
+        let stream = UnixStream::connect(path).ok()?;
+        let (tx, rx) = bounded::<Vec<u8>>(32);
+        std::thread::spawn(move || {
+            let mut stream = stream;
+            while let Ok(frame) = rx.recv() {
+                if stream.write_all(&frame).is_err() {
+                    break;
+                }
+            }
+        });
+        Some(Self { tx })
+    }
+
+    fn send(&self, frame: Vec<u8>) -> bool {
+        if frame.is_empty() {
+            return true;
+        }
+        match self.tx.try_send(frame) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -392,6 +450,8 @@ fn drain_bridge_events_as_json(
     max_events: usize,
     timeout: Duration,
     emit_state: &mut JsonEmitState,
+    #[cfg(unix)] analysis_writer: &mut Option<AnalysisSocketWriter>,
+    #[cfg(not(unix))] _analysis_writer: &mut Option<()>,
 ) {
     let mut latest_snapshot: Option<BridgeSnapshot> = None;
     for i in 0..max_events {
@@ -420,14 +480,26 @@ fn drain_bridge_events_as_json(
     }
 
     if let Some(s) = latest_snapshot {
-        let payload = encode_snapshot_payload(&s, emit_state);
+        let analysis_delta = compute_analysis_delta(&s, emit_state);
+        #[cfg(unix)]
+        let analysis_on_socket = if let Some(writer) = analysis_writer.as_ref() {
+            let frame = encode_analysis_frame(&analysis_delta);
+            writer.send(frame)
+        } else {
+            false
+        };
+        #[cfg(not(unix))]
+        let analysis_on_socket = false;
+        let payload = encode_snapshot_payload(&s, &analysis_delta, emit_state, !analysis_on_socket);
         let _ = emit_json_line(&payload, out_tx, emit_state);
     }
 }
 
 fn encode_snapshot_payload(
     s: &BridgeSnapshot,
+    analysis_delta: &AnalysisDelta,
     emit_state: &mut JsonEmitState,
+    include_analysis_payload: bool,
 ) -> serde_json::Value {
     let library_digest = LibraryDigest {
         roots_len: s.library.roots.len(),
@@ -525,40 +597,29 @@ fn encode_snapshot_payload(
         serde_json::Value::Null
     };
 
-    let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
-    let waveform_peaks = if waveform_changed {
-        emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
-        let reduced = downsample_waveform_peaks(&s.analysis.waveform_peaks, 1024);
-        serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
-    } else {
-        serde_json::Value::Null
-    };
-
-    let spectrogram_reset = s.analysis.spectrogram_seq < emit_state.last_spectrogram_seq
-        || (s.analysis.spectrogram_seq == 0
-            && s.analysis.spectrogram_rows.is_empty()
-            && emit_state.last_spectrogram_seq > 0);
-    let spectrogram_seq = s.analysis.spectrogram_seq;
-    let spectrogram_delta =
-        spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
-    let spectrogram_rows = if spectrogram_delta > 0 && !s.analysis.spectrogram_rows.is_empty() {
-        let tail = spectrogram_delta
-            .min(s.analysis.spectrogram_rows.len())
-            .min(8);
-        let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
+    let waveform_peaks = if include_analysis_payload && analysis_delta.waveform_changed {
         serde_json::Value::Array(
-            s.analysis.spectrogram_rows[start..]
+            analysis_delta
+                .waveform_peaks_u8
                 .iter()
-                .map(|row| {
-                    let reduced = downsample_spectrogram_row(row, 512);
-                    serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
-                })
+                .map(|v| json!((*v as f64) / 255.0))
                 .collect(),
         )
     } else {
         serde_json::Value::Null
     };
-    emit_state.last_spectrogram_seq = spectrogram_seq;
+    let spectrogram_rows =
+        if include_analysis_payload && !analysis_delta.spectrogram_rows_u8.is_empty() {
+            serde_json::Value::Array(
+                analysis_delta
+                    .spectrogram_rows_u8
+                    .iter()
+                    .map(|row| serde_json::Value::Array(row.iter().map(|v| json!(v)).collect()))
+                    .collect(),
+            )
+        } else {
+            serde_json::Value::Null
+        };
 
     json!({
         "event": "snapshot",
@@ -582,12 +643,12 @@ fn encode_snapshot_payload(
             "albums": library_albums,
         },
         "analysis": {
-            "spectrogram_seq": spectrogram_seq,
-            "spectrogram_reset": spectrogram_reset,
+            "spectrogram_seq": analysis_delta.spectrogram_seq,
+            "spectrogram_reset": include_analysis_payload && analysis_delta.spectrogram_reset,
             "spectrogram_rows": spectrogram_rows,
-            "sample_rate_hz": s.analysis.sample_rate_hz,
-            "waveform_len": s.analysis.waveform_peaks.len(),
-            "waveform_changed": waveform_changed,
+            "sample_rate_hz": if include_analysis_payload { analysis_delta.sample_rate_hz } else { 0 },
+            "waveform_len": if include_analysis_payload { analysis_delta.waveform_len } else { 0 },
+            "waveform_changed": include_analysis_payload && analysis_delta.waveform_changed,
             "waveform_peaks": waveform_peaks,
         },
         "settings": {
@@ -597,6 +658,128 @@ fn encode_snapshot_payload(
             "log_scale": s.settings.log_scale,
         }
     })
+}
+
+fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut JsonEmitState) -> AnalysisDelta {
+    let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
+    let waveform_peaks_u8 = if waveform_changed {
+        emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
+        downsample_waveform_peaks(&s.analysis.waveform_peaks, 1024)
+            .into_iter()
+            .map(|v| to_u8_norm(v))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let spectrogram_reset = s.analysis.spectrogram_seq < emit_state.last_spectrogram_seq
+        || (s.analysis.spectrogram_seq == 0
+            && s.analysis.spectrogram_rows.is_empty()
+            && emit_state.last_spectrogram_seq > 0);
+    let spectrogram_seq = s.analysis.spectrogram_seq;
+    let spectrogram_delta =
+        spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
+    let spectrogram_rows_u8 = if spectrogram_delta > 0 && !s.analysis.spectrogram_rows.is_empty() {
+        let tail = spectrogram_delta
+            .min(s.analysis.spectrogram_rows.len())
+            .min(12);
+        let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
+        s.analysis.spectrogram_rows[start..]
+            .iter()
+            .map(|row| {
+                let reduced = downsample_spectrogram_row(row, 1024);
+                reduced
+                    .into_iter()
+                    .map(|v| to_u8_spectrum(v, s.settings.db_range))
+                    .collect::<Vec<u8>>()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    emit_state.last_spectrogram_seq = spectrogram_seq;
+
+    AnalysisDelta {
+        sample_rate_hz: s.analysis.sample_rate_hz,
+        spectrogram_seq,
+        spectrogram_reset,
+        waveform_len: s.analysis.waveform_peaks.len(),
+        waveform_changed,
+        waveform_peaks_u8,
+        spectrogram_rows_u8,
+    }
+}
+
+fn to_u8_norm(v: f32) -> u8 {
+    let clamped = v.clamp(0.0, 1.0);
+    (clamped * 255.0).round() as u8
+}
+
+fn to_u8_spectrum(v: f32, db_range: f32) -> u8 {
+    let range = db_range.clamp(50.0, 120.0) as f64;
+    let db = if v > 0.0 {
+        (10.0 / std::f64::consts::LN_10) * (v as f64).ln()
+    } else {
+        -200.0
+    };
+    let xdb = (db + range - 63.0).clamp(0.0, range);
+    ((xdb / range) * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
+    let waveform_len = delta.waveform_peaks_u8.len();
+    let row_count = delta.spectrogram_rows_u8.len();
+    let bin_count = delta
+        .spectrogram_rows_u8
+        .first()
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let has_spectrogram = row_count > 0 && bin_count > 0;
+
+    let mut flags = 0u8;
+    if delta.waveform_changed && waveform_len > 0 {
+        flags |= ANALYSIS_FLAG_WAVEFORM;
+    }
+    if delta.spectrogram_reset {
+        flags |= ANALYSIS_FLAG_RESET;
+    }
+    if has_spectrogram {
+        flags |= ANALYSIS_FLAG_SPECTROGRAM;
+    }
+
+    if flags == 0 {
+        return Vec::new();
+    }
+
+    let waveform_len_u16 = waveform_len.min(u16::MAX as usize) as u16;
+    let row_count_u16 = row_count.min(u16::MAX as usize) as u16;
+    let bin_count_u16 = bin_count.min(u16::MAX as usize) as u16;
+    let spectrogram_bytes = row_count_u16 as usize * bin_count_u16 as usize;
+    let payload_len = 12usize + waveform_len_u16 as usize + spectrogram_bytes;
+
+    let mut out = Vec::with_capacity(4 + payload_len);
+    out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    out.push(ANALYSIS_FRAME_MAGIC);
+    out.extend_from_slice(&delta.sample_rate_hz.to_le_bytes());
+    out.push(flags);
+    out.extend_from_slice(&waveform_len_u16.to_le_bytes());
+    out.extend_from_slice(&row_count_u16.to_le_bytes());
+    out.extend_from_slice(&bin_count_u16.to_le_bytes());
+
+    if (flags & ANALYSIS_FLAG_WAVEFORM) != 0 {
+        out.extend_from_slice(&delta.waveform_peaks_u8[..waveform_len_u16 as usize]);
+    }
+    if (flags & ANALYSIS_FLAG_SPECTROGRAM) != 0 {
+        for row in delta
+            .spectrogram_rows_u8
+            .iter()
+            .take(row_count_u16 as usize)
+        {
+            out.extend_from_slice(&row[..bin_count_u16 as usize]);
+        }
+    }
+
+    out
 }
 
 fn emit_json_line(

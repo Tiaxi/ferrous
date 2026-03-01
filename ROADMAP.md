@@ -26,7 +26,7 @@ Ship a Kirigami frontend that reaches current Ferrous behavior parity, then cont
 - Avoid feature freeze on backend improvements, but avoid new large egui-only UX work.
 - Migrate screen-by-screen with runnable checkpoints.
 - Keep one source of truth for queue/playback/library state (no duplicated state machines in QML).
-- Performance target: minimum 60 FPS rendering, with design choices favoring display refresh-rate rendering when feasible.
+- Performance target: minimum 60 FPS rendering, and target the active display refresh rate (no hardcoded 120 Hz assumptions).
 - Performance is a hard requirement (no degraded responsiveness accepted for feature parity).
 
 ## Critical Path: Performance Architecture Rework (Started)
@@ -58,9 +58,10 @@ Acceptance criteria:
 ### Phase P1: Native Spectrogram Render Path (C++ Item)
 
 - [x] Replace QML `Canvas` spectrogram with C++ render item (`QQuickPaintedItem` baseline landed).
-- [ ] Move palette mapping + bin projection to C++ (no per-frame JS loops).
+- [x] Move palette mapping + bin projection to C++ (no per-frame JS loops).
 - [ ] Keep DeaDBeeF-like color mapping and dB behavior parity.
 - [ ] Keep rolling history and seek behavior parity.
+- [ ] Keep implementation notes aligned with DeaDBeeF reference source at `/home/tuomas/Downloads/ddb_spectrogram/`.
 
 Acceptance criteria:
 - Spectrogram rendering no longer causes observable UI hitching.
@@ -68,6 +69,8 @@ Acceptance criteria:
 
 ### Phase P2: Split Transport by Data Rate
 
+- [x] **Next slice**: remove analysis payload from JSON snapshots when binary analysis channel is active; keep control/state in JSON.
+- [x] **Next slice**: add dedicated high-rate binary analysis channel for spectrogram rows + waveform peaks (Unix local socket path, fallback to JSON analysis when unavailable).
 - [ ] Low-rate channel (JSON/properties): playback state, queue, library, settings.
 - [ ] High-rate channel (binary ring/shared memory): spectrogram rows + waveform peaks.
 - [ ] Explicit frame sequencing and drop policy for high-rate visuals.
