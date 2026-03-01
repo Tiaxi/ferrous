@@ -342,13 +342,25 @@ impl eframe::App for FerrousApp {
                 if paths.is_empty() {
                     // no-op
                 } else {
-                    let start_idx = self.state.queue.len();
+                    self.state.queue.clear();
                     self.state.queue.extend(paths);
                     let tracks = self.state.queue.clone();
                     self.playback.command(PlaybackCommand::LoadQueue(tracks));
-                    self.playback.command(PlaybackCommand::PlayAt(start_idx));
+                    self.playback.command(PlaybackCommand::PlayAt(0));
                     self.playback.command(PlaybackCommand::Play);
-                    self.state.selected_queue_index = Some(start_idx);
+                    self.state.selected_queue_index = Some(0);
+                }
+            }
+            CenterPanelAction {
+                add_library_album_tracks_append: Some(paths),
+                ..
+            } => {
+                if paths.is_empty() {
+                    // no-op
+                } else {
+                    self.state.queue.extend(paths);
+                    let tracks = self.state.queue.clone();
+                    self.playback.command(PlaybackCommand::LoadQueue(tracks));
                 }
             }
             CenterPanelAction {

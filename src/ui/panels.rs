@@ -38,6 +38,7 @@ pub struct CenterPanelAction {
     pub scan_library_folder: bool,
     pub add_library_track: Option<PathBuf>,
     pub add_library_album_tracks: Option<Vec<PathBuf>>,
+    pub add_library_album_tracks_append: Option<Vec<PathBuf>>,
     pub play_library_track: Option<PathBuf>,
     pub set_fft_size: Option<usize>,
 }
@@ -77,6 +78,7 @@ pub struct SpectrogramCache {
 pub struct CoverArtCache {
     texture: Option<TextureHandle>,
     key: Option<u64>,
+    target_size: Option<[usize; 2]>,
 }
 
 #[derive(Default)]
@@ -91,8 +93,7 @@ pub fn draw_top_panel(
     analysis: &AnalysisSnapshot,
 ) -> TopPanelAction {
     let mut action = TopPanelAction::None;
-    let menu_fill = ctx.style().visuals.window_fill();
-    let controls_fill = ctx.style().visuals.panel_fill;
+    let controls_fill = ctx.style().visuals.window_fill();
 
     egui::TopBottomPanel::top("top_controls")
         .frame(egui::Frame::default().fill(controls_fill))
@@ -102,18 +103,13 @@ pub fn draw_top_panel(
             ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
             ui.spacing_mut().slider_width = 140.0;
             ui.spacing_mut().interact_size.y = 27.0;
-            egui::Frame::default()
-                .fill(menu_fill)
-                .inner_margin(egui::Margin::symmetric(4, 1))
-                .show(ui, |ui| {
-                    egui::menu::bar(ui, |ui| {
-                        ui.label("File");
-                        ui.label("Edit");
-                        ui.label("View");
-                        ui.label("Playback");
-                        ui.label("Help");
-                    });
-                });
+            egui::menu::bar(ui, |ui| {
+                ui.label("File");
+                ui.label("Edit");
+                ui.label("View");
+                ui.label("Playback");
+                ui.label("Help");
+            });
             ui.add_space(2.0);
 
             ui.horizontal(|ui| {
@@ -133,7 +129,9 @@ pub fn draw_top_panel(
                     action = TopPanelAction::Next;
                 }
 
-                flush_v_separator(ui, 27.0);
+                ui.add_space(2.0);
+                flush_v_separator(ui, 21.0);
+                ui.add_space(2.0);
 
                 let duration_text = format!(
                     "{} / {}",
@@ -152,19 +150,27 @@ pub fn draw_top_panel(
                     Vec2::new(duration_width, 27.0),
                     egui::Label::new(duration_text),
                 );
-                flush_v_separator(ui, 27.0);
+                ui.add_space(2.0);
+                flush_v_separator(ui, 21.0);
+                ui.add_space(2.0);
                 let mut vol = playback.volume.clamp(0.0, 1.0);
+                ui.label("🔊");
                 let changed = ui
-                    .add_sized(
-                        Vec2::new(volume_width, 27.0),
-                        egui::Slider::new(&mut vol, 0.0..=1.0)
-                            .show_value(false)
-                            .clamping(egui::SliderClamping::Always),
-                    )
-                    .changed();
+                    .scope(|ui| {
+                        ui.spacing_mut().interact_size.y = 19.0;
+                        ui.add_sized(
+                            Vec2::new(volume_width - 20.0, 27.0),
+                            egui::Slider::new(&mut vol, 0.0..=1.0)
+                                .show_value(false)
+                                .clamping(egui::SliderClamping::Always),
+                        )
+                        .changed()
+                    })
+                    .inner;
                 if changed {
                     action = TopPanelAction::SetVolume(vol);
                 }
+                ui.add_space(8.0);
             });
         });
 
@@ -470,7 +476,8 @@ pub fn draw_center_panel(
                                                         group_chars,
                                                     );
                                                     let mut toggle_album = false;
-                                                    let mut add_album = false;
+                                                    let mut replace_with_album = false;
+                                                    let mut append_album = false;
                                                     ui.horizontal(|ui| {
                                                         if full_row_text_button(
                                                             ui,
@@ -493,14 +500,24 @@ pub fn draw_center_panel(
                                                             0.0,
                                                         );
                                                         if resp.double_clicked() {
-                                                            add_album = true;
+                                                            replace_with_album = true;
                                                         }
+                                                        resp.context_menu(|ui| {
+                                                            if ui.button("Play Album (Replace Playlist)").clicked() {
+                                                                replace_with_album = true;
+                                                                ui.close_menu();
+                                                            }
+                                                            if ui.button("Add Album To Playlist").clicked() {
+                                                                append_album = true;
+                                                                ui.close_menu();
+                                                            }
+                                                        });
                                                     });
                                                     if toggle_album {
                                                         expanded_library_groups
                                                             .insert(album_key.clone(), !album_open);
                                                     }
-                                                    if add_album {
+                                                    if replace_with_album || append_album {
                                                         let mut paths =
                                                             Vec::with_capacity(indices.len());
                                                         for idx in indices.iter().copied() {
@@ -510,8 +527,15 @@ pub fn draw_center_panel(
                                                             }
                                                         }
                                                         if !paths.is_empty() {
-                                                            action.add_library_album_tracks =
-                                                                Some(paths);
+                                                            if replace_with_album {
+                                                                action.add_library_album_tracks =
+                                                                    Some(paths.clone());
+                                                            }
+                                                            if append_album {
+                                                                action
+                                                                    .add_library_album_tracks_append =
+                                                                    Some(paths);
+                                                            }
                                                         }
                                                     }
                                                     if !expanded_library_groups
@@ -615,58 +639,6 @@ pub fn draw_center_panel(
                                 Vec2::new(ui.available_width(), playlist_h),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
-                                    ui.heading("Playlist");
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .add_enabled(
-                                                selected_queue_index.is_some(),
-                                                egui::Button::new("Up"),
-                                            )
-                                            .clicked()
-                                        {
-                                            action.queue_move_up = true;
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                selected_queue_index.is_some(),
-                                                egui::Button::new("Down"),
-                                            )
-                                            .clicked()
-                                        {
-                                            action.queue_move_down = true;
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                selected_queue_index.is_some(),
-                                                egui::Button::new("Remove"),
-                                            )
-                                            .clicked()
-                                        {
-                                            action.queue_remove_index = selected_queue_index;
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                !queue.is_empty(),
-                                                egui::Button::new("Clear"),
-                                            )
-                                            .clicked()
-                                        {
-                                            action.queue_clear = true;
-                                        }
-                                    });
-                                    let now_playing = if metadata.title.is_empty() {
-                                        "No track loaded".to_string()
-                                    } else if metadata.artist.is_empty() {
-                                        metadata.title.clone()
-                                    } else {
-                                        format!("{} - {}", metadata.artist, metadata.title)
-                                    };
-                                    ui.label(format!("Now Playing: {now_playing}"));
-                                    if !metadata.album.is_empty() {
-                                        ui.label(format!("Album: {}", metadata.album));
-                                    }
-                                    ui.label(format!("Tracks: {}", queue.len()));
-                                    flush_h_separator(ui);
                                     let row_h = 22.0;
                                     ui.horizontal(|ui| {
                                         ui.add_sized(Vec2::new(34.0, row_h), egui::Label::new("#"));
@@ -801,16 +773,24 @@ enum TransportIcon {
 }
 
 fn transport_button(ui: &mut egui::Ui, icon: TransportIcon, tooltip: &str) -> egui::Response {
-    let size = Vec2::new(34.0, 27.0);
+    let size = Vec2::new(34.0, 25.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let visuals = ui.style().interact(&response);
-    ui.painter().rect(
-        rect,
-        4.0,
-        visuals.bg_fill,
-        visuals.bg_stroke,
-        StrokeKind::Middle,
-    );
+    let pane_fill = ui.style().visuals.window_fill();
+    let bg_fill = if response.is_pointer_button_down_on() {
+        ui.style().visuals.widgets.active.weak_bg_fill
+    } else if response.hovered() {
+        ui.style().visuals.widgets.hovered.weak_bg_fill
+    } else {
+        pane_fill
+    };
+    let bg_stroke = if response.hovered() || response.is_pointer_button_down_on() {
+        visuals.bg_stroke
+    } else {
+        Stroke::NONE
+    };
+    ui.painter()
+        .rect(rect, 4.0, bg_fill, bg_stroke, StrokeKind::Middle);
     draw_transport_icon(
         ui.painter(),
         rect.shrink2(Vec2::new(8.0, 6.0)),
@@ -1002,34 +982,67 @@ fn draw_cover_art(
         );
         cache.texture = None;
         cache.key = None;
+        cache.target_size = None;
         return;
     };
 
     let key = cover_art_key(*w, *h, rgba);
-    if cache.key != Some(key) || cache.texture.is_none() {
-        let image = ColorImage::from_rgba_unmultiplied([*w, *h], rgba);
-        cache.texture = Some(ui.ctx().load_texture(
-            "cover_art_texture",
-            image,
-            TextureOptions::LINEAR,
-        ));
+    let ppp = ui.ctx().pixels_per_point().max(1.0);
+    let target_size = [
+        (rect.width() * ppp).round().max(2.0) as usize,
+        (rect.height() * ppp).round().max(2.0) as usize,
+    ];
+    let needs_refresh =
+        cache.key != Some(key) || cache.texture.is_none() || cache.target_size != Some(target_size);
+    if needs_refresh {
+        if let Some(src) = image::RgbaImage::from_raw(*w as u32, *h as u32, rgba.clone()) {
+            let img_aspect = *w as f32 / (*h).max(1) as f32;
+            let dst_aspect = target_size[0] as f32 / target_size[1].max(1) as f32;
+            let (crop_x, crop_y, crop_w, crop_h) = if img_aspect > dst_aspect {
+                let crop_w = ((*h as f32) * dst_aspect).round().clamp(1.0, *w as f32) as u32;
+                let crop_x = ((*w as u32).saturating_sub(crop_w)) / 2;
+                (crop_x, 0u32, crop_w, *h as u32)
+            } else {
+                let crop_h = ((*w as f32) / dst_aspect.max(0.0001))
+                    .round()
+                    .clamp(1.0, *h as f32) as u32;
+                let crop_y = ((*h as u32).saturating_sub(crop_h)) / 2;
+                (0u32, crop_y, *w as u32, crop_h)
+            };
+
+            let cropped =
+                image::imageops::crop_imm(&src, crop_x, crop_y, crop_w, crop_h).to_image();
+            let scaled = image::imageops::resize(
+                &cropped,
+                target_size[0] as u32,
+                target_size[1] as u32,
+                image::imageops::FilterType::Lanczos3,
+            );
+            let image = ColorImage::from_rgba_unmultiplied(target_size, scaled.as_raw());
+            cache.texture = Some(ui.ctx().load_texture(
+                "cover_art_texture",
+                image,
+                TextureOptions::LINEAR,
+            ));
+        } else {
+            let image = ColorImage::from_rgba_unmultiplied([*w, *h], rgba);
+            cache.texture = Some(ui.ctx().load_texture(
+                "cover_art_texture",
+                image,
+                TextureOptions::LINEAR,
+            ));
+        }
         cache.key = Some(key);
+        cache.target_size = Some(target_size);
     }
 
     if let Some(tex) = cache.texture.as_ref() {
-        // Draw exactly to widget bounds and crop UVs to preserve aspect ratio.
-        let img_aspect = *w as f32 / (*h).max(1) as f32;
-        let rect_aspect = rect.width() / rect.height().max(1.0);
-        let uv = if img_aspect > rect_aspect {
-            let keep_x = (rect_aspect / img_aspect).clamp(0.0, 1.0);
-            let pad_x = (1.0 - keep_x) * 0.5;
-            Rect::from_min_max(Pos2::new(pad_x, 0.0), Pos2::new(1.0 - pad_x, 1.0))
-        } else {
-            let keep_y = (img_aspect / rect_aspect.max(0.0001)).clamp(0.0, 1.0);
-            let pad_y = (1.0 - keep_y) * 0.5;
-            Rect::from_min_max(Pos2::new(0.0, pad_y), Pos2::new(1.0, 1.0 - pad_y))
-        };
-        painter.image(tex.id(), rect, uv, Color32::WHITE);
+        painter.image(
+            tex.id(),
+            rect,
+            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
     }
 }
 
@@ -1186,8 +1199,8 @@ fn draw_wave_seekbar(
     painter.rect(
         rect,
         3.0,
-        Color32::from_gray(18),
-        Stroke::new(1.0, Color32::from_gray(70)),
+        Color32::from_rgb(250, 250, 252),
+        Stroke::new(1.0, Color32::from_gray(190)),
         StrokeKind::Middle,
     );
 
@@ -1212,7 +1225,7 @@ fn draw_wave_seekbar(
             let h = (amp.clamp(0.0, 1.0) * rect.height() * 0.46).max(1.0);
             painter.line_segment(
                 [Pos2::new(x, center_y - h), Pos2::new(x, center_y + h)],
-                Stroke::new(1.0, Color32::from_rgb(130, 220, 255)),
+                Stroke::new(1.0, Color32::from_rgb(10, 38, 112)),
             );
         }
     }
@@ -1227,14 +1240,14 @@ fn draw_wave_seekbar(
     painter.rect_filled(
         progress_rect,
         3.0,
-        Color32::from_rgba_unmultiplied(90, 180, 255, 24),
+        Color32::from_rgba_unmultiplied(90, 170, 255, 40),
     );
     painter.line_segment(
         [
             Pos2::new(progress_x, rect.top()),
             Pos2::new(progress_x, rect.bottom()),
         ],
-        Stroke::new(1.0, Color32::from_rgb(150, 210, 255)),
+        Stroke::new(1.5, Color32::from_rgb(30, 104, 215)),
     );
 
     if response.clicked() || response.dragged() {
@@ -1267,13 +1280,6 @@ fn draw_spectrogram(
 
     let no_texture_yet = cache.texture.is_none() || cache.written_cols == 0;
     if (rows.is_empty() || rows[0].is_empty()) && no_texture_yet {
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "spectrogram unavailable",
-            egui::TextStyle::Body.resolve(ui.style()),
-            Color32::from_gray(120),
-        );
         return;
     }
 

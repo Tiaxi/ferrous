@@ -23,6 +23,12 @@ Reach practical daily-driver parity with DeaDBeeF for local-library playback, th
 - [x] Remove redundant "Library" title above album art.
 - [x] Tighten UI density (reduced extra spacing/padding between panes/widgets).
 - [x] Standardize zero-padding separators and apply margins only per-pane/per-widget where explicitly needed.
+- [x] Simplify playlist pane to list-centric view (keep only header row + tracks).
+- [x] Remove spectrogram placeholder text when no data is available (blank view).
+- [x] Improve cover art scaling quality with high-quality resize filtering.
+- [x] Restyle top controls with pane-matched transport button backgrounds and compact spacing.
+- [x] Align menu-row styling closer to desktop-native window chrome.
+- [x] Make album double-click in library replace playlist and autoplay; move append behavior to album context menu.
 - [x] Simplify to a single playlist model (intentional UX choice vs DeaDBeeF multi-playlist workflow).
 - [ ] Implement real top menu actions (`File/Edit/View/Playback/Help`) instead of static labels.
 - [ ] Add playlist context menus (track/playlist) for common actions.
