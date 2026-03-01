@@ -450,7 +450,14 @@ mod backend {
                     state.set_queue(paths);
                     if let Some(first) = state.current() {
                         if let Some(uri) = file_uri(&first) {
-                            switch_track(playbin, snapshot, &first, &uri);
+                            switch_track(
+                                playbin,
+                                snapshot,
+                                &first,
+                                &uri,
+                                applied_volume,
+                                startup_gain_ramp,
+                            );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged(first.clone()));
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
@@ -466,6 +473,7 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     state.clear();
                 }
+                soft_mute(playbin, applied_volume);
                 let _ = playbin.set_state(gst::State::Ready);
                 *startup_gain_ramp = false;
                 snapshot.current = None;
@@ -478,7 +486,14 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     if let Some(path) = state.set_current(idx) {
                         if let Some(uri) = file_uri(&path) {
-                            switch_track(playbin, snapshot, &path, &uri);
+                            switch_track(
+                                playbin,
+                                snapshot,
+                                &path,
+                                &uri,
+                                applied_volume,
+                                startup_gain_ramp,
+                            );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
@@ -489,7 +504,14 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     if let Some(path) = state.next() {
                         if let Some(uri) = file_uri(&path) {
-                            switch_track(playbin, snapshot, &path, &uri);
+                            switch_track(
+                                playbin,
+                                snapshot,
+                                &path,
+                                &uri,
+                                applied_volume,
+                                startup_gain_ramp,
+                            );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
@@ -500,7 +522,14 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     if let Some(path) = state.previous() {
                         if let Some(uri) = file_uri(&path) {
-                            switch_track(playbin, snapshot, &path, &uri);
+                            switch_track(
+                                playbin,
+                                snapshot,
+                                &path,
+                                &uri,
+                                applied_volume,
+                                startup_gain_ramp,
+                            );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
@@ -517,6 +546,9 @@ mod backend {
                 }
                 if playbin.set_state(gst::State::Playing).is_ok() {
                     snapshot.state = PlaybackState::Playing;
+                    if (*target_volume - *applied_volume).abs() > f64::EPSILON {
+                        *startup_gain_ramp = true;
+                    }
                 }
             }
             PlaybackCommand::Pause => {
@@ -525,6 +557,7 @@ mod backend {
                 }
             }
             PlaybackCommand::Stop => {
+                soft_mute(playbin, applied_volume);
                 if playbin.set_state(gst::State::Ready).is_ok() {
                     *startup_gain_ramp = false;
                     snapshot.state = PlaybackState::Stopped;
@@ -546,7 +579,9 @@ mod backend {
             }
             PlaybackCommand::Poll => {
                 let delta = *target_volume - *applied_volume;
-                if delta.abs() > f64::EPSILON {
+                if delta.abs() > f64::EPSILON
+                    && (snapshot.state == PlaybackState::Playing || *startup_gain_ramp)
+                {
                     // Apply a short gain ramp to avoid zipper noise / clicks when dragging volume.
                     let step = if *startup_gain_ramp {
                         0.18_f64
@@ -596,19 +631,47 @@ mod backend {
         snapshot: &mut PlaybackSnapshot,
         path: &PathBuf,
         uri: &str,
+        applied_volume: &mut f64,
+        startup_gain_ramp: &mut bool,
     ) {
         let was_playing = snapshot.state == PlaybackState::Playing;
+        soft_mute(playbin, applied_volume);
         let _ = playbin.set_state(gst::State::Ready);
         playbin.set_property("uri", uri);
         if was_playing {
             let _ = playbin.set_state(gst::State::Playing);
             snapshot.state = PlaybackState::Playing;
+            *startup_gain_ramp = true;
         } else if snapshot.state == PlaybackState::Paused {
             let _ = playbin.set_state(gst::State::Paused);
+            *startup_gain_ramp = false;
+        } else {
+            *startup_gain_ramp = false;
         }
         snapshot.current = Some(path.clone());
         snapshot.position = Duration::ZERO;
         snapshot.duration = Duration::ZERO;
+    }
+
+    fn soft_mute(playbin: &gst::Element, applied_volume: &mut f64) {
+        if *applied_volume <= 0.0001 {
+            *applied_volume = 0.0;
+            playbin.set_property("volume", *applied_volume);
+            return;
+        }
+        for _ in 0..3 {
+            *applied_volume *= 0.35;
+            if *applied_volume <= 0.0001 {
+                *applied_volume = 0.0;
+            }
+            playbin.set_property("volume", *applied_volume);
+            std::thread::sleep(Duration::from_millis(4));
+            if *applied_volume == 0.0 {
+                break;
+            }
+        }
+        *applied_volume = 0.0;
+        playbin.set_property("volume", *applied_volume);
     }
 
     fn handle_bus_message(
