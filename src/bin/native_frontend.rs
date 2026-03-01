@@ -188,6 +188,32 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 value as usize,
             )))
         }
+        "select_queue" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "select_queue requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("select_queue value must be a number".to_string());
+            }
+            let selected = if value < 0.0 {
+                None
+            } else {
+                Some(value as usize)
+            };
+            Some(BridgeCommand::Queue(BridgeQueueCommand::Select(selected)))
+        }
+        "remove_at" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "remove_at requires numeric field 'value'".to_string())?;
+            if value < 0.0 || !value.is_finite() {
+                return Err("remove_at value must be a non-negative number".to_string());
+            }
+            Some(BridgeCommand::Queue(BridgeQueueCommand::Remove(
+                value as usize,
+            )))
+        }
+        "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),
         "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
         "shutdown" => Some(BridgeCommand::Shutdown),
         _ => return Err(format!("unknown command '{}'", parsed.cmd)),

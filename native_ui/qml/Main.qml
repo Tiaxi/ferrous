@@ -62,6 +62,11 @@ Kirigami.ApplicationWindow {
         shortcut: "Ctrl+Right"
         onTriggered: bridge.next()
     }
+    Action {
+        id: clearPlaylistAction
+        text: "Clear Playlist"
+        onTriggered: bridge.clearQueue()
+    }
 
     Shortcut {
         sequence: "Space"
@@ -74,6 +79,14 @@ Kirigami.ApplicationWindow {
     Shortcut {
         sequence: "Media Next"
         onActivated: nextAction.trigger()
+    }
+    Shortcut {
+        sequence: "Delete"
+        onActivated: {
+            if (bridge.selectedQueueIndex >= 0) {
+                bridge.removeAt(bridge.selectedQueueIndex)
+            }
+        }
     }
 
     menuBar: MenuBar {
@@ -94,6 +107,8 @@ Kirigami.ApplicationWindow {
             MenuItem { action: pauseAction }
             MenuItem { action: stopAction }
             MenuItem { action: nextAction }
+            MenuSeparator {}
+            MenuItem { action: clearPlaylistAction }
         }
         Menu {
             title: "Help"
@@ -356,6 +371,7 @@ Kirigami.ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     acceptedButtons: Qt.LeftButton
+                                    onClicked: bridge.selectQueueIndex(index)
                                     onDoubleClicked: bridge.playAt(index)
                                 }
                             }

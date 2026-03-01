@@ -93,6 +93,21 @@ void BridgeClient::playAt(int index) {
     sendCommand(QStringLiteral("play_at"), static_cast<double>(index));
 }
 
+void BridgeClient::selectQueueIndex(int index) {
+    sendCommand(QStringLiteral("select_queue"), static_cast<double>(index));
+}
+
+void BridgeClient::removeAt(int index) {
+    if (index < 0) {
+        return;
+    }
+    sendCommand(QStringLiteral("remove_at"), static_cast<double>(index));
+}
+
+void BridgeClient::clearQueue() {
+    sendCommand(QStringLiteral("clear_queue"));
+}
+
 void BridgeClient::requestSnapshot() {
     sendCommand(QStringLiteral("request_snapshot"));
 }
