@@ -65,6 +65,7 @@ Input is line-delimited JSON commands, for example:
 {"cmd":"play"}
 {"cmd":"set_volume","value":0.5}
 {"cmd":"seek","value":42.25}
+{"cmd":"play_at","value":3}
 {"cmd":"request_snapshot"}
 ```
 

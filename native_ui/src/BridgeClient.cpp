@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <QCoreApplication>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -45,6 +46,14 @@ int BridgeClient::queueLength() const {
     return m_queueLength;
 }
 
+QStringList BridgeClient::queueItems() const {
+    return m_queueItems;
+}
+
+int BridgeClient::selectedQueueIndex() const {
+    return m_selectedQueueIndex;
+}
+
 bool BridgeClient::connected() const {
     return m_connected;
 }
@@ -75,6 +84,13 @@ void BridgeClient::seek(double seconds) {
 
 void BridgeClient::setVolume(double value) {
     sendCommand(QStringLiteral("set_volume"), std::clamp(value, 0.0, 1.0));
+}
+
+void BridgeClient::playAt(int index) {
+    if (index < 0) {
+        return;
+    }
+    sendCommand(QStringLiteral("play_at"), static_cast<double>(index));
 }
 
 void BridgeClient::requestSnapshot() {
@@ -132,12 +148,14 @@ void BridgeClient::handleStdoutReady() {
         if (event == QStringLiteral("snapshot")) {
             const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
             const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
+            const QJsonArray queueTracks = queue.value(QStringLiteral("tracks")).toArray();
 
             const QString nextState = playback.value(QStringLiteral("state")).toString();
             const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
             const double dur = playback.value(QStringLiteral("duration_secs")).toDouble();
             const double vol = playback.value(QStringLiteral("volume")).toDouble();
             const int qlen = queue.value(QStringLiteral("len")).toInt();
+            const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
 
             bool changed = false;
             if (m_playbackState != nextState) {
@@ -168,6 +186,22 @@ void BridgeClient::handleStdoutReady() {
             }
             if (m_queueLength != qlen) {
                 m_queueLength = qlen;
+                changed = true;
+            }
+            QStringList items;
+            items.reserve(queueTracks.size());
+            for (const QJsonValue &track : queueTracks) {
+                const QJsonObject obj = track.toObject();
+                const QString title = obj.value(QStringLiteral("title")).toString();
+                const QString path = obj.value(QStringLiteral("path")).toString();
+                items.push_back(title.isEmpty() ? path : title);
+            }
+            if (m_queueItems != items) {
+                m_queueItems = items;
+                changed = true;
+            }
+            if (m_selectedQueueIndex != selected) {
+                m_selectedQueueIndex = selected;
                 changed = true;
             }
             if (changed) {

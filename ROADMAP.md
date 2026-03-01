@@ -62,10 +62,10 @@ Acceptance criteria:
 
 ## Milestone C: Playlist + Playback UI Migration
 
-- [ ] Implement native playlist table (header + rows + selection + double-click play).
-- [ ] Wire queue reordering, remove, clear, and play-at operations.
+- [x] Implement native playlist table (header + rows + selection + double-click play).
+- [ ] Wire queue reordering, remove, clear, and play-at operations (play-at now wired; reorder/remove/clear pending).
 - [ ] Implement waveform seekbar in native frontend with current behavior.
-- [ ] Implement volume control UX in native frontend.
+- [x] Implement volume control UX in native frontend.
 
 Acceptance criteria:
 - Day-to-day playback can be driven fully from Kirigami UI without egui.

@@ -310,15 +310,16 @@ Kirigami.ApplicationWindow {
                         }
 
                         ListView {
+                            id: playlistView
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
-                            model: 18
+                            model: bridge.queueItems
 
                             delegate: Rectangle {
                                 width: ListView.view.width
                                 height: 24
-                                color: index === 0
+                                color: index === bridge.selectedQueueIndex
                                     ? Kirigami.Theme.highlightColor
                                     : (index % 2 === 0 ? Kirigami.Theme.backgroundColor
                                                         : Kirigami.Theme.alternateBackgroundColor)
@@ -330,20 +331,51 @@ Kirigami.ApplicationWindow {
                                     Label {
                                         text: (index + 1).toString().padStart(2, "0")
                                         Layout.preferredWidth: 24
-                                        color: index === 0 ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                                        color: index === bridge.selectedQueueIndex
+                                            ? Kirigami.Theme.highlightedTextColor
+                                            : Kirigami.Theme.textColor
                                     }
                                     Label {
-                                        text: "Playlist placeholder track " + (index + 1)
+                                        text: modelData
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
-                                        color: index === 0 ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                                        color: index === bridge.selectedQueueIndex
+                                            ? Kirigami.Theme.highlightedTextColor
+                                            : Kirigami.Theme.textColor
                                     }
                                     Label {
-                                        text: "4:32"
+                                        text: ""
                                         Layout.preferredWidth: 72
                                         horizontalAlignment: Text.AlignRight
-                                        color: index === 0 ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                                        color: index === bridge.selectedQueueIndex
+                                            ? Kirigami.Theme.highlightedTextColor
+                                            : Kirigami.Theme.textColor
                                     }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.LeftButton
+                                    onDoubleClicked: bridge.playAt(index)
+                                }
+                            }
+                        }
+
+                        Label {
+                            visible: bridge.queueLength === 0
+                            text: "Playlist is empty"
+                            color: Kirigami.Theme.disabledTextColor
+                            horizontalAlignment: Text.AlignHCenter
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.topMargin: 10
+                        }
+
+                        Connections {
+                            target: bridge
+                            function onSnapshotChanged() {
+                                if (bridge.selectedQueueIndex >= 0) {
+                                    playlistView.positionViewAtIndex(bridge.selectedQueueIndex, ListView.Contain)
                                 }
                             }
                         }

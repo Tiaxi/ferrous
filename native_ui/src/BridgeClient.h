@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QProcess>
 #include <QString>
+#include <QStringList>
 
 class BridgeClient : public QObject {
     Q_OBJECT
@@ -13,6 +14,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY snapshotChanged)
     Q_PROPERTY(double volume READ volume NOTIFY snapshotChanged)
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
+    Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
+    Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
 
 public:
@@ -25,6 +28,8 @@ public:
     double durationSeconds() const;
     double volume() const;
     int queueLength() const;
+    QStringList queueItems() const;
+    int selectedQueueIndex() const;
     bool connected() const;
 
     Q_INVOKABLE void play();
@@ -34,6 +39,7 @@ public:
     Q_INVOKABLE void previous();
     Q_INVOKABLE void seek(double seconds);
     Q_INVOKABLE void setVolume(double value);
+    Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
 
@@ -59,5 +65,7 @@ private:
     double m_durationSeconds{0.0};
     double m_volume{1.0};
     int m_queueLength{0};
+    QStringList m_queueItems;
+    int m_selectedQueueIndex{-1};
     bool m_connected{false};
 };

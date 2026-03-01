@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
 use ferrous::frontend_bridge::{
-    BridgeCommand, BridgeEvent, BridgePlaybackCommand, FrontendBridgeHandle,
+    BridgeCommand, BridgeEvent, BridgePlaybackCommand, BridgeQueueCommand, FrontendBridgeHandle,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -177,6 +177,17 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 Duration::from_secs_f64(value),
             )))
         }
+        "play_at" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "play_at requires numeric field 'value'".to_string())?;
+            if value < 0.0 || !value.is_finite() {
+                return Err("play_at value must be a non-negative number".to_string());
+            }
+            Some(BridgeCommand::Queue(BridgeQueueCommand::PlayAt(
+                value as usize,
+            )))
+        }
         "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
         "shutdown" => Some(BridgeCommand::Shutdown),
         _ => return Err(format!("unknown command '{}'", parsed.cmd)),
@@ -200,6 +211,20 @@ fn drain_bridge_events_as_json(
         };
         match event {
             BridgeEvent::Snapshot(s) => {
+                let queue_tracks: Vec<_> = s
+                    .queue
+                    .iter()
+                    .map(|path| {
+                        let title = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                        json!({
+                            "path": path.to_string_lossy().to_string(),
+                            "title": title,
+                        })
+                    })
+                    .collect();
                 let payload = json!({
                     "event": "snapshot",
                     "playback": {
@@ -212,6 +237,7 @@ fn drain_bridge_events_as_json(
                     "queue": {
                         "len": s.queue.len(),
                         "selected_index": s.selected_queue_index,
+                        "tracks": queue_tracks,
                     },
                     "library": {
                         "roots": s.library.roots.len(),
