@@ -22,6 +22,10 @@ constexpr quint8 kAnalysisFlagWaveform = 0x01;
 constexpr quint8 kAnalysisFlagReset = 0x02;
 constexpr quint8 kAnalysisFlagSpectrogram = 0x04;
 constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
+
+bool isNewerSeq(quint32 seq, quint32 last) {
+    return static_cast<qint32>(seq - last) > 0;
+}
 } // namespace
 
 BridgeClient::BridgeClient(QObject *parent)
@@ -64,6 +68,7 @@ void BridgeClient::teardownAnalysisSocket(bool immediateDelete) {
     QLocalSocket *socket = m_analysisSocket;
     m_analysisSocket = nullptr;
     m_analysisSocketConnected = false;
+    m_hasAnalysisFrameSeq = false;
     m_analysisBuffer.clear();
     if (socket == nullptr) {
         return;
@@ -310,6 +315,7 @@ void BridgeClient::handleAnalysisSocketConnected() {
     }
     m_analysisBuffer.clear();
     m_analysisSocketConnected = true;
+    m_hasAnalysisFrameSeq = false;
     connect(m_analysisSocket, &QLocalSocket::readyRead, this, &BridgeClient::handleAnalysisSocketReady);
     QLocalSocket *socket = m_analysisSocket;
     connect(socket, &QLocalSocket::disconnected, this, [this, socket]() {
@@ -348,7 +354,7 @@ void BridgeClient::handleAnalysisSocketReady() {
         QByteArray frame = m_analysisBuffer.mid(sizeof(quint32), frameBytes);
         m_analysisBuffer.remove(0, totalBytes);
 
-        if (frame.size() < 12) {
+        if (frame.size() < 16) {
             continue;
         }
         const auto *data = reinterpret_cast<const uchar *>(frame.constData());
@@ -360,13 +366,20 @@ void BridgeClient::handleAnalysisSocketReady() {
         const quint16 waveformLen = qFromLittleEndian<quint16>(data + 6);
         const quint16 rowCount = qFromLittleEndian<quint16>(data + 8);
         const quint16 binCount = qFromLittleEndian<quint16>(data + 10);
-        const qsizetype expected = 12 + static_cast<qsizetype>(waveformLen)
+        const quint32 frameSeq = qFromLittleEndian<quint32>(data + 12);
+        const qsizetype expected = 16 + static_cast<qsizetype>(waveformLen)
             + static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
         if (frame.size() < expected) {
             continue;
         }
+        if (m_hasAnalysisFrameSeq && !isNewerSeq(frameSeq, m_lastAnalysisFrameSeq)) {
+            m_analysisDroppedFrames++;
+            continue;
+        }
+        m_hasAnalysisFrameSeq = true;
+        m_lastAnalysisFrameSeq = frameSeq;
 
-        const uchar *cursor = data + 12;
+        const uchar *cursor = data + 16;
 
         if (sampleRate > 0 && m_sampleRateHz != static_cast<int>(sampleRate)) {
             m_sampleRateHz = static_cast<int>(sampleRate);

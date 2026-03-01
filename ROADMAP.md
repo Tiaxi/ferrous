@@ -73,7 +73,7 @@ Acceptance criteria:
 - [x] **Next slice**: add dedicated high-rate binary analysis channel for spectrogram rows + waveform peaks (Unix local socket path, fallback to JSON analysis when unavailable).
 - [ ] Low-rate channel (JSON/properties): playback state, queue, library, settings.
 - [ ] High-rate channel (binary ring/shared memory): spectrogram rows + waveform peaks.
-- [ ] Explicit frame sequencing and drop policy for high-rate visuals.
+- [x] Explicit frame sequencing and drop policy for high-rate visuals (binary frame seq + stale-frame drop + socket queue drop counters).
 - [ ] Eliminate repeated parse/alloc on UI thread for high-rate analysis data.
 
 Acceptance criteria:

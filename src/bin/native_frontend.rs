@@ -142,6 +142,8 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
     let mut analysis_writer = AnalysisSocketWriter::from_env();
     #[cfg(not(unix))]
     let mut analysis_writer: Option<()> = None;
+    #[cfg(unix)]
+    let mut analysis_profile_last = Instant::now();
 
     let mut emit_state = JsonEmitState {
         profile_enabled: std::env::var_os("FERROUS_PROFILE").is_some(),
@@ -211,6 +213,18 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
             return;
         }
 
+        #[cfg(unix)]
+        if emit_state.profile_enabled && analysis_profile_last.elapsed() >= Duration::from_secs(1) {
+            if let Some(writer) = analysis_writer.as_ref() {
+                let (enqueued, dropped) = writer.take_counters();
+                eprintln!(
+                    "[analysis-sock] frames/s={} dropped/s={}",
+                    enqueued, dropped
+                );
+            }
+            analysis_profile_last = Instant::now();
+        }
+
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -235,6 +249,7 @@ const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
 #[derive(Default)]
 struct AnalysisDelta {
     sample_rate_hz: u32,
+    frame_seq: u32,
     spectrogram_seq: u64,
     spectrogram_reset: bool,
     waveform_len: usize,
@@ -246,6 +261,8 @@ struct AnalysisDelta {
 #[cfg(unix)]
 struct AnalysisSocketWriter {
     tx: Sender<Vec<u8>>,
+    enqueued_counter: Arc<AtomicUsize>,
+    dropped_counter: Arc<AtomicUsize>,
 }
 
 #[cfg(unix)]
@@ -254,6 +271,8 @@ impl AnalysisSocketWriter {
         let path = std::env::var("FERROUS_ANALYSIS_SOCKET_PATH").ok()?;
         let stream = UnixStream::connect(path).ok()?;
         let (tx, rx) = bounded::<Vec<u8>>(32);
+        let enqueued_counter = Arc::new(AtomicUsize::new(0));
+        let dropped_counter = Arc::new(AtomicUsize::new(0));
         std::thread::spawn(move || {
             let mut stream = stream;
             while let Ok(frame) = rx.recv() {
@@ -262,7 +281,11 @@ impl AnalysisSocketWriter {
                 }
             }
         });
-        Some(Self { tx })
+        Some(Self {
+            tx,
+            enqueued_counter,
+            dropped_counter,
+        })
     }
 
     fn send(&self, frame: Vec<u8>) -> bool {
@@ -270,10 +293,23 @@ impl AnalysisSocketWriter {
             return true;
         }
         match self.tx.try_send(frame) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => true,
+            Ok(()) => {
+                self.enqueued_counter.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(TrySendError::Full(_)) => {
+                self.dropped_counter.fetch_add(1, Ordering::Relaxed);
+                true
+            }
             Err(TrySendError::Disconnected(_)) => false,
         }
+    }
+
+    fn take_counters(&self) -> (usize, usize) {
+        (
+            self.enqueued_counter.swap(0, Ordering::Relaxed),
+            self.dropped_counter.swap(0, Ordering::Relaxed),
+        )
     }
 }
 
@@ -283,6 +319,7 @@ struct JsonEmitState {
     last_library_digest: Option<LibraryDigest>,
     last_queue_digest: Option<QueueDigest>,
     last_spectrogram_seq: u64,
+    analysis_frame_seq: u32,
     profile_enabled: bool,
     dropped_counter: Arc<AtomicUsize>,
 }
@@ -482,11 +519,20 @@ fn drain_bridge_events_as_json(
     if let Some(s) = latest_snapshot {
         let analysis_delta = compute_analysis_delta(&s, emit_state);
         #[cfg(unix)]
-        let analysis_on_socket = if let Some(writer) = analysis_writer.as_ref() {
+        let analysis_on_socket = {
             let frame = encode_analysis_frame(&analysis_delta);
-            writer.send(frame)
-        } else {
-            false
+            let mut connected = false;
+            let mut drop_writer = false;
+            if let Some(writer) = analysis_writer.as_ref() {
+                connected = writer.send(frame);
+                if !connected {
+                    drop_writer = true;
+                }
+            }
+            if drop_writer {
+                *analysis_writer = None;
+            }
+            connected
         };
         #[cfg(not(unix))]
         let analysis_on_socket = false;
@@ -698,9 +744,14 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut JsonEmitState) ->
         Vec::new()
     };
     emit_state.last_spectrogram_seq = spectrogram_seq;
+    let has_payload = waveform_changed || spectrogram_reset || !spectrogram_rows_u8.is_empty();
+    if has_payload {
+        emit_state.analysis_frame_seq = emit_state.analysis_frame_seq.wrapping_add(1);
+    }
 
     AnalysisDelta {
         sample_rate_hz: s.analysis.sample_rate_hz,
+        frame_seq: emit_state.analysis_frame_seq,
         spectrogram_seq,
         spectrogram_reset,
         waveform_len: s.analysis.waveform_peaks.len(),
@@ -755,7 +806,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     let row_count_u16 = row_count.min(u16::MAX as usize) as u16;
     let bin_count_u16 = bin_count.min(u16::MAX as usize) as u16;
     let spectrogram_bytes = row_count_u16 as usize * bin_count_u16 as usize;
-    let payload_len = 12usize + waveform_len_u16 as usize + spectrogram_bytes;
+    let payload_len = 16usize + waveform_len_u16 as usize + spectrogram_bytes;
 
     let mut out = Vec::with_capacity(4 + payload_len);
     out.extend_from_slice(&(payload_len as u32).to_le_bytes());
@@ -765,6 +816,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     out.extend_from_slice(&waveform_len_u16.to_le_bytes());
     out.extend_from_slice(&row_count_u16.to_le_bytes());
     out.extend_from_slice(&bin_count_u16.to_le_bytes());
+    out.extend_from_slice(&delta.frame_seq.to_le_bytes());
 
     if (flags & ANALYSIS_FLAG_WAVEFORM) != 0 {
         out.extend_from_slice(&delta.waveform_peaks_u8[..waveform_len_u16 as usize]);

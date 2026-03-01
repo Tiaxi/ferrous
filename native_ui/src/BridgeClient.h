@@ -127,4 +127,7 @@ private:
     QByteArray m_analysisBuffer;
     QString m_analysisSocketName;
     bool m_analysisSocketConnected{false};
+    bool m_hasAnalysisFrameSeq{false};
+    quint32 m_lastAnalysisFrameSeq{0};
+    quint64 m_analysisDroppedFrames{0};
 };
