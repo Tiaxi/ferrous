@@ -63,6 +63,73 @@ impl PlaybackEngine {
     }
 }
 
+#[cfg(all(test, not(feature = "gst")))]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use crossbeam_channel::unbounded;
+
+    use super::{PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackState};
+
+    fn recv_snapshot(
+        rx: &crossbeam_channel::Receiver<PlaybackEvent>,
+        timeout: Duration,
+    ) -> Option<super::PlaybackSnapshot> {
+        let deadline = Instant::now() + timeout;
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
+                if let PlaybackEvent::Snapshot(s) = evt {
+                    last = Some(s);
+                }
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn rapid_track_switch_keeps_current_consistent() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        let c = PathBuf::from("/tmp/c.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ]));
+        engine.command(PlaybackCommand::PlayAt(2));
+        engine.command(PlaybackCommand::Previous);
+        engine.command(PlaybackCommand::Next);
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&c));
+    }
+
+    #[test]
+    fn clear_queue_stops_and_resets_snapshot() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.mp3");
+        engine.command(PlaybackCommand::LoadQueue(vec![a]));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::ClearQueue);
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current, None);
+        assert_eq!(snap.state, PlaybackState::Stopped);
+        assert_eq!(snap.position, Duration::ZERO);
+    }
+}
+
 #[cfg(not(feature = "gst"))]
 mod backend {
     use std::f32::consts::PI;
@@ -312,7 +379,6 @@ mod backend {
 
         {
             let queue_state = Arc::clone(&queue_state);
-            let event_tx = event_tx.clone();
             playbin.connect("about-to-finish", false, move |values| {
                 let maybe_playbin = values.first().and_then(|v| v.get::<gst::Element>().ok());
                 let Some(playbin_obj) = maybe_playbin else {
@@ -323,7 +389,6 @@ mod backend {
                 if let Some(next_path) = next {
                     if let Some(uri) = file_uri(&next_path) {
                         playbin_obj.set_property("uri", uri);
-                        let _ = event_tx.send(PlaybackEvent::TrackChanged(next_path));
                     }
                 }
                 None
@@ -460,6 +525,24 @@ mod backend {
                 }
                 if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
                     snapshot.duration = Duration::from_nanos(dur.nseconds());
+                }
+                // Gapless handoff sets next URI early in about-to-finish.
+                // Emit TrackChanged only once playback has actually rolled over.
+                if snapshot.state == PlaybackState::Playing {
+                    if let Ok(state) = queue_state.lock() {
+                        if let Some(current_path) = state.current() {
+                            let path_changed = snapshot
+                                .current
+                                .as_ref()
+                                .map(|p| p != &current_path)
+                                .unwrap_or(true);
+                            let at_track_start = snapshot.position <= Duration::from_secs(2);
+                            if path_changed && at_track_start {
+                                snapshot.current = Some(current_path.clone());
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged(current_path));
+                            }
+                        }
+                    }
                 }
                 let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }

@@ -1,11 +1,12 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{select, tick, unbounded, Receiver, Sender};
 use realfft::{num_complex::Complex32, RealFftPlanner, RealToComplex};
+use rusqlite::{params, Connection};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -19,7 +20,6 @@ pub enum AnalysisCommand {
     SetTrack(PathBuf),
     SetSampleRate(u32),
     SetFftSize(usize),
-    ResetRealtime,
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -45,6 +45,24 @@ pub struct AnalysisEngine {
     pcm_tx: Sender<Vec<f32>>,
 }
 
+const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
+const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
+const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
+const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WaveformSourceStamp {
+    size_bytes: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
+#[derive(Debug, Clone)]
+struct WaveformCacheEntry {
+    stamp: Option<WaveformSourceStamp>,
+    peaks: Vec<f32>,
+}
+
 impl AnalysisEngine {
     pub fn new() -> (Self, Receiver<AnalysisEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<AnalysisCommand>();
@@ -60,10 +78,15 @@ impl AnalysisEngine {
             let mut waveform_dirty = false;
             let mut last_emit = std::time::Instant::now();
 
-            let mut stft = StftComputer::new(512, 128);
-            // Higher factor = slower horizontal scroll and larger visible time window.
-            let mut decimator = SpectrogramDecimator::new(8);
+            let mut stft = StftComputer::new(8192, 2048);
+            let mut decimator = SpectrogramDecimator::new(1);
             let mut active_track_token = 0u64;
+            let mut active_track_path: Option<PathBuf> = None;
+            let mut active_track_stamp: Option<WaveformSourceStamp> = None;
+            let mut waveform_cache: HashMap<PathBuf, WaveformCacheEntry> = HashMap::new();
+            let mut waveform_cache_lru: VecDeque<PathBuf> = VecDeque::new();
+            let mut waveform_db = open_waveform_cache_db().ok();
+            let mut waveform_db_writes_since_prune = 0usize;
             let ticker = tick(Duration::from_millis(16));
             let mut pcm_fifo: VecDeque<f32> = VecDeque::with_capacity(48_000);
             let mut last_tick_time = std::time::Instant::now();
@@ -85,6 +108,8 @@ impl AnalysisEngine {
                             AnalysisCommand::SetTrack(path) => {
                                 active_track_token = active_track_token.wrapping_add(1);
                                 let track_token = active_track_token;
+                                active_track_stamp = source_stamp(&path);
+                                active_track_path = Some(path.clone());
 
                                 snapshot.waveform_peaks.clear();
                                 snapshot.spectrogram_seq = 0;
@@ -105,16 +130,57 @@ impl AnalysisEngine {
                                     true,
                                 );
 
-                                let tx = waveform_tx.clone();
-                                std::thread::spawn(move || {
-                                    let _ = decode_waveform_peaks_stream(&path, 4096, |peaks, done| {
-                                        let _ = tx.send(AnalysisCommand::WaveformProgress {
-                                            track_token,
-                                            peaks,
-                                            done,
-                                        });
+                                let cache_hit = waveform_cache
+                                    .get(&path)
+                                    .filter(|entry| entry.stamp == active_track_stamp)
+                                    .map(|entry| entry.peaks.clone());
+                                let peaks = if let Some(peaks) = cache_hit {
+                                    touch_waveform_cache_lru(&mut waveform_cache_lru, &path);
+                                    Some(peaks)
+                                } else if let (Some(conn), Some(stamp)) =
+                                    (waveform_db.as_ref(), active_track_stamp)
+                                {
+                                    let disk_hit = load_waveform_from_db(conn, &path, stamp);
+                                    if let Some(peaks) = disk_hit.as_ref() {
+                                        insert_waveform_cache_entry(
+                                            &mut waveform_cache,
+                                            &mut waveform_cache_lru,
+                                            path.clone(),
+                                            WaveformCacheEntry {
+                                                stamp: Some(stamp),
+                                                peaks: peaks.clone(),
+                                            },
+                                        );
+                                    }
+                                    disk_hit
+                                } else {
+                                    None
+                                };
+
+                                if let Some(peaks) = peaks {
+                                    snapshot.waveform_peaks = peaks;
+                                    waveform_dirty = true;
+                                    emit_snapshot(
+                                        &event_tx,
+                                        &snapshot,
+                                        &mut pending_rows,
+                                        &mut waveform_dirty,
+                                        &mut last_emit,
+                                        true,
+                                    );
+                                } else {
+                                    let tx = waveform_tx.clone();
+                                    std::thread::spawn(move || {
+                                        let _ =
+                                            decode_waveform_peaks_stream(&path, 4096, |peaks, done| {
+                                                let _ = tx.send(AnalysisCommand::WaveformProgress {
+                                                    track_token,
+                                                    peaks,
+                                                    done,
+                                                });
+                                            });
                                     });
-                                });
+                                }
                             }
                             AnalysisCommand::SetSampleRate(rate) => {
                                 if rate > 0 {
@@ -130,7 +196,7 @@ impl AnalysisEngine {
                                 }
                             }
                             AnalysisCommand::SetFftSize(size) => {
-                                let fft = size.clamp(256, 2048).next_power_of_two();
+                                let fft = size.clamp(512, 8192).next_power_of_two();
                                 let hop = (fft / 4).max(64);
                                 stft = StftComputer::new(fft, hop);
                                 decimator.reset();
@@ -149,24 +215,6 @@ impl AnalysisEngine {
                                     true,
                                 );
                             }
-                            AnalysisCommand::ResetRealtime => {
-                                snapshot.spectrogram_seq = 0;
-                                pending_rows.clear();
-                                stft.reset_full();
-                                decimator.reset();
-                                drain_pcm_queue(&pcm_rx);
-                                pcm_fifo.clear();
-                                last_tick_time = std::time::Instant::now();
-                                sample_credit = 0.0;
-                                emit_snapshot(
-                                    &event_tx,
-                                    &snapshot,
-                                    &mut pending_rows,
-                                    &mut waveform_dirty,
-                                    &mut last_emit,
-                                    true,
-                                );
-                            }
                             AnalysisCommand::WaveformProgress {
                                 track_token,
                                 peaks,
@@ -174,6 +222,41 @@ impl AnalysisEngine {
                             } => {
                                 if track_token == active_track_token {
                                     snapshot.waveform_peaks = peaks;
+                                    if done {
+                                        if let Some(path) = active_track_path.as_ref() {
+                                            let cached_peaks = snapshot.waveform_peaks.clone();
+                                            insert_waveform_cache_entry(
+                                                &mut waveform_cache,
+                                                &mut waveform_cache_lru,
+                                                path.clone(),
+                                                WaveformCacheEntry {
+                                                    stamp: active_track_stamp,
+                                                    peaks: cached_peaks.clone(),
+                                                },
+                                            );
+                                            if let (Some(conn), Some(stamp)) =
+                                                (waveform_db.as_mut(), active_track_stamp)
+                                            {
+                                                let _ = persist_waveform_to_db(
+                                                    conn,
+                                                    path,
+                                                    stamp,
+                                                    &cached_peaks,
+                                                );
+                                                waveform_db_writes_since_prune = waveform_db_writes_since_prune
+                                                    .saturating_add(1);
+                                                if waveform_db_writes_since_prune
+                                                    >= PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL
+                                                {
+                                                    let _ = prune_persistent_waveform_cache(
+                                                        conn,
+                                                        PERSISTENT_WAVEFORM_CACHE_MAX_ROWS,
+                                                    );
+                                                    waveform_db_writes_since_prune = 0;
+                                                }
+                                            }
+                                        }
+                                    }
                                     waveform_dirty = true;
                                     if done || snapshot.waveform_peaks.len() >= 128 {
                                         emit_snapshot(
@@ -307,6 +390,205 @@ fn drain_pcm_queue(pcm_rx: &Receiver<Vec<f32>>) {
     while pcm_rx.try_recv().is_ok() {}
 }
 
+fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let since_epoch = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(WaveformSourceStamp {
+        size_bytes: meta.len(),
+        modified_secs: since_epoch.as_secs(),
+        modified_nanos: since_epoch.subsec_nanos(),
+    })
+}
+
+fn open_waveform_cache_db() -> anyhow::Result<Connection> {
+    let db_path = waveform_db_path()?;
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(db_path)?;
+    let _ = conn.busy_timeout(Duration::from_millis(250));
+    init_waveform_cache_schema(&conn)?;
+    Ok(conn)
+}
+
+fn waveform_db_path() -> anyhow::Result<PathBuf> {
+    if let Some(xdg_home) = std::env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(xdg_home)
+            .join("ferrous")
+            .join("library.sqlite3"));
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set and XDG_DATA_HOME is missing"))?;
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("ferrous")
+        .join("library.sqlite3"))
+}
+
+fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS waveform_cache (
+            path TEXT PRIMARY KEY,
+            size_bytes INTEGER NOT NULL,
+            modified_secs INTEGER NOT NULL,
+            modified_nanos INTEGER NOT NULL,
+            format_version INTEGER NOT NULL,
+            peak_count INTEGER NOT NULL,
+            peaks_blob BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_waveform_cache_updated_at
+            ON waveform_cache(updated_at);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn load_waveform_from_db(
+    conn: &Connection,
+    path: &Path,
+    stamp: WaveformSourceStamp,
+) -> Option<Vec<f32>> {
+    let path = path.to_string_lossy().to_string();
+    let row: (i64, i64, Vec<u8>) = conn
+        .query_row(
+            r#"
+            SELECT format_version, peak_count, peaks_blob
+            FROM waveform_cache
+            WHERE path=?1
+              AND size_bytes=?2
+              AND modified_secs=?3
+              AND modified_nanos=?4
+            "#,
+            params![
+                path,
+                stamp.size_bytes as i64,
+                stamp.modified_secs as i64,
+                i64::from(stamp.modified_nanos),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .ok()?;
+    if row.0 != WAVEFORM_CACHE_FORMAT_VERSION {
+        return None;
+    }
+    let peak_count = usize::try_from(row.1).ok()?;
+    decode_peaks_blob(&row.2, peak_count)
+}
+
+fn persist_waveform_to_db(
+    conn: &Connection,
+    path: &Path,
+    stamp: WaveformSourceStamp,
+    peaks: &[f32],
+) -> rusqlite::Result<()> {
+    let blob = encode_peaks_blob(peaks);
+    let now = unix_ts_i64();
+    conn.execute(
+        r#"
+        INSERT INTO waveform_cache(
+            path, size_bytes, modified_secs, modified_nanos,
+            format_version, peak_count, peaks_blob, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(path) DO UPDATE SET
+            size_bytes=excluded.size_bytes,
+            modified_secs=excluded.modified_secs,
+            modified_nanos=excluded.modified_nanos,
+            format_version=excluded.format_version,
+            peak_count=excluded.peak_count,
+            peaks_blob=excluded.peaks_blob,
+            updated_at=excluded.updated_at
+        "#,
+        params![
+            path.to_string_lossy().to_string(),
+            stamp.size_bytes as i64,
+            stamp.modified_secs as i64,
+            i64::from(stamp.modified_nanos),
+            WAVEFORM_CACHE_FORMAT_VERSION,
+            peaks.len() as i64,
+            blob,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn prune_persistent_waveform_cache(conn: &Connection, max_rows: usize) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        DELETE FROM waveform_cache
+        WHERE path IN (
+            SELECT path
+            FROM waveform_cache
+            ORDER BY updated_at DESC
+            LIMIT -1 OFFSET ?1
+        )
+        "#,
+        params![max_rows as i64],
+    )?;
+    Ok(())
+}
+
+fn encode_peaks_blob(peaks: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(peaks.len() * 4);
+    for &v in peaks {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+fn decode_peaks_blob(blob: &[u8], peak_count: usize) -> Option<Vec<f32>> {
+    if blob.len() != peak_count.checked_mul(4)? {
+        return None;
+    }
+    let mut out = Vec::with_capacity(peak_count);
+    for chunk in blob.chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Some(out)
+}
+
+fn unix_ts_i64() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn touch_waveform_cache_lru(lru: &mut VecDeque<PathBuf>, path: &Path) {
+    if let Some(pos) = lru.iter().position(|p| p == path) {
+        lru.remove(pos);
+    }
+    lru.push_back(path.to_path_buf());
+}
+
+fn insert_waveform_cache_entry(
+    cache: &mut HashMap<PathBuf, WaveformCacheEntry>,
+    lru: &mut VecDeque<PathBuf>,
+    path: PathBuf,
+    entry: WaveformCacheEntry,
+) {
+    cache.insert(path.clone(), entry);
+    touch_waveform_cache_lru(lru, &path);
+
+    while cache.len() > MAX_WAVEFORM_CACHE_TRACKS {
+        let Some(evicted) = lru.pop_front() else {
+            break;
+        };
+        cache.remove(&evicted);
+    }
+}
+
 fn emit_snapshot(
     event_tx: &Sender<AnalysisEvent>,
     snapshot: &AnalysisSnapshot,
@@ -353,7 +635,8 @@ impl StftComputer {
         let r2c = planner.plan_fft_forward(fft_size);
         let fft_in = r2c.make_input_vec();
         let fft_out = r2c.make_output_vec();
-        let window = hann_window(fft_size);
+        // Blackman-Harris (as in DeaDBeeF spectrogram) gives cleaner bin separation.
+        let window = blackman_harris_window(fft_size);
 
         Self {
             r2c,
@@ -393,16 +676,7 @@ impl StftComputer {
                 .process(&mut self.fft_in, &mut self.fft_out)
                 .is_ok()
             {
-                let row: Vec<f32> = self
-                    .fft_out
-                    .iter()
-                    .map(|bin| {
-                        let mag = bin.norm();
-                        let db = 20.0 * (mag + 1e-8).log10();
-                        let n = ((db + 92.0) / 92.0).clamp(0.0, 1.0);
-                        n.powf(1.22)
-                    })
-                    .collect();
+                let row: Vec<f32> = self.fft_out.iter().map(|bin| bin.norm_sqr()).collect();
                 rows.push(row);
             }
 
@@ -429,7 +703,6 @@ struct SpectrogramDecimator {
     factor: usize,
     accum: Vec<f32>,
     count: usize,
-    prev: Option<Vec<f32>>,
 }
 
 impl SpectrogramDecimator {
@@ -438,14 +711,12 @@ impl SpectrogramDecimator {
             factor: factor.max(1),
             accum: Vec::new(),
             count: 0,
-            prev: None,
         }
     }
 
     fn reset(&mut self) {
         self.accum.clear();
         self.count = 0;
-        self.prev = None;
     }
 
     fn push(&mut self, row: Vec<f32>) -> Option<Vec<f32>> {
@@ -469,31 +740,22 @@ impl SpectrogramDecimator {
         let inv = 1.0 / self.count as f32;
         let mut out = Vec::with_capacity(self.accum.len());
         for v in &self.accum {
-            out.push((v * inv).clamp(0.0, 1.0));
+            out.push(v * inv);
         }
 
         self.accum.fill(0.0);
         self.count = 0;
-
-        let blended = if let Some(prev) = self.prev.as_ref() {
-            out.iter()
-                .zip(prev.iter())
-                .map(|(cur, old)| (old * 0.35 + cur * 0.65).clamp(0.0, 1.0))
-                .collect::<Vec<f32>>()
-        } else {
-            out
-        };
-        self.prev = Some(blended.clone());
-        Some(blended)
+        Some(out)
     }
 }
 
-fn hann_window(size: usize) -> Vec<f32> {
+fn blackman_harris_window(size: usize) -> Vec<f32> {
     let n = size as f32;
     (0..size)
         .map(|i| {
             let phase = (2.0 * std::f32::consts::PI * i as f32) / n;
-            0.5 - 0.5 * phase.cos()
+            0.35875 - 0.48829 * phase.cos() + 0.14128 * (2.0 * phase).cos()
+                - 0.01168 * (3.0 * phase).cos()
         })
         .collect()
 }

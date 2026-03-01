@@ -118,9 +118,7 @@ impl FerrousApp {
                         .command(crate::analysis::AnalysisCommand::SetTrack(path));
                 }
                 PlaybackEvent::Seeked => {
-                    self.state.spectrogram_cache = SpectrogramCache::default();
-                    self.analysis
-                        .command(crate::analysis::AnalysisCommand::ResetRealtime);
+                    // Keep existing spectrogram history visible across seeks.
                 }
             }
         }
@@ -237,22 +235,18 @@ impl FerrousApp {
                 }
                 "fft_size" => {
                     if let Ok(x) = v.parse::<usize>() {
-                        self.state.spectro_ui.fft_size = x.clamp(256, 2048).next_power_of_two();
+                        let _ = x;
+                        self.state.spectro_ui.fft_size = 8192;
                     }
                 }
-                "floor_cut" => {
+                "db_range" => {
                     if let Ok(x) = v.parse::<f32>() {
-                        self.state.spectro_ui.floor_cut = x.clamp(0.0, 0.16);
+                        self.state.spectro_ui.db_range = x.clamp(50.0, 120.0);
                     }
                 }
-                "bass_gain_min" => {
-                    if let Ok(x) = v.parse::<f32>() {
-                        self.state.spectro_ui.bass_gain_min = x.clamp(0.60, 0.95);
-                    }
-                }
-                "highlight_knee" => {
-                    if let Ok(x) = v.parse::<f32>() {
-                        self.state.spectro_ui.highlight_knee = x.clamp(0.60, 0.90);
+                "log_scale" => {
+                    if let Ok(x) = v.parse::<i32>() {
+                        self.state.spectro_ui.log_scale = x != 0;
                     }
                 }
                 "active_playlist" => {
@@ -274,12 +268,15 @@ impl FerrousApp {
             let _ = fs::create_dir_all(parent);
         }
         let text = format!(
-            "volume={:.4}\nfft_size={}\nfloor_cut={:.4}\nbass_gain_min={:.4}\nhighlight_knee={:.4}\nactive_playlist={}\n",
+            "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nactive_playlist={}\n",
             self.state.playback.volume,
             self.state.spectro_ui.fft_size,
-            self.state.spectro_ui.floor_cut,
-            self.state.spectro_ui.bass_gain_min,
-            self.state.spectro_ui.highlight_knee,
+            self.state.spectro_ui.db_range,
+            if self.state.spectro_ui.log_scale {
+                1
+            } else {
+                0
+            },
             self.state.active_playlist
         );
         let _ = fs::write(path, text);
@@ -385,17 +382,17 @@ impl eframe::App for FerrousApp {
         );
         match center_action {
             CenterPanelAction {
-                queue_select_index: Some(index),
-                ..
-            } => {
-                self.state.selected_queue_index = Some(index);
-            }
-            CenterPanelAction {
                 queue_play_index: Some(index),
                 ..
             } => {
                 self.playback.command(PlaybackCommand::PlayAt(index));
                 self.playback.command(PlaybackCommand::Play);
+                self.state.selected_queue_index = Some(index);
+            }
+            CenterPanelAction {
+                queue_select_index: Some(index),
+                ..
+            } => {
                 self.state.selected_queue_index = Some(index);
             }
             CenterPanelAction {
@@ -421,6 +418,27 @@ impl eframe::App for FerrousApp {
                 } else {
                     self.playback
                         .command(PlaybackCommand::AddToQueue(vec![path]));
+                }
+            }
+            CenterPanelAction {
+                add_library_album_tracks: Some(paths),
+                ..
+            } => {
+                if paths.is_empty() {
+                    // no-op
+                } else {
+                    let was_empty = self.active_playlist().tracks.is_empty();
+                    if was_empty {
+                        let tracks = {
+                            let pl = self.active_playlist_mut();
+                            pl.tracks.extend(paths.clone());
+                            pl.tracks.clone()
+                        };
+                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
+                    } else {
+                        self.active_playlist_mut().tracks.extend(paths.clone());
+                        self.playback.command(PlaybackCommand::AddToQueue(paths));
+                    }
                 }
             }
             CenterPanelAction {
@@ -465,6 +483,26 @@ impl eframe::App for FerrousApp {
                 if let Some(tracks) = new_tracks {
                     self.state.selected_queue_index = idx.checked_sub(1);
                     self.playback.command(PlaybackCommand::LoadQueue(tracks));
+                }
+            }
+            CenterPanelAction {
+                queue_move_to: Some((from, to)),
+                ..
+            } => {
+                if from != to {
+                    let mut new_tracks = None;
+                    {
+                        let pl = self.active_playlist_mut();
+                        if from < pl.tracks.len() && to < pl.tracks.len() {
+                            let item = pl.tracks.remove(from);
+                            pl.tracks.insert(to, item);
+                            new_tracks = Some(pl.tracks.clone());
+                        }
+                    }
+                    if let Some(tracks) = new_tracks {
+                        self.state.selected_queue_index = Some(to);
+                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
+                    }
                 }
             }
             CenterPanelAction {
