@@ -348,11 +348,9 @@ mod backend {
                     state.set_queue(paths);
                     if let Some(first) = state.current() {
                         if let Some(uri) = file_uri(&first) {
-                            playbin.set_property("uri", uri);
-                            snapshot.current = Some(first.clone());
-                            snapshot.position = Duration::ZERO;
-                            snapshot.duration = Duration::ZERO;
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(first));
+                            switch_track(playbin, snapshot, &first, &uri);
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(first.clone()));
+                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
                 }
@@ -366,10 +364,9 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     if let Some(path) = state.set_current(idx) {
                         if let Some(uri) = file_uri(&path) {
-                            playbin.set_property("uri", uri);
-                            snapshot.current = Some(path.clone());
-                            snapshot.position = Duration::ZERO;
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                            switch_track(playbin, snapshot, &path, &uri);
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
+                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
                 }
@@ -378,10 +375,9 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     if let Some(path) = state.next() {
                         if let Some(uri) = file_uri(&path) {
-                            playbin.set_property("uri", uri);
-                            snapshot.current = Some(path.clone());
-                            snapshot.position = Duration::ZERO;
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                            switch_track(playbin, snapshot, &path, &uri);
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
+                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
                 }
@@ -390,10 +386,9 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     if let Some(path) = state.previous() {
                         if let Some(uri) = file_uri(&path) {
-                            playbin.set_property("uri", uri);
-                            snapshot.current = Some(path.clone());
-                            snapshot.position = Duration::ZERO;
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                            switch_track(playbin, snapshot, &path, &uri);
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
+                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
                 }
@@ -431,6 +426,26 @@ mod backend {
                 let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
         }
+    }
+
+    fn switch_track(
+        playbin: &gst::Element,
+        snapshot: &mut PlaybackSnapshot,
+        path: &PathBuf,
+        uri: &str,
+    ) {
+        let was_playing = snapshot.state == PlaybackState::Playing;
+        let _ = playbin.set_state(gst::State::Ready);
+        playbin.set_property("uri", uri);
+        if was_playing {
+            let _ = playbin.set_state(gst::State::Playing);
+            snapshot.state = PlaybackState::Playing;
+        } else if snapshot.state == PlaybackState::Paused {
+            let _ = playbin.set_state(gst::State::Paused);
+        }
+        snapshot.current = Some(path.clone());
+        snapshot.position = Duration::ZERO;
+        snapshot.duration = Duration::ZERO;
     }
 
     fn handle_bus_message(

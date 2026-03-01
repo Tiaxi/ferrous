@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 
 use crate::analysis::AnalysisSnapshot;
+use crate::library::LibrarySnapshot;
 use crate::metadata::TrackMetadata;
 use crate::playback::{PlaybackSnapshot, PlaybackState};
 
@@ -21,6 +22,13 @@ pub enum TopPanelAction {
     Pause,
     Stop,
     SeekTo(Duration),
+}
+
+#[derive(Default)]
+pub struct CenterPanelAction {
+    pub queue_play_index: Option<usize>,
+    pub scan_library_folder: bool,
+    pub play_library_track: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -117,9 +125,10 @@ pub fn draw_center_panel(
     metadata: &TrackMetadata,
     queue: &[PathBuf],
     current: Option<&PathBuf>,
+    library: &LibrarySnapshot,
     spectrogram_cache: &mut SpectrogramCache,
-) -> Option<usize> {
-    let mut play_index = None;
+) -> CenterPanelAction {
+    let mut action = CenterPanelAction::default();
     egui::CentralPanel::default().show(ctx, |ui| {
         let top_h = (ui.available_height() * 0.52).clamp(220.0, 420.0);
         ui.allocate_ui_with_layout(
@@ -154,8 +163,62 @@ pub fn draw_center_panel(
                     ui.label(format!("Artist: {}", fallback(&metadata.artist, "Unknown")));
                     ui.label(format!("Album: {}", fallback(&metadata.album, "Unknown")));
                     ui.add_space(8.0);
-                    ui.label("Folders");
-                    ui.label("All Music");
+                    ui.horizontal(|ui| {
+                        if ui.button("Scan Folder").clicked() && !library.scan_in_progress {
+                            action.scan_library_folder = true;
+                        }
+                        ui.label(format!("Indexed: {}", library.tracks.len()));
+                    });
+                    if library.scan_in_progress {
+                        ui.label(format!("Scanning... {} files", library.scanned_files));
+                    }
+                    if let Some(err) = library.last_error.as_ref() {
+                        ui.colored_label(Color32::from_rgb(200, 70, 70), err);
+                    }
+                    ui.separator();
+                    ui.label("Indexed Folders");
+                    egui::ScrollArea::vertical()
+                        .max_height((top_h * 0.18).max(50.0))
+                        .show(ui, |ui| {
+                            if library.roots.is_empty() {
+                                ui.label("No folders added");
+                                return;
+                            }
+                            for root in &library.roots {
+                                ui.label(root.display().to_string());
+                            }
+                        });
+                    ui.separator();
+                    ui.label("Library Tracks");
+                    egui::ScrollArea::vertical()
+                        .max_height((top_h * 0.34).max(80.0))
+                        .show(ui, |ui| {
+                            if library.tracks.is_empty() {
+                                ui.label("No tracks indexed");
+                                return;
+                            }
+                            for track in &library.tracks {
+                                let mut text = if track.artist.is_empty() {
+                                    track.title.clone()
+                                } else {
+                                    format!("{} - {}", track.artist, track.title)
+                                };
+                                if !track.album.is_empty() {
+                                    text.push_str(&format!("  [{}]", track.album));
+                                }
+                                if let Some(secs) = track.duration_secs {
+                                    text.push_str(&format!(
+                                        "  {:02}:{:02}",
+                                        (secs as u64) / 60,
+                                        (secs as u64) % 60
+                                    ));
+                                }
+                                let resp = ui.selectable_label(false, text);
+                                if resp.double_clicked() {
+                                    action.play_library_track = Some(track.path.clone());
+                                }
+                            }
+                        });
                 });
 
                 ui.separator();
@@ -177,7 +240,7 @@ pub fn draw_center_panel(
                             }
                             let resp = ui.selectable_label(is_current, text);
                             if resp.double_clicked() || resp.clicked() {
-                                play_index = Some(idx);
+                                action.queue_play_index = Some(idx);
                             }
                         }
                     });
@@ -195,7 +258,7 @@ pub fn draw_center_panel(
             spectrogram_cache,
         );
     });
-    play_index
+    action
 }
 
 fn draw_wave_seekbar(

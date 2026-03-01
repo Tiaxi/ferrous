@@ -1,5 +1,6 @@
 mod analysis;
 mod app;
+mod library;
 mod metadata;
 mod playback;
 mod ui;

@@ -5,17 +5,22 @@ use crossbeam_channel::Receiver;
 use eframe::egui;
 
 use crate::analysis::{AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
+use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot};
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot};
-use crate::ui::panels::{draw_center_panel, draw_top_panel, SpectrogramCache, TopPanelAction};
+use crate::ui::panels::{
+    draw_center_panel, draw_top_panel, CenterPanelAction, SpectrogramCache, TopPanelAction,
+};
 
 pub struct FerrousApp {
     playback: PlaybackEngine,
     analysis: AnalysisEngine,
     metadata: MetadataService,
+    library: LibraryService,
     playback_rx: Receiver<PlaybackEvent>,
     analysis_rx: Receiver<AnalysisEvent>,
     metadata_rx: Receiver<MetadataEvent>,
+    library_rx: Receiver<LibraryEvent>,
     state: AppState,
     last_tick: Instant,
     profile_enabled: bool,
@@ -28,6 +33,7 @@ struct AppState {
     playback: PlaybackSnapshot,
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
+    library: LibrarySnapshot,
     queue: Vec<PathBuf>,
     spectrogram_cache: SpectrogramCache,
 }
@@ -39,14 +45,17 @@ impl FerrousApp {
         let (analysis, analysis_rx) = AnalysisEngine::new();
         let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
         let (metadata, metadata_rx) = MetadataService::new();
+        let (library, library_rx) = LibraryService::new();
 
         Self {
             playback,
             analysis,
             metadata,
+            library,
             playback_rx,
             analysis_rx,
             metadata_rx,
+            library_rx,
             state: AppState::default(),
             last_tick: Instant::now(),
             profile_enabled: std::env::var_os("FERROUS_PROFILE").is_some(),
@@ -105,6 +114,15 @@ impl FerrousApp {
             };
             match event {
                 MetadataEvent::Loaded(metadata) => self.state.metadata = metadata,
+            }
+        }
+
+        for _ in 0..4 {
+            let Ok(event) = self.library_rx.try_recv() else {
+                break;
+            };
+            match event {
+                LibraryEvent::Snapshot(snapshot) => self.state.library = snapshot,
             }
         }
     }
@@ -175,17 +193,42 @@ impl eframe::App for FerrousApp {
             TopPanelAction::SeekTo(pos) => self.playback.command(PlaybackCommand::Seek(pos)),
         }
 
-        let play_index = draw_center_panel(
+        let center_action = draw_center_panel(
             ctx,
             &self.state.analysis,
             &self.state.metadata,
             &self.state.queue,
             self.state.playback.current.as_ref(),
+            &self.state.library,
             &mut self.state.spectrogram_cache,
         );
-        if let Some(index) = play_index {
-            self.playback.command(PlaybackCommand::PlayAt(index));
-            self.playback.command(PlaybackCommand::Play);
+        match center_action {
+            CenterPanelAction {
+                queue_play_index: Some(index),
+                ..
+            } => {
+                self.playback.command(PlaybackCommand::PlayAt(index));
+                self.playback.command(PlaybackCommand::Play);
+            }
+            CenterPanelAction {
+                scan_library_folder: true,
+                ..
+            } => {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.library.command(LibraryCommand::ScanRoot(folder));
+                }
+            }
+            CenterPanelAction {
+                play_library_track: Some(path),
+                ..
+            } => {
+                self.state.queue.clear();
+                self.state.queue.push(path.clone());
+                self.playback
+                    .command(PlaybackCommand::LoadQueue(vec![path]));
+                self.playback.command(PlaybackCommand::Play);
+            }
+            _ => {}
         }
 
         if self.last_tick.elapsed() >= Duration::from_millis(16) {
