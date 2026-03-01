@@ -70,6 +70,8 @@ Input is line-delimited JSON commands, for example:
 {"cmd":"remove_at","value":3}
 {"cmd":"move_queue","from":3,"to":1}
 {"cmd":"clear_queue"}
+{"cmd":"replace_album","paths":["/music/album/01.flac","/music/album/02.flac"]}
+{"cmd":"append_album","paths":["/music/album/03.flac"]}
 {"cmd":"request_snapshot"}
 ```
 

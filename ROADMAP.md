@@ -68,13 +68,13 @@ Acceptance criteria:
 - [x] Implement volume control UX in native frontend.
 
 Acceptance criteria:
-- Day-to-day playback can be driven fully from Kirigami UI without egui.
+- [x] Day-to-day playback can be driven fully from Kirigami UI without egui.
 
 ## Milestone D: Library Pane Migration
 
 - [ ] Implement library tree/grouping UI (artist/album/track hierarchy).
 - [ ] Wire search/filter and indexed roots display.
-- [ ] Implement album interactions:
+- [x] Implement album interactions (on current album list view):
   - double-click = replace playlist + play
   - context menu append option
 - [ ] Implement library album-art thumbnails and cover panel.

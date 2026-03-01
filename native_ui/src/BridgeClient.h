@@ -5,6 +5,7 @@
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <QVariantList>
 
 class BridgeClient : public QObject {
@@ -19,6 +20,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(QVariantList waveformPeaks READ waveformPeaks NOTIFY snapshotChanged)
+    Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
+    Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY snapshotChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
 
 public:
@@ -34,6 +37,8 @@ public:
     QStringList queueItems() const;
     int selectedQueueIndex() const;
     QVariantList waveformPeaks() const;
+    QStringList libraryAlbums() const;
+    bool libraryScanInProgress() const;
     bool connected() const;
 
     Q_INVOKABLE void play();
@@ -48,6 +53,8 @@ public:
     Q_INVOKABLE void removeAt(int index);
     Q_INVOKABLE void moveQueue(int from, int to);
     Q_INVOKABLE void clearQueue();
+    Q_INVOKABLE void replaceAlbumAt(int index);
+    Q_INVOKABLE void appendAlbumAt(int index);
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
 
@@ -77,5 +84,8 @@ private:
     QStringList m_queueItems;
     int m_selectedQueueIndex{-1};
     QVariantList m_waveformPeaks;
+    QStringList m_libraryAlbums;
+    QVector<QStringList> m_libraryAlbumPaths;
+    bool m_libraryScanInProgress{false};
     bool m_connected{false};
 };

@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use ferrous::frontend_bridge::{
@@ -149,11 +151,24 @@ struct JsonCommand {
     value: Option<f64>,
     from: Option<f64>,
     to: Option<f64>,
+    paths: Option<Vec<String>>,
 }
 
 #[derive(Default)]
 struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
+    last_library_digest: Option<LibraryDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LibraryDigest {
+    roots_len: usize,
+    tracks_len: usize,
+    scan_in_progress: bool,
+    first_root: Option<String>,
+    last_root: Option<String>,
+    first_track: Option<String>,
+    last_track: Option<String>,
 }
 
 fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
@@ -238,6 +253,24 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 to: to as usize,
             }))
         }
+        "replace_album" => {
+            let paths = parsed
+                .paths
+                .ok_or_else(|| "replace_album requires array field 'paths'".to_string())?;
+            let items: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+            Some(BridgeCommand::Library(
+                ferrous::frontend_bridge::BridgeLibraryCommand::ReplaceWithAlbum(items),
+            ))
+        }
+        "append_album" => {
+            let paths = parsed
+                .paths
+                .ok_or_else(|| "append_album requires array field 'paths'".to_string())?;
+            let items: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+            Some(BridgeCommand::Library(
+                ferrous::frontend_bridge::BridgeLibraryCommand::AppendAlbum(items),
+            ))
+        }
         "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),
         "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
         "shutdown" => Some(BridgeCommand::Shutdown),
@@ -263,6 +296,72 @@ fn drain_bridge_events_as_json(
         };
         match event {
             BridgeEvent::Snapshot(s) => {
+                let library_digest = LibraryDigest {
+                    roots_len: s.library.roots.len(),
+                    tracks_len: s.library.tracks.len(),
+                    scan_in_progress: s.library.scan_in_progress,
+                    first_root: s
+                        .library
+                        .roots
+                        .first()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    last_root: s
+                        .library
+                        .roots
+                        .last()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    first_track: s
+                        .library
+                        .tracks
+                        .first()
+                        .map(|t| t.path.to_string_lossy().to_string()),
+                    last_track: s
+                        .library
+                        .tracks
+                        .last()
+                        .map(|t| t.path.to_string_lossy().to_string()),
+                };
+                let albums_changed = emit_state
+                    .last_library_digest
+                    .as_ref()
+                    .map(|d| d != &library_digest)
+                    .unwrap_or(true);
+                let library_albums = if albums_changed {
+                    emit_state.last_library_digest = Some(library_digest);
+                    let mut grouped: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+                    for track in &s.library.tracks {
+                        let album = if track.album.trim().is_empty() {
+                            String::from("Unknown Album")
+                        } else {
+                            track.album.clone()
+                        };
+                        let artist = if track.artist.trim().is_empty() {
+                            String::from("Unknown Artist")
+                        } else {
+                            track.artist.clone()
+                        };
+                        grouped
+                            .entry((artist, album))
+                            .or_default()
+                            .push(track.path.to_string_lossy().to_string());
+                    }
+                    serde_json::Value::Array(
+                        grouped
+                            .into_iter()
+                            .map(|((artist, album), paths)| {
+                                json!({
+                                    "artist": artist,
+                                    "name": album,
+                                    "count": paths.len(),
+                                    "paths": paths,
+                                })
+                            })
+                            .collect(),
+                    )
+                } else {
+                    serde_json::Value::Null
+                };
+
                 let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
                 let waveform_peaks = if waveform_changed {
                     emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
@@ -304,6 +403,8 @@ fn drain_bridge_events_as_json(
                         "roots": s.library.roots.len(),
                         "tracks": s.library.tracks.len(),
                         "scan_in_progress": s.library.scan_in_progress,
+                        "albums_changed": albums_changed,
+                        "albums": library_albums,
                     },
                     "analysis": {
                         "spectrogram_seq": s.analysis.spectrogram_seq,

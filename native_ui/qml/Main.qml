@@ -12,6 +12,7 @@ Kirigami.ApplicationWindow {
     minimumHeight: 780
     visible: true
     title: "Ferrous"
+    property int selectedLibraryAlbumIndex: -1
 
     function togglePlayPause() {
         if (bridge.playbackState === "Playing") {
@@ -369,25 +370,66 @@ Kirigami.ApplicationWindow {
                             }
 
                             ListView {
+                                id: libraryAlbumView
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                model: ["All Music", "Albumit", "ABBA", "Stam1na", "Apnea", "Elokuutio"]
+                                model: bridge.libraryAlbums
 
                                 delegate: Rectangle {
                                     width: ListView.view.width
                                     height: 24
-                                    color: index % 2 === 0
-                                        ? Kirigami.Theme.backgroundColor
-                                        : Kirigami.Theme.alternateBackgroundColor
+                                    color: index === root.selectedLibraryAlbumIndex
+                                        ? Kirigami.Theme.highlightColor
+                                        : (index % 2 === 0
+                                            ? Kirigami.Theme.backgroundColor
+                                            : Kirigami.Theme.alternateBackgroundColor)
 
                                     Label {
                                         anchors.verticalCenter: parent.verticalCenter
                                         anchors.left: parent.left
                                         anchors.leftMargin: 8
                                         text: modelData
+                                        elide: Text.ElideRight
+                                        anchors.right: parent.right
+                                        anchors.rightMargin: 6
+                                        color: index === root.selectedLibraryAlbumIndex
+                                            ? Kirigami.Theme.highlightedTextColor
+                                            : Kirigami.Theme.textColor
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        onClicked: function(mouse) {
+                                            root.selectedLibraryAlbumIndex = index
+                                            if (mouse.button === Qt.RightButton) {
+                                                albumMenu.popup()
+                                            }
+                                        }
+                                        onDoubleClicked: bridge.replaceAlbumAt(index)
+                                    }
+
+                                    Menu {
+                                        id: albumMenu
+                                        MenuItem {
+                                            text: "Play Album"
+                                            onTriggered: bridge.replaceAlbumAt(index)
+                                        }
+                                        MenuItem {
+                                            text: "Append Album"
+                                            onTriggered: bridge.appendAlbumAt(index)
+                                        }
                                     }
                                 }
+                            }
+
+                            Label {
+                                visible: bridge.libraryAlbums.length === 0
+                                text: bridge.libraryScanInProgress ? "Scanning library..." : "No albums indexed"
+                                color: Kirigami.Theme.disabledTextColor
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
                             }
                         }
                     }
@@ -546,6 +588,11 @@ Kirigami.ApplicationWindow {
 
     Connections {
         target: bridge
+        function onSnapshotChanged() {
+            if (root.selectedLibraryAlbumIndex >= bridge.libraryAlbums.length) {
+                root.selectedLibraryAlbumIndex = bridge.libraryAlbums.length - 1
+            }
+        }
         function onBridgeError(message) {
             console.warn("bridge error:", message)
         }

@@ -58,6 +58,14 @@ QVariantList BridgeClient::waveformPeaks() const {
     return m_waveformPeaks;
 }
 
+QStringList BridgeClient::libraryAlbums() const {
+    return m_libraryAlbums;
+}
+
+bool BridgeClient::libraryScanInProgress() const {
+    return m_libraryScanInProgress;
+}
+
 bool BridgeClient::connected() const {
     return m_connected;
 }
@@ -123,6 +131,34 @@ void BridgeClient::clearQueue() {
     sendCommand(QStringLiteral("clear_queue"));
 }
 
+void BridgeClient::replaceAlbumAt(int index) {
+    if (index < 0 || index >= m_libraryAlbumPaths.size()) {
+        return;
+    }
+    QJsonArray arr;
+    for (const QString &path : m_libraryAlbumPaths[index]) {
+        arr.push_back(path);
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_album"));
+    obj.insert(QStringLiteral("paths"), arr);
+    sendJson(obj);
+}
+
+void BridgeClient::appendAlbumAt(int index) {
+    if (index < 0 || index >= m_libraryAlbumPaths.size()) {
+        return;
+    }
+    QJsonArray arr;
+    for (const QString &path : m_libraryAlbumPaths[index]) {
+        arr.push_back(path);
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_album"));
+    obj.insert(QStringLiteral("paths"), arr);
+    sendJson(obj);
+}
+
 void BridgeClient::requestSnapshot() {
     sendCommand(QStringLiteral("request_snapshot"));
 }
@@ -181,6 +217,7 @@ void BridgeClient::handleStdoutReady() {
         if (event == QStringLiteral("snapshot")) {
             const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
             const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
+            const QJsonObject library = root.value(QStringLiteral("library")).toObject();
             const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
             const QJsonArray queueTracks = queue.value(QStringLiteral("tracks")).toArray();
 
@@ -237,6 +274,40 @@ void BridgeClient::handleStdoutReady() {
             if (m_selectedQueueIndex != selected) {
                 m_selectedQueueIndex = selected;
                 changed = true;
+            }
+            const bool scanInProgress = library.value(QStringLiteral("scan_in_progress")).toBool();
+            if (m_libraryScanInProgress != scanInProgress) {
+                m_libraryScanInProgress = scanInProgress;
+                changed = true;
+            }
+            const QJsonValue albumsValue = library.value(QStringLiteral("albums"));
+            if (albumsValue.isArray()) {
+                const QJsonArray albums = albumsValue.toArray();
+                QStringList labels;
+                QVector<QStringList> albumPaths;
+                labels.reserve(albums.size());
+                albumPaths.reserve(albums.size());
+                for (const QJsonValue &entry : albums) {
+                    const QJsonObject obj = entry.toObject();
+                    const QString artist = obj.value(QStringLiteral("artist")).toString();
+                    const QString name = obj.value(QStringLiteral("name")).toString();
+                    const int count = obj.value(QStringLiteral("count")).toInt();
+                    labels.push_back(QStringLiteral("%1 - %2 (%3)").arg(artist, name).arg(count));
+
+                    QStringList paths;
+                    for (const QJsonValue &path : obj.value(QStringLiteral("paths")).toArray()) {
+                        paths.push_back(path.toString());
+                    }
+                    albumPaths.push_back(paths);
+                }
+                if (m_libraryAlbums != labels) {
+                    m_libraryAlbums = labels;
+                    changed = true;
+                }
+                if (m_libraryAlbumPaths != albumPaths) {
+                    m_libraryAlbumPaths = albumPaths;
+                    changed = true;
+                }
             }
             const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
             if (waveformValue.isArray()) {
