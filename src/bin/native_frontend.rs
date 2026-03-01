@@ -387,10 +387,16 @@ fn drain_bridge_events_as_json(
                     || (s.analysis.spectrogram_seq == 0
                         && s.analysis.spectrogram_rows.is_empty()
                         && emit_state.last_spectrogram_seq > 0);
-                let spectrogram_rows = if !s.analysis.spectrogram_rows.is_empty() {
+                let spectrogram_seq = s.analysis.spectrogram_seq;
+                let spectrogram_delta =
+                    spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
+                let spectrogram_rows = if spectrogram_delta > 0
+                    && !s.analysis.spectrogram_rows.is_empty()
+                {
+                    let tail = spectrogram_delta.min(s.analysis.spectrogram_rows.len());
+                    let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
                     serde_json::Value::Array(
-                        s.analysis
-                            .spectrogram_rows
+                        s.analysis.spectrogram_rows[start..]
                             .iter()
                             .map(|row| {
                                 let reduced = downsample_spectrogram_row(row, 320);
@@ -401,7 +407,7 @@ fn drain_bridge_events_as_json(
                 } else {
                     serde_json::Value::Null
                 };
-                emit_state.last_spectrogram_seq = s.analysis.spectrogram_seq;
+                emit_state.last_spectrogram_seq = spectrogram_seq;
                 let queue_tracks: Vec<_> = s
                     .queue
                     .iter()
@@ -438,7 +444,7 @@ fn drain_bridge_events_as_json(
                         "albums": library_albums,
                     },
                     "analysis": {
-                        "spectrogram_seq": s.analysis.spectrogram_seq,
+                        "spectrogram_seq": spectrogram_seq,
                         "spectrogram_reset": spectrogram_reset,
                         "spectrogram_rows": spectrogram_rows,
                         "sample_rate_hz": s.analysis.sample_rate_hz,
