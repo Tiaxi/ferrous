@@ -509,14 +509,14 @@ mod backend {
             }
             PlaybackCommand::Play => {
                 let was_stopped = snapshot.state == PlaybackState::Stopped;
+                if was_stopped {
+                    // Prime startup gain before entering Playing so first output buffer starts silent.
+                    *applied_volume = 0.0;
+                    playbin.set_property("volume", *applied_volume);
+                    *startup_gain_ramp = true;
+                }
                 if playbin.set_state(gst::State::Playing).is_ok() {
                     snapshot.state = PlaybackState::Playing;
-                    if was_stopped {
-                        // Fade in from silence at track start to suppress startup pops.
-                        *applied_volume = 0.0;
-                        playbin.set_property("volume", *applied_volume);
-                        *startup_gain_ramp = true;
-                    }
                 }
             }
             PlaybackCommand::Pause => {
