@@ -6,7 +6,7 @@ use std::time::Duration;
 use crossbeam_channel::unbounded;
 use ferrous::frontend_bridge::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    FrontendBridgeHandle,
+    BridgeSnapshot, FrontendBridgeHandle,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -189,6 +189,7 @@ struct JsonCommand {
 struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
+    last_queue_digest: Option<QueueDigest>,
     last_spectrogram_seq: u64,
 }
 
@@ -201,6 +202,14 @@ struct LibraryDigest {
     last_root: Option<String>,
     first_track: Option<String>,
     last_track: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueDigest {
+    len: usize,
+    selected: Option<usize>,
+    first: Option<String>,
+    last: Option<String>,
 }
 
 fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
@@ -325,6 +334,7 @@ fn drain_bridge_events_as_json(
     timeout: Duration,
     emit_state: &mut JsonEmitState,
 ) {
+    let mut latest_snapshot: Option<BridgeSnapshot> = None;
     for i in 0..max_events {
         let event = if i == 0 {
             bridge.recv_timeout(timeout)
@@ -335,169 +345,196 @@ fn drain_bridge_events_as_json(
             break;
         };
         match event {
-            BridgeEvent::Snapshot(s) => {
-                let library_digest = LibraryDigest {
-                    roots_len: s.library.roots.len(),
-                    tracks_len: s.library.tracks.len(),
-                    scan_in_progress: s.library.scan_in_progress,
-                    first_root: s
-                        .library
-                        .roots
-                        .first()
-                        .map(|p| p.to_string_lossy().to_string()),
-                    last_root: s
-                        .library
-                        .roots
-                        .last()
-                        .map(|p| p.to_string_lossy().to_string()),
-                    first_track: s
-                        .library
-                        .tracks
-                        .first()
-                        .map(|t| t.path.to_string_lossy().to_string()),
-                    last_track: s
-                        .library
-                        .tracks
-                        .last()
-                        .map(|t| t.path.to_string_lossy().to_string()),
-                };
-                let albums_changed = emit_state
-                    .last_library_digest
-                    .as_ref()
-                    .map(|d| d != &library_digest)
-                    .unwrap_or(true);
-                let library_albums = if albums_changed {
-                    emit_state.last_library_digest = Some(library_digest);
-                    let mut grouped: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-                    for track in &s.library.tracks {
-                        let album = if track.album.trim().is_empty() {
-                            String::from("Unknown Album")
-                        } else {
-                            track.album.clone()
-                        };
-                        let artist = if track.artist.trim().is_empty() {
-                            String::from("Unknown Artist")
-                        } else {
-                            track.artist.clone()
-                        };
-                        grouped
-                            .entry((artist, album))
-                            .or_default()
-                            .push(track.path.to_string_lossy().to_string());
-                    }
-                    serde_json::Value::Array(
-                        grouped
-                            .into_iter()
-                            .map(|((artist, album), paths)| {
-                                json!({
-                                    "artist": artist,
-                                    "name": album,
-                                    "count": paths.len(),
-                                    "paths": paths,
-                                })
-                            })
-                            .collect(),
-                    )
-                } else {
-                    serde_json::Value::Null
-                };
-
-                let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
-                let waveform_peaks = if waveform_changed {
-                    emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
-                    serde_json::Value::Array(
-                        s.analysis.waveform_peaks.iter().map(|v| json!(v)).collect(),
-                    )
-                } else {
-                    serde_json::Value::Null
-                };
-                let spectrogram_reset = s.analysis.spectrogram_seq
-                    < emit_state.last_spectrogram_seq
-                    || (s.analysis.spectrogram_seq == 0
-                        && s.analysis.spectrogram_rows.is_empty()
-                        && emit_state.last_spectrogram_seq > 0);
-                let spectrogram_seq = s.analysis.spectrogram_seq;
-                let spectrogram_delta =
-                    spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
-                let spectrogram_rows = if spectrogram_delta > 0
-                    && !s.analysis.spectrogram_rows.is_empty()
-                {
-                    let tail = spectrogram_delta.min(s.analysis.spectrogram_rows.len());
-                    let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
-                    serde_json::Value::Array(
-                        s.analysis.spectrogram_rows[start..]
-                            .iter()
-                            .map(|row| {
-                                let reduced = downsample_spectrogram_row(row, 320);
-                                serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
-                            })
-                            .collect(),
-                    )
-                } else {
-                    serde_json::Value::Null
-                };
-                emit_state.last_spectrogram_seq = spectrogram_seq;
-                let queue_tracks: Vec<_> = s
-                    .queue
-                    .iter()
-                    .map(|path| {
-                        let title = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                        json!({
-                            "path": path.to_string_lossy().to_string(),
-                            "title": title,
-                        })
-                    })
-                    .collect();
-                let payload = json!({
-                    "event": "snapshot",
-                    "playback": {
-                        "state": format!("{:?}", s.playback.state),
-                        "position_secs": s.playback.position.as_secs_f64(),
-                        "duration_secs": s.playback.duration.as_secs_f64(),
-                        "volume": s.playback.volume,
-                        "has_current": s.playback.current.is_some(),
-                    },
-                    "queue": {
-                        "len": s.queue.len(),
-                        "selected_index": s.selected_queue_index,
-                        "tracks": queue_tracks,
-                    },
-                    "library": {
-                        "roots": s.library.roots.len(),
-                        "tracks": s.library.tracks.len(),
-                        "scan_in_progress": s.library.scan_in_progress,
-                        "albums_changed": albums_changed,
-                        "albums": library_albums,
-                    },
-                    "analysis": {
-                        "spectrogram_seq": spectrogram_seq,
-                        "spectrogram_reset": spectrogram_reset,
-                        "spectrogram_rows": spectrogram_rows,
-                        "sample_rate_hz": s.analysis.sample_rate_hz,
-                        "waveform_len": s.analysis.waveform_peaks.len(),
-                        "waveform_changed": waveform_changed,
-                        "waveform_peaks": waveform_peaks,
-                    },
-                    "settings": {
-                        "volume": s.settings.volume,
-                        "fft_size": s.settings.fft_size,
-                        "db_range": s.settings.db_range,
-                        "log_scale": s.settings.log_scale,
-                    }
-                });
-                let _ = emit_json_line(&payload);
-            }
+            BridgeEvent::Snapshot(s) => latest_snapshot = Some(s),
             BridgeEvent::Error(message) => {
                 let _ = emit_json_line(&json!({ "event": "error", "message": message }));
             }
             BridgeEvent::Stopped => {
                 let _ = emit_json_line(&json!({ "event": "stopped" }));
+                return;
             }
         }
     }
+
+    if let Some(s) = latest_snapshot {
+        let payload = encode_snapshot_payload(&s, emit_state);
+        let _ = emit_json_line(&payload);
+    }
+}
+
+fn encode_snapshot_payload(
+    s: &BridgeSnapshot,
+    emit_state: &mut JsonEmitState,
+) -> serde_json::Value {
+    let library_digest = LibraryDigest {
+        roots_len: s.library.roots.len(),
+        tracks_len: s.library.tracks.len(),
+        scan_in_progress: s.library.scan_in_progress,
+        first_root: s
+            .library
+            .roots
+            .first()
+            .map(|p| p.to_string_lossy().to_string()),
+        last_root: s
+            .library
+            .roots
+            .last()
+            .map(|p| p.to_string_lossy().to_string()),
+        first_track: s
+            .library
+            .tracks
+            .first()
+            .map(|t| t.path.to_string_lossy().to_string()),
+        last_track: s
+            .library
+            .tracks
+            .last()
+            .map(|t| t.path.to_string_lossy().to_string()),
+    };
+    let albums_changed = emit_state
+        .last_library_digest
+        .as_ref()
+        .map(|d| d != &library_digest)
+        .unwrap_or(true);
+    let library_albums = if albums_changed {
+        emit_state.last_library_digest = Some(library_digest);
+        let mut grouped: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        for track in &s.library.tracks {
+            let album = if track.album.trim().is_empty() {
+                String::from("Unknown Album")
+            } else {
+                track.album.clone()
+            };
+            let artist = if track.artist.trim().is_empty() {
+                String::from("Unknown Artist")
+            } else {
+                track.artist.clone()
+            };
+            grouped
+                .entry((artist, album))
+                .or_default()
+                .push(track.path.to_string_lossy().to_string());
+        }
+        serde_json::Value::Array(
+            grouped
+                .into_iter()
+                .map(|((artist, album), paths)| {
+                    json!({
+                        "artist": artist,
+                        "name": album,
+                        "count": paths.len(),
+                        "paths": paths,
+                    })
+                })
+                .collect(),
+        )
+    } else {
+        serde_json::Value::Null
+    };
+
+    let queue_digest = QueueDigest {
+        len: s.queue.len(),
+        selected: s.selected_queue_index,
+        first: s.queue.first().map(|p| p.to_string_lossy().to_string()),
+        last: s.queue.last().map(|p| p.to_string_lossy().to_string()),
+    };
+    let queue_changed = emit_state
+        .last_queue_digest
+        .as_ref()
+        .map(|d| d != &queue_digest)
+        .unwrap_or(true);
+    let queue_tracks = if queue_changed {
+        emit_state.last_queue_digest = Some(queue_digest);
+        serde_json::Value::Array(
+            s.queue
+                .iter()
+                .map(|path| {
+                    let title = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                    json!({
+                        "path": path.to_string_lossy().to_string(),
+                        "title": title,
+                    })
+                })
+                .collect(),
+        )
+    } else {
+        serde_json::Value::Null
+    };
+
+    let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
+    let waveform_peaks = if waveform_changed {
+        emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
+        serde_json::Value::Array(s.analysis.waveform_peaks.iter().map(|v| json!(v)).collect())
+    } else {
+        serde_json::Value::Null
+    };
+
+    let spectrogram_reset = s.analysis.spectrogram_seq < emit_state.last_spectrogram_seq
+        || (s.analysis.spectrogram_seq == 0
+            && s.analysis.spectrogram_rows.is_empty()
+            && emit_state.last_spectrogram_seq > 0);
+    let spectrogram_seq = s.analysis.spectrogram_seq;
+    let spectrogram_delta =
+        spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
+    let spectrogram_rows = if spectrogram_delta > 0 && !s.analysis.spectrogram_rows.is_empty() {
+        let tail = spectrogram_delta
+            .min(s.analysis.spectrogram_rows.len())
+            .min(3);
+        let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
+        serde_json::Value::Array(
+            s.analysis.spectrogram_rows[start..]
+                .iter()
+                .map(|row| {
+                    let reduced = downsample_spectrogram_row(row, 256);
+                    serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
+                })
+                .collect(),
+        )
+    } else {
+        serde_json::Value::Null
+    };
+    emit_state.last_spectrogram_seq = spectrogram_seq;
+
+    json!({
+        "event": "snapshot",
+        "playback": {
+            "state": format!("{:?}", s.playback.state),
+            "position_secs": s.playback.position.as_secs_f64(),
+            "duration_secs": s.playback.duration.as_secs_f64(),
+            "volume": s.playback.volume,
+            "has_current": s.playback.current.is_some(),
+        },
+        "queue": {
+            "len": s.queue.len(),
+            "selected_index": s.selected_queue_index,
+            "tracks": queue_tracks,
+        },
+        "library": {
+            "roots": s.library.roots.len(),
+            "tracks": s.library.tracks.len(),
+            "scan_in_progress": s.library.scan_in_progress,
+            "albums_changed": albums_changed,
+            "albums": library_albums,
+        },
+        "analysis": {
+            "spectrogram_seq": spectrogram_seq,
+            "spectrogram_reset": spectrogram_reset,
+            "spectrogram_rows": spectrogram_rows,
+            "sample_rate_hz": s.analysis.sample_rate_hz,
+            "waveform_len": s.analysis.waveform_peaks.len(),
+            "waveform_changed": waveform_changed,
+            "waveform_peaks": waveform_peaks,
+        },
+        "settings": {
+            "volume": s.settings.volume,
+            "fft_size": s.settings.fft_size,
+            "db_range": s.settings.db_range,
+            "log_scale": s.settings.log_scale,
+        }
+    })
 }
 
 fn emit_json_line(payload: &serde_json::Value) -> io::Result<()> {

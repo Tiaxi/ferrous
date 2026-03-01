@@ -67,6 +67,7 @@ public:
     Q_INVOKABLE void appendAlbumAt(int index);
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
+    Q_INVOKABLE QVariantList takeSpectrogramRowsDelta();
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
 

@@ -197,6 +197,14 @@ void BridgeClient::scanDefaultMusicRoot() {
     scanRoot(music);
 }
 
+QVariantList BridgeClient::takeSpectrogramRowsDelta() {
+    QVariantList out = m_spectrogramRowsDelta;
+    if (!m_spectrogramRowsDelta.isEmpty()) {
+        m_spectrogramRowsDelta.clear();
+    }
+    return out;
+}
+
 void BridgeClient::requestSnapshot() {
     sendCommand(QStringLiteral("request_snapshot"));
 }
@@ -208,11 +216,24 @@ void BridgeClient::shutdown() {
 void BridgeClient::startBridgeProcess() {
     QString command = qEnvironmentVariable("FERROUS_BRIDGE_CMD");
     if (command.isEmpty()) {
-        // Prefer prebuilt bridge binary for lower overhead; fallback to cargo run.
-        const QString binary = QStringLiteral("target/debug/native_frontend");
-        if (QFileInfo::exists(binary)) {
-            command = binary + QStringLiteral(" --json-bridge");
-        } else {
+        // Prefer a prebuilt bridge binary for lower overhead and predictable runtime memory.
+        const QDir appDir(QCoreApplication::applicationDirPath());
+        const QStringList candidates{
+            appDir.absoluteFilePath(QStringLiteral("../../target/debug/native_frontend")),
+            appDir.absoluteFilePath(QStringLiteral("../../target/release/native_frontend")),
+            QDir::current().absoluteFilePath(QStringLiteral("target/debug/native_frontend")),
+            QDir::current().absoluteFilePath(QStringLiteral("target/release/native_frontend")),
+        };
+
+        for (const QString &candidate : candidates) {
+            const QFileInfo info(candidate);
+            if (info.exists() && info.isFile() && info.isExecutable()) {
+                command = QStringLiteral("\"%1\" --json-bridge").arg(info.absoluteFilePath());
+                break;
+            }
+        }
+
+        if (command.isEmpty()) {
             command = QStringLiteral("cargo run --bin native_frontend --features gst -- --json-bridge");
         }
     }
@@ -242,6 +263,7 @@ void BridgeClient::sendJson(const QJsonObject &obj) {
 }
 
 void BridgeClient::handleStdoutReady() {
+    bool anySnapshotChanged = false;
     while (m_process.canReadLine()) {
         const QByteArray line = m_process.readLine().trimmed();
         if (line.isEmpty()) {
@@ -263,7 +285,6 @@ void BridgeClient::handleStdoutReady() {
             const QJsonObject library = root.value(QStringLiteral("library")).toObject();
             const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
             const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
-            const QJsonArray queueTracks = queue.value(QStringLiteral("tracks")).toArray();
 
             const QString nextState = playback.value(QStringLiteral("state")).toString();
             const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
@@ -304,17 +325,21 @@ void BridgeClient::handleStdoutReady() {
                 m_queueLength = qlen;
                 changed = true;
             }
-            QStringList items;
-            items.reserve(queueTracks.size());
-            for (const QJsonValue &track : queueTracks) {
-                const QJsonObject obj = track.toObject();
-                const QString title = obj.value(QStringLiteral("title")).toString();
-                const QString path = obj.value(QStringLiteral("path")).toString();
-                items.push_back(title.isEmpty() ? path : title);
-            }
-            if (m_queueItems != items) {
-                m_queueItems = items;
-                changed = true;
+            const QJsonValue queueTracksValue = queue.value(QStringLiteral("tracks"));
+            if (queueTracksValue.isArray()) {
+                const QJsonArray queueTracks = queueTracksValue.toArray();
+                QStringList items;
+                items.reserve(queueTracks.size());
+                for (const QJsonValue &track : queueTracks) {
+                    const QJsonObject obj = track.toObject();
+                    const QString title = obj.value(QStringLiteral("title")).toString();
+                    const QString path = obj.value(QStringLiteral("path")).toString();
+                    items.push_back(title.isEmpty() ? path : title);
+                }
+                if (m_queueItems != items) {
+                    m_queueItems = items;
+                    changed = true;
+                }
             }
             if (m_selectedQueueIndex != selected) {
                 m_selectedQueueIndex = selected;
@@ -342,13 +367,10 @@ void BridgeClient::handleStdoutReady() {
                     }
                     rowsDelta.push_back(row);
                 }
-                if (m_spectrogramRowsDelta != rowsDelta) {
-                    m_spectrogramRowsDelta = rowsDelta;
+                if (!rowsDelta.isEmpty()) {
+                    m_spectrogramRowsDelta += rowsDelta;
                     changed = true;
                 }
-            } else if (!m_spectrogramRowsDelta.isEmpty()) {
-                m_spectrogramRowsDelta.clear();
-                changed = true;
             }
             if (m_sampleRateHz != sampleRate) {
                 m_sampleRateHz = sampleRate;
@@ -412,7 +434,7 @@ void BridgeClient::handleStdoutReady() {
                 }
             }
             if (changed) {
-                emit snapshotChanged();
+                anySnapshotChanged = true;
             }
         } else if (event == QStringLiteral("error")) {
             emit bridgeError(root.value(QStringLiteral("message")).toString());
@@ -422,6 +444,9 @@ void BridgeClient::handleStdoutReady() {
                 emit connectedChanged();
             }
         }
+    }
+    if (anySnapshotChanged) {
+        emit snapshotChanged();
     }
 }
 

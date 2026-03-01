@@ -660,7 +660,7 @@ Kirigami.ApplicationWindow {
             if (bridge.spectrogramReset) {
                 root.spectrogramColumns = []
             }
-            const delta = bridge.spectrogramRowsDelta
+            const delta = bridge.takeSpectrogramRowsDelta()
             if (delta.length > 0) {
                 const merged = root.spectrogramColumns.slice()
                 for (let i = 0; i < delta.length; i++) {
