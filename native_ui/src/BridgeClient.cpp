@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -207,8 +208,13 @@ void BridgeClient::shutdown() {
 void BridgeClient::startBridgeProcess() {
     QString command = qEnvironmentVariable("FERROUS_BRIDGE_CMD");
     if (command.isEmpty()) {
-        // Dev default: run Rust bridge through cargo in current repo.
-        command = QStringLiteral("cargo run --bin native_frontend --features gst -- --json-bridge");
+        // Prefer prebuilt bridge binary for lower overhead; fallback to cargo run.
+        const QString binary = QStringLiteral("target/debug/native_frontend");
+        if (QFileInfo::exists(binary)) {
+            command = binary + QStringLiteral(" --json-bridge");
+        } else {
+            command = QStringLiteral("cargo run --bin native_frontend --features gst -- --json-bridge");
+        }
     }
 
     const QString shell = QStringLiteral("/bin/sh");

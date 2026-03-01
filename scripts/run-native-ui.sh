@@ -7,6 +7,7 @@ NATIVE_UI_DIR="${REPO_ROOT}/native_ui"
 BUILD_DIR="${FERROUS_NATIVE_BUILD_DIR:-${NATIVE_UI_DIR}/build}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 DEFAULT_BRIDGE_CMD='cargo run --bin native_frontend --features gst -- --json-bridge'
+DEFAULT_BRIDGE_BIN="${REPO_ROOT}/target/debug/native_frontend"
 
 DO_CONFIGURE=1
 DO_BUILD=1
@@ -78,10 +79,15 @@ if [[ ${DO_CONFIGURE} -eq 1 ]]; then
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then
+    cargo build --bin native_frontend --features gst
     cmake --build "${BUILD_DIR}" -j
 fi
 
+if [[ -z "${FERROUS_BRIDGE_CMD:-}" ]]; then
+    BRIDGE_CMD="${DEFAULT_BRIDGE_BIN} --json-bridge"
+fi
+
 if [[ ${DO_RUN} -eq 1 ]]; then
-    export FERROUS_BRIDGE_CMD="${BRIDGE_CMD}"
+    export FERROUS_BRIDGE_CMD="${BRIDGE_CMD:-$DEFAULT_BRIDGE_CMD}"
     exec "${BUILD_DIR}/ferrous_kirigami_shell" "${APP_ARGS[@]}"
 fi

@@ -95,6 +95,9 @@ One-command dev path from repo root:
 ./scripts/run-native-ui.sh
 ```
 
+The script builds and uses `target/debug/native_frontend --json-bridge`
+to avoid `cargo run` staying as the long-lived bridge process.
+
 Build-only check:
 
 ```bash

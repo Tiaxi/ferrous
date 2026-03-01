@@ -18,6 +18,9 @@ From repo root:
 ./scripts/run-native-ui.sh
 ```
 
+This script builds `native_frontend` first and runs the bridge as:
+`target/debug/native_frontend --json-bridge` (not `cargo run`).
+
 Build-only (no GUI launch):
 
 ```bash

@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crossbeam_channel::unbounded;
 use ferrous::frontend_bridge::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     FrontendBridgeHandle,
@@ -108,41 +109,69 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
 }
 
 fn run_json_bridge(bridge: FrontendBridgeHandle) {
+    enum InputMsg {
+        Line(String),
+        Eof,
+    }
+
+    let (input_tx, input_rx) = unbounded::<InputMsg>();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        let reader = io::BufReader::new(stdin.lock());
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if input_tx.send(InputMsg::Line(line)).is_err() {
+                return;
+            }
+        }
+        let _ = input_tx.send(InputMsg::Eof);
+    });
+
     let mut emit_state = JsonEmitState::default();
     bridge.command(BridgeCommand::RequestSnapshot);
-    drain_bridge_events_as_json(&bridge, 16, Duration::from_millis(10), &mut emit_state);
+    drain_bridge_events_as_json(&bridge, 32, Duration::from_millis(1), &mut emit_state);
 
-    let stdin = io::stdin();
-    let mut reader = io::BufReader::new(stdin.lock());
+    let mut eof_seen = false;
     loop {
-        let mut line = String::new();
-        let Ok(n) = reader.read_line(&mut line) else {
-            break;
-        };
-        if n == 0 {
-            break;
-        }
-
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        match parse_json_command(line) {
-            Ok(Some(cmd)) => {
-                if matches!(cmd, BridgeCommand::Shutdown) {
-                    bridge.command(BridgeCommand::Shutdown);
-                    let _ = emit_json_line(&json!({ "event": "stopped" }));
-                    break;
+        while let Ok(msg) = input_rx.try_recv() {
+            match msg {
+                InputMsg::Line(line) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match parse_json_command(line) {
+                        Ok(Some(cmd)) => {
+                            if matches!(cmd, BridgeCommand::Shutdown) {
+                                bridge.command(BridgeCommand::Shutdown);
+                                let _ = emit_json_line(&json!({ "event": "stopped" }));
+                                return;
+                            }
+                            bridge.command(cmd);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            let _ = emit_json_line(&json!({ "event": "error", "message": err }));
+                        }
+                    }
                 }
-                bridge.command(cmd);
-            }
-            Ok(None) => {}
-            Err(err) => {
-                let _ = emit_json_line(&json!({ "event": "error", "message": err }));
+                InputMsg::Eof => {
+                    eof_seen = true;
+                }
             }
         }
-        drain_bridge_events_as_json(&bridge, 16, Duration::from_millis(10), &mut emit_state);
+
+        drain_bridge_events_as_json(&bridge, 64, Duration::from_millis(1), &mut emit_state);
+
+        if eof_seen {
+            bridge.command(BridgeCommand::Shutdown);
+            let _ = emit_json_line(&json!({ "event": "stopped" }));
+            return;
+        }
+
+        std::thread::sleep(Duration::from_millis(8));
     }
 }
 
