@@ -794,7 +794,7 @@ where
         symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let sample_rate_hz = track.codec_params.sample_rate.unwrap_or(48_000) as u64;
     let estimated_frames = track.codec_params.n_frames.unwrap_or(sample_rate_hz * 240);
-    let block_size = (estimated_frames / max_points.max(1) as u64).max(1);
+    let mut block_size = (estimated_frames / max_points.max(1) as u64).max(1);
 
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut peaks = Vec::with_capacity(max_points);
@@ -851,8 +851,20 @@ where
                 peaks.push(bucket_peak.clamp(0.0, 1.0));
                 bucket_peak = 0.0;
                 bucket_count = 0;
-                if peaks.len() % 256 == 0 {
-                    on_update(peaks.clone(), false);
+                // Keep waveform memory bounded even when duration/frame estimates are inaccurate.
+                while peaks.len() > max_points {
+                    let mut reduced = Vec::with_capacity((peaks.len() + 1) / 2);
+                    for chunk in peaks.chunks(2) {
+                        let mut p = 0.0f32;
+                        for &v in chunk {
+                            if v > p {
+                                p = v;
+                            }
+                        }
+                        reduced.push(p);
+                    }
+                    peaks = reduced;
+                    block_size = block_size.saturating_mul(2).max(1);
                 }
             }
         }
