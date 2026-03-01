@@ -21,6 +21,17 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    function moveSelected(delta) {
+        const from = bridge.selectedQueueIndex
+        if (from < 0 || bridge.queueLength <= 0) {
+            return
+        }
+        const to = Math.max(0, Math.min(bridge.queueLength - 1, from + delta))
+        if (to !== from) {
+            bridge.moveQueue(from, to)
+        }
+    }
+
     Action {
         id: quitAction
         text: "Quit"
@@ -67,6 +78,18 @@ Kirigami.ApplicationWindow {
         text: "Clear Playlist"
         onTriggered: bridge.clearQueue()
     }
+    Action {
+        id: moveTrackUpAction
+        text: "Move Track Up"
+        shortcut: "Ctrl+Shift+Up"
+        onTriggered: root.moveSelected(-1)
+    }
+    Action {
+        id: moveTrackDownAction
+        text: "Move Track Down"
+        shortcut: "Ctrl+Shift+Down"
+        onTriggered: root.moveSelected(1)
+    }
 
     Shortcut {
         sequence: "Space"
@@ -107,6 +130,9 @@ Kirigami.ApplicationWindow {
             MenuItem { action: pauseAction }
             MenuItem { action: stopAction }
             MenuItem { action: nextAction }
+            MenuSeparator {}
+            MenuItem { action: moveTrackUpAction }
+            MenuItem { action: moveTrackDownAction }
             MenuSeparator {}
             MenuItem { action: clearPlaylistAction }
         }
@@ -165,6 +191,81 @@ Kirigami.ApplicationWindow {
                         if (!pressed) {
                             bridge.seek(value)
                         }
+                    }
+
+                    background: Item {
+                        implicitHeight: 24
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: "white"
+                            border.color: "#a0a9b3"
+                            radius: 1
+                        }
+
+                        Canvas {
+                            id: waveformCanvas
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            antialiasing: false
+
+                            onPaint: {
+                                const ctx = getContext("2d")
+                                ctx.reset()
+                                const w = width
+                                const h = height
+                                if (w <= 0 || h <= 0) {
+                                    return
+                                }
+
+                                const peaks = bridge.waveformPeaks
+                                ctx.fillStyle = "#ffffff"
+                                ctx.fillRect(0, 0, w, h)
+
+                                if (peaks.length > 0) {
+                                    ctx.fillStyle = "#0f2e5d"
+                                    const centerY = h / 2
+                                    for (let x = 0; x < w; x++) {
+                                        const idx = Math.floor((x / Math.max(1, w - 1)) * (peaks.length - 1))
+                                        const peak = Math.max(0.0, Math.min(1.0, Number(peaks[idx])))
+                                        const bar = Math.max(1, Math.floor(peak * (h / 2)))
+                                        ctx.fillRect(x, centerY - bar, 1, bar * 2)
+                                    }
+                                }
+
+                                const progress = bridge.durationSeconds > 0
+                                    ? Math.max(0, Math.min(1, bridge.positionSeconds / bridge.durationSeconds))
+                                    : 0
+                                const progressX = Math.floor(progress * w)
+
+                                ctx.fillStyle = "rgba(120, 190, 255, 0.26)"
+                                ctx.fillRect(0, 0, progressX, h)
+
+                                ctx.fillStyle = "#2f7cd6"
+                                ctx.fillRect(progressX, 0, 1, h)
+                            }
+
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+
+                            Connections {
+                                target: bridge
+                                function onSnapshotChanged() {
+                                    waveformCanvas.requestPaint()
+                                }
+                            }
+                        }
+                    }
+
+                    handle: Rectangle {
+                        x: seekSlider.leftPadding + seekSlider.visualPosition * (seekSlider.availableWidth - width)
+                        y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
+                        implicitWidth: 3
+                        implicitHeight: seekSlider.height - 4
+                        radius: 1
+                        color: "#2f7cd6"
+                        border.color: "#1f5aa7"
                     }
                 }
 

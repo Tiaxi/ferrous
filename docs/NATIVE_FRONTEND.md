@@ -68,6 +68,7 @@ Input is line-delimited JSON commands, for example:
 {"cmd":"play_at","value":3}
 {"cmd":"select_queue","value":3}
 {"cmd":"remove_at","value":3}
+{"cmd":"move_queue","from":3,"to":1}
 {"cmd":"clear_queue"}
 {"cmd":"request_snapshot"}
 ```

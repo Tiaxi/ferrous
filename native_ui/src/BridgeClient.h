@@ -1,9 +1,11 @@
 #pragma once
 
 #include <QObject>
+#include <QJsonObject>
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 
 class BridgeClient : public QObject {
     Q_OBJECT
@@ -16,6 +18,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
+    Q_PROPERTY(QVariantList waveformPeaks READ waveformPeaks NOTIFY snapshotChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
 
 public:
@@ -30,6 +33,7 @@ public:
     int queueLength() const;
     QStringList queueItems() const;
     int selectedQueueIndex() const;
+    QVariantList waveformPeaks() const;
     bool connected() const;
 
     Q_INVOKABLE void play();
@@ -42,6 +46,7 @@ public:
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
+    Q_INVOKABLE void moveQueue(int from, int to);
     Q_INVOKABLE void clearQueue();
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
@@ -53,6 +58,7 @@ signals:
 
 private:
     void startBridgeProcess();
+    void sendJson(const QJsonObject &obj);
     void sendCommand(const QString &cmd, double value = -1.0);
     void handleStdoutReady();
     void handleStderrReady();
@@ -70,5 +76,6 @@ private:
     int m_queueLength{0};
     QStringList m_queueItems;
     int m_selectedQueueIndex{-1};
+    QVariantList m_waveformPeaks;
     bool m_connected{false};
 };

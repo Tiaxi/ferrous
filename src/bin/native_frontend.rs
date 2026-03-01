@@ -105,8 +105,9 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
 }
 
 fn run_json_bridge(bridge: FrontendBridgeHandle) {
+    let mut emit_state = JsonEmitState::default();
     bridge.command(BridgeCommand::RequestSnapshot);
-    drain_bridge_events_as_json(&bridge, 16, Duration::from_millis(10));
+    drain_bridge_events_as_json(&bridge, 16, Duration::from_millis(10), &mut emit_state);
 
     let stdin = io::stdin();
     let mut reader = io::BufReader::new(stdin.lock());
@@ -138,7 +139,7 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
                 let _ = emit_json_line(&json!({ "event": "error", "message": err }));
             }
         }
-        drain_bridge_events_as_json(&bridge, 16, Duration::from_millis(10));
+        drain_bridge_events_as_json(&bridge, 16, Duration::from_millis(10), &mut emit_state);
     }
 }
 
@@ -146,6 +147,13 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
 struct JsonCommand {
     cmd: String,
     value: Option<f64>,
+    from: Option<f64>,
+    to: Option<f64>,
+}
+
+#[derive(Default)]
+struct JsonEmitState {
+    last_waveform_peaks: Vec<f32>,
 }
 
 fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
@@ -213,6 +221,23 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 value as usize,
             )))
         }
+        "move_queue" => {
+            let from = parsed
+                .from
+                .ok_or_else(|| "move_queue requires numeric field 'from'".to_string())?;
+            let to = parsed
+                .to
+                .ok_or_else(|| "move_queue requires numeric field 'to'".to_string())?;
+            if !from.is_finite() || !to.is_finite() || from < 0.0 || to < 0.0 {
+                return Err(
+                    "move_queue fields 'from' and 'to' must be non-negative numbers".to_string(),
+                );
+            }
+            Some(BridgeCommand::Queue(BridgeQueueCommand::Move {
+                from: from as usize,
+                to: to as usize,
+            }))
+        }
         "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),
         "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
         "shutdown" => Some(BridgeCommand::Shutdown),
@@ -225,6 +250,7 @@ fn drain_bridge_events_as_json(
     bridge: &FrontendBridgeHandle,
     max_events: usize,
     timeout: Duration,
+    emit_state: &mut JsonEmitState,
 ) {
     for i in 0..max_events {
         let event = if i == 0 {
@@ -237,6 +263,15 @@ fn drain_bridge_events_as_json(
         };
         match event {
             BridgeEvent::Snapshot(s) => {
+                let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
+                let waveform_peaks = if waveform_changed {
+                    emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
+                    serde_json::Value::Array(
+                        s.analysis.waveform_peaks.iter().map(|v| json!(v)).collect(),
+                    )
+                } else {
+                    serde_json::Value::Null
+                };
                 let queue_tracks: Vec<_> = s
                     .queue
                     .iter()
@@ -273,7 +308,9 @@ fn drain_bridge_events_as_json(
                     "analysis": {
                         "spectrogram_seq": s.analysis.spectrogram_seq,
                         "sample_rate_hz": s.analysis.sample_rate_hz,
-                        "waveform_peaks": s.analysis.waveform_peaks.len(),
+                        "waveform_len": s.analysis.waveform_peaks.len(),
+                        "waveform_changed": waveform_changed,
+                        "waveform_peaks": waveform_peaks,
                     },
                     "settings": {
                         "volume": s.settings.volume,

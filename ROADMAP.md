@@ -63,8 +63,8 @@ Acceptance criteria:
 ## Milestone C: Playlist + Playback UI Migration
 
 - [x] Implement native playlist table (header + rows + selection + double-click play).
-- [ ] Wire queue reordering, remove, clear, and play-at operations (play-at/select/remove/clear now wired; reorder pending).
-- [ ] Implement waveform seekbar in native frontend with current behavior.
+- [x] Wire queue reordering, remove, clear, and play-at operations.
+- [x] Implement waveform seekbar in native frontend with current behavior.
 - [x] Implement volume control UX in native frontend.
 
 Acceptance criteria:

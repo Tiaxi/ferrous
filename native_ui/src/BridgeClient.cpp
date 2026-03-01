@@ -54,6 +54,10 @@ int BridgeClient::selectedQueueIndex() const {
     return m_selectedQueueIndex;
 }
 
+QVariantList BridgeClient::waveformPeaks() const {
+    return m_waveformPeaks;
+}
+
 bool BridgeClient::connected() const {
     return m_connected;
 }
@@ -104,6 +108,17 @@ void BridgeClient::removeAt(int index) {
     sendCommand(QStringLiteral("remove_at"), static_cast<double>(index));
 }
 
+void BridgeClient::moveQueue(int from, int to) {
+    if (from < 0 || to < 0) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("move_queue"));
+    obj.insert(QStringLiteral("from"), from);
+    obj.insert(QStringLiteral("to"), to);
+    sendJson(obj);
+}
+
 void BridgeClient::clearQueue() {
     sendCommand(QStringLiteral("clear_queue"));
 }
@@ -129,17 +144,20 @@ void BridgeClient::startBridgeProcess() {
 }
 
 void BridgeClient::sendCommand(const QString &cmd, double value) {
-    if (m_process.state() != QProcess::Running) {
-        emit bridgeError(QStringLiteral("bridge process is not running"));
-        return;
-    }
-
     QJsonObject obj;
     obj.insert(QStringLiteral("cmd"), cmd);
     if (value >= 0.0) {
         obj.insert(QStringLiteral("value"), value);
     }
 
+    sendJson(obj);
+}
+
+void BridgeClient::sendJson(const QJsonObject &obj) {
+    if (m_process.state() != QProcess::Running) {
+        emit bridgeError(QStringLiteral("bridge process is not running"));
+        return;
+    }
     const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
     m_process.write(payload);
 }
@@ -163,6 +181,7 @@ void BridgeClient::handleStdoutReady() {
         if (event == QStringLiteral("snapshot")) {
             const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
             const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
+            const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
             const QJsonArray queueTracks = queue.value(QStringLiteral("tracks")).toArray();
 
             const QString nextState = playback.value(QStringLiteral("state")).toString();
@@ -218,6 +237,19 @@ void BridgeClient::handleStdoutReady() {
             if (m_selectedQueueIndex != selected) {
                 m_selectedQueueIndex = selected;
                 changed = true;
+            }
+            const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
+            if (waveformValue.isArray()) {
+                QVariantList peaks;
+                const QJsonArray arr = waveformValue.toArray();
+                peaks.reserve(arr.size());
+                for (const QJsonValue &v : arr) {
+                    peaks.push_back(v.toDouble());
+                }
+                if (m_waveformPeaks != peaks) {
+                    m_waveformPeaks = peaks;
+                    changed = true;
+                }
             }
             if (changed) {
                 emit snapshotChanged();
