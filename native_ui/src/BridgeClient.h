@@ -5,7 +5,6 @@
 #include <QProcess>
 #include <QString>
 #include <QStringList>
-#include <QVector>
 #include <QVariantList>
 
 class BridgeClient : public QObject {
@@ -103,7 +102,8 @@ private:
     double m_dbRange{90.0};
     bool m_logScale{false};
     QStringList m_libraryAlbums;
-    QVector<QStringList> m_libraryAlbumPaths;
+    QStringList m_libraryAlbumArtists;
+    QStringList m_libraryAlbumNames;
     bool m_libraryScanInProgress{false};
     bool m_connected{false};
     bool m_stdoutPumpScheduled{false};

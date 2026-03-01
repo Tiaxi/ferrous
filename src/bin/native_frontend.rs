@@ -183,6 +183,8 @@ struct JsonCommand {
     to: Option<f64>,
     paths: Option<Vec<String>>,
     path: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
 }
 
 #[derive(Default)]
@@ -312,6 +314,28 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 items,
             )))
         }
+        "replace_album_by_key" => {
+            let artist = parsed
+                .artist
+                .ok_or_else(|| "replace_album_by_key requires string field 'artist'".to_string())?;
+            let album = parsed
+                .album
+                .ok_or_else(|| "replace_album_by_key requires string field 'album'".to_string())?;
+            Some(BridgeCommand::Library(
+                BridgeLibraryCommand::ReplaceAlbumByKey { artist, album },
+            ))
+        }
+        "append_album_by_key" => {
+            let artist = parsed
+                .artist
+                .ok_or_else(|| "append_album_by_key requires string field 'artist'".to_string())?;
+            let album = parsed
+                .album
+                .ok_or_else(|| "append_album_by_key requires string field 'album'".to_string())?;
+            Some(BridgeCommand::Library(
+                BridgeLibraryCommand::AppendAlbumByKey { artist, album },
+            ))
+        }
         "scan_root" => {
             let path = parsed
                 .path
@@ -396,9 +420,11 @@ fn encode_snapshot_payload(
         .as_ref()
         .map(|d| d != &library_digest)
         .unwrap_or(true);
-    let library_albums = if albums_changed {
-        emit_state.last_library_digest = Some(library_digest);
-        let mut grouped: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let should_emit_albums =
+        albums_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
+    emit_state.last_library_digest = Some(library_digest);
+    let library_albums = if should_emit_albums {
+        let mut grouped: BTreeMap<(String, String), usize> = BTreeMap::new();
         for track in &s.library.tracks {
             let album = if track.album.trim().is_empty() {
                 String::from("Unknown Album")
@@ -410,20 +436,16 @@ fn encode_snapshot_payload(
             } else {
                 track.artist.clone()
             };
-            grouped
-                .entry((artist, album))
-                .or_default()
-                .push(track.path.to_string_lossy().to_string());
+            *grouped.entry((artist, album)).or_insert(0) += 1;
         }
         serde_json::Value::Array(
             grouped
                 .into_iter()
-                .map(|((artist, album), paths)| {
+                .map(|((artist, album), count)| {
                     json!({
                         "artist": artist,
                         "name": album,
-                        "count": paths.len(),
-                        "paths": paths,
+                        "count": count,
                     })
                 })
                 .collect(),
@@ -516,7 +538,7 @@ fn encode_snapshot_payload(
             "roots": s.library.roots.len(),
             "tracks": s.library.tracks.len(),
             "scan_in_progress": s.library.scan_in_progress,
-            "albums_changed": albums_changed,
+            "albums_changed": should_emit_albums,
             "albums": library_albums,
         },
         "analysis": {

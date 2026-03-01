@@ -156,30 +156,24 @@ void BridgeClient::clearQueue() {
 }
 
 void BridgeClient::replaceAlbumAt(int index) {
-    if (index < 0 || index >= m_libraryAlbumPaths.size()) {
+    if (index < 0 || index >= m_libraryAlbumArtists.size() || index >= m_libraryAlbumNames.size()) {
         return;
     }
-    QJsonArray arr;
-    for (const QString &path : m_libraryAlbumPaths[index]) {
-        arr.push_back(path);
-    }
     QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_album"));
-    obj.insert(QStringLiteral("paths"), arr);
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_album_by_key"));
+    obj.insert(QStringLiteral("artist"), m_libraryAlbumArtists[index]);
+    obj.insert(QStringLiteral("album"), m_libraryAlbumNames[index]);
     sendJson(obj);
 }
 
 void BridgeClient::appendAlbumAt(int index) {
-    if (index < 0 || index >= m_libraryAlbumPaths.size()) {
+    if (index < 0 || index >= m_libraryAlbumArtists.size() || index >= m_libraryAlbumNames.size()) {
         return;
     }
-    QJsonArray arr;
-    for (const QString &path : m_libraryAlbumPaths[index]) {
-        arr.push_back(path);
-    }
     QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_album"));
-    obj.insert(QStringLiteral("paths"), arr);
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_album_by_key"));
+    obj.insert(QStringLiteral("artist"), m_libraryAlbumArtists[index]);
+    obj.insert(QStringLiteral("album"), m_libraryAlbumNames[index]);
     sendJson(obj);
 }
 
@@ -406,28 +400,30 @@ void BridgeClient::handleStdoutReady() {
             if (albumsValue.isArray()) {
                 const QJsonArray albums = albumsValue.toArray();
                 QStringList labels;
-                QVector<QStringList> albumPaths;
+                QStringList artists;
+                QStringList albumNames;
                 labels.reserve(albums.size());
-                albumPaths.reserve(albums.size());
+                artists.reserve(albums.size());
+                albumNames.reserve(albums.size());
                 for (const QJsonValue &entry : albums) {
                     const QJsonObject obj = entry.toObject();
                     const QString artist = obj.value(QStringLiteral("artist")).toString();
                     const QString name = obj.value(QStringLiteral("name")).toString();
                     const int count = obj.value(QStringLiteral("count")).toInt();
                     labels.push_back(QStringLiteral("%1 - %2 (%3)").arg(artist, name).arg(count));
-
-                    QStringList paths;
-                    for (const QJsonValue &path : obj.value(QStringLiteral("paths")).toArray()) {
-                        paths.push_back(path.toString());
-                    }
-                    albumPaths.push_back(paths);
+                    artists.push_back(artist);
+                    albumNames.push_back(name);
                 }
                 if (m_libraryAlbums != labels) {
                     m_libraryAlbums = labels;
                     changed = true;
                 }
-                if (m_libraryAlbumPaths != albumPaths) {
-                    m_libraryAlbumPaths = albumPaths;
+                if (m_libraryAlbumArtists != artists) {
+                    m_libraryAlbumArtists = artists;
+                    changed = true;
+                }
+                if (m_libraryAlbumNames != albumNames) {
+                    m_libraryAlbumNames = albumNames;
                     changed = true;
                 }
             }
