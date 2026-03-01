@@ -1,89 +1,142 @@
 # Ferrous Roadmap
 
-This document tracks upcoming work, with an emphasis on DeaDBeeF parity.
-Reference baseline: current DeaDBeeF layout/behavior in your screenshot.
+This document tracks upcoming work with a KDE-first target.
+Reference baseline for UX: DeaDBeeF screenshot (`deadbeef_reference.png`).
 
-## Goal
+## Product Direction
 
-Reach practical daily-driver parity with DeaDBeeF for local-library playback, then iterate beyond parity.
+- Frontend strategy selected: `Qt6/QML + Kirigami` (KDE-native).
+- Existing `eframe/egui` UI is now considered a legacy frontend during migration.
+- Rust playback/analysis/library services remain the core backend.
 
-## Parity Baseline (Current)
+## Migration Goal
 
-- Layout, split panes, transport controls, library tree, playlist, and spectrogram are in place.
+Ship a Kirigami frontend that reaches current Ferrous behavior parity, then continue DeaDBeeF parity and feature expansion on top of it.
+
+## Current Backend Baseline
+
 - Gapless playback works.
-- Spectrogram pipeline is close to DeaDBeeF behavior.
-- Waveform cache exists in-memory and persists to SQLite.
+- Spectrogram pipeline is near DeaDBeeF behavior.
+- Waveform cache exists and persists to SQLite.
+- Library indexing, metadata loading, queue management, and playback control are in place.
 
-## Milestone 1: Core UX Parity
+## Migration Principles
 
-- [x] Replace text transport buttons with icon-style toolbar controls (Open/Add/Prev/Next/Play/Pause/Stop).
-- [x] Make waveform seekbar consume remaining horizontal space in top transport row.
-- [x] Remove volume numeric box and keep slider-only volume control.
-- [x] Move playback info text into bottom footer/status bar.
-- [x] Remove redundant "Library" title above album art.
-- [x] Tighten UI density (reduced extra spacing/padding between panes/widgets).
-- [x] Standardize zero-padding separators and apply margins only per-pane/per-widget where explicitly needed.
-- [x] Simplify playlist pane to list-centric view (keep only header row + tracks).
-- [x] Remove spectrogram placeholder text when no data is available (blank view).
-- [x] Improve cover art scaling quality with high-quality resize filtering.
-- [x] Restyle top controls with pane-matched transport button backgrounds and compact spacing.
-- [x] Align menu-row styling closer to desktop-native window chrome.
-- [x] Make album double-click in library replace playlist and autoplay; move append behavior to album context menu.
-- [x] Simplify to a single playlist model (intentional UX choice vs DeaDBeeF multi-playlist workflow).
-- [ ] Implement real top menu actions (`File/Edit/View/Playback/Help`) instead of static labels.
-- [ ] Add playlist context menus (track/playlist) for common actions.
-- [ ] Add library context menus (play, add, add all from album/artist, rescan folder).
-- [ ] Add drag-and-drop from library tree into playlist.
-- [ ] Add multi-select in playlist and library lists.
-- [ ] Add keyboard shortcuts for common actions (`Space`, `Ctrl+O`, `Delete`, `Ctrl+F`, `Ctrl+Tab`, etc.).
-- [ ] Add double-click/enter behavior consistency across all list/tree rows.
-- [ ] Add status bar parity items (selection counts, queue duration, playback mode indicators).
+- Keep business logic in Rust backend; UI layer should stay thin.
+- Avoid feature freeze on backend improvements, but avoid new large egui-only UX work.
+- Migrate screen-by-screen with runnable checkpoints.
+- Keep one source of truth for queue/playback/library state (no duplicated state machines in QML).
+- Performance target: minimum 60 FPS rendering, with design choices favoring display refresh-rate rendering when feasible.
 
-## Milestone 2: Playback Feature Parity
+## Milestone A: Frontend Foundation (QML/Kirigami bootstrap)
 
-- [ ] Add playback modes: repeat off/all/one and shuffle (track/album).
-- [ ] Add ReplayGain support (track/album mode, preamp, clipping prevention).
-- [ ] Add preamp/volume behavior parity with dB scale options.
-- [ ] Add output device selector and remember selected output device.
-- [ ] Add configurable prebuffer/buffer sizes for gapless stability tuning.
-- [ ] Add optional crossfade with sane defaults and disable rules (pause/seek/manual track switch).
-- [ ] Add robust stream error handling with skip-to-next policies.
+- [x] Select and implement initial Rust↔frontend bridge approach (fallback bridge bootstrap now in place; CXX-Qt binding integration pending).
+- [x] Add new app target/entrypoint for native frontend (keep egui target buildable during migration).
+- [x] Define typed bridge API for:
+  - playback controls/events
+  - queue queries/mutations
+  - library queries/selections
+  - analysis snapshots (waveform/spectrogram)
+  - settings read/write
+- [x] Add minimal Kirigami app shell scaffold with native window, menu bar, and status/footer area.
+- [x] Add build documentation for KDE dev environment and runtime dependencies.
 
-## Milestone 3: Library/Metadata Parity
+Acceptance criteria:
+- Kirigami shell launches and can call Rust backend (`Play/Pause/Stop` roundtrip works).
+- Legacy egui build still compiles.
 
-- [ ] Add persistent playlist save/load on app restart.
-- [ ] Add autoplay last playlist/last track restore.
-- [ ] Add file system watcher for incremental library updates.
-- [ ] Add configurable library roots UI (`Folders`/`Configure`) parity dialog.
-- [ ] Add richer sort/group modes in library view (artist/album/year/genre).
-- [ ] Add fast filter modes (artist-only, album-only, title-only).
-- [ ] Add missing metadata fields in UI (year, genre, codec/container, sample format details).
+## Milestone B: Native Main Layout Skeleton
 
-## Milestone 4: Spectrogram/Waveform Controls Parity
+- [x] Implement split layout in QML matching current Ferrous/DeaDBeeF structure:
+  - top controls row
+  - left library pane
+  - right playlist pane
+  - bottom spectrogram pane
+  - footer status line
+- [x] Recreate top control semantics with native KDE look/behavior.
+- [x] Implement centralized action/shortcut map in native shell (`Space`, media controls, etc.).
 
-- [ ] Add spectrogram properties UI (dB range, log scale, number of colors, gradient stops).
-- [ ] Add persisted spectrogram presets and quick reset to DeaDBeeF-like defaults.
-- [ ] Add waveform seekbar style options and density tuning.
-- [ ] Add analysis quality presets (CPU vs detail).
+Acceptance criteria:
+- [x] Layout parity exists with placeholder/static content.
+- [x] Native menu/shortcuts are wired and functional.
 
-## Milestone 5: Quality and Performance
+## Milestone C: Playlist + Playback UI Migration
 
-- [ ] Add integration tests for queue transitions, gapless handoff, and seek behavior.
-- [ ] Add regression tests for "no early next-track waveform/metadata switch".
-- [ ] Add DB migration/versioning strategy for library + waveform cache schema changes.
-- [ ] Add profiling toggles + telemetry for decode/analyze/render timings.
-- [ ] Add startup performance budget and benchmarks for large libraries.
+- [ ] Implement native playlist table (header + rows + selection + double-click play).
+- [ ] Wire queue reordering, remove, clear, and play-at operations.
+- [ ] Implement waveform seekbar in native frontend with current behavior.
+- [ ] Implement volume control UX in native frontend.
 
-## Nice-to-Have (Post-Parity)
+Acceptance criteria:
+- Day-to-day playback can be driven fully from Kirigami UI without egui.
 
-- [ ] Global media keys and optional desktop notifications.
-- [ ] Theming and compact/normal density modes.
-- [ ] Plugin-style visualization architecture.
-- [ ] Embedded lyrics and external metadata provider hooks.
-- [ ] Smart playlists and search query language.
+## Milestone D: Library Pane Migration
 
-## Working Rules for This Roadmap
+- [ ] Implement library tree/grouping UI (artist/album/track hierarchy).
+- [ ] Wire search/filter and indexed roots display.
+- [ ] Implement album interactions:
+  - double-click = replace playlist + play
+  - context menu append option
+- [ ] Implement library album-art thumbnails and cover panel.
+
+Acceptance criteria:
+- Library browsing and enqueue/play workflows match current behavior.
+
+## Milestone E: Spectrogram + Analysis View Migration
+
+- [ ] Port spectrogram widget rendering path to native frontend.
+- [ ] Preserve rolling behavior across seek and track transitions.
+- [ ] Port dB/log-scale controls and settings persistence.
+- [ ] Ensure performance parity with current implementation.
+
+Acceptance criteria:
+- Spectrogram and waveform behavior are functionally on par with current frontend.
+
+## Milestone F: Cutover and Cleanup
+
+- [ ] Make Kirigami frontend the default build/run path.
+- [ ] Remove or archive egui-specific UI modules after migration sign-off.
+- [ ] Update CI to test native frontend build and backend integration.
+- [ ] Write migration notes/changelog for users.
+
+Acceptance criteria:
+- Native frontend is the primary supported UI with no functional regressions vs pre-cutover baseline.
+
+## Post-Migration Parity/Feature Backlog
+
+### Core UX / Interaction
+- [ ] Implement full native top menu actions (`File/Edit/View/Playback/Help`).
+- [ ] Add playlist and library context menus for common actions.
+- [ ] Add drag-and-drop from library to playlist.
+- [ ] Add multi-select in playlist and library views.
+- [ ] Add status bar parity items (selection counts, queue duration, mode indicators).
+
+### Playback Features
+- [ ] Add repeat/shuffle modes.
+- [ ] Add ReplayGain support.
+- [ ] Add preamp/volume dB behavior options.
+- [ ] Add output device selector persistence.
+- [ ] Add optional crossfade and buffer tuning controls.
+
+### Library/Metadata
+- [ ] Add persistent playlist/session restore.
+- [ ] Add incremental library updates via filesystem watcher.
+- [ ] Add configurable library roots/config dialog parity.
+- [ ] Add richer sort/group/filter modes and extended metadata fields.
+
+### Spectrogram/Waveform Controls
+- [ ] Add spectrogram properties UI (dB range, log scale, color stops).
+- [ ] Add presets and reset to DeaDBeeF-like defaults.
+- [ ] Add waveform density/style options.
+
+### Quality/Performance
+- [ ] Add integration tests for queue transitions, gapless handoff, seek behavior.
+- [ ] Add regression tests for no early next-track waveform/metadata switch.
+- [ ] Add DB migration/versioning strategy.
+- [ ] Add profiling/telemetry for decode/analyze/render timing.
+
+## Working Rules
 
 - Keep items concrete and testable.
-- Prefer parity-first behavior over new custom UX until Milestone 2 is mostly complete.
-- When adding a new item, include acceptance criteria in the related PR/commit.
+- Frontend migration tasks should include explicit acceptance criteria before moving to next milestone.
+- Keep `ROADMAP.md` updated continuously as tasks land or are reprioritized.

@@ -1,12 +1,5 @@
-mod analysis;
-mod app;
-mod library;
-mod metadata;
-mod playback;
-mod ui;
-
-use app::FerrousApp;
 use eframe::egui;
+use ferrous::app::FerrousApp;
 use tracing_subscriber::{fmt, EnvFilter};
 
 fn main() -> eframe::Result<()> {
