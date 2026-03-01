@@ -152,6 +152,7 @@ struct JsonCommand {
     from: Option<f64>,
     to: Option<f64>,
     paths: Option<Vec<String>>,
+    path: Option<String>,
 }
 
 #[derive(Default)]
@@ -269,6 +270,14 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             let items: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             Some(BridgeCommand::Library(
                 ferrous::frontend_bridge::BridgeLibraryCommand::AppendAlbum(items),
+            ))
+        }
+        "scan_root" => {
+            let path = parsed
+                .path
+                .ok_or_else(|| "scan_root requires string field 'path'".to_string())?;
+            Some(BridgeCommand::Library(
+                ferrous::frontend_bridge::BridgeLibraryCommand::ScanRoot(PathBuf::from(path)),
             ))
         }
         "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),

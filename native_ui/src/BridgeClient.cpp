@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -157,6 +158,22 @@ void BridgeClient::appendAlbumAt(int index) {
     obj.insert(QStringLiteral("cmd"), QStringLiteral("append_album"));
     obj.insert(QStringLiteral("paths"), arr);
     sendJson(obj);
+}
+
+void BridgeClient::scanRoot(const QString &path) {
+    if (path.trimmed().isEmpty()) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("scan_root"));
+    obj.insert(QStringLiteral("path"), path);
+    sendJson(obj);
+}
+
+void BridgeClient::scanDefaultMusicRoot() {
+    const QString home = QDir::homePath();
+    const QString music = QDir(home).filePath(QStringLiteral("Music"));
+    scanRoot(music);
 }
 
 void BridgeClient::requestSnapshot() {

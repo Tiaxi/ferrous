@@ -361,7 +361,10 @@ Kirigami.ApplicationWindow {
                                     icon.name: "document-edit"
                                     display: AbstractButton.IconOnly
                                 }
-                                Button { text: "Configure" }
+                                Button {
+                                    text: "Scan Music"
+                                    onClicked: bridge.scanDefaultMusicRoot()
+                                }
                             }
 
                             TextField {
