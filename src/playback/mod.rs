@@ -1,0 +1,637 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
+use crossbeam_channel::{Receiver, Sender};
+
+use crate::analysis::AnalysisCommand;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlaybackState {
+    #[default]
+    Stopped,
+    Playing,
+    Paused,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PlaybackSnapshot {
+    pub state: PlaybackState,
+    pub position: Duration,
+    pub duration: Duration,
+    pub current: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PlaybackCommand {
+    LoadQueue(Vec<PathBuf>),
+    AddToQueue(Vec<PathBuf>),
+    PlayAt(usize),
+    Next,
+    Previous,
+    Play,
+    Pause,
+    Stop,
+    Seek(Duration),
+    Poll,
+}
+
+#[derive(Debug, Clone)]
+pub enum PlaybackEvent {
+    Snapshot(PlaybackSnapshot),
+    TrackChanged(PathBuf),
+    Seeked,
+}
+
+pub struct PlaybackEngine {
+    tx: Sender<PlaybackCommand>,
+}
+
+impl PlaybackEngine {
+    pub fn new(
+        analysis_tx: Sender<AnalysisCommand>,
+        pcm_tx: Sender<Vec<f32>>,
+    ) -> (Self, Receiver<PlaybackEvent>) {
+        let (tx, rx) = backend::spawn_engine(analysis_tx, pcm_tx);
+        (Self { tx }, rx)
+    }
+
+    pub fn command(&self, cmd: PlaybackCommand) {
+        let _ = self.tx.send(cmd);
+    }
+}
+
+#[cfg(not(feature = "gst"))]
+mod backend {
+    use std::f32::consts::PI;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use crossbeam_channel::{unbounded, Receiver, Sender};
+
+    use crate::analysis::AnalysisCommand;
+
+    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState};
+
+    pub fn spawn_engine(
+        analysis_tx: Sender<AnalysisCommand>,
+        pcm_tx: Sender<Vec<f32>>,
+    ) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
+        let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
+        let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
+
+        std::thread::spawn(move || {
+            let mut snapshot = PlaybackSnapshot::default();
+            let mut queue: Vec<PathBuf> = Vec::new();
+            let mut queue_idx = 0usize;
+            let mut last_tick = Instant::now();
+            let mut phase = 0.0f32;
+
+            while let Ok(cmd) = cmd_rx.recv() {
+                if snapshot.state == PlaybackState::Playing {
+                    let delta = last_tick.elapsed();
+                    snapshot.position = snapshot.position.saturating_add(delta);
+                }
+                last_tick = Instant::now();
+
+                match cmd {
+                    PlaybackCommand::LoadQueue(paths) => {
+                        queue = paths;
+                        queue_idx = 0;
+                        snapshot.position = Duration::ZERO;
+                        snapshot.duration = Duration::from_secs(180);
+                        snapshot.current = queue.first().cloned();
+                        if let Some(path) = snapshot.current.clone() {
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                            let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(48_000));
+                        }
+                    }
+                    PlaybackCommand::AddToQueue(paths) => {
+                        queue.extend(paths);
+                    }
+                    PlaybackCommand::PlayAt(idx) => {
+                        if let Some(path) = queue.get(idx).cloned() {
+                            queue_idx = idx;
+                            snapshot.current = Some(path.clone());
+                            snapshot.position = Duration::ZERO;
+                            snapshot.duration = Duration::from_secs(180);
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                        }
+                    }
+                    PlaybackCommand::Next => {
+                        if queue_idx + 1 < queue.len() {
+                            queue_idx += 1;
+                            if let Some(next) = queue.get(queue_idx).cloned() {
+                                snapshot.current = Some(next.clone());
+                                snapshot.position = Duration::ZERO;
+                                snapshot.duration = Duration::from_secs(180);
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged(next));
+                            }
+                        }
+                    }
+                    PlaybackCommand::Previous => {
+                        if queue_idx > 0 {
+                            queue_idx -= 1;
+                            if let Some(prev) = queue.get(queue_idx).cloned() {
+                                snapshot.current = Some(prev.clone());
+                                snapshot.position = Duration::ZERO;
+                                snapshot.duration = Duration::from_secs(180);
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged(prev));
+                            }
+                        }
+                    }
+                    PlaybackCommand::Play => {
+                        snapshot.state = PlaybackState::Playing;
+                    }
+                    PlaybackCommand::Pause => {
+                        snapshot.state = PlaybackState::Paused;
+                    }
+                    PlaybackCommand::Stop => {
+                        snapshot.state = PlaybackState::Stopped;
+                        snapshot.position = Duration::ZERO;
+                    }
+                    PlaybackCommand::Seek(pos) => {
+                        snapshot.position = pos.min(snapshot.duration);
+                        let _ = event_tx.send(PlaybackEvent::Seeked);
+                    }
+                    PlaybackCommand::Poll => {
+                        if snapshot.state == PlaybackState::Playing {
+                            // Generate synthetic PCM when GStreamer is disabled, so visuals remain testable.
+                            let mut chunk = Vec::with_capacity(1024);
+                            for _ in 0..1024 {
+                                chunk.push(0.25 * phase.sin());
+                                phase += (2.0 * PI * 440.0) / 48_000.0;
+                                if phase > 2.0 * PI {
+                                    phase -= 2.0 * PI;
+                                }
+                            }
+                            let _ = pcm_tx.try_send(chunk);
+                        }
+
+                        if snapshot.state == PlaybackState::Playing
+                            && snapshot.position >= snapshot.duration
+                        {
+                            queue_idx += 1;
+                            if let Some(next) = queue.get(queue_idx).cloned() {
+                                snapshot.current = Some(next.clone());
+                                snapshot.position = Duration::ZERO;
+                                snapshot.duration = Duration::from_secs(180);
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged(next));
+                            } else {
+                                snapshot.state = PlaybackState::Stopped;
+                                snapshot.position = Duration::ZERO;
+                            }
+                        }
+                    }
+                }
+
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+            }
+        });
+
+        (cmd_tx, event_rx)
+    }
+}
+
+#[cfg(feature = "gst")]
+mod backend {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use anyhow::{anyhow, Context};
+    use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
+    use gst::prelude::*;
+    use gstreamer as gst;
+    use gstreamer_app as gst_app;
+
+    use crate::analysis::AnalysisCommand;
+
+    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState};
+
+    struct GaplessQueue {
+        queue: Vec<PathBuf>,
+        current_idx: usize,
+    }
+
+    impl GaplessQueue {
+        fn new() -> Self {
+            Self {
+                queue: Vec::new(),
+                current_idx: 0,
+            }
+        }
+
+        fn set_queue(&mut self, queue: Vec<PathBuf>) {
+            self.queue = queue;
+            self.current_idx = 0;
+        }
+
+        fn add_to_queue(&mut self, items: Vec<PathBuf>) {
+            self.queue.extend(items);
+        }
+
+        fn current(&self) -> Option<PathBuf> {
+            self.queue.get(self.current_idx).cloned()
+        }
+
+        fn set_current(&mut self, idx: usize) -> Option<PathBuf> {
+            if idx < self.queue.len() {
+                self.current_idx = idx;
+                self.current()
+            } else {
+                None
+            }
+        }
+
+        fn next(&mut self) -> Option<PathBuf> {
+            self.current_idx = self.current_idx.saturating_add(1);
+            self.queue.get(self.current_idx).cloned()
+        }
+
+        fn previous(&mut self) -> Option<PathBuf> {
+            if self.current_idx > 0 {
+                self.current_idx -= 1;
+                return self.current();
+            }
+            None
+        }
+    }
+
+    pub fn spawn_engine(
+        analysis_tx: Sender<AnalysisCommand>,
+        pcm_tx: Sender<Vec<f32>>,
+    ) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
+        let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
+        let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
+
+        std::thread::spawn(move || {
+            if let Err(err) = run_gst_engine(cmd_rx, event_tx.clone(), analysis_tx, pcm_tx) {
+                tracing::error!("gstreamer playback engine failed: {err:#}");
+            }
+        });
+
+        (cmd_tx, event_rx)
+    }
+
+    fn run_gst_engine(
+        cmd_rx: Receiver<PlaybackCommand>,
+        event_tx: Sender<PlaybackEvent>,
+        analysis_tx: Sender<AnalysisCommand>,
+        pcm_tx: Sender<Vec<f32>>,
+    ) -> anyhow::Result<()> {
+        gst::init().context("gst::init failed")?;
+
+        let playbin = gst::ElementFactory::make("playbin")
+            .build()
+            .map_err(|_| anyhow!("failed to create playbin"))?;
+
+        let analysis_sink = build_analysis_audio_sink(analysis_tx, pcm_tx)?;
+        playbin.set_property("audio-sink", &analysis_sink);
+
+        let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
+
+        {
+            let queue_state = Arc::clone(&queue_state);
+            let event_tx = event_tx.clone();
+            playbin.connect("about-to-finish", false, move |values| {
+                let maybe_playbin = values.first().and_then(|v| v.get::<gst::Element>().ok());
+                let Some(playbin_obj) = maybe_playbin else {
+                    return None;
+                };
+
+                let next = queue_state.lock().ok().and_then(|mut q| q.next());
+                if let Some(next_path) = next {
+                    if let Some(uri) = file_uri(&next_path) {
+                        playbin_obj.set_property("uri", uri);
+                        let _ = event_tx.send(PlaybackEvent::TrackChanged(next_path));
+                    }
+                }
+                None
+            });
+        }
+
+        let bus = playbin.bus().context("playbin has no bus")?;
+        let mut snapshot = PlaybackSnapshot::default();
+
+        loop {
+            match cmd_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(cmd) => {
+                    apply_command(&playbin, &queue_state, &event_tx, &mut snapshot, cmd);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+
+            while let Some(msg) = bus.pop() {
+                handle_bus_message(&playbin, &event_tx, &mut snapshot, msg);
+            }
+        }
+
+        let _ = playbin.set_state(gst::State::Null);
+        Ok(())
+    }
+
+    fn apply_command(
+        playbin: &gst::Element,
+        queue_state: &Arc<Mutex<GaplessQueue>>,
+        event_tx: &Sender<PlaybackEvent>,
+        snapshot: &mut PlaybackSnapshot,
+        cmd: PlaybackCommand,
+    ) {
+        match cmd {
+            PlaybackCommand::LoadQueue(paths) => {
+                if paths.is_empty() {
+                    return;
+                }
+
+                if let Ok(mut state) = queue_state.lock() {
+                    state.set_queue(paths);
+                    if let Some(first) = state.current() {
+                        if let Some(uri) = file_uri(&first) {
+                            playbin.set_property("uri", uri);
+                            snapshot.current = Some(first.clone());
+                            snapshot.position = Duration::ZERO;
+                            snapshot.duration = Duration::ZERO;
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(first));
+                        }
+                    }
+                }
+            }
+            PlaybackCommand::AddToQueue(paths) => {
+                if let Ok(mut state) = queue_state.lock() {
+                    state.add_to_queue(paths);
+                }
+            }
+            PlaybackCommand::PlayAt(idx) => {
+                if let Ok(mut state) = queue_state.lock() {
+                    if let Some(path) = state.set_current(idx) {
+                        if let Some(uri) = file_uri(&path) {
+                            playbin.set_property("uri", uri);
+                            snapshot.current = Some(path.clone());
+                            snapshot.position = Duration::ZERO;
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                        }
+                    }
+                }
+            }
+            PlaybackCommand::Next => {
+                if let Ok(mut state) = queue_state.lock() {
+                    if let Some(path) = state.next() {
+                        if let Some(uri) = file_uri(&path) {
+                            playbin.set_property("uri", uri);
+                            snapshot.current = Some(path.clone());
+                            snapshot.position = Duration::ZERO;
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                        }
+                    }
+                }
+            }
+            PlaybackCommand::Previous => {
+                if let Ok(mut state) = queue_state.lock() {
+                    if let Some(path) = state.previous() {
+                        if let Some(uri) = file_uri(&path) {
+                            playbin.set_property("uri", uri);
+                            snapshot.current = Some(path.clone());
+                            snapshot.position = Duration::ZERO;
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                        }
+                    }
+                }
+            }
+            PlaybackCommand::Play => {
+                if playbin.set_state(gst::State::Playing).is_ok() {
+                    snapshot.state = PlaybackState::Playing;
+                }
+            }
+            PlaybackCommand::Pause => {
+                if playbin.set_state(gst::State::Paused).is_ok() {
+                    snapshot.state = PlaybackState::Paused;
+                }
+            }
+            PlaybackCommand::Stop => {
+                if playbin.set_state(gst::State::Ready).is_ok() {
+                    snapshot.state = PlaybackState::Stopped;
+                    snapshot.position = Duration::ZERO;
+                }
+            }
+            PlaybackCommand::Seek(pos) => {
+                let nanos = pos.as_nanos().min(u64::MAX as u128) as u64;
+                let target = gst::ClockTime::from_nseconds(nanos);
+                let _ =
+                    playbin.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, target);
+                let _ = event_tx.send(PlaybackEvent::Seeked);
+            }
+            PlaybackCommand::Poll => {
+                if let Some(pos) = playbin.query_position::<gst::ClockTime>() {
+                    snapshot.position = Duration::from_nanos(pos.nseconds());
+                }
+                if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
+                    snapshot.duration = Duration::from_nanos(dur.nseconds());
+                }
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+            }
+        }
+    }
+
+    fn handle_bus_message(
+        _playbin: &gst::Element,
+        event_tx: &Sender<PlaybackEvent>,
+        snapshot: &mut PlaybackSnapshot,
+        msg: gst::Message,
+    ) {
+        match msg.view() {
+            gst::MessageView::Eos(..) => {
+                snapshot.state = PlaybackState::Stopped;
+                snapshot.position = Duration::ZERO;
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+            }
+            gst::MessageView::Error(err) => {
+                tracing::error!(
+                    "gstreamer error from {:?}: {} ({:?})",
+                    err.src().map(|s| s.path_string()),
+                    err.error(),
+                    err.debug()
+                );
+                snapshot.state = PlaybackState::Stopped;
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    fn build_analysis_audio_sink(
+        analysis_tx: Sender<AnalysisCommand>,
+        pcm_tx: Sender<Vec<f32>>,
+    ) -> anyhow::Result<gst::Bin> {
+        let bin = gst::Bin::new();
+
+        let tee = gst::ElementFactory::make("tee")
+            .build()
+            .map_err(|_| anyhow!("missing tee element"))?;
+
+        let queue_out = gst::ElementFactory::make("queue")
+            .build()
+            .map_err(|_| anyhow!("missing queue element"))?;
+        let sink_out = gst::ElementFactory::make("autoaudiosink")
+            .build()
+            .map_err(|_| anyhow!("missing autoaudiosink element"))?;
+
+        let queue_tap = gst::ElementFactory::make("queue")
+            .build()
+            .map_err(|_| anyhow!("missing queue element"))?;
+        queue_tap.set_property_from_str("leaky", "downstream");
+        queue_tap.set_property("max-size-buffers", 128u32);
+        queue_tap.set_property("max-size-bytes", 0u32);
+        queue_tap.set_property("max-size-time", 0u64);
+        let conv = gst::ElementFactory::make("audioconvert")
+            .build()
+            .map_err(|_| anyhow!("missing audioconvert element"))?;
+        let resample = gst::ElementFactory::make("audioresample")
+            .build()
+            .map_err(|_| anyhow!("missing audioresample element"))?;
+        let capsfilter = gst::ElementFactory::make("capsfilter")
+            .build()
+            .map_err(|_| anyhow!("missing capsfilter element"))?;
+
+        let caps = gst::Caps::builder("audio/x-raw")
+            .field("format", "F32LE")
+            .field("layout", "interleaved")
+            .field("channels", 1i32)
+            // Keep analysis workload constant across source formats/codecs.
+            .field("rate", 44_100i32)
+            .build();
+        capsfilter.set_property("caps", &caps);
+
+        let appsink = gst_app::AppSink::builder()
+            .caps(&caps)
+            .drop(true)
+            .max_buffers(8)
+            .sync(true)
+            .build();
+
+        appsink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample({
+                    let mut last_rate_hz: u32 = 0;
+                    let profile_enabled = std::env::var_os("FERROUS_PROFILE").is_some();
+                    let mut prof_last = std::time::Instant::now();
+                    let mut prof_sent = 0usize;
+                    let mut prof_dropped = 0usize;
+                    let mut prof_samples = 0usize;
+                    move |sink| {
+                        if let Ok(sample) = sink.pull_sample() {
+                            if let Some(buffer) = sample.buffer() {
+                                if let Ok(map) = buffer.map_readable() {
+                                    let bytes = map.as_slice();
+                                    if !bytes.is_empty() {
+                                        let mut pcm = Vec::with_capacity(bytes.len() / 4);
+                                        for chunk in bytes.chunks_exact(4) {
+                                            pcm.push(f32::from_le_bytes([
+                                                chunk[0], chunk[1], chunk[2], chunk[3],
+                                            ]));
+                                        }
+                                        if !pcm.is_empty() {
+                                            if let Some(caps) = sample.caps() {
+                                                if let Some(s) = caps.structure(0) {
+                                                    if let Ok(rate) = s.get::<i32>("rate") {
+                                                        if rate > 0 && last_rate_hz != rate as u32 {
+                                                            last_rate_hz = rate as u32;
+                                                            let _ = analysis_tx.send(
+                                                                AnalysisCommand::SetSampleRate(
+                                                                    rate as u32,
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // Split large buffers into smaller chunks for smoother analysis pacing.
+                                            for part in pcm.chunks(512) {
+                                                if pcm_tx.try_send(part.to_vec()).is_ok() {
+                                                    prof_sent += 1;
+                                                    prof_samples += part.len();
+                                                } else {
+                                                    prof_dropped += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
+                            eprintln!(
+                                "[gst] pcm_chunks sent/s={} dropped/s={} samples/s={} rate={}Hz",
+                                prof_sent, prof_dropped, prof_samples, last_rate_hz
+                            );
+                            prof_last = std::time::Instant::now();
+                            prof_sent = 0;
+                            prof_dropped = 0;
+                            prof_samples = 0;
+                        }
+                        Ok(gst::FlowSuccess::Ok)
+                    }
+                })
+                .build(),
+        );
+
+        bin.add_many([
+            &tee,
+            &queue_out,
+            &sink_out,
+            &queue_tap,
+            &conv,
+            &resample,
+            &capsfilter,
+            appsink.upcast_ref(),
+        ])
+        .context("failed to add elements to analysis audio bin")?;
+
+        gst::Element::link_many([&queue_out, &sink_out]).context("failed to link output branch")?;
+        gst::Element::link_many([
+            &queue_tap,
+            &conv,
+            &resample,
+            &capsfilter,
+            appsink.upcast_ref(),
+        ])
+        .context("failed to link analysis branch")?;
+
+        let tee_out_pad = tee
+            .request_pad_simple("src_%u")
+            .ok_or_else(|| anyhow!("failed requesting tee src pad for output"))?;
+        let queue_out_sink_pad = queue_out
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("missing queue_out sink pad"))?;
+        tee_out_pad
+            .link(&queue_out_sink_pad)
+            .map_err(|e| anyhow!("failed linking tee->output queue: {e:?}"))?;
+
+        let tee_tap_pad = tee
+            .request_pad_simple("src_%u")
+            .ok_or_else(|| anyhow!("failed requesting tee src pad for analysis"))?;
+        let queue_tap_sink_pad = queue_tap
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("missing queue_tap sink pad"))?;
+        tee_tap_pad
+            .link(&queue_tap_sink_pad)
+            .map_err(|e| anyhow!("failed linking tee->analysis queue: {e:?}"))?;
+
+        let tee_sink_pad = tee
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("missing tee sink pad"))?;
+        let ghost = gst::GhostPad::with_target(&tee_sink_pad)
+            .map_err(|_| anyhow!("failed creating ghost pad"))?;
+        ghost
+            .set_active(true)
+            .map_err(|_| anyhow!("failed activating ghost pad"))?;
+        bin.add_pad(&ghost)
+            .map_err(|_| anyhow!("failed adding ghost pad to bin"))?;
+
+        Ok(bin)
+    }
+
+    fn file_uri(path: &Path) -> Option<String> {
+        url::Url::from_file_path(path).ok().map(|u| u.to_string())
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "ferrous"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+crossbeam-channel = "0.5"
+eframe = "0.31"
+egui = "0.31"
+gstreamer = { version = "0.23", optional = true }
+gstreamer-app = { version = "0.23", optional = true }
+gstreamer-audio = { version = "0.23", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+lofty = "0.22"
+parking_lot = "0.12"
+realfft = "3"
+rfd = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["flac", "mp3"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+url = "2"
+
+[features]
+default = []
+gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio"]
