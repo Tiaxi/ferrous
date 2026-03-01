@@ -79,6 +79,18 @@ cmake --build build
 FERROUS_BRIDGE_CMD='cargo run --bin native_frontend --features gst -- --json-bridge' ./build/ferrous_kirigami_shell
 ```
 
+One-command dev path from repo root:
+
+```bash
+./scripts/run-native-ui.sh
+```
+
+Build-only check:
+
+```bash
+./scripts/run-native-ui.sh --no-run
+```
+
 Notes:
 
 - The shell is currently Milestone A scaffolding (layout + control wiring + status/footer).

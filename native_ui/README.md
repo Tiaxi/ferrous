@@ -10,6 +10,20 @@ cmake -B build -G Ninja
 cmake --build build
 ```
 
+## Fast Dev Launch
+
+From repo root:
+
+```bash
+./scripts/run-native-ui.sh
+```
+
+Build-only (no GUI launch):
+
+```bash
+./scripts/run-native-ui.sh --no-run
+```
+
 ## Run (dev mode)
 
 ```bash

@@ -50,6 +50,12 @@ If you implement and gate GStreamer code behind the feature:
 cargo run --features gst
 ```
 
+Native KDE frontend (Qt6/QML + Kirigami) dev launcher:
+
+```bash
+./scripts/run-native-ui.sh
+```
+
 ## Project layout
 
 - `src/main.rs`: app entrypoint
