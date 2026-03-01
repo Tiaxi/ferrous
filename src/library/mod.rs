@@ -15,6 +15,7 @@ pub struct LibraryTrack {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub track_no: Option<u32>,
     pub duration_secs: Option<f32>,
 }
 
@@ -130,6 +131,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             title TEXT NOT NULL,
             artist TEXT NOT NULL,
             album TEXT NOT NULL,
+            track_no INTEGER,
             duration_secs REAL,
             mtime_ns INTEGER NOT NULL,
             size_bytes INTEGER NOT NULL,
@@ -141,6 +143,8 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
         "#,
     )?;
+    // Migration for existing DBs created before track_no support.
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN track_no INTEGER", []);
     Ok(())
 }
 
@@ -158,13 +162,14 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
 
     if let Ok(mut stmt) = conn.prepare(
         r#"
-        SELECT path, title, artist, album, duration_secs
+        SELECT path, title, artist, album, track_no, duration_secs
         FROM tracks
         ORDER BY
             CASE WHEN artist = '' THEN 1 ELSE 0 END,
             artist COLLATE NOCASE,
             album COLLATE NOCASE,
-            title COLLATE NOCASE,
+            CASE WHEN track_no IS NULL THEN 1 ELSE 0 END,
+            track_no ASC,
             path COLLATE NOCASE
         "#,
     ) {
@@ -174,7 +179,10 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
                 title: row.get::<_, String>(1)?,
                 artist: row.get::<_, String>(2)?,
                 album: row.get::<_, String>(3)?,
-                duration_secs: row.get::<_, Option<f32>>(4)?,
+                track_no: row
+                    .get::<_, Option<i64>>(4)?
+                    .and_then(|v| u32::try_from(v).ok()),
+                duration_secs: row.get::<_, Option<f32>>(5)?,
             })
         }) {
             for row in rows.flatten() {
@@ -262,12 +270,13 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
             if tx
                 .execute(
                     r#"
-                    INSERT INTO tracks(path, title, artist, album, duration_secs, mtime_ns, size_bytes, indexed_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    INSERT INTO tracks(path, title, artist, album, track_no, duration_secs, mtime_ns, size_bytes, indexed_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                     ON CONFLICT(path) DO UPDATE SET
                         title=excluded.title,
                         artist=excluded.artist,
                         album=excluded.album,
+                        track_no=excluded.track_no,
                         duration_secs=excluded.duration_secs,
                         mtime_ns=excluded.mtime_ns,
                         size_bytes=excluded.size_bytes,
@@ -278,6 +287,7 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
                         indexed.title,
                         indexed.artist,
                         indexed.album,
+                        indexed.track_no.map(i64::from),
                         indexed.duration_secs,
                         mtime_ns,
                         size_bytes,
@@ -318,6 +328,7 @@ struct IndexedTrack {
     title: String,
     artist: String,
     album: String,
+    track_no: Option<u32>,
     duration_secs: Option<f32>,
 }
 
@@ -330,6 +341,7 @@ fn read_track_info(path: &Path) -> IndexedTrack {
             .to_owned(),
         artist: String::new(),
         album: String::new(),
+        track_no: None,
         duration_secs: None,
     };
 
@@ -344,6 +356,7 @@ fn read_track_info(path: &Path) -> IndexedTrack {
             if let Some(album) = tag.album() {
                 out.album = album.into_owned();
             }
+            out.track_no = tag.track();
         }
         out.duration_secs = Some(tagged.properties().duration().as_secs_f32());
     }

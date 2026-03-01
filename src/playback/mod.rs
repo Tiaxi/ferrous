@@ -19,12 +19,14 @@ pub struct PlaybackSnapshot {
     pub position: Duration,
     pub duration: Duration,
     pub current: Option<PathBuf>,
+    pub volume: f32,
 }
 
 #[derive(Debug, Clone)]
 pub enum PlaybackCommand {
     LoadQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
+    ClearQueue,
     PlayAt(usize),
     Next,
     Previous,
@@ -32,6 +34,7 @@ pub enum PlaybackCommand {
     Pause,
     Stop,
     Seek(Duration),
+    SetVolume(f32),
     Poll,
 }
 
@@ -81,6 +84,7 @@ mod backend {
 
         std::thread::spawn(move || {
             let mut snapshot = PlaybackSnapshot::default();
+            snapshot.volume = 1.0;
             let mut queue: Vec<PathBuf> = Vec::new();
             let mut queue_idx = 0usize;
             let mut last_tick = Instant::now();
@@ -107,6 +111,14 @@ mod backend {
                     }
                     PlaybackCommand::AddToQueue(paths) => {
                         queue.extend(paths);
+                    }
+                    PlaybackCommand::ClearQueue => {
+                        queue.clear();
+                        queue_idx = 0;
+                        snapshot.current = None;
+                        snapshot.state = PlaybackState::Stopped;
+                        snapshot.position = Duration::ZERO;
+                        snapshot.duration = Duration::ZERO;
                     }
                     PlaybackCommand::PlayAt(idx) => {
                         if let Some(path) = queue.get(idx).cloned() {
@@ -152,6 +164,9 @@ mod backend {
                     PlaybackCommand::Seek(pos) => {
                         snapshot.position = pos.min(snapshot.duration);
                         let _ = event_tx.send(PlaybackEvent::Seeked);
+                    }
+                    PlaybackCommand::SetVolume(vol) => {
+                        snapshot.volume = vol.clamp(0.0, 1.0);
                     }
                     PlaybackCommand::Poll => {
                         if snapshot.state == PlaybackState::Playing {
@@ -228,6 +243,11 @@ mod backend {
 
         fn add_to_queue(&mut self, items: Vec<PathBuf>) {
             self.queue.extend(items);
+        }
+
+        fn clear(&mut self) {
+            self.queue.clear();
+            self.current_idx = 0;
         }
 
         fn current(&self) -> Option<PathBuf> {
@@ -312,6 +332,7 @@ mod backend {
 
         let bus = playbin.bus().context("playbin has no bus")?;
         let mut snapshot = PlaybackSnapshot::default();
+        snapshot.volume = 1.0;
 
         loop {
             match cmd_rx.recv_timeout(Duration::from_millis(20)) {
@@ -359,6 +380,17 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     state.add_to_queue(paths);
                 }
+            }
+            PlaybackCommand::ClearQueue => {
+                if let Ok(mut state) = queue_state.lock() {
+                    state.clear();
+                }
+                let _ = playbin.set_state(gst::State::Ready);
+                snapshot.current = None;
+                snapshot.state = PlaybackState::Stopped;
+                snapshot.position = Duration::ZERO;
+                snapshot.duration = Duration::ZERO;
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
             PlaybackCommand::PlayAt(idx) => {
                 if let Ok(mut state) = queue_state.lock() {
@@ -415,6 +447,12 @@ mod backend {
                 let _ =
                     playbin.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, target);
                 let _ = event_tx.send(PlaybackEvent::Seeked);
+            }
+            PlaybackCommand::SetVolume(vol) => {
+                let v = vol.clamp(0.0, 1.0) as f64;
+                playbin.set_property("volume", v);
+                snapshot.volume = v as f32;
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
             PlaybackCommand::Poll => {
                 if let Some(pos) = playbin.query_position::<gst::ClockTime>() {

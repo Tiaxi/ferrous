@@ -1,10 +1,12 @@
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use std::{ffi::OsStr, path::PathBuf};
 
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2,
 };
+use lofty::file::TaggedFileExt;
 
 use crate::analysis::AnalysisSnapshot;
 use crate::library::LibrarySnapshot;
@@ -22,13 +24,43 @@ pub enum TopPanelAction {
     Pause,
     Stop,
     SeekTo(Duration),
+    SetVolume(f32),
 }
 
 #[derive(Default)]
 pub struct CenterPanelAction {
     pub queue_play_index: Option<usize>,
+    pub queue_select_index: Option<usize>,
+    pub queue_clear: bool,
+    pub queue_remove_index: Option<usize>,
+    pub queue_move_up: bool,
+    pub queue_move_down: bool,
     pub scan_library_folder: bool,
+    pub add_library_track: Option<PathBuf>,
     pub play_library_track: Option<PathBuf>,
+    pub set_fft_size: Option<usize>,
+    pub select_playlist: Option<usize>,
+    pub create_playlist: bool,
+    pub delete_playlist: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpectrogramUiSettings {
+    pub fft_size: usize,
+    pub floor_cut: f32,
+    pub bass_gain_min: f32,
+    pub highlight_knee: f32,
+}
+
+impl Default for SpectrogramUiSettings {
+    fn default() -> Self {
+        Self {
+            fft_size: 512,
+            floor_cut: 0.0,
+            bass_gain_min: 0.95,
+            highlight_knee: 0.90,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -40,6 +72,21 @@ pub struct SpectrogramCache {
     write_x: usize,
     written_cols: usize,
     filled: bool,
+    fps_last_instant: Option<Instant>,
+    fps_accum_frames: u32,
+    fps_value: f32,
+}
+
+#[derive(Default)]
+pub struct CoverArtCache {
+    texture: Option<TextureHandle>,
+    key: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct LibraryArtCache {
+    thumbs: HashMap<u64, TextureHandle>,
+    missing: HashSet<u64>,
 }
 
 pub fn draw_top_panel(
@@ -94,6 +141,18 @@ pub fn draw_top_panel(
                 format_duration(playback.position),
                 format_duration(playback.duration)
             ));
+            ui.separator();
+            let mut vol = playback.volume.clamp(0.0, 1.0);
+            let changed = ui
+                .add(
+                    egui::Slider::new(&mut vol, 0.0..=1.0)
+                        .text("Vol")
+                        .clamping(egui::SliderClamping::Always),
+                )
+                .changed();
+            if changed {
+                action = TopPanelAction::SetVolume(vol);
+            }
         });
 
         ui.horizontal(|ui| {
@@ -112,7 +171,31 @@ pub fn draw_top_panel(
             } else {
                 metadata.artist.as_str()
             };
-            ui.label(format!("{state} | {title} {artist}"));
+            let mut fmt = Vec::new();
+            if let Some(sr) = metadata.sample_rate_hz {
+                fmt.push(format!("{sr}Hz"));
+            }
+            if let Some(bits) = metadata.bit_depth {
+                fmt.push(format!("{bits}bit"));
+            }
+            if let Some(ch) = metadata.channels {
+                fmt.push(if ch == 1 {
+                    "mono".to_string()
+                } else if ch == 2 {
+                    "stereo".to_string()
+                } else {
+                    format!("{ch}ch")
+                });
+            }
+            if let Some(br) = metadata.bitrate_kbps {
+                fmt.push(format!("{br}kbps"));
+            }
+            let fmt_str = if fmt.is_empty() {
+                String::new()
+            } else {
+                format!(" | {}", fmt.join(" "))
+            };
+            ui.label(format!("{state} | {title} {artist}{fmt_str}"));
         });
     });
 
@@ -124,130 +207,502 @@ pub fn draw_center_panel(
     analysis: &AnalysisSnapshot,
     metadata: &TrackMetadata,
     queue: &[PathBuf],
+    playlist_names: &[String],
+    active_playlist: usize,
+    selected_queue_index: Option<usize>,
     current: Option<&PathBuf>,
     library: &LibrarySnapshot,
+    library_query: &mut String,
+    selected_library_root: &mut Option<PathBuf>,
+    selected_library_track: &mut Option<PathBuf>,
+    expanded_library_groups: &mut HashMap<String, bool>,
+    spectro_ui: &mut SpectrogramUiSettings,
+    cover_art_cache: &mut CoverArtCache,
+    library_art_cache: &mut LibraryArtCache,
     spectrogram_cache: &mut SpectrogramCache,
 ) -> CenterPanelAction {
     let mut action = CenterPanelAction::default();
     egui::CentralPanel::default().show(ctx, |ui| {
-        let top_h = (ui.available_height() * 0.52).clamp(220.0, 420.0);
-        ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), top_h),
-            egui::Layout::left_to_right(egui::Align::Min),
-            |ui| {
-                let left_w = 260.0_f32.min(ui.available_width() * 0.35);
-                ui.allocate_ui(Vec2::new(left_w, top_h), |ui| {
-                    ui.heading("Library");
-                    ui.separator();
-                    let cover_h = (top_h * 0.58).max(120.0);
-                    let (cover_rect, _) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), cover_h),
-                        Sense::hover(),
-                    );
-                    let painter = ui.painter_at(cover_rect);
-                    painter.rect_filled(cover_rect, 2.0, Color32::from_gray(35));
-                    painter.text(
-                        cover_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        if metadata.cover_art_rgba.is_some() {
-                            "Cover art loaded"
-                        } else {
-                            "No cover art"
-                        },
-                        egui::TextStyle::Body.resolve(ui.style()),
-                        Color32::from_gray(180),
-                    );
+        let top_h = (ui.available_height() * 0.52).clamp(280.0, 540.0);
+        ui.allocate_ui(Vec2::new(ui.available_width(), top_h), |ui| {
+            let full_w = ui.available_width();
+            let mut left_w = (full_w * 0.28).clamp(250.0, 390.0);
+            left_w = left_w.min((full_w - 180.0).max(120.0));
+            let right_w = (full_w - left_w - 12.0).max(120.0);
 
-                    ui.separator();
-                    ui.label(format!("Title: {}", fallback(&metadata.title, "Unknown")));
-                    ui.label(format!("Artist: {}", fallback(&metadata.artist, "Unknown")));
-                    ui.label(format!("Album: {}", fallback(&metadata.album, "Unknown")));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Scan Folder").clicked() && !library.scan_in_progress {
-                            action.scan_library_folder = true;
-                        }
-                        ui.label(format!("Indexed: {}", library.tracks.len()));
-                    });
-                    if library.scan_in_progress {
-                        ui.label(format!("Scanning... {} files", library.scanned_files));
-                    }
-                    if let Some(err) = library.last_error.as_ref() {
-                        ui.colored_label(Color32::from_rgb(200, 70, 70), err);
-                    }
-                    ui.separator();
-                    ui.label("Indexed Folders");
-                    egui::ScrollArea::vertical()
-                        .max_height((top_h * 0.18).max(50.0))
-                        .show(ui, |ui| {
-                            if library.roots.is_empty() {
-                                ui.label("No folders added");
-                                return;
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(left_w, top_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.heading("Library");
+                        ui.separator();
+                        let cover_h = (top_h * 0.34).max(114.0);
+                        draw_cover_art(
+                            ui,
+                            metadata,
+                            cover_art_cache,
+                            Vec2::new(ui.available_width(), cover_h),
+                        );
+
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Scan Folder").clicked() && !library.scan_in_progress {
+                                action.scan_library_folder = true;
                             }
-                            for root in &library.roots {
-                                ui.label(root.display().to_string());
+                            if ui
+                                .add_enabled(
+                                    selected_library_track.is_some(),
+                                    egui::Button::new("Add"),
+                                )
+                                .clicked()
+                            {
+                                action.add_library_track = selected_library_track.clone();
+                            }
+                            if ui
+                                .add_enabled(
+                                    selected_library_track.is_some(),
+                                    egui::Button::new("Play"),
+                                )
+                                .clicked()
+                            {
+                                action.play_library_track = selected_library_track.clone();
                             }
                         });
-                    ui.separator();
-                    ui.label("Library Tracks");
-                    egui::ScrollArea::vertical()
-                        .max_height((top_h * 0.34).max(80.0))
-                        .show(ui, |ui| {
-                            if library.tracks.is_empty() {
-                                ui.label("No tracks indexed");
-                                return;
-                            }
-                            for track in &library.tracks {
-                                let mut text = if track.artist.is_empty() {
-                                    track.title.clone()
+
+                        ui.horizontal(|ui| {
+                            ui.label("Search:");
+                            ui.text_edit_singleline(library_query);
+                        });
+                        let query = library_query.trim().to_lowercase();
+                        let selected_root = selected_library_root.clone();
+                        let visible_indices: Vec<usize> = library
+                            .tracks
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, track)| {
+                                if let Some(root) = selected_root.as_ref() {
+                                    if !track.path.starts_with(root) {
+                                        return None;
+                                    }
+                                }
+
+                                if query.is_empty() {
+                                    return Some(idx);
+                                }
+
+                                let hay = format!(
+                                    "{} {} {} {}",
+                                    track.title,
+                                    track.artist,
+                                    track.album,
+                                    track.path.display()
+                                )
+                                .to_lowercase();
+                                if hay.contains(&query) {
+                                    Some(idx)
                                 } else {
-                                    format!("{} - {}", track.artist, track.title)
+                                    None
+                                }
+                            })
+                            .collect();
+                        ui.label(format!(
+                            "Indexed tracks: {}  |  Visible: {}",
+                            library.tracks.len(),
+                            visible_indices.len()
+                        ));
+                        if library.scan_in_progress {
+                            ui.label(format!("Scanning... {} files", library.scanned_files));
+                        }
+                        if let Some(err) = library.last_error.as_ref() {
+                            ui.colored_label(Color32::from_rgb(200, 70, 70), err);
+                        }
+
+                        ui.separator();
+                        ui.label("Indexed Folders");
+                        egui::ScrollArea::vertical()
+                            .max_height((top_h * 0.16).clamp(56.0, 92.0))
+                            .show(ui, |ui| {
+                                if library.roots.is_empty() {
+                                    ui.label("No folders added");
+                                } else {
+                                    let row_w = ui.available_width().max(90.0);
+                                    let max_chars = ((row_w / 6.8).floor() as usize).max(8);
+                                    for root in &library.roots {
+                                        let root_text =
+                                            ellipsize(&root.display().to_string(), max_chars);
+                                        let selected = selected_library_root
+                                            .as_ref()
+                                            .map(|p| p == root)
+                                            .unwrap_or(false);
+                                        let resp = ui.add_sized(
+                                            Vec2::new(row_w, 20.0),
+                                            egui::Button::new(root_text).selected(selected),
+                                        );
+                                        if resp.clicked() {
+                                            if selected {
+                                                *selected_library_root = None;
+                                            } else {
+                                                *selected_library_root = Some(root.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+
+                        ui.separator();
+                        ui.label("Library Tracks");
+                        if visible_indices.is_empty() {
+                            ui.label("No tracks indexed");
+                        } else {
+                            struct AlbumGroup {
+                                key: String,
+                                artist: String,
+                                album: String,
+                                track_indices: Vec<usize>,
+                            }
+
+                            let mut groups: Vec<AlbumGroup> = Vec::new();
+                            for idx in visible_indices.iter().copied() {
+                                let Some(track) = library.tracks.get(idx) else {
+                                    continue;
                                 };
-                                if !track.album.is_empty() {
-                                    text.push_str(&format!("  [{}]", track.album));
-                                }
-                                if let Some(secs) = track.duration_secs {
-                                    text.push_str(&format!(
-                                        "  {:02}:{:02}",
-                                        (secs as u64) / 60,
-                                        (secs as u64) % 60
-                                    ));
-                                }
-                                let resp = ui.selectable_label(false, text);
-                                if resp.double_clicked() {
-                                    action.play_library_track = Some(track.path.clone());
+                                let artist = track.artist.trim().to_string();
+                                let album = track.album.trim().to_string();
+                                let key =
+                                    format!("{}|{}", artist.to_lowercase(), album.to_lowercase());
+                                let should_start_new =
+                                    groups.last().map(|g| g.key != key).unwrap_or(true);
+                                if should_start_new {
+                                    groups.push(AlbumGroup {
+                                        key,
+                                        artist,
+                                        album,
+                                        track_indices: vec![idx],
+                                    });
+                                } else if let Some(g) = groups.last_mut() {
+                                    g.track_indices.push(idx);
                                 }
                             }
-                        });
-                });
+
+                            let row_h = 21.0;
+                            let tracks_h = ui.available_height().max(120.0);
+                            ui.allocate_ui(Vec2::new(ui.available_width(), tracks_h), |ui| {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    let row_w = ui.available_width().max(80.0);
+                                    let group_chars = ((row_w / 7.6).floor() as usize).max(14);
+                                    let track_chars = ((row_w / 8.2).floor() as usize).max(10);
+                                    for (gidx, group) in groups.iter().enumerate() {
+                                        let default_open = gidx == 0;
+                                        let is_open = expanded_library_groups
+                                            .get(&group.key)
+                                            .copied()
+                                            .unwrap_or(default_open);
+
+                                        let Some(first_track) = group
+                                            .track_indices
+                                            .first()
+                                            .and_then(|i| library.tracks.get(*i))
+                                        else {
+                                            continue;
+                                        };
+
+                                        let album_thumb = ensure_album_thumb_texture_id(
+                                            ui,
+                                            library_art_cache,
+                                            &group.key,
+                                            &first_track.path,
+                                        );
+
+                                        let artist = if group.artist.is_empty() {
+                                            "Unknown artist"
+                                        } else {
+                                            group.artist.as_str()
+                                        };
+                                        let album = if group.album.is_empty() {
+                                            "Unknown album"
+                                        } else {
+                                            group.album.as_str()
+                                        };
+                                        let label = ellipsize(
+                                            &format!(
+                                                "{artist} - {album} ({})",
+                                                group.track_indices.len()
+                                            ),
+                                            group_chars,
+                                        );
+
+                                        let mut toggled = false;
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .add_sized(
+                                                    Vec2::new(18.0, row_h),
+                                                    egui::Button::new(if is_open {
+                                                        "v"
+                                                    } else {
+                                                        ">"
+                                                    }),
+                                                )
+                                                .clicked()
+                                            {
+                                                toggled = true;
+                                            }
+                                            if let Some(tex_id) = album_thumb {
+                                                ui.image((tex_id, Vec2::splat(20.0)));
+                                            } else {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    Vec2::splat(20.0),
+                                                    Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    2.0,
+                                                    Color32::from_gray(38),
+                                                );
+                                            }
+                                            if ui
+                                                .add_sized(
+                                                    Vec2::new((row_w - 30.0).max(80.0), row_h),
+                                                    egui::Button::new(label).selected(is_open),
+                                                )
+                                                .clicked()
+                                            {
+                                                toggled = true;
+                                            }
+                                        });
+                                        if toggled {
+                                            expanded_library_groups
+                                                .insert(group.key.clone(), !is_open);
+                                        } else {
+                                            expanded_library_groups
+                                                .entry(group.key.clone())
+                                                .or_insert(default_open);
+                                        }
+
+                                        if !expanded_library_groups
+                                            .get(&group.key)
+                                            .copied()
+                                            .unwrap_or(default_open)
+                                        {
+                                            continue;
+                                        }
+
+                                        ui.horizontal(|ui| {
+                                            ui.add_sized(
+                                                Vec2::new(28.0, row_h),
+                                                egui::Label::new(
+                                                    egui::RichText::new("#")
+                                                        .color(Color32::from_gray(130)),
+                                                ),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new("Title")
+                                                    .color(Color32::from_gray(130)),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.add_sized(
+                                                        Vec2::new(52.0, row_h),
+                                                        egui::Label::new(
+                                                            egui::RichText::new("Len")
+                                                                .color(Color32::from_gray(130)),
+                                                        ),
+                                                    );
+                                                },
+                                            );
+                                        });
+
+                                        for (idx_in_album, idx) in
+                                            group.track_indices.iter().copied().enumerate()
+                                        {
+                                            let Some(track) = library.tracks.get(idx) else {
+                                                continue;
+                                            };
+                                            let title = if track.title.is_empty() {
+                                                track_label(&track.path)
+                                            } else {
+                                                track.title.clone()
+                                            };
+                                            let title = ellipsize(&title, track_chars);
+                                            let duration = track
+                                                .duration_secs
+                                                .map(format_seconds)
+                                                .unwrap_or_else(|| "--:--".to_string());
+                                            let row_text = format!(
+                                                "{:02}  {}  {}",
+                                                track.track_no.unwrap_or((idx_in_album + 1) as u32),
+                                                title,
+                                                duration
+                                            );
+                                            let is_selected = selected_library_track
+                                                .as_ref()
+                                                .map(|p| p == &track.path)
+                                                .unwrap_or(false);
+                                            let resp = ui.add_sized(
+                                                Vec2::new(row_w, row_h),
+                                                egui::Button::new(row_text).selected(is_selected),
+                                            );
+                                            if resp.clicked() {
+                                                *selected_library_track = Some(track.path.clone());
+                                            }
+                                            if resp.double_clicked() {
+                                                action.play_library_track =
+                                                    Some(track.path.clone());
+                                            }
+                                        }
+                                        ui.add_space(2.0);
+                                    }
+                                    if groups.is_empty() {
+                                        ui.label("No grouped tracks for this filter");
+                                    }
+                                });
+                            });
+                        }
+                    },
+                );
 
                 ui.separator();
 
-                ui.allocate_ui(Vec2::new(ui.available_width(), top_h), |ui| {
-                    ui.heading("Playlist");
-                    ui.separator();
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if queue.is_empty() {
-                            ui.label("Queue is empty");
-                            return;
-                        }
-
-                        for (idx, path) in queue.iter().enumerate() {
-                            let is_current = current.map(|p| p == path).unwrap_or(false);
-                            let mut text = format!("{:02}  {}", idx + 1, track_label(path));
-                            if is_current {
-                                text.push_str("   ▶");
+                ui.allocate_ui_with_layout(
+                    Vec2::new(right_w, top_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.heading("Playlist");
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            let active_label = playlist_names
+                                .get(active_playlist)
+                                .cloned()
+                                .unwrap_or_else(|| "Playlist".to_string());
+                            egui::ComboBox::from_id_salt("playlist_select")
+                                .selected_text(active_label)
+                                .show_ui(ui, |ui| {
+                                    for (idx, name) in playlist_names.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(idx == active_playlist, name)
+                                            .clicked()
+                                        {
+                                            action.select_playlist = Some(idx);
+                                        }
+                                    }
+                                });
+                            if ui.button("+").clicked() {
+                                action.create_playlist = true;
                             }
-                            let resp = ui.selectable_label(is_current, text);
-                            if resp.double_clicked() || resp.clicked() {
-                                action.queue_play_index = Some(idx);
+                            if ui
+                                .add_enabled(playlist_names.len() > 1, egui::Button::new("-"))
+                                .clicked()
+                            {
+                                action.delete_playlist = true;
                             }
+                            if ui
+                                .add_enabled(
+                                    selected_queue_index.is_some(),
+                                    egui::Button::new("Up"),
+                                )
+                                .clicked()
+                            {
+                                action.queue_move_up = true;
+                            }
+                            if ui
+                                .add_enabled(
+                                    selected_queue_index.is_some(),
+                                    egui::Button::new("Down"),
+                                )
+                                .clicked()
+                            {
+                                action.queue_move_down = true;
+                            }
+                            if ui
+                                .add_enabled(
+                                    selected_queue_index.is_some(),
+                                    egui::Button::new("Remove"),
+                                )
+                                .clicked()
+                            {
+                                action.queue_remove_index = selected_queue_index;
+                            }
+                        });
+                        ui.separator();
+                        let now_playing = if metadata.title.is_empty() {
+                            "No track loaded".to_string()
+                        } else if metadata.artist.is_empty() {
+                            metadata.title.clone()
+                        } else {
+                            format!("{} - {}", metadata.artist, metadata.title)
+                        };
+                        ui.label(format!("Now Playing: {now_playing}"));
+                        if !metadata.album.is_empty() {
+                            ui.label(format!("Album: {}", metadata.album));
                         }
-                    });
-                });
-            },
-        );
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(!queue.is_empty(), egui::Button::new("Clear"))
+                                .clicked()
+                            {
+                                action.queue_clear = true;
+                            }
+                            ui.label(format!("Tracks: {}", queue.len()));
+                        });
+                        ui.separator();
+                        let row_h = 22.0;
+                        ui.horizontal(|ui| {
+                            ui.add_sized(Vec2::new(34.0, row_h), egui::Label::new("#"));
+                            ui.label("Title");
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.add_sized(
+                                        Vec2::new(58.0, row_h),
+                                        egui::Label::new("Length"),
+                                    );
+                                },
+                            );
+                        });
+                        ui.separator();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if queue.is_empty() {
+                                ui.label("Queue is empty");
+                                return;
+                            }
 
+                            let row_w = ui.available_width().max(120.0);
+                            let max_chars = ((row_w / 7.2).floor() as usize).max(10);
+                            for (idx, path) in queue.iter().enumerate() {
+                                let is_current = current.map(|p| p == path).unwrap_or(false);
+                                let is_selected = selected_queue_index == Some(idx);
+                                let duration = duration_for_path(library, path)
+                                    .map(format_seconds)
+                                    .unwrap_or_else(|| "--:--".to_string());
+                                let mut text = track_label(path);
+                                if is_current {
+                                    text.push_str("  ▶");
+                                }
+                                text = ellipsize(&text, max_chars);
+
+                                let button_text = format!("{:02}  {}  {}", idx + 1, text, duration);
+                                let resp = ui.add_sized(
+                                    Vec2::new(row_w, row_h),
+                                    egui::Button::new(button_text)
+                                        .selected(is_current || is_selected),
+                                );
+                                if resp.clicked() {
+                                    action.queue_select_index = Some(idx);
+                                }
+                                if resp.double_clicked() {
+                                    action.queue_play_index = Some(idx);
+                                }
+                            }
+                        });
+                    },
+                );
+            });
+        });
+
+        ui.separator();
+        draw_spectrogram_controls(ui, spectro_ui, &mut action);
         ui.separator();
 
         draw_spectrogram(
@@ -255,10 +710,242 @@ pub fn draw_center_panel(
             &analysis.spectrogram_rows,
             analysis.spectrogram_seq,
             analysis.sample_rate_hz,
+            spectro_ui,
             spectrogram_cache,
         );
     });
     action
+}
+
+fn draw_spectrogram_controls(
+    ui: &mut egui::Ui,
+    settings: &mut SpectrogramUiSettings,
+    action: &mut CenterPanelAction,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Spectrogram");
+        egui::ComboBox::from_id_salt("spectro_fft_size")
+            .selected_text(format!("FFT {}", settings.fft_size))
+            .show_ui(ui, |ui| {
+                for &sz in &[256usize, 512, 1024, 2048] {
+                    if ui
+                        .selectable_value(&mut settings.fft_size, sz, format!("FFT {sz}"))
+                        .clicked()
+                    {
+                        action.set_fft_size = Some(sz);
+                    }
+                }
+            });
+        ui.add(
+            egui::Slider::new(&mut settings.floor_cut, 0.0..=0.16)
+                .text("Floor")
+                .clamping(egui::SliderClamping::Always),
+        );
+        ui.add(
+            egui::Slider::new(&mut settings.bass_gain_min, 0.60..=0.95)
+                .text("Bass")
+                .clamping(egui::SliderClamping::Always),
+        );
+        ui.add(
+            egui::Slider::new(&mut settings.highlight_knee, 0.60..=0.90)
+                .text("Whites")
+                .clamping(egui::SliderClamping::Always),
+        );
+    });
+}
+
+fn draw_cover_art(
+    ui: &mut egui::Ui,
+    metadata: &TrackMetadata,
+    cache: &mut CoverArtCache,
+    desired: Vec2,
+) {
+    let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, Color32::from_gray(30));
+
+    let Some((w, h, rgba)) = metadata.cover_art_rgba.as_ref() else {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "No cover art",
+            egui::TextStyle::Body.resolve(ui.style()),
+            Color32::from_gray(170),
+        );
+        cache.texture = None;
+        cache.key = None;
+        return;
+    };
+
+    let key = cover_art_key(*w, *h, rgba);
+    if cache.key != Some(key) || cache.texture.is_none() {
+        let image = ColorImage::from_rgba_unmultiplied([*w, *h], rgba);
+        cache.texture = Some(ui.ctx().load_texture(
+            "cover_art_texture",
+            image,
+            TextureOptions::LINEAR,
+        ));
+        cache.key = Some(key);
+    }
+
+    if let Some(tex) = cache.texture.as_ref() {
+        let img_aspect = *w as f32 / (*h).max(1) as f32;
+        let rect_aspect = rect.width() / rect.height().max(1.0);
+        let draw_rect = if img_aspect > rect_aspect {
+            let draw_h = rect.width() / img_aspect;
+            Rect::from_center_size(rect.center(), Vec2::new(rect.width(), draw_h))
+        } else {
+            let draw_w = rect.height() * img_aspect;
+            Rect::from_center_size(rect.center(), Vec2::new(draw_w, rect.height()))
+        };
+        painter.image(
+            tex.id(),
+            draw_rect,
+            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+}
+
+fn cover_art_key(w: usize, h: usize, rgba: &[u8]) -> u64 {
+    let mut hash = 1469598103934665603u64;
+    hash ^= w as u64;
+    hash = hash.wrapping_mul(1099511628211);
+    hash ^= h as u64;
+    hash = hash.wrapping_mul(1099511628211);
+    hash ^= rgba.len() as u64;
+    hash = hash.wrapping_mul(1099511628211);
+    let step = (rgba.len() / 128).max(1);
+    for b in rgba.iter().step_by(step).take(128) {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+fn ensure_album_thumb_texture_id(
+    ui: &egui::Ui,
+    cache: &mut LibraryArtCache,
+    group_key: &str,
+    track_path: &PathBuf,
+) -> Option<egui::TextureId> {
+    let key = hash_str(group_key);
+    if let Some(tex) = cache.thumbs.get(&key) {
+        return Some(tex.id());
+    }
+    if cache.missing.contains(&key) {
+        return None;
+    }
+
+    let tagged = match lofty::read_from_path(track_path) {
+        Ok(v) => v,
+        Err(_) => {
+            cache.missing.insert(key);
+            return None;
+        }
+    };
+    let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
+        cache.missing.insert(key);
+        return None;
+    };
+    let Some(pic) = tag.pictures().first() else {
+        return load_album_thumb_from_folder(ui, cache, key, track_path);
+    };
+    let Ok(img) = image::load_from_memory(pic.data()) else {
+        return load_album_thumb_from_folder(ui, cache, key, track_path);
+    };
+    let rgba = img.thumbnail(24, 24).to_rgba8();
+    let image = ColorImage::from_rgba_unmultiplied(
+        [rgba.width() as usize, rgba.height() as usize],
+        &rgba.into_raw(),
+    );
+    let tex = ui.ctx().load_texture(
+        format!("library_album_thumb_{key}"),
+        image,
+        TextureOptions::LINEAR,
+    );
+    if cache.thumbs.len() >= 512 {
+        cache.thumbs.clear();
+        cache.missing.clear();
+    }
+    cache.thumbs.insert(key, tex);
+    cache.thumbs.get(&key).map(TextureHandle::id)
+}
+
+fn load_album_thumb_from_folder(
+    ui: &egui::Ui,
+    cache: &mut LibraryArtCache,
+    key: u64,
+    track_path: &PathBuf,
+) -> Option<egui::TextureId> {
+    let Some(dir) = track_path.parent() else {
+        cache.missing.insert(key);
+        return None;
+    };
+    let mut candidates = vec![
+        "cover.jpg",
+        "cover.jpeg",
+        "cover.png",
+        "folder.jpg",
+        "folder.jpeg",
+        "folder.png",
+        "front.jpg",
+        "front.png",
+    ]
+    .into_iter()
+    .map(|n| dir.join(n))
+    .collect::<Vec<_>>();
+
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        for ent in read_dir.flatten() {
+            let p = ent.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            let ext = ext.to_ascii_lowercase();
+            if ext == "jpg" || ext == "jpeg" || ext == "png" {
+                if !candidates.iter().any(|c| c == &p) {
+                    candidates.push(p);
+                }
+            }
+        }
+    }
+
+    for p in candidates {
+        if !p.is_file() {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&p) {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                let rgba = img.thumbnail(24, 24).to_rgba8();
+                let image = ColorImage::from_rgba_unmultiplied(
+                    [rgba.width() as usize, rgba.height() as usize],
+                    &rgba.into_raw(),
+                );
+                let tex = ui.ctx().load_texture(
+                    format!("library_album_thumb_{key}"),
+                    image,
+                    TextureOptions::LINEAR,
+                );
+                cache.thumbs.insert(key, tex);
+                return cache.thumbs.get(&key).map(TextureHandle::id);
+            }
+        }
+    }
+    cache.missing.insert(key);
+    None
+}
+
+fn hash_str(s: &str) -> u64 {
+    let mut hash = 1469598103934665603u64;
+    for &b in s.as_bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
 }
 
 fn draw_wave_seekbar(
@@ -340,8 +1027,11 @@ fn draw_spectrogram(
     rows: &[Vec<f32>],
     seq: u64,
     sample_rate_hz: u32,
+    settings: &SpectrogramUiSettings,
     cache: &mut SpectrogramCache,
 ) {
+    update_spectrogram_fps(cache);
+
     let desired_h = 360.0_f32.min(ui.available_height().max(180.0));
     let desired = Vec2::new(ui.available_width(), desired_h);
     let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
@@ -364,7 +1054,7 @@ fn draw_spectrogram(
     let tex_w = (rect.width() * ppp).round().max(256.0) as usize;
     let tex_h = (rect.height() * ppp).round().max(128.0) as usize;
     ensure_spectrogram_texture(ui, cache, tex_w, tex_h);
-    update_spectrogram_texture(cache, rows, seq);
+    update_spectrogram_texture(cache, rows, seq, settings);
 
     if let Some(tex) = cache.texture.as_ref() {
         paint_ring_texture(&painter, rect, tex, cache);
@@ -399,6 +1089,30 @@ fn draw_spectrogram(
         egui::TextStyle::Small.resolve(ui.style()),
         Color32::from_gray(130),
     );
+    painter.text(
+        Pos2::new(rect.left() + 4.0, rect.top() + 4.0),
+        egui::Align2::LEFT_TOP,
+        format!("{:.0} fps", cache.fps_value),
+        egui::TextStyle::Small.resolve(ui.style()),
+        Color32::from_gray(95),
+    );
+}
+
+fn update_spectrogram_fps(cache: &mut SpectrogramCache) {
+    let now = Instant::now();
+    if let Some(last) = cache.fps_last_instant {
+        cache.fps_accum_frames = cache.fps_accum_frames.saturating_add(1);
+        let elapsed = now.duration_since(last).as_secs_f32();
+        if elapsed >= 0.5 {
+            cache.fps_value = cache.fps_accum_frames as f32 / elapsed;
+            cache.fps_accum_frames = 0;
+            cache.fps_last_instant = Some(now);
+        }
+    } else {
+        cache.fps_last_instant = Some(now);
+        cache.fps_accum_frames = 0;
+        cache.fps_value = 0.0;
+    }
 }
 
 fn spectrogram_color(value: f32) -> Color32 {
@@ -414,7 +1128,8 @@ fn spectrogram_color(value: f32) -> Color32 {
             (0.66, [0xb5, 0x2c, 0x4d]),
             (0.80, [0xd9, 0x55, 0x22]),
             (0.91, [0xee, 0x97, 0x16]),
-            (0.97, [0xf3, 0xcf, 0x3a]),
+            (0.96, [0xf5, 0xd8, 0x52]),
+            (0.985, [0xfa, 0xec, 0xc2]),
             (1.00, [0xfa, 0xec, 0xc2]),
         ],
     )
@@ -427,12 +1142,14 @@ fn format_duration(d: Duration) -> String {
     format!("{m:02}:{s:02}")
 }
 
-fn fallback<'a>(value: &'a str, alt: &'a str) -> &'a str {
-    if value.is_empty() {
-        alt
-    } else {
-        value
+fn format_seconds(secs: f32) -> String {
+    if !secs.is_finite() || secs < 0.0 {
+        return "--:--".to_string();
     }
+    let secs = secs.round() as u64;
+    let m = secs / 60;
+    let s = secs % 60;
+    format!("{m:02}:{s:02}")
 }
 
 fn track_label(path: &PathBuf) -> String {
@@ -440,6 +1157,30 @@ fn track_label(path: &PathBuf) -> String {
         .and_then(OsStr::to_str)
         .unwrap_or("unknown")
         .to_owned()
+}
+
+fn duration_for_path(library: &LibrarySnapshot, path: &PathBuf) -> Option<f32> {
+    library
+        .tracks
+        .iter()
+        .find(|t| &t.path == path)
+        .and_then(|t| t.duration_secs)
+}
+
+fn ellipsize(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_owned();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let take_n = max_chars.saturating_sub(1);
+    let mut out = String::new();
+    for ch in s.chars().take(take_n) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 fn gradient(t: f32, stops: &[(f32, [u8; 3])]) -> Color32 {
@@ -460,7 +1201,11 @@ fn gradient(t: f32, stops: &[(f32, [u8; 3])]) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
-fn build_column_pixels(height: usize, row: &[f32]) -> Vec<Color32> {
+fn build_column_pixels(
+    height: usize,
+    row: &[f32],
+    settings: &SpectrogramUiSettings,
+) -> Vec<Color32> {
     let src_bins = row.len().max(1);
     let mut col = vec![Color32::BLACK; height];
     for y in 0..height {
@@ -472,7 +1217,25 @@ fn build_column_pixels(height: usize, row: &[f32]) -> Vec<Color32> {
         let frac = (src_yf - src_y0 as f32).clamp(0.0, 1.0);
         let v0 = row[src_y0.min(src_bins - 1)];
         let v1 = row[src_y1];
-        let v = (v0 * (1.0 - frac) + v1 * frac).clamp(0.0, 1.0);
+        let mut v = (v0 * (1.0 - frac) + v1 * frac).clamp(0.0, 1.0);
+        // Frequency-aware shaping: slightly tame very low bins and keep mids/his expressive.
+        let f = src_yf / (src_bins.saturating_sub(1).max(1) as f32);
+        let gamma = 1.20 - 0.24 * f; // low freq darker to avoid bass blowout
+        v = v.powf(gamma.clamp(0.90, 1.14));
+        let gain = settings.bass_gain_min + (1.0 - settings.bass_gain_min) * f.powf(0.62);
+        v = (v * gain).clamp(0.0, 1.0);
+
+        // Frequency-dependent floor gate: remove constant low-band bed so detail stands out.
+        let floor = 0.10 - 0.07 * f.powf(0.80); // ~0.10 at bass, ~0.03 at top
+        let floor = (floor + settings.floor_cut - 0.055).clamp(0.0, 0.28);
+        v = ((v - floor) / (1.0 - floor).max(1e-6)).clamp(0.0, 1.0);
+
+        if v > settings.highlight_knee {
+            let span = (1.0 - settings.highlight_knee).max(1e-6);
+            let h = ((v - settings.highlight_knee) / span).clamp(0.0, 1.0);
+            v = settings.highlight_knee + h.powf(0.62) * span;
+        }
+
         col[y] = spectrogram_color(v);
     }
     col
@@ -504,7 +1267,12 @@ fn ensure_spectrogram_texture(
     ));
 }
 
-fn update_spectrogram_texture(cache: &mut SpectrogramCache, rows: &[Vec<f32>], seq: u64) {
+fn update_spectrogram_texture(
+    cache: &mut SpectrogramCache,
+    rows: &[Vec<f32>],
+    seq: u64,
+    settings: &SpectrogramUiSettings,
+) {
     if cache.width == 0 || cache.height == 0 {
         return;
     }
@@ -546,7 +1314,7 @@ fn update_spectrogram_texture(cache: &mut SpectrogramCache, rows: &[Vec<f32>], s
         .len()
         .min(cache.width.saturating_sub(cache.write_x));
     if first_chunk > 0 {
-        let img = build_column_strip(cache.height, &incoming[..first_chunk]);
+        let img = build_column_strip(cache.height, &incoming[..first_chunk], settings);
         tex.set_partial([cache.write_x, 0], img, TextureOptions::LINEAR);
         cache.write_x += first_chunk;
         if cache.write_x >= cache.width {
@@ -558,7 +1326,7 @@ fn update_spectrogram_texture(cache: &mut SpectrogramCache, rows: &[Vec<f32>], s
 
     let remaining = incoming.len().saturating_sub(first_chunk);
     if remaining > 0 {
-        let img = build_column_strip(cache.height, &incoming[first_chunk..]);
+        let img = build_column_strip(cache.height, &incoming[first_chunk..], settings);
         tex.set_partial([0, 0], img, TextureOptions::LINEAR);
         cache.write_x = remaining.min(cache.width);
         cache.filled = true;
@@ -568,11 +1336,15 @@ fn update_spectrogram_texture(cache: &mut SpectrogramCache, rows: &[Vec<f32>], s
     cache.last_seq = seq;
 }
 
-fn build_column_strip(height: usize, rows: &[Vec<f32>]) -> ColorImage {
+fn build_column_strip(
+    height: usize,
+    rows: &[Vec<f32>],
+    settings: &SpectrogramUiSettings,
+) -> ColorImage {
     let w = rows.len();
     let mut pixels = vec![Color32::BLACK; w * height];
     for (x, row) in rows.iter().enumerate() {
-        let col = build_column_pixels(height, row);
+        let col = build_column_pixels(height, row, settings);
         for (y, px) in col.into_iter().enumerate() {
             pixels[y * w + x] = px;
         }

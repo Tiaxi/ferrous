@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use lofty::file::TaggedFileExt;
+use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 
 #[derive(Debug, Clone, Default)]
@@ -9,6 +9,10 @@ pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub sample_rate_hz: Option<u32>,
+    pub bitrate_kbps: Option<u32>,
+    pub channels: Option<u8>,
+    pub bit_depth: Option<u8>,
     pub cover_art_rgba: Option<(usize, usize, Vec<u8>)>,
 }
 
@@ -36,6 +40,12 @@ impl MetadataService {
                     .to_owned();
 
                 if let Ok(tagged) = lofty::read_from_path(&path) {
+                    let props = tagged.properties();
+                    metadata.sample_rate_hz = props.sample_rate();
+                    metadata.channels = props.channels().map(|v| v as u8);
+                    metadata.bit_depth = props.bit_depth().map(|v| v as u8);
+                    metadata.bitrate_kbps = props.audio_bitrate();
+
                     if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
                         metadata.title = tag
                             .title()
@@ -63,6 +73,10 @@ impl MetadataService {
                     }
                 }
 
+                if metadata.cover_art_rgba.is_none() {
+                    metadata.cover_art_rgba = load_folder_cover_art(&path);
+                }
+
                 let _ = event_tx.send(MetadataEvent::Loaded(metadata));
             }
         });
@@ -73,4 +87,56 @@ impl MetadataService {
     pub fn request(&self, path: PathBuf) {
         let _ = self.tx.send(path);
     }
+}
+
+fn load_folder_cover_art(track_path: &PathBuf) -> Option<(usize, usize, Vec<u8>)> {
+    let dir = track_path.parent()?;
+    let mut candidates = vec![
+        "cover.jpg",
+        "cover.jpeg",
+        "cover.png",
+        "folder.jpg",
+        "folder.jpeg",
+        "folder.png",
+        "front.jpg",
+        "front.png",
+    ]
+    .into_iter()
+    .map(|n| dir.join(n))
+    .collect::<Vec<_>>();
+
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        for ent in read_dir.flatten() {
+            let p = ent.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            let ext = ext.to_ascii_lowercase();
+            if ext == "jpg" || ext == "jpeg" || ext == "png" {
+                if !candidates.iter().any(|c| c == &p) {
+                    candidates.push(p);
+                }
+            }
+        }
+    }
+
+    for p in candidates {
+        if !p.is_file() {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&p) {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                let rgba = img.to_rgba8();
+                return Some((
+                    rgba.width() as usize,
+                    rgba.height() as usize,
+                    rgba.into_raw(),
+                ));
+            }
+        }
+    }
+    None
 }

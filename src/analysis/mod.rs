@@ -18,6 +18,7 @@ use symphonia::core::probe::Hint;
 pub enum AnalysisCommand {
     SetTrack(PathBuf),
     SetSampleRate(u32),
+    SetFftSize(usize),
     ResetRealtime,
     WaveformProgress {
         track_token: u64,
@@ -74,6 +75,7 @@ impl AnalysisEngine {
             let mut prof_ticks = 0usize;
             let mut prof_in_samples = 0usize;
             let mut prof_out_samples = 0usize;
+            let mut ticks_without_row = 0usize;
 
             loop {
                 select! {
@@ -126,6 +128,26 @@ impl AnalysisEngine {
                                         true,
                                     );
                                 }
+                            }
+                            AnalysisCommand::SetFftSize(size) => {
+                                let fft = size.clamp(256, 2048).next_power_of_two();
+                                let hop = (fft / 4).max(64);
+                                stft = StftComputer::new(fft, hop);
+                                decimator.reset();
+                                pending_rows.clear();
+                                snapshot.spectrogram_seq = 0;
+                                drain_pcm_queue(&pcm_rx);
+                                pcm_fifo.clear();
+                                sample_credit = 0.0;
+                                last_tick_time = std::time::Instant::now();
+                                emit_snapshot(
+                                    &event_tx,
+                                    &snapshot,
+                                    &mut pending_rows,
+                                    &mut waveform_dirty,
+                                    &mut last_emit,
+                                    true,
+                                );
                             }
                             AnalysisCommand::ResetRealtime => {
                                 snapshot.spectrogram_seq = 0;
@@ -198,7 +220,16 @@ impl AnalysisEngine {
                         // Keep visuals slightly behind output to compensate sink/device buffering.
                         let visual_delay_samples =
                             ((snapshot.sample_rate_hz as usize) * 40 / 1000).max(512);
-                        let available = pcm_fifo.len().saturating_sub(visual_delay_samples);
+                        let mut available = if pcm_fifo.len() > visual_delay_samples {
+                            pcm_fifo.len().saturating_sub(visual_delay_samples)
+                        } else {
+                            // Never fully stall visuals when backlog is small.
+                            pcm_fifo.len()
+                        };
+                        if ticks_without_row > 24 {
+                            // Recovery mode: if visuals are stalled, consume directly to kick-start rows.
+                            available = pcm_fifo.len();
+                        }
                         let to_feed = target_samples.min(available);
                         if to_feed > 0 {
                             let mut feed = Vec::with_capacity(to_feed);
@@ -213,6 +244,11 @@ impl AnalysisEngine {
 
                         let rows = stft.take_rows(8);
                         prof_rows += rows.len();
+                        if rows.is_empty() {
+                            ticks_without_row = ticks_without_row.saturating_add(1);
+                        } else {
+                            ticks_without_row = 0;
+                        }
                         for row in rows {
                             if let Some(slow_row) = decimator.push(row) {
                                 pending_rows.push(slow_row);
