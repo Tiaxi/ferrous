@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ferrous::frontend_bridge::{
-    BridgeCommand, BridgeEvent, BridgePlaybackCommand, BridgeQueueCommand, FrontendBridgeHandle,
+    BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
+    FrontendBridgeHandle,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -159,6 +160,7 @@ struct JsonCommand {
 struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
+    last_spectrogram_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,7 +262,7 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 .ok_or_else(|| "replace_album requires array field 'paths'".to_string())?;
             let items: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             Some(BridgeCommand::Library(
-                ferrous::frontend_bridge::BridgeLibraryCommand::ReplaceWithAlbum(items),
+                BridgeLibraryCommand::ReplaceWithAlbum(items),
             ))
         }
         "append_album" => {
@@ -268,17 +270,17 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 .paths
                 .ok_or_else(|| "append_album requires array field 'paths'".to_string())?;
             let items: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-            Some(BridgeCommand::Library(
-                ferrous::frontend_bridge::BridgeLibraryCommand::AppendAlbum(items),
-            ))
+            Some(BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(
+                items,
+            )))
         }
         "scan_root" => {
             let path = parsed
                 .path
                 .ok_or_else(|| "scan_root requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(
-                ferrous::frontend_bridge::BridgeLibraryCommand::ScanRoot(PathBuf::from(path)),
-            ))
+            Some(BridgeCommand::Library(BridgeLibraryCommand::ScanRoot(
+                PathBuf::from(path),
+            )))
         }
         "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),
         "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
@@ -380,6 +382,26 @@ fn drain_bridge_events_as_json(
                 } else {
                     serde_json::Value::Null
                 };
+                let spectrogram_reset = s.analysis.spectrogram_seq
+                    < emit_state.last_spectrogram_seq
+                    || (s.analysis.spectrogram_seq == 0
+                        && s.analysis.spectrogram_rows.is_empty()
+                        && emit_state.last_spectrogram_seq > 0);
+                let spectrogram_rows = if !s.analysis.spectrogram_rows.is_empty() {
+                    serde_json::Value::Array(
+                        s.analysis
+                            .spectrogram_rows
+                            .iter()
+                            .map(|row| {
+                                let reduced = downsample_spectrogram_row(row, 768);
+                                serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
+                            })
+                            .collect(),
+                    )
+                } else {
+                    serde_json::Value::Null
+                };
+                emit_state.last_spectrogram_seq = s.analysis.spectrogram_seq;
                 let queue_tracks: Vec<_> = s
                     .queue
                     .iter()
@@ -417,6 +439,8 @@ fn drain_bridge_events_as_json(
                     },
                     "analysis": {
                         "spectrogram_seq": s.analysis.spectrogram_seq,
+                        "spectrogram_reset": spectrogram_reset,
+                        "spectrogram_rows": spectrogram_rows,
                         "sample_rate_hz": s.analysis.sample_rate_hz,
                         "waveform_len": s.analysis.waveform_peaks.len(),
                         "waveform_changed": waveform_changed,
@@ -445,4 +469,26 @@ fn emit_json_line(payload: &serde_json::Value) -> io::Result<()> {
     let mut out = io::stdout().lock();
     writeln!(out, "{}", payload)?;
     out.flush()
+}
+
+fn downsample_spectrogram_row(row: &[f32], max_bins: usize) -> Vec<f32> {
+    if row.len() <= max_bins || max_bins == 0 {
+        return row.to_vec();
+    }
+    let mut out = Vec::with_capacity(max_bins);
+    for i in 0..max_bins {
+        let start = i * row.len() / max_bins;
+        let mut end = (i + 1) * row.len() / max_bins;
+        if end <= start {
+            end = (start + 1).min(row.len());
+        }
+        let mut peak = 0.0f32;
+        for &v in &row[start..end] {
+            if v > peak {
+                peak = v;
+            }
+        }
+        out.push(peak);
+    }
+    out
 }

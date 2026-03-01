@@ -552,35 +552,96 @@ Kirigami.ApplicationWindow {
                     border.color: Qt.rgba(0, 0, 0, 0.25)
 
                     Canvas {
-                        id: spectroPlaceholder
+                        id: spectrogramCanvas
                         anchors.fill: parent
+                        antialiasing: false
+
+                        function ddbColor(norm) {
+                            const colors = [
+                                [255, 255, 255],
+                                [255, 255, 255],
+                                [255, 247, 0],
+                                [242, 54, 0],
+                                [176, 0, 91],
+                                [48, 0, 115],
+                                [4, 1, 71]
+                            ]
+                            const clamped = Math.max(0.0, Math.min(1.0, norm))
+                            const pos = (1.0 - clamped) * (colors.length - 1)
+                            const i0 = Math.floor(pos)
+                            const i1 = Math.min(colors.length - 1, i0 + 1)
+                            const t = pos - i0
+                            const c0 = colors[i0]
+                            const c1 = colors[i1]
+                            return [
+                                Math.round(c0[0] + (c1[0] - c0[0]) * t),
+                                Math.round(c0[1] + (c1[1] - c0[1]) * t),
+                                Math.round(c0[2] + (c1[2] - c0[2]) * t)
+                            ]
+                        }
+
                         onPaint: {
                             const ctx = getContext("2d")
                             ctx.reset()
-                            const w = width
-                            const h = height
-
-                            const grad = ctx.createLinearGradient(0, h, 0, 0)
-                            grad.addColorStop(0.0, "#fff470")
-                            grad.addColorStop(0.35, "#ff7a00")
-                            grad.addColorStop(0.65, "#c00074")
-                            grad.addColorStop(1.0, "#11004f")
-                            ctx.fillStyle = grad
+                            const w = Math.max(1, Math.floor(width))
+                            const h = Math.max(1, Math.floor(height))
+                            ctx.fillStyle = "#0b0b0f"
                             ctx.fillRect(0, 0, w, h)
 
-                            ctx.fillStyle = "rgba(0,0,0,0.26)"
-                            for (let x = 0; x < w; x += 20) {
-                                const stripe = (Math.sin(x / 43.0) * 0.5 + 0.5) * h * 0.65
-                                ctx.fillRect(x, 0, 8, stripe)
+                            const rows = bridge.spectrogramRows
+                            if (rows.length === 0) {
+                                return
                             }
 
-                            ctx.fillStyle = "#ffffff"
-                            ctx.globalAlpha = 0.22
-                            for (let y = h - 4; y > h * 0.72; y -= 3) {
-                                ctx.fillRect(0, y, w, 1)
+                            const cols = Math.min(rows.length, w)
+                            const start = rows.length - cols
+                            const img = ctx.createImageData(cols, h)
+                            const pixels = img.data
+
+                            const sampleRate = Math.max(1000, bridge.sampleRateHz)
+                            const dbRange = Math.max(50.0, Math.min(120.0, bridge.dbRange))
+                            const useLogScale = bridge.logScale
+                            const minFreq = 25.0
+                            const nyquist = Math.max(sampleRate * 0.5, minFreq * 1.1)
+                            const logStep = (Math.log2(nyquist) - Math.log2(minFreq)) / Math.max(1, h)
+
+                            for (let x = 0; x < cols; x++) {
+                                const row = rows[start + x]
+                                const bins = row.length
+                                if (bins <= 0) {
+                                    continue
+                                }
+                                const freqRes = Math.max(1.0, sampleRate / (2.0 * Math.max(1, bins - 1)))
+                                for (let y = 0; y < h; y++) {
+                                    const i = h - 1 - y
+                                    let bin
+                                    if (useLogScale) {
+                                        const freq = Math.pow(2.0, i * logStep + Math.log2(minFreq))
+                                        bin = Math.round(freq / freqRes)
+                                    } else {
+                                        bin = Math.floor((i / Math.max(1, h - 1)) * (bins - 1))
+                                    }
+                                    bin = Math.max(0, Math.min(bins - 1, bin))
+
+                                    const power = Number(row[bin])
+                                    const db = power > 0.0 ? (10.0 * Math.log(power) / Math.log(10.0)) : -200.0
+                                    const xdb = Math.max(0.0, Math.min(dbRange, db + dbRange - 63.0))
+                                    const [r, g, b] = ddbColor(xdb / dbRange)
+
+                                    const p = (y * cols + x) * 4
+                                    pixels[p + 0] = r
+                                    pixels[p + 1] = g
+                                    pixels[p + 2] = b
+                                    pixels[p + 3] = 255
+                                }
                             }
-                            ctx.globalAlpha = 1.0
+
+                            const offsetX = w - cols
+                            ctx.putImageData(img, offsetX, 0)
                         }
+
+                        onWidthChanged: requestPaint()
+                        onHeightChanged: requestPaint()
                     }
                 }
             }
@@ -595,6 +656,7 @@ Kirigami.ApplicationWindow {
             if (root.selectedLibraryAlbumIndex >= bridge.libraryAlbums.length) {
                 root.selectedLibraryAlbumIndex = bridge.libraryAlbums.length - 1
             }
+            spectrogramCanvas.requestPaint()
         }
         function onBridgeError(message) {
             console.warn("bridge error:", message)

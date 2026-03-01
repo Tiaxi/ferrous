@@ -77,6 +77,8 @@ Input is line-delimited JSON commands, for example:
 ```
 
 Output is line-delimited JSON events (`snapshot`, `error`, `stopped`).
+For performance, `snapshot.analysis.waveform_peaks` and `snapshot.analysis.spectrogram_rows`
+are delta-style payloads and may be `null` when unchanged.
 
 ## Running Kirigami shell scaffold
 

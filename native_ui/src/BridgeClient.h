@@ -20,6 +20,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(QVariantList waveformPeaks READ waveformPeaks NOTIFY snapshotChanged)
+    Q_PROPERTY(QVariantList spectrogramRows READ spectrogramRows NOTIFY snapshotChanged)
+    Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY snapshotChanged)
+    Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
+    Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY snapshotChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
@@ -37,6 +41,10 @@ public:
     QStringList queueItems() const;
     int selectedQueueIndex() const;
     QVariantList waveformPeaks() const;
+    QVariantList spectrogramRows() const;
+    int sampleRateHz() const;
+    double dbRange() const;
+    bool logScale() const;
     QStringList libraryAlbums() const;
     bool libraryScanInProgress() const;
     bool connected() const;
@@ -86,6 +94,10 @@ private:
     QStringList m_queueItems;
     int m_selectedQueueIndex{-1};
     QVariantList m_waveformPeaks;
+    QVariantList m_spectrogramRows;
+    int m_sampleRateHz{48000};
+    double m_dbRange{90.0};
+    bool m_logScale{false};
     QStringList m_libraryAlbums;
     QVector<QStringList> m_libraryAlbumPaths;
     bool m_libraryScanInProgress{false};

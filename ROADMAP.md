@@ -84,7 +84,7 @@ Acceptance criteria:
 
 ## Milestone E: Spectrogram + Analysis View Migration
 
-- [ ] Port spectrogram widget rendering path to native frontend.
+- [x] Port spectrogram widget rendering path to native frontend.
 - [ ] Preserve rolling behavior across seek and track transitions.
 - [ ] Port dB/log-scale controls and settings persistence.
 - [ ] Ensure performance parity with current implementation.

@@ -59,6 +59,22 @@ QVariantList BridgeClient::waveformPeaks() const {
     return m_waveformPeaks;
 }
 
+QVariantList BridgeClient::spectrogramRows() const {
+    return m_spectrogramRows;
+}
+
+int BridgeClient::sampleRateHz() const {
+    return m_sampleRateHz;
+}
+
+double BridgeClient::dbRange() const {
+    return m_dbRange;
+}
+
+bool BridgeClient::logScale() const {
+    return m_logScale;
+}
+
 QStringList BridgeClient::libraryAlbums() const {
     return m_libraryAlbums;
 }
@@ -236,6 +252,7 @@ void BridgeClient::handleStdoutReady() {
             const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
             const QJsonObject library = root.value(QStringLiteral("library")).toObject();
             const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
+            const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
             const QJsonArray queueTracks = queue.value(QStringLiteral("tracks")).toArray();
 
             const QString nextState = playback.value(QStringLiteral("state")).toString();
@@ -244,6 +261,7 @@ void BridgeClient::handleStdoutReady() {
             const double vol = playback.value(QStringLiteral("volume")).toDouble();
             const int qlen = queue.value(QStringLiteral("len")).toInt();
             const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
+            const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
 
             bool changed = false;
             if (m_playbackState != nextState) {
@@ -290,6 +308,51 @@ void BridgeClient::handleStdoutReady() {
             }
             if (m_selectedQueueIndex != selected) {
                 m_selectedQueueIndex = selected;
+                changed = true;
+            }
+            const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
+            if (spectrogramReset && !m_spectrogramRows.isEmpty()) {
+                m_spectrogramRows.clear();
+                changed = true;
+            }
+            const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
+            if (spectrogramRowsValue.isArray()) {
+                const QJsonArray rowsArr = spectrogramRowsValue.toArray();
+                bool spectroChanged = false;
+                for (const QJsonValue &rowValue : rowsArr) {
+                    const QJsonArray rowArr = rowValue.toArray();
+                    if (rowArr.isEmpty()) {
+                        continue;
+                    }
+                    QVariantList row;
+                    row.reserve(rowArr.size());
+                    for (const QJsonValue &v : rowArr) {
+                        row.push_back(v.toDouble());
+                    }
+                    m_spectrogramRows.push_back(row);
+                    spectroChanged = true;
+                }
+                constexpr int kMaxSpectrogramColumns = 2200;
+                while (m_spectrogramRows.size() > kMaxSpectrogramColumns) {
+                    m_spectrogramRows.removeFirst();
+                    spectroChanged = true;
+                }
+                if (spectroChanged) {
+                    changed = true;
+                }
+            }
+            if (m_sampleRateHz != sampleRate) {
+                m_sampleRateHz = sampleRate;
+                changed = true;
+            }
+            const double dbRange = settings.value(QStringLiteral("db_range")).toDouble(m_dbRange);
+            if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
+                m_dbRange = dbRange;
+                changed = true;
+            }
+            const bool logScale = settings.value(QStringLiteral("log_scale")).toBool(m_logScale);
+            if (m_logScale != logScale) {
+                m_logScale = logScale;
                 changed = true;
             }
             const bool scanInProgress = library.value(QStringLiteral("scan_in_progress")).toBool();
