@@ -11,8 +11,8 @@ use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapsh
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot};
 use crate::ui::panels::{
-    draw_center_panel, draw_top_panel, CenterPanelAction, CoverArtCache, LibraryArtCache,
-    SpectrogramCache, SpectrogramUiSettings, TopPanelAction,
+    draw_center_panel, draw_footer_panel, draw_top_panel, CenterPanelAction, CoverArtCache,
+    LibraryArtCache, SpectrogramCache, SpectrogramUiSettings, TopPanelAction,
 };
 
 pub struct FerrousApp {
@@ -42,19 +42,12 @@ struct AppState {
     selected_library_root: Option<PathBuf>,
     selected_library_track: Option<PathBuf>,
     expanded_library_groups: HashMap<String, bool>,
-    playlists: Vec<PlaylistModel>,
-    active_playlist: usize,
+    queue: Vec<PathBuf>,
     selected_queue_index: Option<usize>,
     cover_art_cache: CoverArtCache,
     library_art_cache: LibraryArtCache,
     spectro_ui: SpectrogramUiSettings,
     spectrogram_cache: SpectrogramCache,
-}
-
-#[derive(Default)]
-struct PlaylistModel {
-    name: String,
-    tracks: Vec<PathBuf>,
 }
 
 impl FerrousApp {
@@ -80,10 +73,6 @@ impl FerrousApp {
                     volume: 1.0,
                     ..PlaybackSnapshot::default()
                 },
-                playlists: vec![PlaylistModel {
-                    name: "Playlist 1".to_string(),
-                    tracks: Vec::new(),
-                }],
                 ..AppState::default()
             },
             last_tick: Instant::now(),
@@ -189,22 +178,6 @@ impl FerrousApp {
         self.playback.command(PlaybackCommand::Poll);
     }
 
-    fn active_playlist_mut(&mut self) -> &mut PlaylistModel {
-        let idx = self
-            .state
-            .active_playlist
-            .min(self.state.playlists.len().saturating_sub(1));
-        &mut self.state.playlists[idx]
-    }
-
-    fn active_playlist(&self) -> &PlaylistModel {
-        let idx = self
-            .state
-            .active_playlist
-            .min(self.state.playlists.len().saturating_sub(1));
-        &self.state.playlists[idx]
-    }
-
     fn settings_path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -249,12 +222,6 @@ impl FerrousApp {
                         self.state.spectro_ui.log_scale = x != 0;
                     }
                 }
-                "active_playlist" => {
-                    if let Ok(x) = v.parse::<usize>() {
-                        self.state.active_playlist =
-                            x.min(self.state.playlists.len().saturating_sub(1));
-                    }
-                }
                 _ => {}
             }
         }
@@ -268,7 +235,7 @@ impl FerrousApp {
             let _ = fs::create_dir_all(parent);
         }
         let text = format!(
-            "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nactive_playlist={}\n",
+            "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\n",
             self.state.playback.volume,
             self.state.spectro_ui.fft_size,
             self.state.spectro_ui.db_range,
@@ -277,7 +244,6 @@ impl FerrousApp {
             } else {
                 0
             },
-            self.state.active_playlist
         );
         let _ = fs::write(path, text);
         self.last_settings_save = Instant::now();
@@ -291,7 +257,7 @@ impl eframe::App for FerrousApp {
             eprintln!(
                 "[ui] fps={} queue={} spectro_seq={}",
                 self.profile_frames,
-                self.active_playlist().tracks.len(),
+                self.state.queue.len(),
                 self.state.analysis.spectrogram_seq
             );
             self.profile_last = Instant::now();
@@ -300,49 +266,10 @@ impl eframe::App for FerrousApp {
 
         self.pump_events();
 
-        let action = draw_top_panel(
-            ctx,
-            &self.state.playback,
-            &self.state.metadata,
-            &self.state.analysis,
-        );
+        let action = draw_top_panel(ctx, &self.state.playback, &self.state.analysis);
 
         match action {
             TopPanelAction::None => {}
-            TopPanelAction::OpenFiles => {
-                if let Some(paths) = rfd::FileDialog::new()
-                    .add_filter("Audio", &["mp3", "flac"])
-                    .pick_files()
-                {
-                    let pl = self.active_playlist_mut();
-                    pl.tracks.clear();
-                    pl.tracks.extend(paths.clone());
-                    self.state.selected_queue_index =
-                        if pl.tracks.is_empty() { None } else { Some(0) };
-                    self.playback.command(PlaybackCommand::LoadQueue(paths));
-                    self.playback.command(PlaybackCommand::Play);
-                }
-            }
-            TopPanelAction::AddFiles => {
-                if let Some(paths) = rfd::FileDialog::new()
-                    .add_filter("Audio", &["mp3", "flac"])
-                    .pick_files()
-                {
-                    let was_empty = self.active_playlist().tracks.is_empty();
-                    if was_empty {
-                        let tracks = {
-                            let pl = self.active_playlist_mut();
-                            pl.tracks.extend(paths.clone());
-                            pl.tracks.clone()
-                        };
-                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
-                        self.playback.command(PlaybackCommand::Play);
-                    } else {
-                        self.active_playlist_mut().tracks.extend(paths.clone());
-                        self.playback.command(PlaybackCommand::AddToQueue(paths));
-                    }
-                }
-            }
             TopPanelAction::Previous => self.playback.command(PlaybackCommand::Previous),
             TopPanelAction::Next => self.playback.command(PlaybackCommand::Next),
             TopPanelAction::Play => self.playback.command(PlaybackCommand::Play),
@@ -352,22 +279,13 @@ impl eframe::App for FerrousApp {
             TopPanelAction::SetVolume(v) => self.playback.command(PlaybackCommand::SetVolume(v)),
         }
 
-        let playlist_names: Vec<String> = self
-            .state
-            .playlists
-            .iter()
-            .map(|p| p.name.clone())
-            .collect();
-        let active_playlist = self.state.active_playlist;
         let selected_queue_index = self.state.selected_queue_index;
-        let active_tracks = self.active_playlist().tracks.clone();
+        let active_tracks = self.state.queue.clone();
         let center_action = draw_center_panel(
             ctx,
             &self.state.analysis,
             &self.state.metadata,
             &active_tracks,
-            &playlist_names,
-            active_playlist,
             selected_queue_index,
             self.state.playback.current.as_ref(),
             &self.state.library,
@@ -407,13 +325,10 @@ impl eframe::App for FerrousApp {
                 add_library_track: Some(path),
                 ..
             } => {
-                let tracks_len = {
-                    let pl = self.active_playlist_mut();
-                    pl.tracks.push(path.clone());
-                    pl.tracks.len()
-                };
+                self.state.queue.push(path.clone());
+                let tracks_len = self.state.queue.len();
                 if tracks_len == 1 {
-                    let tracks = self.active_playlist().tracks.clone();
+                    let tracks = self.state.queue.clone();
                     self.playback.command(PlaybackCommand::LoadQueue(tracks));
                 } else {
                     self.playback
@@ -427,27 +342,21 @@ impl eframe::App for FerrousApp {
                 if paths.is_empty() {
                     // no-op
                 } else {
-                    let was_empty = self.active_playlist().tracks.is_empty();
-                    if was_empty {
-                        let tracks = {
-                            let pl = self.active_playlist_mut();
-                            pl.tracks.extend(paths.clone());
-                            pl.tracks.clone()
-                        };
-                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
-                    } else {
-                        self.active_playlist_mut().tracks.extend(paths.clone());
-                        self.playback.command(PlaybackCommand::AddToQueue(paths));
-                    }
+                    let start_idx = self.state.queue.len();
+                    self.state.queue.extend(paths);
+                    let tracks = self.state.queue.clone();
+                    self.playback.command(PlaybackCommand::LoadQueue(tracks));
+                    self.playback.command(PlaybackCommand::PlayAt(start_idx));
+                    self.playback.command(PlaybackCommand::Play);
+                    self.state.selected_queue_index = Some(start_idx);
                 }
             }
             CenterPanelAction {
                 play_library_track: Some(path),
                 ..
             } => {
-                let pl = self.active_playlist_mut();
-                pl.tracks.clear();
-                pl.tracks.push(path.clone());
+                self.state.queue.clear();
+                self.state.queue.push(path.clone());
                 self.playback
                     .command(PlaybackCommand::LoadQueue(vec![path]));
                 self.playback.command(PlaybackCommand::Play);
@@ -464,7 +373,7 @@ impl eframe::App for FerrousApp {
             CenterPanelAction {
                 queue_clear: true, ..
             } => {
-                self.active_playlist_mut().tracks.clear();
+                self.state.queue.clear();
                 self.state.selected_queue_index = None;
                 self.playback.command(PlaybackCommand::ClearQueue);
             }
@@ -472,17 +381,12 @@ impl eframe::App for FerrousApp {
                 queue_remove_index: Some(idx),
                 ..
             } => {
-                let mut new_tracks = None;
-                {
-                    let pl = self.active_playlist_mut();
-                    if idx < pl.tracks.len() {
-                        pl.tracks.remove(idx);
-                        new_tracks = Some(pl.tracks.clone());
-                    }
-                }
-                if let Some(tracks) = new_tracks {
+                if idx < self.state.queue.len() {
+                    self.state.queue.remove(idx);
+                    let new_tracks = self.state.queue.clone();
                     self.state.selected_queue_index = idx.checked_sub(1);
-                    self.playback.command(PlaybackCommand::LoadQueue(tracks));
+                    self.playback
+                        .command(PlaybackCommand::LoadQueue(new_tracks));
                 }
             }
             CenterPanelAction {
@@ -490,16 +394,10 @@ impl eframe::App for FerrousApp {
                 ..
             } => {
                 if from != to {
-                    let mut new_tracks = None;
-                    {
-                        let pl = self.active_playlist_mut();
-                        if from < pl.tracks.len() && to < pl.tracks.len() {
-                            let item = pl.tracks.remove(from);
-                            pl.tracks.insert(to, item);
-                            new_tracks = Some(pl.tracks.clone());
-                        }
-                    }
-                    if let Some(tracks) = new_tracks {
+                    if from < self.state.queue.len() && to < self.state.queue.len() {
+                        let item = self.state.queue.remove(from);
+                        self.state.queue.insert(to, item);
+                        let tracks = self.state.queue.clone();
                         self.state.selected_queue_index = Some(to);
                         self.playback.command(PlaybackCommand::LoadQueue(tracks));
                     }
@@ -511,15 +409,9 @@ impl eframe::App for FerrousApp {
             } => {
                 if let Some(sel) = self.state.selected_queue_index {
                     if sel > 0 {
-                        let mut new_tracks = None;
-                        {
-                            let pl = self.active_playlist_mut();
-                            if sel < pl.tracks.len() {
-                                pl.tracks.swap(sel - 1, sel);
-                                new_tracks = Some(pl.tracks.clone());
-                            }
-                        }
-                        if let Some(tracks) = new_tracks {
+                        if sel < self.state.queue.len() {
+                            self.state.queue.swap(sel - 1, sel);
+                            let tracks = self.state.queue.clone();
                             self.state.selected_queue_index = Some(sel - 1);
                             self.playback.command(PlaybackCommand::LoadQueue(tracks));
                         }
@@ -531,70 +423,24 @@ impl eframe::App for FerrousApp {
                 ..
             } => {
                 if let Some(sel) = self.state.selected_queue_index {
-                    let mut new_tracks = None;
-                    {
-                        let pl = self.active_playlist_mut();
-                        if sel + 1 < pl.tracks.len() {
-                            pl.tracks.swap(sel, sel + 1);
-                            new_tracks = Some(pl.tracks.clone());
-                        }
-                    }
-                    if let Some(tracks) = new_tracks {
+                    if sel + 1 < self.state.queue.len() {
+                        self.state.queue.swap(sel, sel + 1);
+                        let tracks = self.state.queue.clone();
                         self.state.selected_queue_index = Some(sel + 1);
-                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
-                    }
-                }
-            }
-            CenterPanelAction {
-                select_playlist: Some(idx),
-                ..
-            } => {
-                if idx < self.state.playlists.len() {
-                    self.state.active_playlist = idx;
-                    self.state.selected_queue_index = None;
-                    let tracks = self.active_playlist().tracks.clone();
-                    if tracks.is_empty() {
-                        self.playback.command(PlaybackCommand::ClearQueue);
-                    } else {
-                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
-                    }
-                }
-            }
-            CenterPanelAction {
-                create_playlist: true,
-                ..
-            } => {
-                let next_n = self.state.playlists.len() + 1;
-                self.state.playlists.push(PlaylistModel {
-                    name: format!("Playlist {next_n}"),
-                    tracks: Vec::new(),
-                });
-                self.state.active_playlist = self.state.playlists.len() - 1;
-                self.state.selected_queue_index = None;
-                self.playback.command(PlaybackCommand::ClearQueue);
-            }
-            CenterPanelAction {
-                delete_playlist: true,
-                ..
-            } => {
-                if self.state.playlists.len() > 1 {
-                    let idx = self
-                        .state
-                        .active_playlist
-                        .min(self.state.playlists.len().saturating_sub(1));
-                    self.state.playlists.remove(idx);
-                    self.state.active_playlist = idx.saturating_sub(1);
-                    self.state.selected_queue_index = None;
-                    let tracks = self.active_playlist().tracks.clone();
-                    if tracks.is_empty() {
-                        self.playback.command(PlaybackCommand::ClearQueue);
-                    } else {
                         self.playback.command(PlaybackCommand::LoadQueue(tracks));
                     }
                 }
             }
             _ => {}
         }
+
+        draw_footer_panel(
+            ctx,
+            &self.state.playback,
+            &self.state.metadata,
+            &self.state.queue,
+            &self.state.library,
+        );
 
         if self.last_tick.elapsed() >= Duration::from_millis(16) {
             self.last_tick = Instant::now();

@@ -17,8 +17,6 @@ use crate::playback::{PlaybackSnapshot, PlaybackState};
 #[derive(Debug, Clone, Copy)]
 pub enum TopPanelAction {
     None,
-    OpenFiles,
-    AddFiles,
     Previous,
     Next,
     Play,
@@ -42,9 +40,6 @@ pub struct CenterPanelAction {
     pub add_library_album_tracks: Option<Vec<PathBuf>>,
     pub play_library_track: Option<PathBuf>,
     pub set_fft_size: Option<usize>,
-    pub select_playlist: Option<usize>,
-    pub create_playlist: bool,
-    pub delete_playlist: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -93,114 +88,105 @@ pub struct LibraryArtCache {
 pub fn draw_top_panel(
     ctx: &egui::Context,
     playback: &PlaybackSnapshot,
-    metadata: &TrackMetadata,
     analysis: &AnalysisSnapshot,
 ) -> TopPanelAction {
     let mut action = TopPanelAction::None;
+    let menu_fill = ctx.style().visuals.window_fill();
+    let controls_fill = ctx.style().visuals.panel_fill;
 
-    egui::TopBottomPanel::top("top_controls").show(ctx, |ui| {
-        egui::menu::bar(ui, |ui| {
-            ui.label("File");
-            ui.label("Edit");
-            ui.label("View");
-            ui.label("Playback");
-            ui.label("Help");
-        });
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            if ui.button("Open").clicked() {
-                action = TopPanelAction::OpenFiles;
-            }
-            if ui.button("Add").clicked() {
-                action = TopPanelAction::AddFiles;
-            }
-            if ui.button("Prev").clicked() {
-                action = TopPanelAction::Previous;
-            }
-            if ui.button("Next").clicked() {
-                action = TopPanelAction::Next;
-            }
-            if ui.button("Play").clicked() {
-                action = TopPanelAction::Play;
-            }
-            if ui.button("Pause").clicked() {
-                action = TopPanelAction::Pause;
-            }
-            if ui.button("Stop").clicked() {
-                action = TopPanelAction::Stop;
-            }
-
-            ui.separator();
-
-            if let Some(seek) = draw_wave_seekbar(ui, playback, analysis) {
-                action = TopPanelAction::SeekTo(seek);
-            }
-
-            ui.label(format!(
-                "{} / {}",
-                format_duration(playback.position),
-                format_duration(playback.duration)
-            ));
-            ui.separator();
-            let mut vol = playback.volume.clamp(0.0, 1.0);
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut vol, 0.0..=1.0)
-                        .text("Vol")
-                        .clamping(egui::SliderClamping::Always),
-                )
-                .changed();
-            if changed {
-                action = TopPanelAction::SetVolume(vol);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            let state = match playback.state {
-                PlaybackState::Stopped => "stopped",
-                PlaybackState::Playing => "playing",
-                PlaybackState::Paused => "paused",
-            };
-            let title = if metadata.title.is_empty() {
-                "No track loaded"
-            } else {
-                metadata.title.as_str()
-            };
-            let artist = if metadata.artist.is_empty() {
-                ""
-            } else {
-                metadata.artist.as_str()
-            };
-            let mut fmt = Vec::new();
-            if let Some(sr) = metadata.sample_rate_hz {
-                fmt.push(format!("{sr}Hz"));
-            }
-            if let Some(bits) = metadata.bit_depth {
-                fmt.push(format!("{bits}bit"));
-            }
-            if let Some(ch) = metadata.channels {
-                fmt.push(if ch == 1 {
-                    "mono".to_string()
-                } else if ch == 2 {
-                    "stereo".to_string()
-                } else {
-                    format!("{ch}ch")
+    egui::TopBottomPanel::top("top_controls")
+        .frame(egui::Frame::default().fill(controls_fill))
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+            ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
+            ui.spacing_mut().slider_width = 140.0;
+            ui.spacing_mut().interact_size.y = 27.0;
+            egui::Frame::default()
+                .fill(menu_fill)
+                .inner_margin(egui::Margin::symmetric(4, 1))
+                .show(ui, |ui| {
+                    egui::menu::bar(ui, |ui| {
+                        ui.label("File");
+                        ui.label("Edit");
+                        ui.label("View");
+                        ui.label("Playback");
+                        ui.label("Help");
+                    });
                 });
-            }
-            if let Some(br) = metadata.bitrate_kbps {
-                fmt.push(format!("{br}kbps"));
-            }
-            let fmt_str = if fmt.is_empty() {
-                String::new()
-            } else {
-                format!(" | {}", fmt.join(" "))
-            };
-            ui.label(format!("{state} | {title} {artist}{fmt_str}"));
+            ui.add_space(2.0);
+
+            ui.horizontal(|ui| {
+                if transport_button(ui, TransportIcon::Previous, "Previous").clicked() {
+                    action = TopPanelAction::Previous;
+                }
+                if transport_button(ui, TransportIcon::Play, "Play").clicked() {
+                    action = TopPanelAction::Play;
+                }
+                if transport_button(ui, TransportIcon::Pause, "Pause").clicked() {
+                    action = TopPanelAction::Pause;
+                }
+                if transport_button(ui, TransportIcon::Stop, "Stop").clicked() {
+                    action = TopPanelAction::Stop;
+                }
+                if transport_button(ui, TransportIcon::Next, "Next").clicked() {
+                    action = TopPanelAction::Next;
+                }
+
+                flush_v_separator(ui, 27.0);
+
+                let duration_text = format!(
+                    "{} / {}",
+                    format_duration(playback.position),
+                    format_duration(playback.duration)
+                );
+                let duration_width = 76.0;
+                let volume_width = 140.0;
+                let seek_width =
+                    (ui.available_width() - duration_width - volume_width - 12.0).max(140.0);
+                if let Some(seek) = draw_wave_seekbar(ui, playback, analysis, seek_width) {
+                    action = TopPanelAction::SeekTo(seek);
+                }
+
+                ui.add_sized(
+                    Vec2::new(duration_width, 27.0),
+                    egui::Label::new(duration_text),
+                );
+                flush_v_separator(ui, 27.0);
+                let mut vol = playback.volume.clamp(0.0, 1.0);
+                let changed = ui
+                    .add_sized(
+                        Vec2::new(volume_width, 27.0),
+                        egui::Slider::new(&mut vol, 0.0..=1.0)
+                            .show_value(false)
+                            .clamping(egui::SliderClamping::Always),
+                    )
+                    .changed();
+                if changed {
+                    action = TopPanelAction::SetVolume(vol);
+                }
+            });
         });
-    });
 
     action
+}
+
+pub fn draw_footer_panel(
+    ctx: &egui::Context,
+    playback: &PlaybackSnapshot,
+    metadata: &TrackMetadata,
+    queue: &[PathBuf],
+    library: &LibrarySnapshot,
+) {
+    egui::TopBottomPanel::bottom("status_footer")
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+            ui.spacing_mut().interact_size.y = 18.0;
+            ui.horizontal(|ui| {
+                ui.label(build_footer_status(playback, metadata, queue, library));
+            });
+        });
 }
 
 pub fn draw_center_panel(
@@ -208,8 +194,6 @@ pub fn draw_center_panel(
     analysis: &AnalysisSnapshot,
     metadata: &TrackMetadata,
     queue: &[PathBuf],
-    playlist_names: &[String],
-    active_playlist: usize,
     selected_queue_index: Option<usize>,
     current: Option<&PathBuf>,
     library: &LibrarySnapshot,
@@ -223,588 +207,779 @@ pub fn draw_center_panel(
     spectrogram_cache: &mut SpectrogramCache,
 ) -> CenterPanelAction {
     let mut action = CenterPanelAction::default();
-    egui::CentralPanel::default().show(ctx, |ui| {
-        let top_h = ui.available_height();
-        ui.allocate_ui(Vec2::new(ui.available_width(), top_h), |ui| {
-            let full_w = ui.available_width();
-            let mut left_w = (full_w * 0.28).clamp(250.0, 390.0);
-            left_w = left_w.min((full_w - 180.0).max(120.0));
-            let right_w = (full_w - left_w - 12.0).max(120.0);
+    egui::CentralPanel::default()
+        .frame(
+            egui::Frame::default()
+                .fill(ctx.style().visuals.panel_fill)
+                .inner_margin(egui::Margin::same(0))
+                .outer_margin(egui::Margin::same(0)),
+        )
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+            ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
+            let top_h = ui.available_height();
+            ui.allocate_ui(Vec2::new(ui.available_width(), top_h), |ui| {
+                let full_w = ui.available_width();
+                let mut left_w = (full_w * 0.28).clamp(250.0, 390.0);
+                left_w = left_w.min((full_w - 180.0).max(120.0));
+                let separator_w = 1.0;
+                let right_w = (full_w - left_w - separator_w).max(120.0);
 
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(left_w, top_h),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.heading("Library");
-                        ui.separator();
-                        let cover_h = ui.available_width().max(80.0);
-                        draw_cover_art(ui, metadata, cover_art_cache, Vec2::splat(cover_h));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left_w, top_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+                            let cover_h = ui.available_width().max(80.0);
+                            draw_cover_art(ui, metadata, cover_art_cache, Vec2::splat(cover_h));
 
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            if ui.button("Scan Folder").clicked() && !library.scan_in_progress {
-                                action.scan_library_folder = true;
-                            }
-                            if ui
-                                .add_enabled(
-                                    selected_library_track.is_some(),
-                                    egui::Button::new("Add"),
-                                )
-                                .clicked()
-                            {
-                                action.add_library_track = selected_library_track.clone();
-                            }
-                            if ui
-                                .add_enabled(
-                                    selected_library_track.is_some(),
-                                    egui::Button::new("Play"),
-                                )
-                                .clicked()
-                            {
-                                action.play_library_track = selected_library_track.clone();
-                            }
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Search:");
-                            ui.text_edit_singleline(library_query);
-                        });
-                        let query = library_query.trim().to_lowercase();
-                        let selected_root = selected_library_root.clone();
-                        let visible_indices: Vec<usize> = library
-                            .tracks
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(idx, track)| {
-                                if let Some(root) = selected_root.as_ref() {
-                                    if !track.path.starts_with(root) {
-                                        return None;
-                                    }
+                            flush_h_separator(ui);
+                            ui.horizontal(|ui| {
+                                if ui.button("Scan Folder").clicked() && !library.scan_in_progress {
+                                    action.scan_library_folder = true;
                                 }
-
-                                if query.is_empty() {
-                                    return Some(idx);
+                                if ui
+                                    .add_enabled(
+                                        selected_library_track.is_some(),
+                                        egui::Button::new("Add"),
+                                    )
+                                    .clicked()
+                                {
+                                    action.add_library_track = selected_library_track.clone();
                                 }
-
-                                let hay = format!(
-                                    "{} {} {} {}",
-                                    track.title,
-                                    track.artist,
-                                    track.album,
-                                    track.path.display()
-                                )
-                                .to_lowercase();
-                                if hay.contains(&query) {
-                                    Some(idx)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        ui.label(format!(
-                            "Indexed tracks: {}  |  Visible: {}",
-                            library.tracks.len(),
-                            visible_indices.len()
-                        ));
-                        if library.scan_in_progress {
-                            ui.label(format!("Scanning... {} files", library.scanned_files));
-                        }
-                        if let Some(err) = library.last_error.as_ref() {
-                            ui.colored_label(Color32::from_rgb(200, 70, 70), err);
-                        }
-
-                        ui.separator();
-                        ui.label("Indexed Folders");
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .max_height((top_h * 0.16).clamp(56.0, 92.0))
-                            .show(ui, |ui| {
-                                if library.roots.is_empty() {
-                                    ui.label("No folders added");
-                                } else {
-                                    let row_w = ui.available_width().max(90.0);
-                                    let max_chars = ((row_w / 6.8).floor() as usize).max(8);
-                                    for root in &library.roots {
-                                        let root_text =
-                                            ellipsize(&root.display().to_string(), max_chars);
-                                        let selected = selected_library_root
-                                            .as_ref()
-                                            .map(|p| p == root)
-                                            .unwrap_or(false);
-                                        let resp = full_row_text_button(
-                                            ui, row_w, 20.0, &root_text, selected, 0.0,
-                                        );
-                                        if resp.clicked() {
-                                            if selected {
-                                                *selected_library_root = None;
-                                            } else {
-                                                *selected_library_root = Some(root.clone());
-                                            }
-                                        }
-                                    }
+                                if ui
+                                    .add_enabled(
+                                        selected_library_track.is_some(),
+                                        egui::Button::new("Play"),
+                                    )
+                                    .clicked()
+                                {
+                                    action.play_library_track = selected_library_track.clone();
                                 }
                             });
 
-                        ui.separator();
-                        ui.label("Library Tree");
-                        if visible_indices.is_empty() {
-                            ui.label("No tracks indexed");
-                        } else {
-                            let row_h = 24.0;
-                            let tracks_h = ui.available_height().max(120.0);
-                            ui.allocate_ui(Vec2::new(ui.available_width(), tracks_h), |ui| {
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        let row_w = ui.available_width().max(80.0);
-                                        let group_chars = ((row_w / 7.6).floor() as usize).max(14);
-                                        let track_chars = ((row_w / 8.2).floor() as usize).max(10);
-
-                                        let mut artist_map: BTreeMap<
-                                            String,
-                                            BTreeMap<String, Vec<usize>>,
-                                        > = BTreeMap::new();
-                                        for idx in visible_indices.iter().copied() {
-                                            let Some(track) = library.tracks.get(idx) else {
-                                                continue;
-                                            };
-                                            let artist = if track.artist.trim().is_empty() {
-                                                "Unknown artist".to_string()
-                                            } else {
-                                                track.artist.trim().to_string()
-                                            };
-                                            let album = if track.album.trim().is_empty() {
-                                                "Unknown album".to_string()
-                                            } else {
-                                                track.album.trim().to_string()
-                                            };
-                                            artist_map
-                                                .entry(artist)
-                                                .or_default()
-                                                .entry(album)
-                                                .or_default()
-                                                .push(idx);
+                            ui.horizontal(|ui| {
+                                ui.label("Search:");
+                                ui.text_edit_singleline(library_query);
+                            });
+                            let query = library_query.trim().to_lowercase();
+                            let selected_root = selected_library_root.clone();
+                            let visible_indices: Vec<usize> = library
+                                .tracks
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, track)| {
+                                    if let Some(root) = selected_root.as_ref() {
+                                        if !track.path.starts_with(root) {
+                                            return None;
                                         }
+                                    }
 
-                                        let all_key = "__tree_all_music__".to_string();
-                                        let all_open = expanded_library_groups
-                                            .get(&all_key)
-                                            .copied()
-                                            .unwrap_or(true);
-                                        if full_row_text_button(
-                                            ui,
-                                            row_w,
-                                            row_h,
-                                            &format!(
-                                                "{} All Music ({})",
-                                                if all_open { "v" } else { ">" },
-                                                visible_indices.len()
-                                            ),
-                                            all_open,
-                                            0.0,
-                                        )
-                                        .clicked()
-                                        {
-                                            expanded_library_groups
-                                                .insert(all_key.clone(), !all_open);
-                                        }
+                                    if query.is_empty() {
+                                        return Some(idx);
+                                    }
 
-                                        if !expanded_library_groups
-                                            .get(&all_key)
-                                            .copied()
-                                            .unwrap_or(true)
-                                        {
-                                            return;
-                                        }
+                                    let hay = format!(
+                                        "{} {} {} {}",
+                                        track.title,
+                                        track.artist,
+                                        track.album,
+                                        track.path.display()
+                                    )
+                                    .to_lowercase();
+                                    if hay.contains(&query) {
+                                        Some(idx)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            ui.label(format!(
+                                "Indexed tracks: {}  |  Visible: {}",
+                                library.tracks.len(),
+                                visible_indices.len()
+                            ));
+                            if library.scan_in_progress {
+                                ui.label(format!("Scanning... {} files", library.scanned_files));
+                            }
+                            if let Some(err) = library.last_error.as_ref() {
+                                ui.colored_label(Color32::from_rgb(200, 70, 70), err);
+                            }
 
-                                        for (artist, albums) in artist_map {
-                                            let artist_key =
-                                                format!("__tree_artist__{}", artist.to_lowercase());
-                                            let artist_count: usize =
-                                                albums.values().map(|v| v.len()).sum();
-                                            let artist_open = expanded_library_groups
-                                                .get(&artist_key)
-                                                .copied()
+                            flush_h_separator(ui);
+                            ui.label("Indexed Folders");
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .max_height((top_h * 0.16).clamp(56.0, 92.0))
+                                .show(ui, |ui| {
+                                    if library.roots.is_empty() {
+                                        ui.label("No folders added");
+                                    } else {
+                                        let row_w = ui.available_width().max(90.0);
+                                        let max_chars = ((row_w / 6.8).floor() as usize).max(8);
+                                        for root in &library.roots {
+                                            let root_text =
+                                                ellipsize(&root.display().to_string(), max_chars);
+                                            let selected = selected_library_root
+                                                .as_ref()
+                                                .map(|p| p == root)
                                                 .unwrap_or(false);
-                                            let artist_label = ellipsize(
-                                                &format!(
-                                                    "{} {} ({})",
-                                                    if artist_open { "v" } else { ">" },
-                                                    artist,
-                                                    artist_count
-                                                ),
-                                                group_chars,
+                                            let resp = full_row_text_button(
+                                                ui, row_w, 20.0, &root_text, selected, 0.0,
                                             );
+                                            if resp.clicked() {
+                                                if selected {
+                                                    *selected_library_root = None;
+                                                } else {
+                                                    *selected_library_root = Some(root.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+
+                            flush_h_separator(ui);
+                            ui.label("Library Tree");
+                            if visible_indices.is_empty() {
+                                ui.label("No tracks indexed");
+                            } else {
+                                let row_h = 24.0;
+                                let tracks_h = ui.available_height().max(120.0);
+                                ui.allocate_ui(Vec2::new(ui.available_width(), tracks_h), |ui| {
+                                    egui::ScrollArea::vertical()
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            let row_w = ui.available_width().max(80.0);
+                                            let group_chars =
+                                                ((row_w / 7.6).floor() as usize).max(14);
+                                            let track_chars =
+                                                ((row_w / 8.2).floor() as usize).max(10);
+
+                                            let mut artist_map: BTreeMap<
+                                                String,
+                                                BTreeMap<String, Vec<usize>>,
+                                            > = BTreeMap::new();
+                                            for idx in visible_indices.iter().copied() {
+                                                let Some(track) = library.tracks.get(idx) else {
+                                                    continue;
+                                                };
+                                                let artist = if track.artist.trim().is_empty() {
+                                                    "Unknown artist".to_string()
+                                                } else {
+                                                    track.artist.trim().to_string()
+                                                };
+                                                let album = if track.album.trim().is_empty() {
+                                                    "Unknown album".to_string()
+                                                } else {
+                                                    track.album.trim().to_string()
+                                                };
+                                                artist_map
+                                                    .entry(artist)
+                                                    .or_default()
+                                                    .entry(album)
+                                                    .or_default()
+                                                    .push(idx);
+                                            }
+
+                                            let all_key = "__tree_all_music__".to_string();
+                                            let all_open = expanded_library_groups
+                                                .get(&all_key)
+                                                .copied()
+                                                .unwrap_or(true);
                                             if full_row_text_button(
                                                 ui,
                                                 row_w,
                                                 row_h,
-                                                &artist_label,
-                                                artist_open,
+                                                &format!(
+                                                    "{} All Music ({})",
+                                                    if all_open { "v" } else { ">" },
+                                                    visible_indices.len()
+                                                ),
+                                                all_open,
                                                 0.0,
                                             )
                                             .clicked()
                                             {
                                                 expanded_library_groups
-                                                    .insert(artist_key.clone(), !artist_open);
-                                            }
-                                            if !expanded_library_groups
-                                                .get(&artist_key)
-                                                .copied()
-                                                .unwrap_or(false)
-                                            {
-                                                continue;
+                                                    .insert(all_key.clone(), !all_open);
                                             }
 
-                                            for (album, indices) in albums {
-                                                let album_key = format!(
-                                                    "__tree_album__{}|{}",
-                                                    artist.to_lowercase(),
-                                                    album.to_lowercase()
+                                            if !expanded_library_groups
+                                                .get(&all_key)
+                                                .copied()
+                                                .unwrap_or(true)
+                                            {
+                                                return;
+                                            }
+
+                                            for (artist, albums) in artist_map {
+                                                let artist_key = format!(
+                                                    "__tree_artist__{}",
+                                                    artist.to_lowercase()
                                                 );
-                                                let album_open = expanded_library_groups
-                                                    .get(&album_key)
+                                                let artist_count: usize =
+                                                    albums.values().map(|v| v.len()).sum();
+                                                let artist_open = expanded_library_groups
+                                                    .get(&artist_key)
                                                     .copied()
                                                     .unwrap_or(false);
-                                                let album_label = ellipsize(
-                                                    &format!("  {} ({})", album, indices.len()),
+                                                let artist_label = ellipsize(
+                                                    &format!(
+                                                        "{} {} ({})",
+                                                        if artist_open { "v" } else { ">" },
+                                                        artist,
+                                                        artist_count
+                                                    ),
                                                     group_chars,
                                                 );
-                                                let mut toggle_album = false;
-                                                let mut add_album = false;
-                                                ui.horizontal(|ui| {
-                                                    if full_row_text_button(
-                                                        ui,
-                                                        18.0,
-                                                        row_h,
-                                                        if album_open { "v" } else { ">" },
-                                                        false,
-                                                        0.0,
-                                                    )
-                                                    .clicked()
-                                                    {
-                                                        toggle_album = true;
-                                                    }
-                                                    let resp = full_row_text_button(
-                                                        ui,
-                                                        (row_w - 22.0).max(60.0),
-                                                        row_h,
-                                                        &album_label,
-                                                        album_open,
-                                                        0.0,
-                                                    );
-                                                    if resp.double_clicked() {
-                                                        add_album = true;
-                                                    }
-                                                });
-                                                if toggle_album {
+                                                if full_row_text_button(
+                                                    ui,
+                                                    row_w,
+                                                    row_h,
+                                                    &artist_label,
+                                                    artist_open,
+                                                    0.0,
+                                                )
+                                                .clicked()
+                                                {
                                                     expanded_library_groups
-                                                        .insert(album_key.clone(), !album_open);
-                                                }
-                                                if add_album {
-                                                    let mut paths =
-                                                        Vec::with_capacity(indices.len());
-                                                    for idx in indices.iter().copied() {
-                                                        if let Some(t) = library.tracks.get(idx) {
-                                                            paths.push(t.path.clone());
-                                                        }
-                                                    }
-                                                    if !paths.is_empty() {
-                                                        action.add_library_album_tracks =
-                                                            Some(paths);
-                                                    }
+                                                        .insert(artist_key.clone(), !artist_open);
                                                 }
                                                 if !expanded_library_groups
-                                                    .get(&album_key)
+                                                    .get(&artist_key)
                                                     .copied()
                                                     .unwrap_or(false)
                                                 {
                                                     continue;
                                                 }
 
-                                                let first_track = indices
-                                                    .first()
-                                                    .and_then(|i| library.tracks.get(*i));
-                                                if let Some(track) = first_track {
-                                                    if let Some(tex_id) =
-                                                        ensure_album_thumb_texture_id(
-                                                            ui,
-                                                            library_art_cache,
-                                                            &album_key,
-                                                            &track.path,
-                                                        )
-                                                    {
-                                                        ui.horizontal(|ui| {
-                                                            ui.add_space(22.0);
-                                                            ui.image((tex_id, Vec2::splat(20.0)));
-                                                        });
-                                                    }
-                                                }
-
-                                                for (idx_in_album, idx) in
-                                                    indices.iter().copied().enumerate()
-                                                {
-                                                    let Some(track) = library.tracks.get(idx)
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    let title = if track.title.is_empty() {
-                                                        track_label(&track.path)
-                                                    } else {
-                                                        track.title.clone()
-                                                    };
-                                                    let title = ellipsize(&title, track_chars);
-                                                    let duration = track
-                                                        .duration_secs
-                                                        .map(format_seconds)
-                                                        .unwrap_or_else(|| "--:--".to_string());
-                                                    let row_text = format!(
-                                                        "    {:02}  {}  {}",
-                                                        track
-                                                            .track_no
-                                                            .unwrap_or((idx_in_album + 1) as u32),
-                                                        title,
-                                                        duration
+                                                for (album, indices) in albums {
+                                                    let album_key = format!(
+                                                        "__tree_album__{}|{}",
+                                                        artist.to_lowercase(),
+                                                        album.to_lowercase()
                                                     );
-                                                    let is_selected = selected_library_track
-                                                        .as_ref()
-                                                        .map(|p| p == &track.path)
+                                                    let album_open = expanded_library_groups
+                                                        .get(&album_key)
+                                                        .copied()
                                                         .unwrap_or(false);
-                                                    let resp = full_row_text_button(
-                                                        ui,
-                                                        row_w,
-                                                        row_h,
-                                                        &row_text,
-                                                        is_selected,
-                                                        0.0,
+                                                    let album_label = ellipsize(
+                                                        &format!("  {} ({})", album, indices.len()),
+                                                        group_chars,
                                                     );
-                                                    if resp.clicked() {
-                                                        *selected_library_track =
-                                                            Some(track.path.clone());
+                                                    let mut toggle_album = false;
+                                                    let mut add_album = false;
+                                                    ui.horizontal(|ui| {
+                                                        if full_row_text_button(
+                                                            ui,
+                                                            18.0,
+                                                            row_h,
+                                                            if album_open { "v" } else { ">" },
+                                                            false,
+                                                            0.0,
+                                                        )
+                                                        .clicked()
+                                                        {
+                                                            toggle_album = true;
+                                                        }
+                                                        let resp = full_row_text_button(
+                                                            ui,
+                                                            (row_w - 22.0).max(60.0),
+                                                            row_h,
+                                                            &album_label,
+                                                            album_open,
+                                                            0.0,
+                                                        );
+                                                        if resp.double_clicked() {
+                                                            add_album = true;
+                                                        }
+                                                    });
+                                                    if toggle_album {
+                                                        expanded_library_groups
+                                                            .insert(album_key.clone(), !album_open);
                                                     }
-                                                    if resp.double_clicked() {
-                                                        action.play_library_track =
-                                                            Some(track.path.clone());
+                                                    if add_album {
+                                                        let mut paths =
+                                                            Vec::with_capacity(indices.len());
+                                                        for idx in indices.iter().copied() {
+                                                            if let Some(t) = library.tracks.get(idx)
+                                                            {
+                                                                paths.push(t.path.clone());
+                                                            }
+                                                        }
+                                                        if !paths.is_empty() {
+                                                            action.add_library_album_tracks =
+                                                                Some(paths);
+                                                        }
+                                                    }
+                                                    if !expanded_library_groups
+                                                        .get(&album_key)
+                                                        .copied()
+                                                        .unwrap_or(false)
+                                                    {
+                                                        continue;
+                                                    }
+
+                                                    let first_track = indices
+                                                        .first()
+                                                        .and_then(|i| library.tracks.get(*i));
+                                                    if let Some(track) = first_track {
+                                                        if let Some(tex_id) =
+                                                            ensure_album_thumb_texture_id(
+                                                                ui,
+                                                                library_art_cache,
+                                                                &album_key,
+                                                                &track.path,
+                                                            )
+                                                        {
+                                                            ui.horizontal(|ui| {
+                                                                ui.add_space(22.0);
+                                                                ui.image((
+                                                                    tex_id,
+                                                                    Vec2::splat(20.0),
+                                                                ));
+                                                            });
+                                                        }
+                                                    }
+
+                                                    for (idx_in_album, idx) in
+                                                        indices.iter().copied().enumerate()
+                                                    {
+                                                        let Some(track) = library.tracks.get(idx)
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        let title = if track.title.is_empty() {
+                                                            track_label(&track.path)
+                                                        } else {
+                                                            track.title.clone()
+                                                        };
+                                                        let title = ellipsize(&title, track_chars);
+                                                        let duration = track
+                                                            .duration_secs
+                                                            .map(format_seconds)
+                                                            .unwrap_or_else(|| "--:--".to_string());
+                                                        let row_text = format!(
+                                                            "    {:02}  {}  {}",
+                                                            track.track_no.unwrap_or(
+                                                                (idx_in_album + 1) as u32
+                                                            ),
+                                                            title,
+                                                            duration
+                                                        );
+                                                        let is_selected = selected_library_track
+                                                            .as_ref()
+                                                            .map(|p| p == &track.path)
+                                                            .unwrap_or(false);
+                                                        let resp = full_row_text_button(
+                                                            ui,
+                                                            row_w,
+                                                            row_h,
+                                                            &row_text,
+                                                            is_selected,
+                                                            0.0,
+                                                        );
+                                                        if resp.clicked() {
+                                                            *selected_library_track =
+                                                                Some(track.path.clone());
+                                                        }
+                                                        if resp.double_clicked() {
+                                                            action.play_library_track =
+                                                                Some(track.path.clone());
+                                                        }
                                                     }
                                                 }
                                             }
+                                        });
+                                });
+                            }
+                        },
+                    );
+
+                    flush_v_separator(ui, top_h);
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(right_w, top_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+                            let total_h = ui.available_height();
+                            let split_pad = 2.0;
+                            let mut spectro_h: f32 = 400.0;
+                            let max_spectro_h = (total_h - split_pad - 120.0).max(80.0);
+                            spectro_h = spectro_h.min(max_spectro_h).max(140.0);
+                            let playlist_h = (total_h - spectro_h - split_pad).max(80.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(ui.available_width(), playlist_h),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.heading("Playlist");
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add_enabled(
+                                                selected_queue_index.is_some(),
+                                                egui::Button::new("Up"),
+                                            )
+                                            .clicked()
+                                        {
+                                            action.queue_move_up = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                selected_queue_index.is_some(),
+                                                egui::Button::new("Down"),
+                                            )
+                                            .clicked()
+                                        {
+                                            action.queue_move_down = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                selected_queue_index.is_some(),
+                                                egui::Button::new("Remove"),
+                                            )
+                                            .clicked()
+                                        {
+                                            action.queue_remove_index = selected_queue_index;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                !queue.is_empty(),
+                                                egui::Button::new("Clear"),
+                                            )
+                                            .clicked()
+                                        {
+                                            action.queue_clear = true;
                                         }
                                     });
-                            });
-                        }
-                    },
-                );
-
-                ui.separator();
-
-                ui.allocate_ui_with_layout(
-                    Vec2::new(right_w, top_h),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        let total_h = ui.available_height();
-                        let split_pad = 6.0;
-                        let mut spectro_h: f32 = 400.0;
-                        let max_spectro_h = (total_h - split_pad - 120.0).max(80.0);
-                        spectro_h = spectro_h.min(max_spectro_h).max(140.0);
-                        let playlist_h = (total_h - spectro_h - split_pad).max(80.0);
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(ui.available_width(), playlist_h),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.heading("Playlist");
-                                ui.separator();
-                                ui.horizontal_wrapped(|ui| {
-                                    let active_label = playlist_names
-                                        .get(active_playlist)
-                                        .cloned()
-                                        .unwrap_or_else(|| "Playlist".to_string());
-                                    egui::ComboBox::from_id_salt("playlist_select")
-                                        .selected_text(active_label)
-                                        .show_ui(ui, |ui| {
-                                            for (idx, name) in playlist_names.iter().enumerate() {
-                                                if ui
-                                                    .selectable_label(idx == active_playlist, name)
-                                                    .clicked()
-                                                {
-                                                    action.select_playlist = Some(idx);
-                                                }
-                                            }
-                                        });
-                                    if ui.button("+").clicked() {
-                                        action.create_playlist = true;
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            playlist_names.len() > 1,
-                                            egui::Button::new("-"),
-                                        )
-                                        .clicked()
-                                    {
-                                        action.delete_playlist = true;
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            selected_queue_index.is_some(),
-                                            egui::Button::new("Up"),
-                                        )
-                                        .clicked()
-                                    {
-                                        action.queue_move_up = true;
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            selected_queue_index.is_some(),
-                                            egui::Button::new("Down"),
-                                        )
-                                        .clicked()
-                                    {
-                                        action.queue_move_down = true;
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            selected_queue_index.is_some(),
-                                            egui::Button::new("Remove"),
-                                        )
-                                        .clicked()
-                                    {
-                                        action.queue_remove_index = selected_queue_index;
-                                    }
-                                });
-                                ui.separator();
-                                let now_playing = if metadata.title.is_empty() {
-                                    "No track loaded".to_string()
-                                } else if metadata.artist.is_empty() {
-                                    metadata.title.clone()
-                                } else {
-                                    format!("{} - {}", metadata.artist, metadata.title)
-                                };
-                                ui.label(format!("Now Playing: {now_playing}"));
-                                if !metadata.album.is_empty() {
-                                    ui.label(format!("Album: {}", metadata.album));
-                                }
-                                ui.add_space(2.0);
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .add_enabled(!queue.is_empty(), egui::Button::new("Clear"))
-                                        .clicked()
-                                    {
-                                        action.queue_clear = true;
+                                    let now_playing = if metadata.title.is_empty() {
+                                        "No track loaded".to_string()
+                                    } else if metadata.artist.is_empty() {
+                                        metadata.title.clone()
+                                    } else {
+                                        format!("{} - {}", metadata.artist, metadata.title)
+                                    };
+                                    ui.label(format!("Now Playing: {now_playing}"));
+                                    if !metadata.album.is_empty() {
+                                        ui.label(format!("Album: {}", metadata.album));
                                     }
                                     ui.label(format!("Tracks: {}", queue.len()));
-                                });
-                                ui.separator();
-                                let row_h = 22.0;
-                                ui.horizontal(|ui| {
-                                    ui.add_sized(Vec2::new(34.0, row_h), egui::Label::new("#"));
-                                    ui.label("Title");
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
+                                    flush_h_separator(ui);
+                                    let row_h = 22.0;
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(Vec2::new(34.0, row_h), egui::Label::new("#"));
+                                        ui.label("Title");
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.add_sized(
+                                                    Vec2::new(58.0, row_h),
+                                                    egui::Label::new("Length"),
+                                                );
+                                            },
+                                        );
+                                    });
+                                    flush_h_separator(ui);
+                                    let queue_h = ui.available_height().max(60.0);
+                                    ui.allocate_ui(
+                                        Vec2::new(ui.available_width(), queue_h),
                                         |ui| {
-                                            ui.add_sized(
-                                                Vec2::new(58.0, row_h),
-                                                egui::Label::new("Length"),
-                                            );
+                                            egui::ScrollArea::vertical()
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    if queue.is_empty() {
+                                                        ui.label("Queue is empty");
+                                                        return;
+                                                    }
+
+                                                    let row_w = ui.available_width().max(120.0);
+                                                    let max_chars =
+                                                        ((row_w / 7.2).floor() as usize).max(10);
+                                                    let drag_id =
+                                                        ui.id().with("playlist_drag_from");
+                                                    let mut hovered_idx: Option<usize> = None;
+                                                    for (idx, path) in queue.iter().enumerate() {
+                                                        let is_current = current
+                                                            .map(|p| p == path)
+                                                            .unwrap_or(false);
+                                                        let is_selected =
+                                                            selected_queue_index == Some(idx);
+                                                        let duration =
+                                                            duration_for_path(library, path)
+                                                                .map(format_seconds)
+                                                                .unwrap_or_else(|| {
+                                                                    "--:--".to_string()
+                                                                });
+                                                        let mut text = track_label(path);
+                                                        if is_current {
+                                                            text.push_str("  ▶");
+                                                        }
+                                                        text = ellipsize(&text, max_chars);
+
+                                                        let button_text = format!(
+                                                            "{:02}  {}  {}",
+                                                            idx + 1,
+                                                            text,
+                                                            duration
+                                                        );
+                                                        let resp = ui.add_sized(
+                                                            Vec2::new(row_w, row_h),
+                                                            egui::Button::new(button_text)
+                                                                .selected(is_selected)
+                                                                .sense(Sense::click_and_drag()),
+                                                        );
+                                                        if resp.double_clicked() {
+                                                            action.queue_play_index = Some(idx);
+                                                        } else if resp.clicked() {
+                                                            if is_selected {
+                                                                action.queue_play_index = Some(idx);
+                                                            } else {
+                                                                action.queue_select_index =
+                                                                    Some(idx);
+                                                            }
+                                                        }
+                                                        if resp.drag_started() {
+                                                            ui.memory_mut(|m| {
+                                                                m.data.insert_temp(drag_id, idx)
+                                                            });
+                                                        }
+                                                        if resp.hovered() {
+                                                            hovered_idx = Some(idx);
+                                                        }
+                                                    }
+                                                    if ui.input(|i| i.pointer.any_released()) {
+                                                        let from = ui.memory_mut(|m| {
+                                                            m.data.remove_temp::<usize>(drag_id)
+                                                        });
+                                                        if let (Some(from), Some(to)) =
+                                                            (from, hovered_idx)
+                                                        {
+                                                            if from != to {
+                                                                action.queue_move_to =
+                                                                    Some((from, to));
+                                                            }
+                                                        }
+                                                    }
+                                                });
                                         },
                                     );
-                                });
-                                ui.separator();
-                                let queue_h = ui.available_height().max(60.0);
-                                ui.allocate_ui(Vec2::new(ui.available_width(), queue_h), |ui| {
-                                    egui::ScrollArea::vertical()
-                                        .auto_shrink([false, false])
-                                        .show(ui, |ui| {
-                                            if queue.is_empty() {
-                                                ui.label("Queue is empty");
-                                                return;
-                                            }
-
-                                            let row_w = ui.available_width().max(120.0);
-                                            let max_chars =
-                                                ((row_w / 7.2).floor() as usize).max(10);
-                                            let drag_id = ui.id().with("playlist_drag_from");
-                                            let mut hovered_idx: Option<usize> = None;
-                                            for (idx, path) in queue.iter().enumerate() {
-                                                let is_current =
-                                                    current.map(|p| p == path).unwrap_or(false);
-                                                let is_selected = selected_queue_index == Some(idx);
-                                                let duration = duration_for_path(library, path)
-                                                    .map(format_seconds)
-                                                    .unwrap_or_else(|| "--:--".to_string());
-                                                let mut text = track_label(path);
-                                                if is_current {
-                                                    text.push_str("  ▶");
-                                                }
-                                                text = ellipsize(&text, max_chars);
-
-                                                let button_text = format!(
-                                                    "{:02}  {}  {}",
-                                                    idx + 1,
-                                                    text,
-                                                    duration
-                                                );
-                                                let resp = ui.add_sized(
-                                                    Vec2::new(row_w, row_h),
-                                                    egui::Button::new(button_text)
-                                                        .selected(is_selected)
-                                                        .sense(Sense::click_and_drag()),
-                                                );
-                                                if resp.double_clicked() {
-                                                    action.queue_play_index = Some(idx);
-                                                } else if resp.clicked() {
-                                                    if is_selected {
-                                                        action.queue_play_index = Some(idx);
-                                                    } else {
-                                                        action.queue_select_index = Some(idx);
-                                                    }
-                                                }
-                                                if resp.drag_started() {
-                                                    ui.memory_mut(|m| {
-                                                        m.data.insert_temp(drag_id, idx)
-                                                    });
-                                                }
-                                                if resp.hovered() {
-                                                    hovered_idx = Some(idx);
-                                                }
-                                            }
-                                            if ui.input(|i| i.pointer.any_released()) {
-                                                let from = ui.memory_mut(|m| {
-                                                    m.data.remove_temp::<usize>(drag_id)
-                                                });
-                                                if let (Some(from), Some(to)) = (from, hovered_idx)
-                                                {
-                                                    if from != to {
-                                                        action.queue_move_to = Some((from, to));
-                                                    }
-                                                }
-                                            }
-                                        });
-                                });
-                            },
-                        );
-                        ui.separator();
-                        let spectro_h = ui.available_height().max(120.0);
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(ui.available_width(), spectro_h),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                draw_spectrogram(
-                                    ui,
-                                    spectro_h,
-                                    &analysis.spectrogram_rows,
-                                    analysis.spectrogram_seq,
-                                    analysis.sample_rate_hz,
-                                    spectro_ui,
-                                    spectrogram_cache,
-                                );
-                            },
-                        );
-                    },
-                );
+                                },
+                            );
+                            let spectro_h = ui.available_height().max(120.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(ui.available_width(), spectro_h),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    draw_spectrogram(
+                                        ui,
+                                        spectro_h,
+                                        &analysis.spectrogram_rows,
+                                        analysis.spectrogram_seq,
+                                        analysis.sample_rate_hz,
+                                        spectro_ui,
+                                        spectrogram_cache,
+                                    );
+                                },
+                            );
+                        },
+                    );
+                });
             });
         });
-    });
     action
+}
+
+#[derive(Clone, Copy)]
+enum TransportIcon {
+    Previous,
+    Play,
+    Pause,
+    Stop,
+    Next,
+}
+
+fn transport_button(ui: &mut egui::Ui, icon: TransportIcon, tooltip: &str) -> egui::Response {
+    let size = Vec2::new(34.0, 27.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let visuals = ui.style().interact(&response);
+    ui.painter().rect(
+        rect,
+        4.0,
+        visuals.bg_fill,
+        visuals.bg_stroke,
+        StrokeKind::Middle,
+    );
+    draw_transport_icon(
+        ui.painter(),
+        rect.shrink2(Vec2::new(8.0, 6.0)),
+        icon,
+        visuals.fg_stroke.color,
+    );
+    response.on_hover_text(tooltip)
+}
+
+fn draw_transport_icon(painter: &egui::Painter, rect: Rect, icon: TransportIcon, color: Color32) {
+    match icon {
+        TransportIcon::Play => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(rect.left(), rect.top()),
+                    Pos2::new(rect.right(), rect.center().y),
+                    Pos2::new(rect.left(), rect.bottom()),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        TransportIcon::Pause => {
+            let w = (rect.width() * 0.28).max(2.0);
+            let gap = (rect.width() * 0.16).max(2.0);
+            let x0 = rect.center().x - (w + gap * 0.5);
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(x0, rect.top()), Vec2::new(w, rect.height())),
+                1.0,
+                color,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(x0 + w + gap, rect.top()),
+                    Vec2::new(w, rect.height()),
+                ),
+                1.0,
+                color,
+            );
+        }
+        TransportIcon::Stop => {
+            let s = rect.width().min(rect.height()) * 0.85;
+            painter.rect_filled(
+                Rect::from_center_size(rect.center(), Vec2::splat(s)),
+                1.0,
+                color,
+            );
+        }
+        TransportIcon::Previous => {
+            let bar_w = (rect.width() * 0.12).max(2.0);
+            painter.rect_filled(
+                Rect::from_min_size(rect.left_top(), Vec2::new(bar_w, rect.height())),
+                1.0,
+                color,
+            );
+            let tri_rect = Rect::from_min_max(
+                Pos2::new(rect.left() + bar_w + 1.0, rect.top()),
+                rect.right_bottom(),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(tri_rect.right(), tri_rect.top()),
+                    Pos2::new(tri_rect.left(), tri_rect.center().y),
+                    Pos2::new(tri_rect.right(), tri_rect.bottom()),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        TransportIcon::Next => {
+            let bar_w = (rect.width() * 0.12).max(2.0);
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(rect.right() - bar_w, rect.top()),
+                    Vec2::new(bar_w, rect.height()),
+                ),
+                1.0,
+                color,
+            );
+            let tri_rect = Rect::from_min_max(
+                rect.left_top(),
+                Pos2::new(rect.right() - bar_w - 1.0, rect.bottom()),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(tri_rect.left(), tri_rect.top()),
+                    Pos2::new(tri_rect.right(), tri_rect.center().y),
+                    Pos2::new(tri_rect.left(), tri_rect.bottom()),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
+    }
+}
+
+fn build_footer_status(
+    playback: &PlaybackSnapshot,
+    metadata: &TrackMetadata,
+    queue: &[PathBuf],
+    library: &LibrarySnapshot,
+) -> String {
+    let state = match playback.state {
+        PlaybackState::Stopped => "stopped",
+        PlaybackState::Playing => "playing",
+        PlaybackState::Paused => "paused",
+    };
+    let track_name = if metadata.title.is_empty() {
+        "No track loaded".to_string()
+    } else if metadata.artist.is_empty() {
+        metadata.title.clone()
+    } else {
+        format!("{} - {}", metadata.artist, metadata.title)
+    };
+
+    let mut fields = Vec::new();
+    if let Some(br) = metadata.bitrate_kbps {
+        fields.push(format!("{br} kbps"));
+    }
+    if let Some(sr) = metadata.sample_rate_hz {
+        fields.push(format!("{sr} Hz"));
+    }
+    if let Some(bits) = metadata.bit_depth {
+        fields.push(format!("{bits} bit"));
+    }
+    if let Some(ch) = metadata.channels {
+        fields.push(if ch == 1 {
+            "mono".to_string()
+        } else if ch == 2 {
+            "stereo".to_string()
+        } else {
+            format!("{ch} ch")
+        });
+    }
+    let fmt = if fields.is_empty() {
+        "format unknown".to_string()
+    } else {
+        fields.join(" | ")
+    };
+
+    let track_count = queue.len();
+    let total_secs: f32 = queue
+        .iter()
+        .filter_map(|path| duration_for_path(library, path))
+        .sum();
+    let total_playtime = format_seconds(total_secs);
+    format!(
+        "{state} | {track_name} | {fmt} | {track_count} tracks | {total_playtime} total playtime"
+    )
+}
+
+fn flush_h_separator(ui: &mut egui::Ui) {
+    let stroke = Stroke::new(
+        1.0,
+        ui.style().visuals.widgets.noninteractive.bg_stroke.color,
+    );
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+    ui.painter()
+        .line_segment([rect.left_top(), rect.right_top()], stroke);
+}
+
+fn flush_v_separator(ui: &mut egui::Ui, height: f32) {
+    let stroke = Stroke::new(
+        1.0,
+        ui.style().visuals.widgets.noninteractive.bg_stroke.color,
+    );
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, height.max(1.0)), Sense::hover());
+    ui.painter()
+        .line_segment([rect.left_top(), rect.left_bottom()], stroke);
 }
 
 fn draw_cover_art(
@@ -815,7 +990,7 @@ fn draw_cover_art(
 ) {
     let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, Color32::from_gray(30));
+    painter.rect_filled(rect, 0.0, Color32::from_gray(30));
 
     let Some((w, h, rgba)) = metadata.cover_art_rgba.as_ref() else {
         painter.text(
@@ -842,21 +1017,19 @@ fn draw_cover_art(
     }
 
     if let Some(tex) = cache.texture.as_ref() {
+        // Draw exactly to widget bounds and crop UVs to preserve aspect ratio.
         let img_aspect = *w as f32 / (*h).max(1) as f32;
         let rect_aspect = rect.width() / rect.height().max(1.0);
-        let draw_rect = if img_aspect > rect_aspect {
-            let draw_h = rect.width() / img_aspect;
-            Rect::from_center_size(rect.center(), Vec2::new(rect.width(), draw_h))
+        let uv = if img_aspect > rect_aspect {
+            let keep_x = (rect_aspect / img_aspect).clamp(0.0, 1.0);
+            let pad_x = (1.0 - keep_x) * 0.5;
+            Rect::from_min_max(Pos2::new(pad_x, 0.0), Pos2::new(1.0 - pad_x, 1.0))
         } else {
-            let draw_w = rect.height() * img_aspect;
-            Rect::from_center_size(rect.center(), Vec2::new(draw_w, rect.height()))
+            let keep_y = (img_aspect / rect_aspect.max(0.0001)).clamp(0.0, 1.0);
+            let pad_y = (1.0 - keep_y) * 0.5;
+            Rect::from_min_max(Pos2::new(0.0, pad_y), Pos2::new(1.0, 1.0 - pad_y))
         };
-        painter.image(
-            tex.id(),
-            draw_rect,
-            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        painter.image(tex.id(), rect, uv, Color32::WHITE);
     }
 }
 
@@ -1005,8 +1178,9 @@ fn draw_wave_seekbar(
     ui: &mut egui::Ui,
     playback: &PlaybackSnapshot,
     analysis: &AnalysisSnapshot,
+    width: f32,
 ) -> Option<Duration> {
-    let desired = Vec2::new(320.0, 24.0);
+    let desired = Vec2::new(width.max(120.0), 27.0);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     painter.rect(
@@ -1089,7 +1263,7 @@ fn draw_spectrogram(
     let desired = Vec2::new(ui.available_width(), desired_h.max(120.0));
     let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, Color32::from_gray(12));
+    painter.rect_filled(rect, 0.0, Color32::from_gray(12));
 
     let no_texture_yet = cache.texture.is_none() || cache.written_cols == 0;
     if (rows.is_empty() || rows[0].is_empty()) && no_texture_yet {
@@ -1112,13 +1286,6 @@ fn draw_spectrogram(
     if let Some(tex) = cache.texture.as_ref() {
         paint_ring_texture(&painter, rect, tex, cache);
     }
-
-    painter.rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(1.0, Color32::from_gray(50)),
-        StrokeKind::Middle,
-    );
 
     let max_khz = (sample_rate_hz as f32 / 2000.0).max(1.0);
     painter.text(
@@ -1620,12 +1787,12 @@ fn paint_ring_texture(
         return;
     }
 
-    let texel = 1.0 / cache.width.max(1) as f32;
     let split = cache.write_x as f32 / cache.width as f32;
     let left_w = rect.width() * (1.0 - split);
-    let left_rect = Rect::from_min_size(rect.min, Vec2::new(left_w, rect.height()));
+    let left_rect =
+        Rect::from_min_size(rect.min, Vec2::new((left_w + 0.5).max(0.0), rect.height()));
     let right_rect = Rect::from_min_max(
-        Pos2::new(left_rect.right(), rect.top()),
+        Pos2::new((left_rect.right() - 0.5).max(rect.left()), rect.top()),
         Pos2::new(rect.right(), rect.bottom()),
     );
 
@@ -1633,20 +1800,14 @@ fn paint_ring_texture(
     painter.image(
         tex.id(),
         left_rect,
-        Rect::from_min_max(
-            Pos2::new((split + texel).min(1.0), 0.0),
-            Pos2::new(1.0, 1.0),
-        ),
+        Rect::from_min_max(Pos2::new(split.min(1.0), 0.0), Pos2::new(1.0, 1.0)),
         Color32::WHITE,
     );
     // Wrapped tail.
     painter.image(
         tex.id(),
         right_rect,
-        Rect::from_min_max(
-            Pos2::new(0.0, 0.0),
-            Pos2::new((split - texel).max(0.0), 1.0),
-        ),
+        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(split.max(0.0), 1.0)),
         Color32::WHITE,
     );
 }
