@@ -184,8 +184,16 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
     let mut settings_dirty = false;
     let mut last_settings_save = Instant::now();
     let ticker = tick(Duration::from_millis(16));
+    let profile_enabled = std::env::var_os("FERROUS_PROFILE").is_some();
+    let mut profile_last = Instant::now();
+    let mut prof_snapshots_sent = 0usize;
+    let mut prof_snapshots_dropped = 0usize;
 
-    send_snapshot_event(&event_tx, &state);
+    if send_snapshot_event(&event_tx, &state) {
+        prof_snapshots_sent += 1;
+    } else {
+        prof_snapshots_dropped += 1;
+    }
 
     while running {
         select! {
@@ -203,7 +211,11 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
                             &mut settings_dirty,
                         );
                         if changed {
-                            send_snapshot_event(&event_tx, &state);
+                            if send_snapshot_event(&event_tx, &state) {
+                                prof_snapshots_sent += 1;
+                            } else {
+                                prof_snapshots_dropped += 1;
+                            }
                         }
                     }
                     Err(_) => break,
@@ -221,7 +233,38 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
         changed |= pump_library_events(&library_rx, &mut state);
 
         if changed {
-            send_snapshot_event(&event_tx, &state);
+            if send_snapshot_event(&event_tx, &state) {
+                prof_snapshots_sent += 1;
+            } else {
+                prof_snapshots_dropped += 1;
+            }
+        }
+
+        if profile_enabled && profile_last.elapsed() >= Duration::from_secs(1) {
+            let rss_kb = current_rss_kb();
+            let spectro_rows = state.analysis.spectrogram_rows.len();
+            let spectro_bins = state
+                .analysis
+                .spectrogram_rows
+                .first()
+                .map(|r| r.len())
+                .unwrap_or(0);
+            eprintln!(
+                "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} spectro_rows={} spectro_bins={} sent_snap/s={} drop_snap/s={}",
+                rss_kb,
+                playback_rx.len(),
+                analysis_rx.len(),
+                metadata_rx.len(),
+                library_rx.len(),
+                state.analysis.waveform_peaks.len(),
+                spectro_rows,
+                spectro_bins,
+                prof_snapshots_sent,
+                prof_snapshots_dropped
+            );
+            prof_snapshots_sent = 0;
+            prof_snapshots_dropped = 0;
+            profile_last = Instant::now();
         }
 
         if settings_dirty && last_settings_save.elapsed() >= Duration::from_secs(2) {
@@ -242,12 +285,28 @@ fn try_send_event(
     event_tx.try_send(event)
 }
 
-fn send_snapshot_event(event_tx: &Sender<BridgeEvent>, state: &BridgeState) {
+fn send_snapshot_event(event_tx: &Sender<BridgeEvent>, state: &BridgeState) -> bool {
     // Drop stale snapshot updates when the consumer is behind; next snapshot will replace it.
     if event_tx.is_full() {
-        return;
+        return false;
     }
-    let _ = try_send_event(event_tx, BridgeEvent::Snapshot(state.snapshot()));
+    try_send_event(event_tx, BridgeEvent::Snapshot(state.snapshot())).is_ok()
+}
+
+fn current_rss_kb() -> usize {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            if let Some(num) = rest.split_whitespace().next() {
+                if let Ok(v) = num.parse::<usize>() {
+                    return v;
+                }
+            }
+        }
+    }
+    0
 }
 
 #[allow(clippy::too_many_arguments)]

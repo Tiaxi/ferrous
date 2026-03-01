@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::unbounded;
 use ferrous::frontend_bridge::{
@@ -129,7 +129,10 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
         let _ = input_tx.send(InputMsg::Eof);
     });
 
-    let mut emit_state = JsonEmitState::default();
+    let mut emit_state = JsonEmitState {
+        profile_enabled: std::env::var_os("FERROUS_PROFILE").is_some(),
+        ..JsonEmitState::default()
+    };
     bridge.command(BridgeCommand::RequestSnapshot);
     drain_bridge_events_as_json(&bridge, 32, Duration::from_millis(1), &mut emit_state);
 
@@ -146,14 +149,18 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
                         Ok(Some(cmd)) => {
                             if matches!(cmd, BridgeCommand::Shutdown) {
                                 bridge.command(BridgeCommand::Shutdown);
-                                let _ = emit_json_line(&json!({ "event": "stopped" }));
+                                let _ =
+                                    emit_json_line(&json!({ "event": "stopped" }), &mut emit_state);
                                 return;
                             }
                             bridge.command(cmd);
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            let _ = emit_json_line(&json!({ "event": "error", "message": err }));
+                            let _ = emit_json_line(
+                                &json!({ "event": "error", "message": err }),
+                                &mut emit_state,
+                            );
                         }
                     }
                 }
@@ -167,7 +174,7 @@ fn run_json_bridge(bridge: FrontendBridgeHandle) {
 
         if eof_seen {
             bridge.command(BridgeCommand::Shutdown);
-            let _ = emit_json_line(&json!({ "event": "stopped" }));
+            let _ = emit_json_line(&json!({ "event": "stopped" }), &mut emit_state);
             return;
         }
 
@@ -193,6 +200,12 @@ struct JsonEmitState {
     last_library_digest: Option<LibraryDigest>,
     last_queue_digest: Option<QueueDigest>,
     last_spectrogram_seq: u64,
+    profile_enabled: bool,
+    profile_last: Option<Instant>,
+    profile_snapshots: usize,
+    profile_bytes: usize,
+    profile_max_payload_bytes: usize,
+    profile_max_write_ms: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,10 +384,11 @@ fn drain_bridge_events_as_json(
         match event {
             BridgeEvent::Snapshot(s) => latest_snapshot = Some(s),
             BridgeEvent::Error(message) => {
-                let _ = emit_json_line(&json!({ "event": "error", "message": message }));
+                let _ =
+                    emit_json_line(&json!({ "event": "error", "message": message }), emit_state);
             }
             BridgeEvent::Stopped => {
-                let _ = emit_json_line(&json!({ "event": "stopped" }));
+                let _ = emit_json_line(&json!({ "event": "stopped" }), emit_state);
                 return;
             }
         }
@@ -382,7 +396,7 @@ fn drain_bridge_events_as_json(
 
     if let Some(s) = latest_snapshot {
         let payload = encode_snapshot_payload(&s, emit_state);
-        let _ = emit_json_line(&payload);
+        let _ = emit_json_line(&payload, emit_state);
     }
 }
 
@@ -489,7 +503,8 @@ fn encode_snapshot_payload(
     let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
     let waveform_peaks = if waveform_changed {
         emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
-        serde_json::Value::Array(s.analysis.waveform_peaks.iter().map(|v| json!(v)).collect())
+        let reduced = downsample_waveform_peaks(&s.analysis.waveform_peaks, 1024);
+        serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
     } else {
         serde_json::Value::Null
     };
@@ -510,7 +525,7 @@ fn encode_snapshot_payload(
             s.analysis.spectrogram_rows[start..]
                 .iter()
                 .map(|row| {
-                    let reduced = downsample_spectrogram_row(row, 256);
+                    let reduced = downsample_spectrogram_row(row, 160);
                     serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
                 })
                 .collect(),
@@ -559,10 +574,44 @@ fn encode_snapshot_payload(
     })
 }
 
-fn emit_json_line(payload: &serde_json::Value) -> io::Result<()> {
+fn emit_json_line(payload: &serde_json::Value, emit_state: &mut JsonEmitState) -> io::Result<()> {
+    let started = Instant::now();
+    let bytes = serde_json::to_vec(payload)?;
     let mut out = io::stdout().lock();
-    writeln!(out, "{}", payload)?;
-    out.flush()
+    out.write_all(&bytes)?;
+    out.write_all(b"\n")?;
+    out.flush()?;
+
+    if emit_state.profile_enabled {
+        emit_state.profile_snapshots = emit_state.profile_snapshots.saturating_add(1);
+        emit_state.profile_bytes = emit_state.profile_bytes.saturating_add(bytes.len());
+        emit_state.profile_max_payload_bytes =
+            emit_state.profile_max_payload_bytes.max(bytes.len());
+        let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+        emit_state.profile_max_write_ms = emit_state.profile_max_write_ms.max(write_ms);
+
+        let now = Instant::now();
+        let should_report = emit_state
+            .profile_last
+            .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+            .unwrap_or(true);
+        if should_report {
+            eprintln!(
+                "[bridge-json] snaps/s={} bytes/s={} max_payload={}B max_write_ms={:.2}",
+                emit_state.profile_snapshots,
+                emit_state.profile_bytes,
+                emit_state.profile_max_payload_bytes,
+                emit_state.profile_max_write_ms
+            );
+            emit_state.profile_last = Some(now);
+            emit_state.profile_snapshots = 0;
+            emit_state.profile_bytes = 0;
+            emit_state.profile_max_payload_bytes = 0;
+            emit_state.profile_max_write_ms = 0.0;
+        }
+    }
+
+    Ok(())
 }
 
 fn downsample_spectrogram_row(row: &[f32], max_bins: usize) -> Vec<f32> {
@@ -578,6 +627,28 @@ fn downsample_spectrogram_row(row: &[f32], max_bins: usize) -> Vec<f32> {
         }
         let mut peak = 0.0f32;
         for &v in &row[start..end] {
+            if v > peak {
+                peak = v;
+            }
+        }
+        out.push(peak);
+    }
+    out
+}
+
+fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
+    if peaks.len() <= max_points || max_points == 0 {
+        return peaks.to_vec();
+    }
+    let mut out = Vec::with_capacity(max_points);
+    for i in 0..max_points {
+        let start = i * peaks.len() / max_points;
+        let mut end = (i + 1) * peaks.len() / max_points;
+        if end <= start {
+            end = (start + 1).min(peaks.len());
+        }
+        let mut peak = 0.0f32;
+        for &v in &peaks[start..end] {
             if v > peak {
                 peak = v;
             }
