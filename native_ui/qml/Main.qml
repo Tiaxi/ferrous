@@ -13,6 +13,7 @@ Kirigami.ApplicationWindow {
     visible: true
     title: "Ferrous"
     property int selectedLibraryAlbumIndex: -1
+    property var spectrogramColumns: []
 
     function togglePlayPause() {
         if (bridge.playbackState === "Playing") {
@@ -588,7 +589,7 @@ Kirigami.ApplicationWindow {
                             ctx.fillStyle = "#0b0b0f"
                             ctx.fillRect(0, 0, w, h)
 
-                            const rows = bridge.spectrogramRows
+                            const rows = root.spectrogramColumns
                             if (rows.length === 0) {
                                 return
                             }
@@ -655,6 +656,21 @@ Kirigami.ApplicationWindow {
         function onSnapshotChanged() {
             if (root.selectedLibraryAlbumIndex >= bridge.libraryAlbums.length) {
                 root.selectedLibraryAlbumIndex = bridge.libraryAlbums.length - 1
+            }
+            if (bridge.spectrogramReset) {
+                root.spectrogramColumns = []
+            }
+            const delta = bridge.spectrogramRowsDelta
+            if (delta.length > 0) {
+                const merged = root.spectrogramColumns.slice()
+                for (let i = 0; i < delta.length; i++) {
+                    merged.push(delta[i])
+                }
+                const maxCols = Math.max(512, Math.floor(spectrogramCanvas.width))
+                if (merged.length > maxCols) {
+                    merged.splice(0, merged.length - maxCols)
+                }
+                root.spectrogramColumns = merged
             }
             spectrogramCanvas.requestPaint()
         }

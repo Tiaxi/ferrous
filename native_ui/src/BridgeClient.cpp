@@ -59,8 +59,12 @@ QVariantList BridgeClient::waveformPeaks() const {
     return m_waveformPeaks;
 }
 
-QVariantList BridgeClient::spectrogramRows() const {
-    return m_spectrogramRows;
+QVariantList BridgeClient::spectrogramRowsDelta() const {
+    return m_spectrogramRowsDelta;
+}
+
+bool BridgeClient::spectrogramReset() const {
+    return m_spectrogramReset;
 }
 
 int BridgeClient::sampleRateHz() const {
@@ -311,14 +315,15 @@ void BridgeClient::handleStdoutReady() {
                 changed = true;
             }
             const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
-            if (spectrogramReset && !m_spectrogramRows.isEmpty()) {
-                m_spectrogramRows.clear();
+            if (m_spectrogramReset != spectrogramReset) {
+                m_spectrogramReset = spectrogramReset;
                 changed = true;
             }
             const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
             if (spectrogramRowsValue.isArray()) {
                 const QJsonArray rowsArr = spectrogramRowsValue.toArray();
-                bool spectroChanged = false;
+                QVariantList rowsDelta;
+                rowsDelta.reserve(rowsArr.size());
                 for (const QJsonValue &rowValue : rowsArr) {
                     const QJsonArray rowArr = rowValue.toArray();
                     if (rowArr.isEmpty()) {
@@ -329,17 +334,15 @@ void BridgeClient::handleStdoutReady() {
                     for (const QJsonValue &v : rowArr) {
                         row.push_back(v.toDouble());
                     }
-                    m_spectrogramRows.push_back(row);
-                    spectroChanged = true;
+                    rowsDelta.push_back(row);
                 }
-                constexpr int kMaxSpectrogramColumns = 2200;
-                while (m_spectrogramRows.size() > kMaxSpectrogramColumns) {
-                    m_spectrogramRows.removeFirst();
-                    spectroChanged = true;
-                }
-                if (spectroChanged) {
+                if (m_spectrogramRowsDelta != rowsDelta) {
+                    m_spectrogramRowsDelta = rowsDelta;
                     changed = true;
                 }
+            } else if (!m_spectrogramRowsDelta.isEmpty()) {
+                m_spectrogramRowsDelta.clear();
+                changed = true;
             }
             if (m_sampleRateHz != sampleRate) {
                 m_sampleRateHz = sampleRate;

@@ -393,7 +393,7 @@ fn drain_bridge_events_as_json(
                             .spectrogram_rows
                             .iter()
                             .map(|row| {
-                                let reduced = downsample_spectrogram_row(row, 768);
+                                let reduced = downsample_spectrogram_row(row, 320);
                                 serde_json::Value::Array(reduced.iter().map(|v| json!(v)).collect())
                             })
                             .collect(),

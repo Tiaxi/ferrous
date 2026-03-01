@@ -20,7 +20,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(QVariantList waveformPeaks READ waveformPeaks NOTIFY snapshotChanged)
-    Q_PROPERTY(QVariantList spectrogramRows READ spectrogramRows NOTIFY snapshotChanged)
+    Q_PROPERTY(QVariantList spectrogramRowsDelta READ spectrogramRowsDelta NOTIFY snapshotChanged)
+    Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY snapshotChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY snapshotChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
@@ -41,7 +42,8 @@ public:
     QStringList queueItems() const;
     int selectedQueueIndex() const;
     QVariantList waveformPeaks() const;
-    QVariantList spectrogramRows() const;
+    QVariantList spectrogramRowsDelta() const;
+    bool spectrogramReset() const;
     int sampleRateHz() const;
     double dbRange() const;
     bool logScale() const;
@@ -94,7 +96,8 @@ private:
     QStringList m_queueItems;
     int m_selectedQueueIndex{-1};
     QVariantList m_waveformPeaks;
-    QVariantList m_spectrogramRows;
+    QVariantList m_spectrogramRowsDelta;
+    bool m_spectrogramReset{false};
     int m_sampleRateHz{48000};
     double m_dbRange{90.0};
     bool m_logScale{false};
