@@ -895,6 +895,7 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
@@ -981,5 +982,64 @@ mod tests {
                 p("/a.flac")
             ])]
         );
+    }
+
+    fn wait_for_snapshot_matching<F>(
+        bridge: &FrontendBridgeHandle,
+        timeout: Duration,
+        predicate: F,
+    ) -> Option<BridgeSnapshot>
+    where
+        F: Fn(&BridgeSnapshot) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
+                if let BridgeEvent::Snapshot(snapshot) = event {
+                    if predicate(&snapshot) {
+                        return Some(snapshot);
+                    }
+                    last = Some(snapshot);
+                }
+            }
+            while let Some(event) = bridge.try_recv() {
+                if let BridgeEvent::Snapshot(snapshot) = event {
+                    if predicate(&snapshot) {
+                        return Some(snapshot);
+                    }
+                    last = Some(snapshot);
+                }
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn bridge_queue_roundtrip_snapshot_integration() {
+        let bridge = FrontendBridgeHandle::spawn();
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
+            tracks: vec![p("/music/a.flac"), p("/music/b.flac")],
+            autoplay: false,
+        }));
+        bridge.command(BridgeCommand::RequestSnapshot);
+
+        let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+            s.queue.len() == 2 && s.selected_queue_index == Some(0)
+        })
+        .expect("snapshot with loaded queue");
+        assert_eq!(loaded.queue.len(), 2);
+        assert_eq!(loaded.selected_queue_index, Some(0));
+
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Clear));
+        bridge.command(BridgeCommand::RequestSnapshot);
+        let cleared = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+            s.queue.is_empty() && s.selected_queue_index.is_none()
+        })
+        .expect("snapshot with cleared queue");
+        assert!(cleared.queue.is_empty());
+        assert!(cleared.selected_queue_index.is_none());
+
+        bridge.command(BridgeCommand::Shutdown);
     }
 }

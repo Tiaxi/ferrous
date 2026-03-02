@@ -30,7 +30,9 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Binary analysis frame envelope validation.
 - Status:
   - Phase 1 implemented in `src/frontend_bridge/ffi.rs` (unit-level contract checks).
-  - Future: add integration tests that drive the exported `extern "C"` functions end-to-end.
+  - Phase 2 implemented:
+    - End-to-end tests now drive exported `ferrous_ffi_bridge_*` functions for snapshot/error/stopped flow.
+  - Future: add process-vs-in-process parity integration checks for key command flows.
 
 ### Layer 3: Native UI Smoke Tests (Qt)
 
@@ -47,7 +49,9 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Queue transitions, seek behavior, gapless handoff, no early metadata/waveform switch.
   - In-process bridge mode and process fallback mode parity checks.
 - Status:
-  - Planned.
+  - Phase 1 partially implemented:
+    - Bridge queue roundtrip integration test (`FrontendBridgeHandle` + snapshot assertions).
+  - Further queue/seek/gapless and metadata transition cases still planned.
 
 ## Execution Commands
 
@@ -60,7 +64,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 ## Next Coverage Steps
 
-1. Add FFI integration tests that exercise `ferrous_ffi_bridge_*` end-to-end.
-2. Add queue/playback integration tests with deterministic fixtures.
-3. Add process-vs-in-process bridge parity integration test.
+1. Add process-vs-in-process bridge parity integration tests.
+2. Expand queue/playback integration tests with deterministic fixtures.
+3. Add seek/gapless/metadata transition regression tests.
 4. Add performance regression harness for bridge/event throughput and UI frame pacing.

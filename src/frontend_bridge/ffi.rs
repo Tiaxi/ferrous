@@ -879,8 +879,11 @@ mod tests {
     use crate::analysis::AnalysisSnapshot;
     use crate::library::LibrarySnapshot;
     use crate::playback::{PlaybackSnapshot, PlaybackState};
+    use std::ffi::{CStr, CString};
     use std::sync::Arc;
+    use std::thread;
     use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn parse_json_command_supports_settings_updates() {
@@ -970,5 +973,93 @@ mod tests {
         let frame = encode_analysis_frame(&delta);
         assert!(!frame.is_empty());
         assert_eq!(frame[4], ANALYSIS_FRAME_MAGIC);
+    }
+
+    fn ffi_send_json(handle: *mut FerrousFfiBridge, cmd: &str) -> bool {
+        let c = CString::new(cmd).expect("CString");
+        // SAFETY: `handle` comes from `ferrous_ffi_bridge_create`, and `c` lives across the call.
+        unsafe { ferrous_ffi_bridge_send_json(handle, c.as_ptr()) }
+    }
+
+    fn ffi_next_event(
+        handle: *mut FerrousFfiBridge,
+        timeout: Duration,
+    ) -> Option<serde_json::Value> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            // SAFETY: `handle` comes from `ferrous_ffi_bridge_create` for test lifetime.
+            unsafe {
+                ferrous_ffi_bridge_poll(handle, 64);
+                let ptr = ferrous_ffi_bridge_pop_json_event(handle);
+                if !ptr.is_null() {
+                    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+                    ferrous_ffi_bridge_free_json_event(ptr);
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        return Some(value);
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    fn ffi_wait_event_kind(
+        handle: *mut FerrousFfiBridge,
+        kind: &str,
+        timeout: Duration,
+    ) -> Option<serde_json::Value> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Some(evt) = ffi_next_event(handle, remaining.min(Duration::from_millis(100)))
+            else {
+                continue;
+            };
+            if evt.get("event").and_then(|v| v.as_str()) == Some(kind) {
+                return Some(evt);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn ffi_bridge_emits_snapshot_event_end_to_end() {
+        // SAFETY: creating and destroying handle in this test scope.
+        let handle = ferrous_ffi_bridge_create();
+        assert!(!handle.is_null());
+
+        let snapshot_evt = ffi_wait_event_kind(handle, "snapshot", Duration::from_secs(4))
+            .expect("snapshot event");
+        assert!(snapshot_evt.get("playback").is_some());
+        assert!(snapshot_evt.get("queue").is_some());
+        assert!(snapshot_evt.get("settings").is_some());
+
+        assert!(ffi_send_json(handle, r#"{"cmd":"shutdown"}"#));
+        let stopped = ffi_wait_event_kind(handle, "stopped", Duration::from_secs(3));
+        assert!(stopped.is_some());
+        // SAFETY: paired with create and not used after destroy.
+        unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    #[test]
+    fn ffi_bridge_reports_error_for_bad_command_end_to_end() {
+        // SAFETY: creating and destroying handle in this test scope.
+        let handle = ferrous_ffi_bridge_create();
+        assert!(!handle.is_null());
+
+        assert!(!ffi_send_json(handle, r#"{"cmd":"seek","value":-1}"#));
+        let error_evt =
+            ffi_wait_event_kind(handle, "error", Duration::from_secs(3)).expect("error event");
+        let message = error_evt
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(message.contains("seek value must be >= 0"));
+
+        assert!(ffi_send_json(handle, r#"{"cmd":"shutdown"}"#));
+        let _ = ffi_wait_event_kind(handle, "stopped", Duration::from_secs(3));
+        // SAFETY: paired with create and not used after destroy.
+        unsafe { ferrous_ffi_bridge_destroy(handle) };
     }
 }
