@@ -178,7 +178,7 @@ Acceptance criteria:
 ### Core UX / Interaction
 - [x] Implement full native top menu actions (`File/Edit/View/Playback/Help`).
 - [x] Add playlist and library context menus for common actions.
-- [ ] Add drag-and-drop from library to playlist.
+- [x] Add drag-and-drop from library to playlist.
 - [ ] Add multi-select in playlist and library views.
 - [ ] Add status bar parity items (selection counts, queue duration, mode indicators).
 

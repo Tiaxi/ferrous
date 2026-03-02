@@ -181,6 +181,47 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    function repeatModeText(mode) {
+        if (mode === 1) {
+            return "repeat-one"
+        }
+        if (mode === 2) {
+            return "repeat-all"
+        }
+        return "repeat-off"
+    }
+
+    function librarySelectionStatusText() {
+        if (selectedLibraryRowType === "artist" && selectedLibraryArtist.length > 0) {
+            return "artist: " + selectedLibraryArtist
+        }
+        if (selectedLibraryRowType === "album" && selectedLibraryAlbum.length > 0) {
+            return "album: " + selectedLibraryAlbum
+        }
+        if (selectedLibraryRowType === "track" && selectedLibraryTrackPath.length > 0) {
+            const parts = selectedLibraryTrackPath.split("/")
+            return "track: " + parts[parts.length - 1]
+        }
+        return "none"
+    }
+
+    function statusLineText() {
+        if (!uiBridge.connected) {
+            return "bridge disconnected"
+        }
+        const queueSel = uiBridge.selectedQueueIndex >= 0
+            ? (uiBridge.selectedQueueIndex + 1).toString()
+            : "-"
+        const queuePart = queueSel + "/" + uiBridge.queueLength
+        return uiBridge.playbackState.toLowerCase()
+            + " | " + uiBridge.positionText + "/" + uiBridge.durationText
+            + " | tracks " + uiBridge.queueLength
+            + " | qsel " + queuePart
+            + " | lsel " + librarySelectionStatusText()
+            + " | " + repeatModeText(uiBridge.repeatMode)
+            + " | " + (uiBridge.shuffleEnabled ? "shuffle-on" : "shuffle-off")
+    }
+
     function selectQueueRelative(delta) {
         if (uiBridge.queueLength <= 0) {
             return
@@ -491,11 +532,7 @@ Kirigami.ApplicationWindow {
             spacing: 8
             Label {
                 Layout.fillWidth: true
-                text: uiBridge.connected
-                    ? (uiBridge.playbackState.toLowerCase() + " | "
-                       + uiBridge.positionText + "/" + uiBridge.durationText
-                       + " | tracks " + uiBridge.queueLength)
-                    : "bridge disconnected"
+                text: statusLineText()
                 elide: Text.ElideRight
             }
         }
