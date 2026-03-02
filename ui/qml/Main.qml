@@ -456,6 +456,22 @@ Kirigami.ApplicationWindow {
                             positionSeconds: root.displayedPositionSeconds
                             durationSeconds: uiBridge.durationSeconds
                         }
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: Math.round(parent.width * seekSlider.visualPosition)
+                            color: Qt.rgba(120 / 255, 190 / 255, 1.0, 0.26)
+                        }
+
+                        Rectangle {
+                            width: 1
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            x: Math.round(seekSlider.visualPosition * (parent.width - 1))
+                            color: "#2f7cd6"
+                        }
                     }
 
                     handle: Rectangle {

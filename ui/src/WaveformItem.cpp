@@ -45,7 +45,6 @@ void WaveformItem::setPositionSeconds(double value) {
     }
     m_positionSeconds = value;
     emit positionSecondsChanged();
-    update();
 }
 
 double WaveformItem::durationSeconds() const {
@@ -58,7 +57,6 @@ void WaveformItem::setDurationSeconds(double value) {
     }
     m_durationSeconds = value;
     emit durationSecondsChanged();
-    update();
 }
 
 void WaveformItem::paint(QPainter *painter) {
@@ -81,14 +79,6 @@ void WaveformItem::paint(QPainter *painter) {
             painter->drawRect(x, y, 1, bar * 2);
         }
     }
-
-    const double progress = (m_durationSeconds > 0.0)
-        ? std::clamp(m_positionSeconds / m_durationSeconds, 0.0, 1.0)
-        : 0.0;
-    const int progressX = static_cast<int>(std::floor(progress * w));
-
-    painter->fillRect(QRect(0, 0, progressX, h), QColor(120, 190, 255, 66));
-    painter->fillRect(QRect(progressX, 0, 1, h), QColor("#2f7cd6"));
 
     if (m_profileEnabled) {
         const auto paint_end = std::chrono::steady_clock::now();
