@@ -146,6 +146,14 @@ bool BridgeClient::libraryScanInProgress() const {
     return m_libraryScanInProgress;
 }
 
+int BridgeClient::libraryRootCount() const {
+    return m_libraryRootCount;
+}
+
+int BridgeClient::libraryTrackCount() const {
+    return m_libraryTrackCount;
+}
+
 bool BridgeClient::connected() const {
     return m_connected;
 }
@@ -678,6 +686,16 @@ void BridgeClient::handleStdoutReady() {
             const bool scanInProgress = library.value(QStringLiteral("scan_in_progress")).toBool();
             if (m_libraryScanInProgress != scanInProgress) {
                 m_libraryScanInProgress = scanInProgress;
+                changed = true;
+            }
+            const int roots = library.value(QStringLiteral("roots")).toInt(m_libraryRootCount);
+            if (m_libraryRootCount != roots) {
+                m_libraryRootCount = roots;
+                changed = true;
+            }
+            const int tracks = library.value(QStringLiteral("tracks")).toInt(m_libraryTrackCount);
+            if (m_libraryTrackCount != tracks) {
+                m_libraryTrackCount = tracks;
                 changed = true;
             }
             const QJsonValue albumsValue = library.value(QStringLiteral("albums"));

@@ -14,6 +14,8 @@ Kirigami.ApplicationWindow {
     visible: true
     title: "Ferrous"
     property int selectedLibraryAlbumIndex: -1
+    property var filteredLibrarySourceIndexes: []
+    property var filteredLibraryLabels: []
     property int lastCenteredQueueIndex: -2
     readonly property var uiBridge: bridge ? bridge : bridgeFallback
 
@@ -35,6 +37,8 @@ Kirigami.ApplicationWindow {
         property int sampleRateHz: 48000
         property var libraryAlbums: []
         property bool libraryScanInProgress: false
+        property int libraryRootCount: 0
+        property int libraryTrackCount: 0
         property bool connected: false
         signal snapshotChanged()
         signal bridgeError(string message)
@@ -75,6 +79,33 @@ Kirigami.ApplicationWindow {
         const to = Math.max(0, Math.min(uiBridge.queueLength - 1, from + delta))
         if (to !== from) {
             uiBridge.moveQueue(from, to)
+        }
+    }
+
+    function librarySourceIndexAt(viewIndex) {
+        if (viewIndex < 0 || viewIndex >= filteredLibrarySourceIndexes.length) {
+            return -1
+        }
+        return filteredLibrarySourceIndexes[viewIndex]
+    }
+
+    function rebuildLibraryFilter() {
+        const labels = uiBridge.libraryAlbums || []
+        const term = librarySearchField.text.trim().toLowerCase()
+        const filteredIndexes = []
+        const filteredLabels = []
+        for (let i = 0; i < labels.length; i++) {
+            const label = labels[i]
+            if (term.length === 0 || label.toLowerCase().indexOf(term) !== -1) {
+                filteredIndexes.push(i)
+                filteredLabels.push(label)
+            }
+        }
+        filteredLibrarySourceIndexes = filteredIndexes
+        filteredLibraryLabels = filteredLabels
+        if (selectedLibraryAlbumIndex >= 0
+                && filteredLibrarySourceIndexes.indexOf(selectedLibraryAlbumIndex) === -1) {
+            selectedLibraryAlbumIndex = -1
         }
     }
 
@@ -368,8 +399,19 @@ Kirigami.ApplicationWindow {
                             }
 
                             TextField {
+                                id: librarySearchField
                                 Layout.fillWidth: true
                                 placeholderText: "Search"
+                                onTextChanged: root.rebuildLibraryFilter()
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: "Indexed tracks: " + uiBridge.libraryTrackCount
+                                      + " | roots: " + uiBridge.libraryRootCount
+                                      + (uiBridge.libraryScanInProgress ? " | scanning..." : "")
+                                color: Kirigami.Theme.disabledTextColor
+                                elide: Text.ElideRight
                             }
 
                             ListView {
@@ -377,12 +419,13 @@ Kirigami.ApplicationWindow {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                model: uiBridge.libraryAlbums
+                                model: root.filteredLibraryLabels
 
                                 delegate: Rectangle {
+                                    readonly property int sourceIndex: root.librarySourceIndexAt(index)
                                     width: ListView.view.width
                                     height: 24
-                                    color: index === root.selectedLibraryAlbumIndex
+                                    color: sourceIndex === root.selectedLibraryAlbumIndex
                                         ? Kirigami.Theme.highlightColor
                                         : (index % 2 === 0
                                             ? Kirigami.Theme.backgroundColor
@@ -396,7 +439,7 @@ Kirigami.ApplicationWindow {
                                         elide: Text.ElideRight
                                         anchors.right: parent.right
                                         anchors.rightMargin: 6
-                                        color: index === root.selectedLibraryAlbumIndex
+                                        color: sourceIndex === root.selectedLibraryAlbumIndex
                                             ? Kirigami.Theme.highlightedTextColor
                                             : Kirigami.Theme.textColor
                                     }
@@ -405,31 +448,45 @@ Kirigami.ApplicationWindow {
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                                         onClicked: function(mouse) {
-                                            root.selectedLibraryAlbumIndex = index
+                                            root.selectedLibraryAlbumIndex = sourceIndex
                                             if (mouse.button === Qt.RightButton) {
                                                 albumMenu.popup()
                                             }
                                         }
-                                        onDoubleClicked: uiBridge.replaceAlbumAt(index)
+                                        onDoubleClicked: {
+                                            if (sourceIndex >= 0) {
+                                                uiBridge.replaceAlbumAt(sourceIndex)
+                                            }
+                                        }
                                     }
 
                                     Menu {
                                         id: albumMenu
                                         MenuItem {
                                             text: "Play Album"
-                                            onTriggered: uiBridge.replaceAlbumAt(index)
+                                            onTriggered: {
+                                                if (sourceIndex >= 0) {
+                                                    uiBridge.replaceAlbumAt(sourceIndex)
+                                                }
+                                            }
                                         }
                                         MenuItem {
                                             text: "Append Album"
-                                            onTriggered: uiBridge.appendAlbumAt(index)
+                                            onTriggered: {
+                                                if (sourceIndex >= 0) {
+                                                    uiBridge.appendAlbumAt(sourceIndex)
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
 
                             Label {
-                                visible: uiBridge.libraryAlbums.length === 0
-                                text: uiBridge.libraryScanInProgress ? "Scanning library..." : "No albums indexed"
+                                visible: root.filteredLibraryLabels.length === 0
+                                text: uiBridge.libraryAlbums.length === 0
+                                    ? (uiBridge.libraryScanInProgress ? "Scanning library..." : "No albums indexed")
+                                    : "No albums match search"
                                 color: Kirigami.Theme.disabledTextColor
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignHCenter
@@ -573,6 +630,7 @@ Kirigami.ApplicationWindow {
     Connections {
         target: uiBridge
         function onSnapshotChanged() {
+            root.rebuildLibraryFilter()
             if (root.selectedLibraryAlbumIndex >= uiBridge.libraryAlbums.length) {
                 root.selectedLibraryAlbumIndex = uiBridge.libraryAlbums.length - 1
             }
@@ -593,5 +651,9 @@ Kirigami.ApplicationWindow {
             }
             console.warn("bridge error:", message)
         }
+    }
+
+    Component.onCompleted: {
+        root.rebuildLibraryFilter()
     }
 }
