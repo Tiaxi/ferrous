@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -146,6 +147,10 @@ QStringList BridgeClient::libraryAlbums() const {
 
 QVariantList BridgeClient::libraryTree() const {
     return m_libraryTree;
+}
+
+int BridgeClient::libraryVersion() const {
+    return m_libraryVersion;
 }
 
 bool BridgeClient::libraryScanInProgress() const {
@@ -714,6 +719,7 @@ void BridgeClient::handleStdoutReady() {
                 QStringList artistOrder;
                 QHash<QString, int> artistToIndex;
                 QVector<QVariantList> artistAlbums;
+                bool libraryStructureChanged = false;
                 labels.reserve(albums.size());
                 artists.reserve(albums.size());
                 albumNames.reserve(albums.size());
@@ -792,18 +798,27 @@ void BridgeClient::handleStdoutReady() {
                 if (m_libraryAlbums != labels) {
                     m_libraryAlbums = labels;
                     changed = true;
+                    libraryStructureChanged = true;
                 }
                 if (m_libraryTree != libraryTree) {
                     m_libraryTree = libraryTree;
                     changed = true;
+                    libraryStructureChanged = true;
                 }
                 if (m_libraryAlbumArtists != artists) {
                     m_libraryAlbumArtists = artists;
                     changed = true;
+                    libraryStructureChanged = true;
                 }
                 if (m_libraryAlbumNames != albumNames) {
                     m_libraryAlbumNames = albumNames;
                     changed = true;
+                    libraryStructureChanged = true;
+                }
+                if (libraryStructureChanged) {
+                    m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()
+                        ? m_libraryVersion + 1
+                        : 1;
                 }
             }
             if (!m_analysisSocketConnected) {

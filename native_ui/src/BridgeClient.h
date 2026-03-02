@@ -30,6 +30,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
     Q_PROPERTY(QVariantList libraryTree READ libraryTree NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY snapshotChanged)
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY snapshotChanged)
@@ -55,6 +56,7 @@ public:
     bool logScale() const;
     QStringList libraryAlbums() const;
     QVariantList libraryTree() const;
+    int libraryVersion() const;
     bool libraryScanInProgress() const;
     int libraryRootCount() const;
     int libraryTrackCount() const;
@@ -120,6 +122,7 @@ private:
     bool m_logScale{false};
     QStringList m_libraryAlbums;
     QVariantList m_libraryTree;
+    int m_libraryVersion{0};
     QStringList m_libraryAlbumArtists;
     QStringList m_libraryAlbumNames;
     bool m_libraryScanInProgress{false};

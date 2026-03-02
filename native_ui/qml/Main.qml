@@ -18,6 +18,7 @@ Kirigami.ApplicationWindow {
     property var libraryRows: []
     property var expandedArtists: ({})
     property var expandedAlbums: ({})
+    property int lastAppliedLibraryVersion: -1
     property int lastCenteredQueueIndex: -2
     readonly property var uiBridge: bridge ? bridge : bridgeFallback
 
@@ -39,6 +40,7 @@ Kirigami.ApplicationWindow {
         property int sampleRateHz: 48000
         property var libraryAlbums: []
         property var libraryTree: []
+        property int libraryVersion: 0
         property bool libraryScanInProgress: false
         property int libraryRootCount: 0
         property int libraryTrackCount: 0
@@ -545,6 +547,9 @@ Kirigami.ApplicationWindow {
                                 Layout.fillHeight: true
                                 clip: true
                                 model: root.libraryRows
+                                ScrollBar.vertical: ScrollBar {
+                                    policy: ScrollBar.AlwaysOn
+                                }
 
                                 delegate: Rectangle {
                                     readonly property var rowData: modelData
@@ -812,8 +817,11 @@ Kirigami.ApplicationWindow {
     Connections {
         target: uiBridge
         function onSnapshotChanged() {
-            root.rebuildLibraryFilter()
-            root.ensureLibrarySelectionInBounds()
+            if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
+                root.rebuildLibraryFilter()
+                root.ensureLibrarySelectionInBounds()
+                root.lastAppliedLibraryVersion = uiBridge.libraryVersion
+            }
             if (uiBridge.spectrogramReset) {
                 spectrogramItem.reset()
             }
@@ -835,5 +843,6 @@ Kirigami.ApplicationWindow {
 
     Component.onCompleted: {
         root.rebuildLibraryFilter()
+        root.lastAppliedLibraryVersion = uiBridge.libraryVersion
     }
 }
