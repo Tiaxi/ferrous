@@ -56,6 +56,18 @@ Native KDE frontend (Qt6/QML + Kirigami) dev launcher:
 ./scripts/run-native-ui.sh
 ```
 
+Run project tests (Rust + native UI smoke test):
+
+```bash
+./scripts/run-tests.sh
+```
+
+Roadmap and engineering plans live under `docs/`:
+
+- `docs/ROADMAP.md`
+- `docs/TEST_PLAN.md`
+- `docs/OPTIMIZATION_PLAN.md`
+
 ## Project layout
 
 - `src/main.rs`: app entrypoint
