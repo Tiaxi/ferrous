@@ -1138,6 +1138,21 @@ mod tests {
         last
     }
 
+    fn wait_bridge_error_message(
+        bridge: &FrontendBridgeHandle,
+        timeout: Duration,
+    ) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
+                if let BridgeEvent::Error(message) = event {
+                    return Some(message);
+                }
+            }
+        }
+        None
+    }
+
     unsafe fn wait_ffi_json_event_matching<F>(
         handle: *mut ferrous::frontend_bridge::ffi::FerrousFfiBridge,
         timeout: Duration,
@@ -1510,6 +1525,131 @@ mod tests {
             Some(format!("{:?}", direct_snapshot.playback.state)),
             snapshot_playback_state(&ffi_snapshot)
         );
+
+        direct_bridge.command(BridgeCommand::Shutdown);
+        unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
+    }
+
+    #[test]
+    fn process_parser_and_ffi_path_match_stop_restart_sequence() {
+        let _guard = test_guard();
+        let commands = [
+            r#"{"cmd":"replace_album","paths":["/tmp/a.flac","/tmp/b.flac"]}"#,
+            r#"{"cmd":"play_at","value":1}"#,
+            r#"{"cmd":"stop"}"#,
+            r#"{"cmd":"play"}"#,
+        ];
+
+        let direct_bridge = FrontendBridgeHandle::spawn();
+        for line in &commands {
+            let cmd = parse_json_command(line).expect("parse").expect("cmd");
+            direct_bridge.command(cmd);
+        }
+        direct_bridge.command(BridgeCommand::RequestSnapshot);
+        let direct_snapshot =
+            wait_bridge_snapshot_matching(&direct_bridge, Duration::from_secs(4), |snapshot| {
+                snapshot.queue.len() == 2
+                    && snapshot.playback.current.is_some()
+                    && snapshot.playback.state == ferrous::playback::PlaybackState::Playing
+            })
+            .expect("direct stop/restart snapshot");
+        let direct_current_path = direct_snapshot
+            .playback
+            .current
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let direct_current_queue_index = direct_snapshot
+            .playback
+            .current
+            .as_ref()
+            .and_then(|current| {
+                direct_snapshot
+                    .queue
+                    .iter()
+                    .position(|path| path == current)
+            })
+            .map_or(-1, |idx| idx as i64);
+        let direct_selected_index = direct_snapshot
+            .selected_queue_index
+            .map_or(-1, |idx| idx as i64);
+        let direct_state = format!("{:?}", direct_snapshot.playback.state);
+
+        let ffi_handle = ferrous_ffi_bridge_create();
+        assert!(!ffi_handle.is_null());
+        for line in &commands {
+            let cmd = CString::new(*line).expect("cstring");
+            assert!(unsafe { ferrous_ffi_bridge_send_json(ffi_handle, cmd.as_ptr()) });
+        }
+        let request = CString::new(r#"{"cmd":"request_snapshot"}"#).expect("cstring");
+        assert!(unsafe { ferrous_ffi_bridge_send_json(ffi_handle, request.as_ptr()) });
+        let ffi_snapshot = unsafe {
+            wait_ffi_json_event_matching(ffi_handle, Duration::from_secs(4), |value| {
+                value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
+                    && snapshot_queue_len(value) == 2
+                    && snapshot_selected_index(value) == direct_selected_index
+                    && snapshot_playback_current_queue_index(value) == direct_current_queue_index
+                    && snapshot_playback_current_path(value) == direct_current_path
+                    && snapshot_playback_state(value).as_deref() == Some(direct_state.as_str())
+            })
+        }
+        .expect("ffi stop/restart snapshot");
+
+        assert_eq!(
+            direct_snapshot.queue.len() as u64,
+            snapshot_queue_len(&ffi_snapshot)
+        );
+        assert_eq!(
+            direct_selected_index,
+            snapshot_selected_index(&ffi_snapshot)
+        );
+        assert_eq!(
+            direct_current_queue_index,
+            snapshot_playback_current_queue_index(&ffi_snapshot)
+        );
+        assert_eq!(
+            direct_current_path,
+            snapshot_playback_current_path(&ffi_snapshot)
+        );
+        assert_eq!(Some(direct_state), snapshot_playback_state(&ffi_snapshot));
+
+        direct_bridge.command(BridgeCommand::Shutdown);
+        unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
+    }
+
+    #[test]
+    fn process_parser_and_ffi_path_match_play_at_out_of_bounds_error() {
+        let _guard = test_guard();
+        let commands = [
+            r#"{"cmd":"replace_album","paths":["/tmp/a.flac","/tmp/b.flac"]}"#,
+            r#"{"cmd":"play_at","value":9}"#,
+        ];
+
+        let direct_bridge = FrontendBridgeHandle::spawn();
+        for line in &commands {
+            let cmd = parse_json_command(line).expect("parse").expect("cmd");
+            direct_bridge.command(cmd);
+        }
+        let direct_error = wait_bridge_error_message(&direct_bridge, Duration::from_secs(4))
+            .expect("direct error event");
+        assert!(direct_error.contains("queue index 9 out of bounds"));
+
+        let ffi_handle = ferrous_ffi_bridge_create();
+        assert!(!ffi_handle.is_null());
+        for line in &commands {
+            let cmd = CString::new(*line).expect("cstring");
+            assert!(unsafe { ferrous_ffi_bridge_send_json(ffi_handle, cmd.as_ptr()) });
+        }
+        let ffi_error = unsafe {
+            wait_ffi_json_event_matching(ffi_handle, Duration::from_secs(4), |value| {
+                value.get("event").and_then(|v| v.as_str()) == Some("error")
+            })
+        }
+        .expect("ffi error event");
+        let ffi_message = ffi_error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        assert_eq!(direct_error, ffi_message);
 
         direct_bridge.command(BridgeCommand::Shutdown);
         unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };

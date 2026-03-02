@@ -20,7 +20,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 - Status:
   - Phase 1 implemented:
     - `src/frontend_bridge/mod.rs` tests for settings + queue state logic.
-    - Queue-state coverage includes replace/autoplay, append (empty/non-empty), move, remove, select, and out-of-bounds play-at behavior.
+    - Queue-state coverage includes replace/autoplay, append (empty/non-empty), move (valid/invalid), remove (valid/out-of-bounds), select, clear, and out-of-bounds play-at behavior.
     - `src/frontend_bridge/ffi.rs` tests for command parsing + snapshot/analysis encoding contract.
   - Phase 2 implemented:
     - `src/analysis/mod.rs` tests for waveform cache roundtrip, peak blob roundtrip, STFT row generation, spectrogram decimation, and snapshot emission gating.
@@ -41,10 +41,11 @@ This plan tracks test coverage additions for safe optimization/refactoring.
     - `src/bin/native_frontend.rs` parity tests confirm process-style command parsing path and in-process FFI path produce matching outcomes for:
       - queue replacement via album paths
       - queue transition sequence (`select_queue`, `move_queue`, `remove_at`) including resulting queue order
+      - stop/restart sequence (`stop` -> `play`) parity
+      - play-at out-of-bounds error parity
       - successful seek command path preserving queue/current playback invariants
       - playback state transition sequence (`pause`/`play`/`next`/`prev`) preserving queue/current playback parity
       - invalid seek command error payload parity
-  - Future: broaden parity checks to stop/restart and explicit play-at edge transitions.
 
 ### Layer 3: Native UI Smoke Tests (Qt)
 
@@ -68,6 +69,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
     - Bridge natural-handoff integration test (non-`gst` backend path) in `src/frontend_bridge/mod.rs`.
     - Playback unit regression test for seek boundary behavior before/at track end in `src/playback/mod.rs`.
     - Playback unit regression test proving natural handoff emits `TrackChanged::Natural` at boundary in `src/playback/mod.rs`.
+    - Playback unit tests for volume clamp behavior, seek-clamp + `Seeked` emission, append/next navigation, out-of-bounds `PlayAt` stability, and start-boundary `Previous` behavior in `src/playback/mod.rs`.
     - Bridge regression tests proving:
       - `Seeked` events do not trigger early waveform-track switch side effects
       - `TrackChanged` does not swap metadata until metadata events arrive
@@ -91,5 +93,4 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 1. Add end-to-end no-early-next-track metadata transition timing regression tests.
 2. Add deterministic integration tests for `gst`-path gapless handoff behavior.
-3. Expand process-vs-in-process parity tests for stop/restart and play-at edge transitions.
-4. Add performance regression harness for bridge/event throughput and UI frame pacing.
+3. Add performance regression harness for bridge/event throughput and UI frame pacing.

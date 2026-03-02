@@ -972,6 +972,22 @@ mod tests {
     }
 
     #[test]
+    fn queue_append_empty_is_noop() {
+        let mut queue = vec![p("/a.flac")];
+        let mut selected = Some(0);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Append(Vec::new()),
+            &mut queue,
+            &mut selected,
+        );
+        assert!(!outcome.changed);
+        assert_eq!(queue, vec![p("/a.flac")]);
+        assert_eq!(selected, Some(0));
+        assert!(outcome.playback_ops.is_empty());
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
     fn queue_play_at_out_of_bounds_emits_error() {
         let mut queue = vec![p("/a.flac")];
         let mut selected = None;
@@ -1005,6 +1021,22 @@ mod tests {
                 p("/a.flac")
             ])]
         );
+    }
+
+    #[test]
+    fn queue_move_invalid_indices_is_noop() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac")];
+        let mut selected = Some(1);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Move { from: 2, to: 0 },
+            &mut queue,
+            &mut selected,
+        );
+        assert!(!outcome.changed);
+        assert_eq!(queue, vec![p("/a.flac"), p("/b.flac")]);
+        assert_eq!(selected, Some(1));
+        assert!(outcome.playback_ops.is_empty());
+        assert!(outcome.error.is_none());
     }
 
     #[test]
@@ -1065,6 +1097,19 @@ mod tests {
     }
 
     #[test]
+    fn queue_remove_out_of_bounds_is_noop() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac")];
+        let mut selected = Some(0);
+        let outcome =
+            apply_queue_command_state(BridgeQueueCommand::Remove(3), &mut queue, &mut selected);
+        assert!(!outcome.changed);
+        assert_eq!(queue, vec![p("/a.flac"), p("/b.flac")]);
+        assert_eq!(selected, Some(0));
+        assert!(outcome.playback_ops.is_empty());
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
     fn queue_select_updates_state_without_playback_ops() {
         let mut queue = vec![p("/a.flac"), p("/b.flac")];
         let mut selected = Some(0);
@@ -1076,6 +1121,19 @@ mod tests {
         assert!(outcome.changed);
         assert_eq!(selected, Some(1));
         assert!(outcome.playback_ops.is_empty());
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn queue_clear_empties_state_and_emits_clear_queue_op() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac")];
+        let mut selected = Some(1);
+        let outcome =
+            apply_queue_command_state(BridgeQueueCommand::Clear, &mut queue, &mut selected);
+        assert!(outcome.changed);
+        assert!(queue.is_empty());
+        assert!(selected.is_none());
+        assert_eq!(outcome.playback_ops, vec![QueuePlaybackOp::ClearQueue]);
         assert!(outcome.error.is_none());
     }
 

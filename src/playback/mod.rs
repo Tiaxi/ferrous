@@ -97,6 +97,21 @@ mod tests {
         last
     }
 
+    fn saw_seeked_event(
+        rx: &crossbeam_channel::Receiver<PlaybackEvent>,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
+                if matches!(evt, PlaybackEvent::Seeked) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     #[test]
     fn rapid_track_switch_keeps_current_consistent() {
         let (analysis_tx, _analysis_rx) = unbounded();
@@ -190,6 +205,92 @@ mod tests {
         let (path, kind) = observed.expect("natural handoff track change");
         assert_eq!(path, b);
         assert!(matches!(kind, TrackChangeKind::Natural));
+    }
+
+    #[test]
+    fn set_volume_clamps_to_unit_interval() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        engine.command(PlaybackCommand::SetVolume(1.7));
+        engine.command(PlaybackCommand::Poll);
+        let high = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot high");
+        assert!((high.volume - 1.0).abs() < f32::EPSILON);
+
+        engine.command(PlaybackCommand::SetVolume(-0.4));
+        engine.command(PlaybackCommand::Poll);
+        let low = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot low");
+        assert!((low.volume - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn seek_clamps_and_emits_seeked_event() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        engine.command(PlaybackCommand::LoadQueue(vec![PathBuf::from(
+            "/tmp/a.flac",
+        )]));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(999)));
+
+        assert!(saw_seeked_event(&rx, Duration::from_millis(300)));
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.duration, Duration::from_secs(180));
+        assert_eq!(snap.position, Duration::from_secs(180));
+    }
+
+    #[test]
+    fn add_to_queue_allows_navigation_into_appended_track() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a]));
+        engine.command(PlaybackCommand::AddToQueue(vec![b.clone()]));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Next);
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&b));
+    }
+
+    #[test]
+    fn play_at_out_of_bounds_keeps_current_track() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.command(PlaybackCommand::PlayAt(1));
+        engine.command(PlaybackCommand::PlayAt(99));
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&b));
+    }
+
+    #[test]
+    fn previous_at_start_keeps_first_track() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+        engine.command(PlaybackCommand::Previous);
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&a));
     }
 }
 
