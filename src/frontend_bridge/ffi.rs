@@ -11,7 +11,7 @@ use super::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSettingsCommand, BridgeSnapshot, FrontendBridgeHandle,
 };
-use crate::playback::PlaybackState;
+use crate::playback::{PlaybackState, RepeatMode};
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
@@ -64,6 +64,8 @@ struct QueueDigest {
 struct JsonSnapshotSummary {
     playback_state: PlaybackState,
     playback_current: Option<PathBuf>,
+    playback_repeat_mode: RepeatMode,
+    playback_shuffle_enabled: bool,
     queue_len: usize,
     queue_selected: Option<usize>,
     queue_first: Option<PathBuf>,
@@ -349,6 +351,33 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 .ok_or_else(|| "set_volume requires numeric field 'value'".to_string())?;
             Some(BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(
                 value as f32,
+            )))
+        }
+        "set_repeat_mode" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_repeat_mode requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_repeat_mode value must be a finite number".to_string());
+            }
+            let mode = match value as i32 {
+                1 => RepeatMode::One,
+                2 => RepeatMode::All,
+                _ => RepeatMode::Off,
+            };
+            Some(BridgeCommand::Playback(
+                BridgePlaybackCommand::SetRepeatMode(mode),
+            ))
+        }
+        "set_shuffle" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_shuffle requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_shuffle value must be a finite number".to_string());
+            }
+            Some(BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(
+                value != 0.0,
             )))
         }
         "set_db_range" => {
@@ -733,6 +762,12 @@ fn encode_snapshot_payload(
             "position_secs": s.playback.position.as_secs_f64(),
             "duration_secs": s.playback.duration.as_secs_f64(),
             "volume": s.playback.volume,
+            "repeat_mode": match s.playback.repeat_mode {
+                RepeatMode::Off => 0,
+                RepeatMode::One => 1,
+                RepeatMode::All => 2,
+            },
+            "shuffle_enabled": s.playback.shuffle_enabled,
             "has_current": s.playback.current.is_some(),
             "current_path": s.playback.current.as_ref().map(|path| path.to_string_lossy().to_string()),
             "current_queue_index": current_queue_index,
@@ -832,6 +867,8 @@ fn snapshot_summary(s: &BridgeSnapshot) -> JsonSnapshotSummary {
     JsonSnapshotSummary {
         playback_state: s.playback.state,
         playback_current: s.playback.current.clone(),
+        playback_repeat_mode: s.playback.repeat_mode,
+        playback_shuffle_enabled: s.playback.shuffle_enabled,
         queue_len: s.queue.len(),
         queue_selected: s.selected_queue_index,
         queue_first: s.queue.first().cloned(),
@@ -979,6 +1016,26 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+
+        let cmd = parse_json_command(r#"{"cmd":"set_repeat_mode","value":2}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Playback(BridgePlaybackCommand::SetRepeatMode(mode)) => {
+                assert!(matches!(mode, RepeatMode::All));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_json_command(r#"{"cmd":"set_shuffle","value":1}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(enabled)) => {
+                assert!(enabled);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -1049,6 +1106,8 @@ mod tests {
                 duration: Duration::from_secs(180),
                 current: Some(PathBuf::from("/music/a.flac")),
                 volume: 0.75,
+                repeat_mode: RepeatMode::Off,
+                shuffle_enabled: false,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],

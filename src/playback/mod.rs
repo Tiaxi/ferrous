@@ -13,6 +13,14 @@ pub enum PlaybackState {
     Paused,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    One,
+    All,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
@@ -20,6 +28,8 @@ pub struct PlaybackSnapshot {
     pub duration: Duration,
     pub current: Option<PathBuf>,
     pub volume: f32,
+    pub repeat_mode: RepeatMode,
+    pub shuffle_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +45,8 @@ pub enum PlaybackCommand {
     Stop,
     Seek(Duration),
     SetVolume(f32),
+    SetRepeatMode(RepeatMode),
+    SetShuffle(bool),
     Poll,
 }
 
@@ -304,7 +316,10 @@ mod backend {
 
     use crate::analysis::AnalysisCommand;
 
-    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
+    use super::{
+        PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
+        TrackChangeKind,
+    };
 
     pub fn spawn_engine(
         analysis_tx: Sender<AnalysisCommand>,
@@ -415,6 +430,12 @@ mod backend {
                         PlaybackCommand::SetVolume(vol) => {
                             snapshot.volume = vol.clamp(0.0, 1.0);
                         }
+                        PlaybackCommand::SetRepeatMode(mode) => {
+                            snapshot.repeat_mode = mode;
+                        }
+                        PlaybackCommand::SetShuffle(enabled) => {
+                            snapshot.shuffle_enabled = enabled;
+                        }
                         PlaybackCommand::Poll => {
                             if snapshot.state == PlaybackState::Playing {
                                 // Generate synthetic PCM when GStreamer is disabled, so visuals remain testable.
@@ -471,11 +492,19 @@ mod backend {
 
     use crate::analysis::AnalysisCommand;
 
-    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
+    use super::{
+        PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
+        TrackChangeKind,
+    };
 
     struct GaplessQueue {
         queue: Vec<PathBuf>,
         current_idx: usize,
+        repeat_mode: RepeatMode,
+        shuffle_enabled: bool,
+        shuffle_history: Vec<usize>,
+        shuffle_pool: Vec<usize>,
+        rng_state: u64,
     }
 
     impl GaplessQueue {
@@ -483,21 +512,31 @@ mod backend {
             Self {
                 queue: Vec::new(),
                 current_idx: 0,
+                repeat_mode: RepeatMode::Off,
+                shuffle_enabled: false,
+                shuffle_history: Vec::new(),
+                shuffle_pool: Vec::new(),
+                rng_state: 0,
             }
         }
 
         fn set_queue(&mut self, queue: Vec<PathBuf>) {
             self.queue = queue;
             self.current_idx = 0;
+            self.shuffle_history.clear();
+            self.rebuild_shuffle_pool();
         }
 
         fn add_to_queue(&mut self, items: Vec<PathBuf>) {
             self.queue.extend(items);
+            self.rebuild_shuffle_pool();
         }
 
         fn clear(&mut self) {
             self.queue.clear();
             self.current_idx = 0;
+            self.shuffle_history.clear();
+            self.shuffle_pool.clear();
         }
 
         fn current(&self) -> Option<PathBuf> {
@@ -507,23 +546,165 @@ mod backend {
         fn set_current(&mut self, idx: usize) -> Option<PathBuf> {
             if idx < self.queue.len() {
                 self.current_idx = idx;
+                self.shuffle_history.clear();
+                self.rebuild_shuffle_pool();
                 self.current()
             } else {
                 None
             }
         }
 
-        fn next(&mut self) -> Option<PathBuf> {
-            self.current_idx = self.current_idx.saturating_add(1);
-            self.queue.get(self.current_idx).cloned()
+        fn set_repeat_mode(&mut self, mode: RepeatMode) {
+            self.repeat_mode = mode;
         }
 
-        fn previous(&mut self) -> Option<PathBuf> {
-            if self.current_idx > 0 {
-                self.current_idx -= 1;
+        fn set_shuffle_enabled(&mut self, enabled: bool) {
+            if self.shuffle_enabled == enabled {
+                return;
+            }
+            self.shuffle_enabled = enabled;
+            self.shuffle_history.clear();
+            if enabled {
+                self.rebuild_shuffle_pool();
+            } else {
+                self.shuffle_pool.clear();
+            }
+        }
+
+        fn next_manual(&mut self) -> Option<PathBuf> {
+            if self.queue.is_empty() {
+                return None;
+            }
+
+            if self.shuffle_enabled {
+                return self.advance_shuffle(self.repeat_mode == RepeatMode::All);
+            }
+
+            if self.current_idx + 1 < self.queue.len() {
+                self.current_idx += 1;
+                self.rebuild_shuffle_pool();
+                return self.current();
+            }
+            if self.repeat_mode == RepeatMode::All {
+                self.current_idx = 0;
+                self.rebuild_shuffle_pool();
                 return self.current();
             }
             None
+        }
+
+        fn previous_manual(&mut self) -> Option<PathBuf> {
+            if self.queue.is_empty() {
+                return None;
+            }
+            if self.shuffle_enabled {
+                if let Some(prev_idx) = self.shuffle_history.pop() {
+                    let old_idx = self.current_idx;
+                    if old_idx != prev_idx && !self.shuffle_pool.contains(&old_idx) {
+                        self.shuffle_pool.push(old_idx);
+                    }
+                    self.current_idx = prev_idx;
+                    return self.current();
+                }
+            }
+            if self.current_idx > 0 {
+                self.current_idx -= 1;
+                self.rebuild_shuffle_pool();
+                return self.current();
+            }
+            if self.repeat_mode == RepeatMode::All && !self.queue.is_empty() {
+                self.current_idx = self.queue.len().saturating_sub(1);
+                self.rebuild_shuffle_pool();
+                return self.current();
+            }
+            None
+        }
+
+        fn next_natural(&mut self) -> Option<PathBuf> {
+            if self.queue.is_empty() {
+                return None;
+            }
+            if self.repeat_mode == RepeatMode::One {
+                return self.current();
+            }
+            if self.shuffle_enabled {
+                // When repeat-all is enabled, keep drawing from refreshed pools forever.
+                // With repeat-off, stop once current shuffle pool is exhausted.
+                return self.advance_shuffle(self.repeat_mode == RepeatMode::All);
+            }
+            if self.current_idx + 1 < self.queue.len() {
+                self.current_idx += 1;
+                self.rebuild_shuffle_pool();
+                return self.current();
+            }
+            if self.repeat_mode == RepeatMode::All {
+                self.current_idx = 0;
+                self.rebuild_shuffle_pool();
+                return self.current();
+            }
+            None
+        }
+
+        fn rebuild_shuffle_pool(&mut self) {
+            self.shuffle_pool.clear();
+            for i in 0..self.queue.len() {
+                if i != self.current_idx {
+                    self.shuffle_pool.push(i);
+                }
+            }
+        }
+
+        fn ensure_rng_seed(&mut self) {
+            if self.rng_state != 0 {
+                return;
+            }
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E37_79B9_7F4A_7C15);
+            self.rng_state = nanos ^ 0xA5A5_A5A5_5A5A_5A5A;
+            if self.rng_state == 0 {
+                self.rng_state = 0xD134_2543_DE82_EF95;
+            }
+        }
+
+        fn next_rand(&mut self, max: usize) -> usize {
+            self.ensure_rng_seed();
+            self.rng_state = self
+                .rng_state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (self.rng_state % (max as u64)) as usize
+        }
+
+        fn advance_shuffle(&mut self, allow_repeat_cycle: bool) -> Option<PathBuf> {
+            if self.queue.is_empty() {
+                return None;
+            }
+            if self.queue.len() == 1 {
+                return if allow_repeat_cycle || self.repeat_mode == RepeatMode::One {
+                    self.current()
+                } else {
+                    None
+                };
+            }
+            if self.shuffle_pool.is_empty() {
+                if allow_repeat_cycle {
+                    self.rebuild_shuffle_pool();
+                } else {
+                    return None;
+                }
+            }
+            if self.shuffle_pool.is_empty() {
+                return None;
+            }
+            let pick = self.next_rand(self.shuffle_pool.len());
+            let next_idx = self.shuffle_pool.remove(pick);
+            if next_idx != self.current_idx {
+                self.shuffle_history.push(self.current_idx);
+            }
+            self.current_idx = next_idx;
+            self.current()
         }
     }
 
@@ -570,7 +751,7 @@ mod backend {
                     return None;
                 };
 
-                let next = queue_state.lock().ok().and_then(|mut q| q.next());
+                let next = queue_state.lock().ok().and_then(|mut q| q.next_natural());
                 if let Some(next_path) = next {
                     if let Some(uri) = file_uri(&next_path) {
                         playbin_obj.set_property("uri", uri);
@@ -638,6 +819,8 @@ mod backend {
 
                 if let Ok(mut state) = queue_state.lock() {
                     state.set_queue(paths);
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
                     if let Some(first) = state.current() {
                         if let Some(uri) = file_uri(&first) {
                             switch_track(
@@ -660,11 +843,15 @@ mod backend {
             PlaybackCommand::AddToQueue(paths) => {
                 if let Ok(mut state) = queue_state.lock() {
                     state.add_to_queue(paths);
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
                 }
             }
             PlaybackCommand::ClearQueue => {
                 if let Ok(mut state) = queue_state.lock() {
                     state.clear();
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
                 }
                 soft_mute(playbin, applied_volume);
                 let _ = playbin.set_state(gst::State::Ready);
@@ -677,6 +864,8 @@ mod backend {
             }
             PlaybackCommand::PlayAt(idx) => {
                 if let Ok(mut state) = queue_state.lock() {
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
                     if let Some(path) = state.set_current(idx) {
                         if let Some(uri) = file_uri(&path) {
                             switch_track(
@@ -698,7 +887,9 @@ mod backend {
             }
             PlaybackCommand::Next => {
                 if let Ok(mut state) = queue_state.lock() {
-                    if let Some(path) = state.next() {
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
+                    if let Some(path) = state.next_manual() {
                         if let Some(uri) = file_uri(&path) {
                             switch_track(
                                 playbin,
@@ -719,7 +910,9 @@ mod backend {
             }
             PlaybackCommand::Previous => {
                 if let Ok(mut state) = queue_state.lock() {
-                    if let Some(path) = state.previous() {
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
+                    if let Some(path) = state.previous_manual() {
                         if let Some(uri) = file_uri(&path) {
                             switch_track(
                                 playbin,
@@ -785,6 +978,24 @@ mod backend {
             PlaybackCommand::SetVolume(vol) => {
                 *target_volume = vol.clamp(0.0, 1.0) as f64;
                 snapshot.volume = *target_volume as f32;
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+            }
+            PlaybackCommand::SetRepeatMode(mode) => {
+                if let Ok(mut state) = queue_state.lock() {
+                    state.set_repeat_mode(mode);
+                    snapshot.repeat_mode = state.repeat_mode;
+                } else {
+                    snapshot.repeat_mode = mode;
+                }
+                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+            }
+            PlaybackCommand::SetShuffle(enabled) => {
+                if let Ok(mut state) = queue_state.lock() {
+                    state.set_shuffle_enabled(enabled);
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
+                } else {
+                    snapshot.shuffle_enabled = enabled;
+                }
                 let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
             PlaybackCommand::Poll => {
@@ -1158,7 +1369,7 @@ mod backend {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             queue.set_queue(vec![a.clone(), b.clone()]);
-            let _ = queue.next();
+            let _ = queue.next_manual();
             drop(queue);
             queue_state
         }
@@ -1207,6 +1418,52 @@ mod backend {
             assert!(!emitted);
             assert_eq!(snapshot.current.as_ref(), Some(&first));
             assert!(event_rx.try_recv().is_err());
+        }
+
+        #[test]
+        fn repeat_one_replays_current_on_natural_advance() {
+            let a = PathBuf::from("/tmp/repeat_one.flac");
+            let b = PathBuf::from("/tmp/repeat_one_b.flac");
+            let mut queue = GaplessQueue::new();
+            queue.set_queue(vec![a.clone(), b]);
+            queue.set_repeat_mode(RepeatMode::One);
+            assert_eq!(queue.current().as_ref(), Some(&a));
+            assert_eq!(queue.next_natural().as_ref(), Some(&a));
+        }
+
+        #[test]
+        fn repeat_all_loops_to_start_on_natural_advance() {
+            let a = PathBuf::from("/tmp/repeat_all_a.flac");
+            let b = PathBuf::from("/tmp/repeat_all_b.flac");
+            let mut queue = GaplessQueue::new();
+            queue.set_queue(vec![a.clone(), b]);
+            let _ = queue.set_current(1);
+            queue.set_repeat_mode(RepeatMode::All);
+            assert_eq!(queue.next_natural().as_ref(), Some(&a));
+        }
+
+        #[test]
+        fn shuffle_previous_returns_to_history() {
+            let a = PathBuf::from("/tmp/shuffle_hist_a.flac");
+            let b = PathBuf::from("/tmp/shuffle_hist_b.flac");
+            let c = PathBuf::from("/tmp/shuffle_hist_c.flac");
+            let mut queue = GaplessQueue::new();
+            queue.set_queue(vec![a.clone(), b, c]);
+            queue.set_shuffle_enabled(true);
+            let next = queue.next_manual().expect("shuffle next");
+            assert_ne!(next, a);
+            assert_eq!(queue.previous_manual().as_ref(), Some(&a));
+        }
+
+        #[test]
+        fn shuffle_repeat_off_stops_when_pool_exhausted() {
+            let a = PathBuf::from("/tmp/shuffle_stop_a.flac");
+            let b = PathBuf::from("/tmp/shuffle_stop_b.flac");
+            let mut queue = GaplessQueue::new();
+            queue.set_queue(vec![a, b.clone()]);
+            queue.set_shuffle_enabled(true);
+            assert_eq!(queue.next_natural().as_ref(), Some(&b));
+            assert!(queue.next_natural().is_none());
         }
     }
 

@@ -39,6 +39,7 @@ use ferrous::frontend_bridge::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSettingsCommand, BridgeSnapshot, FrontendBridgeHandle,
 };
+use ferrous::playback::RepeatMode;
 use serde::Deserialize;
 use serde_json::json;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -61,7 +62,7 @@ fn main() {
 fn run_interactive_cli(bridge: FrontendBridgeHandle) {
     println!("Ferrous UI bootstrap");
     println!(
-        "Commands: play, pause, stop, next, prev, vol <0..1>, seek <secs>, dbrange <50..120>, log <0|1>, snap, quit"
+        "Commands: play, pause, stop, next, prev, vol <0..1>, seek <secs>, dbrange <50..120>, log <0|1>, repeat <0|1|2>, shuffle <0|1>, snap, quit"
     );
 
     loop {
@@ -120,6 +121,27 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
                     BridgeSettingsCommand::SetLogScale(value != 0),
                 )),
                 Err(_) => eprintln!("invalid log value, expected 0 or 1"),
+            }
+        } else if let Some(rest) = line.strip_prefix("repeat ") {
+            match rest.parse::<i32>() {
+                Ok(value) => {
+                    let mode = match value {
+                        1 => RepeatMode::One,
+                        2 => RepeatMode::All,
+                        _ => RepeatMode::Off,
+                    };
+                    bridge.command(BridgeCommand::Playback(
+                        BridgePlaybackCommand::SetRepeatMode(mode),
+                    ));
+                }
+                Err(_) => eprintln!("invalid repeat value, expected 0, 1, or 2"),
+            }
+        } else if let Some(rest) = line.strip_prefix("shuffle ") {
+            match rest.parse::<i32>() {
+                Ok(value) => bridge.command(BridgeCommand::Playback(
+                    BridgePlaybackCommand::SetShuffle(value != 0),
+                )),
+                Err(_) => eprintln!("invalid shuffle value, expected 0 or 1"),
             }
         } else if let Some(rest) = line.strip_prefix("fps ") {
             match rest.parse::<i32>() {
@@ -459,6 +481,33 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 return Err("set_log_scale value must be a finite number".to_string());
             }
             Some(BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(
+                value != 0.0,
+            )))
+        }
+        "set_repeat_mode" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_repeat_mode requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_repeat_mode value must be a finite number".to_string());
+            }
+            let mode = match value as i32 {
+                1 => RepeatMode::One,
+                2 => RepeatMode::All,
+                _ => RepeatMode::Off,
+            };
+            Some(BridgeCommand::Playback(
+                BridgePlaybackCommand::SetRepeatMode(mode),
+            ))
+        }
+        "set_shuffle" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_shuffle requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_shuffle value must be a finite number".to_string());
+            }
+            Some(BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(
                 value != 0.0,
             )))
         }
@@ -853,6 +902,12 @@ fn encode_snapshot_payload(
             "position_secs": s.playback.position.as_secs_f64(),
             "duration_secs": s.playback.duration.as_secs_f64(),
             "volume": s.playback.volume,
+            "repeat_mode": match s.playback.repeat_mode {
+                RepeatMode::Off => 0,
+                RepeatMode::One => 1,
+                RepeatMode::All => 2,
+            },
+            "shuffle_enabled": s.playback.shuffle_enabled,
             "has_current": s.playback.current.is_some(),
             "current_path": s.playback.current.as_ref().map(|path| path.to_string_lossy().to_string()),
             "current_queue_index": current_queue_index,

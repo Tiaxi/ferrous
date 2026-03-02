@@ -310,6 +310,14 @@ bool BridgeClient::logScale() const {
     return m_logScale;
 }
 
+int BridgeClient::repeatMode() const {
+    return m_repeatMode;
+}
+
+bool BridgeClient::shuffleEnabled() const {
+    return m_shuffleEnabled;
+}
+
 bool BridgeClient::showFps() const {
     return m_showFps;
 }
@@ -402,6 +410,23 @@ void BridgeClient::setLogScale(bool value) {
         scheduleSnapshotChanged();
     }
     sendCommand(QStringLiteral("set_log_scale"), value ? 1.0 : 0.0);
+}
+
+void BridgeClient::setRepeatMode(int mode) {
+    const int clamped = std::clamp(mode, 0, 2);
+    if (m_repeatMode != clamped) {
+        m_repeatMode = clamped;
+        scheduleSnapshotChanged();
+    }
+    sendCommand(QStringLiteral("set_repeat_mode"), static_cast<double>(clamped));
+}
+
+void BridgeClient::setShuffleEnabled(bool value) {
+    if (m_shuffleEnabled != value) {
+        m_shuffleEnabled = value;
+        scheduleSnapshotChanged();
+    }
+    sendCommand(QStringLiteral("set_shuffle"), value ? 1.0 : 0.0);
 }
 
 void BridgeClient::setShowFps(bool value) {
@@ -826,6 +851,9 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
         const QString nextState = playback.value(QStringLiteral("state")).toString();
         const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
         const double dur = playback.value(QStringLiteral("duration_secs")).toDouble();
+        const int repeatMode = std::clamp(playback.value(QStringLiteral("repeat_mode")).toInt(m_repeatMode), 0, 2);
+        const bool shuffleEnabled =
+            playback.value(QStringLiteral("shuffle_enabled")).toBool(m_shuffleEnabled);
         const QString currentPath = playback.value(QStringLiteral("current_path")).toString();
         int playing = playback.value(QStringLiteral("current_queue_index")).toInt(-1);
         const int qlen = queue.value(QStringLiteral("len")).toInt();
@@ -867,6 +895,14 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
         }
         if (!qFuzzyCompare(m_durationSeconds + 1.0, dur + 1.0)) {
             m_durationSeconds = dur;
+            changed = true;
+        }
+        if (m_repeatMode != repeatMode) {
+            m_repeatMode = repeatMode;
+            changed = true;
+        }
+        if (m_shuffleEnabled != shuffleEnabled) {
+            m_shuffleEnabled = shuffleEnabled;
             changed = true;
         }
         const QJsonValue settingsVolumeValue = settings.value(QStringLiteral("volume"));

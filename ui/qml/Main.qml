@@ -47,6 +47,8 @@ Kirigami.ApplicationWindow {
         property bool spectrogramReset: false
         property real dbRange: 90
         property bool logScale: false
+        property int repeatMode: 0
+        property bool shuffleEnabled: false
         property bool showFps: false
         property int sampleRateHz: 48000
         property var libraryAlbums: []
@@ -68,6 +70,8 @@ Kirigami.ApplicationWindow {
         function setVolume(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
+        function setRepeatMode(mode) {}
+        function setShuffleEnabled(value) {}
         function setShowFps(value) {}
         function playAt(index) {}
         function selectQueueIndex(index) {}
@@ -277,6 +281,34 @@ Kirigami.ApplicationWindow {
         onTriggered: uiBridge.setShowFps(checked)
     }
     Action {
+        id: shuffleAction
+        text: "Shuffle"
+        checkable: true
+        checked: uiBridge.shuffleEnabled
+        onTriggered: uiBridge.setShuffleEnabled(checked)
+    }
+    Action {
+        id: repeatOffAction
+        text: "Repeat Off"
+        checkable: true
+        checked: uiBridge.repeatMode === 0
+        onTriggered: uiBridge.setRepeatMode(0)
+    }
+    Action {
+        id: repeatOneAction
+        text: "Repeat One"
+        checkable: true
+        checked: uiBridge.repeatMode === 1
+        onTriggered: uiBridge.setRepeatMode(1)
+    }
+    Action {
+        id: repeatAllAction
+        text: "Repeat All"
+        checkable: true
+        checked: uiBridge.repeatMode === 2
+        onTriggered: uiBridge.setRepeatMode(2)
+    }
+    Action {
         id: aboutAction
         text: "About Ferrous"
         onTriggered: aboutDialog.open()
@@ -407,6 +439,10 @@ Kirigami.ApplicationWindow {
                 { label: pauseAction.text, shortcut: String(pauseAction.shortcut) },
                 { label: stopAction.text, shortcut: String(stopAction.shortcut) },
                 { label: nextAction.text, shortcut: String(nextAction.shortcut) },
+                { label: shuffleAction.text, shortcut: "" },
+                { label: repeatOffAction.text, shortcut: "" },
+                { label: repeatOneAction.text, shortcut: "" },
+                { label: repeatAllAction.text, shortcut: "" },
                 { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut) },
                 { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut) },
                 { label: clearPlaylistAction.text, shortcut: "" }
@@ -416,6 +452,11 @@ Kirigami.ApplicationWindow {
             MenuItem { action: pauseAction }
             MenuItem { action: stopAction }
             MenuItem { action: nextAction }
+            MenuSeparator {}
+            MenuItem { action: shuffleAction }
+            MenuItem { action: repeatOffAction }
+            MenuItem { action: repeatOneAction }
+            MenuItem { action: repeatAllAction }
             MenuSeparator {}
             MenuItem { action: moveTrackUpAction }
             MenuItem { action: moveTrackDownAction }

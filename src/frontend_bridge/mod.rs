@@ -9,7 +9,7 @@ use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSn
 use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot};
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
-    PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState,
+    PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
     TrackChangeKind,
 };
 
@@ -35,6 +35,8 @@ pub enum BridgePlaybackCommand {
     Previous,
     Seek(Duration),
     SetVolume(f32),
+    SetRepeatMode(RepeatMode),
+    SetShuffle(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -428,6 +430,16 @@ fn handle_bridge_command(
                     context.playback.command(PlaybackCommand::SetVolume(v));
                     state.settings.volume = v;
                     *context.settings_dirty = true;
+                }
+                BridgePlaybackCommand::SetRepeatMode(mode) => {
+                    context
+                        .playback
+                        .command(PlaybackCommand::SetRepeatMode(mode));
+                }
+                BridgePlaybackCommand::SetShuffle(enabled) => {
+                    context
+                        .playback
+                        .command(PlaybackCommand::SetShuffle(enabled));
                 }
             }
             false

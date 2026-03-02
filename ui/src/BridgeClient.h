@@ -34,6 +34,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
+    Q_PROPERTY(int repeatMode READ repeatMode NOTIFY snapshotChanged)
+    Q_PROPERTY(bool shuffleEnabled READ shuffleEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
     Q_PROPERTY(QVariantList libraryTree READ libraryTree NOTIFY snapshotChanged)
@@ -64,6 +66,8 @@ public:
     int sampleRateHz() const;
     double dbRange() const;
     bool logScale() const;
+    int repeatMode() const;
+    bool shuffleEnabled() const;
     bool showFps() const;
     QStringList libraryAlbums() const;
     QVariantList libraryTree() const;
@@ -82,6 +86,8 @@ public:
     Q_INVOKABLE void setVolume(double value);
     Q_INVOKABLE void setDbRange(double value);
     Q_INVOKABLE void setLogScale(bool value);
+    Q_INVOKABLE void setRepeatMode(int mode);
+    Q_INVOKABLE void setShuffleEnabled(bool value);
     Q_INVOKABLE void setShowFps(bool value);
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
@@ -151,6 +157,8 @@ private:
     int m_sampleRateHz{48000};
     double m_dbRange{90.0};
     bool m_logScale{false};
+    int m_repeatMode{0};
+    bool m_shuffleEnabled{false};
     bool m_showFps{false};
     QStringList m_libraryAlbums;
     QVariantList m_libraryTree;
