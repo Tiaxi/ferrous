@@ -784,6 +784,12 @@ mod backend {
                 let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
             PlaybackCommand::Poll => {
+                if snapshot.state == PlaybackState::Stopped
+                    && !*startup_gain_ramp
+                    && seek_hold.is_none()
+                {
+                    return;
+                }
                 let mut snapshot_changed = false;
                 let delta = *target_volume - *applied_volume;
                 if delta.abs() > f64::EPSILON

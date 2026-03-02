@@ -9,7 +9,8 @@ use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSn
 use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot};
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
-    PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, TrackChangeKind,
+    PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState,
+    TrackChangeKind,
 };
 
 pub mod ffi;
@@ -208,6 +209,8 @@ fn run_bridge_loop(
     let mut settings_dirty = false;
     let mut last_settings_save = Instant::now();
     let ticker = tick(Duration::from_millis(16));
+    let idle_poll_interval = Duration::from_millis(250);
+    let mut last_idle_poll = Instant::now();
     let profile_enabled = std::env::var_os("FERROUS_PROFILE").is_some();
     let mut profile_last = Instant::now();
     let mut prof_snapshots_sent = 0usize;
@@ -259,7 +262,12 @@ fn run_bridge_loop(
                 }
             }
             recv(ticker) -> _ => {
-                playback.command(PlaybackCommand::Poll);
+                if state.playback.state == PlaybackState::Playing {
+                    playback.command(PlaybackCommand::Poll);
+                } else if last_idle_poll.elapsed() >= idle_poll_interval {
+                    playback.command(PlaybackCommand::Poll);
+                    last_idle_poll = Instant::now();
+                }
             }
         }
 
