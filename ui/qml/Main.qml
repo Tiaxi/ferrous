@@ -700,9 +700,7 @@ Kirigami.ApplicationWindow {
                                     readonly property bool isArtistRow: rowType === "artist"
                                     readonly property bool isAlbumRow: rowType === "album"
                                     readonly property bool isTrackRow: rowType === "track"
-                                    readonly property int expanderHitWidth: isArtistRow ? 34 : (isAlbumRow ? 52 : 0)
                                     readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
-                                    property bool suppressClickAfterExpanderPress: false
                                     width: ListView.view.width
                                     height: 24
                                     color: selectionKey === root.selectedLibrarySelectionKey
@@ -724,7 +722,10 @@ Kirigami.ApplicationWindow {
                                         Label {
                                             id: expanderIcon
                                             Layout.preferredWidth: 24
+                                            Layout.fillHeight: true
+                                            Layout.alignment: Qt.AlignVCenter
                                             horizontalAlignment: Text.AlignHCenter
+                                            verticalAlignment: Text.AlignVCenter
                                             text: (isArtistRow || isAlbumRow)
                                                 ? (expanded ? "▾" : "▸")
                                                 : ""
@@ -739,6 +740,7 @@ Kirigami.ApplicationWindow {
                                             visible: isAlbumRow
                                             Layout.preferredWidth: 18
                                             Layout.preferredHeight: 18
+                                            Layout.alignment: Qt.AlignVCenter
 
                                             Image {
                                                 anchors.fill: parent
@@ -754,7 +756,10 @@ Kirigami.ApplicationWindow {
 
                                         Label {
                                             Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            Layout.alignment: Qt.AlignVCenter
                                             elide: Text.ElideRight
+                                            verticalAlignment: Text.AlignVCenter
                                             text: isArtistRow
                                                 ? (artist + " (" + count + ")")
                                                 : (isAlbumRow
@@ -769,25 +774,17 @@ Kirigami.ApplicationWindow {
 
                                     MouseArea {
                                         anchors.fill: parent
+                                        preventStealing: true
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        onPressed: function(mouse) {
-                                            libraryRow.suppressClickAfterExpanderPress = false
-                                            if (mouse.button !== Qt.LeftButton) {
-                                                return
-                                            }
-                                            if ((isArtistRow || isAlbumRow) && mouse.x <= expanderHitWidth) {
+                                        onClicked: function(mouse) {
+                                            if (mouse.button === Qt.LeftButton
+                                                    && (isArtistRow || isAlbumRow)
+                                                    && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
                                                 if (isArtistRow) {
                                                     libraryModel.toggleArtist(artist)
                                                 } else {
                                                     libraryModel.toggleAlbum(key)
                                                 }
-                                                libraryRow.suppressClickAfterExpanderPress = true
-                                                mouse.accepted = true
-                                            }
-                                        }
-                                        onClicked: function(mouse) {
-                                            if (libraryRow.suppressClickAfterExpanderPress) {
-                                                libraryRow.suppressClickAfterExpanderPress = false
                                                 return
                                             }
                                             root.selectedLibrarySelectionKey = selectionKey || ""
@@ -810,7 +807,7 @@ Kirigami.ApplicationWindow {
                                                 }
                                             }
                                         }
-                                        onDoubleClicked: {
+                                        onDoubleClicked: function() {
                                             if (isArtistRow) {
                                                 uiBridge.replaceArtistByName(artist)
                                             } else

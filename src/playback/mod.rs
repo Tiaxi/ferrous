@@ -801,7 +801,7 @@ mod backend {
                 {
                     // Apply a short gain ramp to avoid zipper noise / clicks when dragging volume.
                     let step = if *startup_gain_ramp {
-                        0.18_f64
+                        0.45_f64
                     } else {
                         0.03_f64
                     };
