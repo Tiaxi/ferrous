@@ -97,21 +97,6 @@ mod tests {
         last
     }
 
-    fn recv_track_change_path_and_kind(
-        rx: &crossbeam_channel::Receiver<PlaybackEvent>,
-        timeout: Duration,
-    ) -> Option<(PathBuf, TrackChangeKind)> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
-                if let PlaybackEvent::TrackChanged { path, kind } = evt {
-                    return Some((path, kind));
-                }
-            }
-        }
-        None
-    }
-
     #[test]
     fn rapid_track_switch_keeps_current_consistent() {
         let (analysis_tx, _analysis_rx) = unbounded();
@@ -189,8 +174,20 @@ mod tests {
         engine.command(PlaybackCommand::Seek(Duration::from_secs(180)));
         engine.command(PlaybackCommand::Poll);
 
-        let (path, kind) =
-            recv_track_change_path_and_kind(&rx, Duration::from_millis(300)).expect("track change");
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let mut observed = None;
+        while Instant::now() < deadline {
+            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
+                if let PlaybackEvent::TrackChanged { path, kind } = evt {
+                    if path == b && matches!(kind, TrackChangeKind::Natural) {
+                        observed = Some((path, kind));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let (path, kind) = observed.expect("natural handoff track change");
         assert_eq!(path, b);
         assert!(matches!(kind, TrackChangeKind::Natural));
     }

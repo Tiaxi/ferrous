@@ -909,10 +909,19 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
+    }
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
@@ -1103,6 +1112,7 @@ mod tests {
 
     #[test]
     fn bridge_queue_roundtrip_snapshot_integration() {
+        let _guard = test_guard();
         let bridge = FrontendBridgeHandle::spawn();
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
             tracks: vec![p("/music/a.flac"), p("/music/b.flac")],
@@ -1131,6 +1141,7 @@ mod tests {
 
     #[test]
     fn bridge_queue_play_seek_clamp_and_remove_integration() {
+        let _guard = test_guard();
         let bridge = FrontendBridgeHandle::spawn();
         let first = p("/music/a.flac");
         let second = p("/music/b.flac");
@@ -1235,5 +1246,53 @@ mod tests {
         assert_eq!(state.metadata.title, "New Title");
         assert_eq!(state.metadata.artist, "New Artist");
         assert_eq!(state.metadata.album, "New Album");
+    }
+
+    #[cfg(not(feature = "gst"))]
+    #[test]
+    fn bridge_natural_handoff_advances_current_track_and_keeps_playing() {
+        let _guard = test_guard();
+        let bridge = FrontendBridgeHandle::spawn();
+        let first = p("/tmp/ferrous_gapless_case_a.flac");
+        let second = p("/tmp/ferrous_gapless_case_b.flac");
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
+            tracks: vec![first.clone(), second.clone()],
+            autoplay: true,
+        }));
+        bridge.command(BridgeCommand::RequestSnapshot);
+        let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+            s.queue.len() == 2
+                && s.playback.current.as_ref() == Some(&first)
+                && s.playback.state == crate::playback::PlaybackState::Playing
+        })
+        .expect("loaded first track");
+        assert_eq!(loaded.playback.current.as_ref(), Some(&first));
+
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
+            Duration::from_secs(180),
+        )));
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut handed_off = None;
+        while Instant::now() < deadline {
+            // Leave idle time for the bridge ticker to drive playback Poll, then sample state.
+            std::thread::sleep(Duration::from_millis(80));
+            bridge.command(BridgeCommand::RequestSnapshot);
+            if let Some(snapshot) =
+                wait_for_snapshot_matching(&bridge, Duration::from_millis(120), |_| false)
+            {
+                if snapshot.queue.len() == 2
+                    && snapshot.playback.current.as_ref() == Some(&second)
+                    && snapshot.playback.state == crate::playback::PlaybackState::Playing
+                {
+                    handed_off = Some(snapshot);
+                    break;
+                }
+            }
+        }
+        let handed_off = handed_off.expect("handoff to second track");
+        assert_eq!(handed_off.playback.current.as_ref(), Some(&second));
+        assert_eq!(handed_off.queue.len(), 2);
+
+        bridge.command(BridgeCommand::Shutdown);
     }
 }

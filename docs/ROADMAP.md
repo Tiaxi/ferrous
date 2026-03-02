@@ -206,13 +206,13 @@ Acceptance criteria:
 - [x] Add optimization planning document and prioritized backlog (`docs/OPTIMIZATION_PLAN.md`).
 - [x] Implement test plan phase 1 (backend/FFI unit tests + native UI smoke test scaffold).
 - [x] Implement test plan phase 2 (FFI integration tests + initial bridge mode parity test).
-- [ ] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior). In progress: expanded process-vs-FFI parity coverage for queue transition flows, successful seek path invariants, playback-state transitions (`pause`/`play`/`next`/`prev`), and invalid-seek error parity in `src/bin/native_frontend.rs`; added deterministic bridge queue/play-at/seek-clamp/remove integration test, seek-event no-early-waveform-switch regression test, track-change metadata-transition regression test, and playback seek-boundary/natural-handoff regression unit tests.
+- [ ] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior). In progress: expanded process-vs-FFI parity coverage for queue transition flows, successful seek path invariants, playback-state transitions (`pause`/`play`/`next`/`prev`), and invalid-seek error parity in `src/bin/native_frontend.rs`; added deterministic bridge queue/play-at/seek-clamp/remove integration test, non-`gst` bridge natural-handoff integration test, seek-event no-early-waveform-switch regression test, track-change metadata-transition regression test, and playback seek-boundary/natural-handoff regression unit tests.
 - [x] Add strict lint/security verification steps (`cargo clippy -- -D clippy::pedantic`, `cargo audit`) to regular verification script.
 - [x] Burn down current strict `clippy::pedantic` backlog so regular verification passes without `--no-clippy`.
 - [x] Burn down temporary pedantic-lint baseline allow lists in `src/lib.rs` and `src/bin/native_frontend.rs` (current strict pedantic runs clean without clippy allow lists).
 - [x] Mitigate `cargo audit` warning `RUSTSEC-2024-0436` (`paste` unmaintained) via `.cargo/audit.toml` ignore policy; revisit on dependency upgrades.
 - [ ] Execute optimization backlog phase P0 from `docs/OPTIMIZATION_PLAN.md` (typed low-rate in-process path, remove internal JSON churn). Deferred until test coverage phases are complete.
-- [ ] Add integration tests for queue transitions, gapless handoff, seek behavior. Queue-transition + seek-clamp coverage added; gapless handoff coverage still pending.
+- [ ] Add integration tests for queue transitions, gapless handoff, seek behavior. Queue-transition + seek-clamp coverage added; non-`gst` handoff coverage added; deterministic `gst` handoff coverage still pending.
 - [ ] Add regression tests for no early next-track waveform/metadata switch. Waveform side-effect coverage for seek events and metadata transition coverage on `TrackChanged` are now present; end-to-end next-track metadata switch timing coverage is still pending.
 - [ ] Add DB migration/versioning strategy.
 - [ ] Add profiling/telemetry for decode/analyze/render timing.
