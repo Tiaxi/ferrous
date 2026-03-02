@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace {
@@ -49,9 +50,21 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     : QQuickPaintedItem(parent) {
     setAntialiasing(false);
     setOpaquePainting(true);
+    const bool useImageTarget = qEnvironmentVariableIsSet("FERROUS_UI_PAINT_IMAGE");
+    if (!useImageTarget) {
+        setRenderTarget(QQuickPaintedItem::FramebufferObject);
+    }
+    m_showFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
+    m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
+        || qEnvironmentVariableIsSet("FERROUS_PROFILE");
+    if (m_profileEnabled) {
+        m_profileLast = std::chrono::steady_clock::now();
+    }
     rebuildPalette();
-    connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
-    bindWindowFpsTracking(window());
+    if (m_showFpsOverlay) {
+        connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
+        bindWindowFpsTracking(window());
+    }
 }
 
 double SpectrogramItem::dbRange() const {
@@ -222,6 +235,7 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
 }
 
 void SpectrogramItem::paint(QPainter *painter) {
+    const auto paint_start = std::chrono::steady_clock::now();
     QMutexLocker lock(&m_stateMutex);
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
@@ -236,6 +250,26 @@ void SpectrogramItem::paint(QPainter *painter) {
     }
 
     drawFpsOverlay(painter);
+
+    if (m_profileEnabled) {
+        const auto paint_end = std::chrono::steady_clock::now();
+        m_profilePaints += 1;
+        m_profilePaintMs += std::chrono::duration<double, std::milli>(paint_end - paint_start).count();
+        const double elapsed = std::chrono::duration<double>(paint_end - m_profileLast).count();
+        if (elapsed >= 1.0) {
+            std::fprintf(
+                stderr,
+                "[ui-spectrogram] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f cols=%zu bins=%d\n",
+                static_cast<unsigned long long>(m_profilePaints),
+                m_profilePaintMs,
+                m_profilePaints > 0 ? (m_profilePaintMs / static_cast<double>(m_profilePaints)) : 0.0,
+                static_cast<size_t>(m_columns.size()),
+                m_binsPerColumn);
+            m_profileLast = paint_end;
+            m_profilePaints = 0;
+            m_profilePaintMs = 0.0;
+        }
+    }
 }
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
@@ -563,7 +597,7 @@ void SpectrogramItem::updateFpsEstimateLocked() {
 }
 
 void SpectrogramItem::drawFpsOverlay(QPainter *painter) const {
-    if (!painter || m_fpsValue <= 0) {
+    if (!m_showFpsOverlay || !painter || m_fpsValue <= 0) {
         return;
     }
 

@@ -3,12 +3,23 @@
 #include <QPainter>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 
 WaveformItem::WaveformItem(QQuickItem *parent)
     : QQuickPaintedItem(parent) {
     setAntialiasing(false);
     setOpaquePainting(true);
+    const bool useImageTarget = qEnvironmentVariableIsSet("FERROUS_UI_PAINT_IMAGE");
+    if (!useImageTarget) {
+        setRenderTarget(QQuickPaintedItem::FramebufferObject);
+    }
+    m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
+        || qEnvironmentVariableIsSet("FERROUS_PROFILE");
+    if (m_profileEnabled) {
+        m_profileLast = std::chrono::steady_clock::now();
+    }
 }
 
 QByteArray WaveformItem::peaksData() const {
@@ -51,6 +62,7 @@ void WaveformItem::setDurationSeconds(double value) {
 }
 
 void WaveformItem::paint(QPainter *painter) {
+    const auto paint_start = std::chrono::steady_clock::now();
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
 
@@ -77,5 +89,23 @@ void WaveformItem::paint(QPainter *painter) {
 
     painter->fillRect(QRect(0, 0, progressX, h), QColor(120, 190, 255, 66));
     painter->fillRect(QRect(progressX, 0, 1, h), QColor("#2f7cd6"));
-}
 
+    if (m_profileEnabled) {
+        const auto paint_end = std::chrono::steady_clock::now();
+        m_profilePaints += 1;
+        m_profilePaintMs += std::chrono::duration<double, std::milli>(paint_end - paint_start).count();
+        const double elapsed = std::chrono::duration<double>(paint_end - m_profileLast).count();
+        if (elapsed >= 1.0) {
+            std::fprintf(
+                stderr,
+                "[ui-waveform] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f peaks=%d\n",
+                static_cast<unsigned long long>(m_profilePaints),
+                m_profilePaintMs,
+                m_profilePaints > 0 ? (m_profilePaintMs / static_cast<double>(m_profilePaints)) : 0.0,
+                m_peaksData.size());
+            m_profileLast = paint_end;
+            m_profilePaints = 0;
+            m_profilePaintMs = 0.0;
+        }
+    }
+}

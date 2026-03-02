@@ -83,11 +83,16 @@ private:
     QImage m_canvas;
     bool m_canvasDirty{true};
     std::deque<std::vector<quint8>> m_columns;
+    bool m_showFpsOverlay{false};
     bool m_fpsInitialized{false};
     int m_fpsValue{0};
     int m_fpsAccumFrames{0};
     double m_fpsAccumSeconds{0.0};
     std::chrono::steady_clock::time_point m_lastFrameTime{};
+    bool m_profileEnabled{false};
+    std::chrono::steady_clock::time_point m_profileLast{};
+    quint64 m_profilePaints{0};
+    double m_profilePaintMs{0.0};
     QMetaObject::Connection m_frameSwapConnection;
     mutable QMutex m_stateMutex;
 };

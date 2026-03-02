@@ -3,6 +3,8 @@
 #include <QByteArray>
 #include <QQuickPaintedItem>
 
+#include <chrono>
+
 class WaveformItem : public QQuickPaintedItem {
     Q_OBJECT
     Q_PROPERTY(QByteArray peaksData READ peaksData WRITE setPeaksData NOTIFY peaksDataChanged)
@@ -32,5 +34,8 @@ private:
     QByteArray m_peaksData;
     double m_positionSeconds{0.0};
     double m_durationSeconds{0.0};
+    bool m_profileEnabled{false};
+    std::chrono::steady_clock::time_point m_profileLast{};
+    quint64 m_profilePaints{0};
+    double m_profilePaintMs{0.0};
 };
-
