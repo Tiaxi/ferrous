@@ -17,6 +17,7 @@ pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
 )
 
 qt_standard_project_setup(REQUIRES 6.6)
+qt_policy(SET QTP0004 NEW)
 
 set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
@@ -45,6 +46,7 @@ add_dependencies(ferrous_kirigami_shell ferrous_rust_bridge)
 qt_add_qml_module(ferrous_kirigami_shell
     URI FerrousNative
     VERSION 1.0
+    NO_IMPORT_SCAN
     QML_FILES
         qml/Main.qml
 )
@@ -85,6 +87,9 @@ if(BUILD_TESTING)
         Qt6::QuickControls2
         Qt6::Test
         KF6::Kirigami
+    )
+    set_target_properties(ferrous_qml_smoke_tests PROPERTIES
+        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
     add_test(NAME ferrous_qml_smoke_tests COMMAND ferrous_qml_smoke_tests)
     set_tests_properties(ferrous_qml_smoke_tests PROPERTIES
