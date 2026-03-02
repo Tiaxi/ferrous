@@ -159,8 +159,10 @@ mod backend {
         let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
 
         std::thread::spawn(move || {
-            let mut snapshot = PlaybackSnapshot::default();
-            snapshot.volume = 1.0;
+            let mut snapshot = PlaybackSnapshot {
+                volume: 1.0,
+                ..PlaybackSnapshot::default()
+            };
             let mut queue: Vec<PathBuf> = Vec::new();
             let mut queue_idx = 0usize;
             let mut last_tick = Instant::now();
