@@ -49,6 +49,25 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     setAntialiasing(false);
     setOpaquePainting(true);
     rebuildPalette();
+
+    m_animationTimer.setTimerType(Qt::PreciseTimer);
+    m_animationTimer.setInterval(16);
+    connect(&m_animationTimer, &QTimer::timeout, this, [this]() {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_hasRowTiming || m_columns.empty() || m_binsPerColumn <= 0) {
+            m_animationTimer.stop();
+            return;
+        }
+        using Clock = std::chrono::steady_clock;
+        const auto now = Clock::now();
+        const double elapsedSinceAppend =
+            std::chrono::duration<double>(now - m_lastAppendTime).count();
+        if (elapsedSinceAppend > std::max(0.25, m_rowIntervalSec * 2.0)) {
+            m_animationTimer.stop();
+            return;
+        }
+        update();
+    });
 }
 
 double SpectrogramItem::dbRange() const {
@@ -122,6 +141,11 @@ void SpectrogramItem::reset() {
     QMutexLocker lock(&m_stateMutex);
     m_columns.clear();
     m_binsPerColumn = 0;
+    m_hasRowTiming = false;
+    m_rowIntervalSec = 1.0 / 45.0;
+    if (m_animationTimer.isActive()) {
+        m_animationTimer.stop();
+    }
     invalidateMapping();
     invalidateCanvas();
     update();
@@ -134,6 +158,7 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     }
 
     bool anyAdded = false;
+    int appended = 0;
     for (const QVariant &rowVar : rows) {
         const QVariantList row = rowVar.toList();
         if (row.isEmpty()) {
@@ -152,12 +177,14 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         }
         appendColumnAndRender(std::move(mapped));
         anyAdded = true;
+        appended++;
     }
 
     if (!anyAdded) {
         return;
     }
 
+    noteRowsAppended(appended);
     update();
 }
 
@@ -196,6 +223,7 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     if (appended <= 0) {
         return;
     }
+    noteRowsAppended(appended);
 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
@@ -228,8 +256,45 @@ void SpectrogramItem::paint(QPainter *painter) {
     if (!m_columns.empty() && m_binsPerColumn > 0) {
         ensureCanvas(w, h);
         if (!m_canvas.isNull()) {
+            using Clock = std::chrono::steady_clock;
+            double fractionalShift = 0.0;
+            if (m_hasRowTiming && m_rowIntervalSec > 0.0) {
+                const auto now = Clock::now();
+                const double elapsedSinceAppend =
+                    std::chrono::duration<double>(now - m_lastAppendTime).count();
+                if (elapsedSinceAppend >= 0.0
+                    && elapsedSinceAppend <= std::max(0.25, m_rowIntervalSec * 2.0)) {
+                    fractionalShift = std::clamp(elapsedSinceAppend / m_rowIntervalSec, 0.0, 0.999);
+                }
+            }
+
             const int drawX = w - m_canvas.width();
-            painter->drawImage(QPoint(drawX, 0), m_canvas);
+            painter->setRenderHint(QPainter::SmoothPixmapTransform, fractionalShift > 0.0);
+            const QRectF target(
+                static_cast<double>(drawX) - fractionalShift,
+                0.0,
+                static_cast<double>(m_canvas.width()),
+                static_cast<double>(m_canvas.height()));
+            const QRectF source(
+                0.0,
+                0.0,
+                static_cast<double>(m_canvas.width()),
+                static_cast<double>(m_canvas.height()));
+            painter->drawImage(target, m_canvas, source);
+
+            if (fractionalShift > 0.0) {
+                const QRectF tailTarget(
+                    static_cast<double>(w) - fractionalShift,
+                    0.0,
+                    fractionalShift,
+                    static_cast<double>(m_canvas.height()));
+                const QRectF tailSource(
+                    static_cast<double>(m_canvas.width() - 1),
+                    0.0,
+                    1.0,
+                    static_cast<double>(m_canvas.height()));
+                painter->drawImage(tailTarget, m_canvas, tailSource);
+            }
         }
     }
 
@@ -474,6 +539,30 @@ void SpectrogramItem::appendColumnAndRender(std::vector<quint8> &&col) {
     drawColumnAt(m_canvas.width() - 1, m_columns.back());
 }
 
+void SpectrogramItem::noteRowsAppended(int rowCount) {
+    if (rowCount <= 0) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    if (m_hasRowTiming) {
+        const double elapsed = std::chrono::duration<double>(now - m_lastAppendTime).count();
+        if (elapsed > 0.0) {
+            const double perRow = std::clamp(
+                elapsed / static_cast<double>(rowCount),
+                1.0 / 240.0,
+                1.0 / 8.0);
+            m_rowIntervalSec = (m_rowIntervalSec * 0.65) + (perRow * 0.35);
+        }
+    } else {
+        m_hasRowTiming = true;
+    }
+    m_lastAppendTime = now;
+    if (!m_animationTimer.isActive()) {
+        m_animationTimer.start();
+    }
+}
+
 std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) const {
     std::vector<quint8> out;
     out.reserve(static_cast<size_t>(row.size()));
@@ -504,6 +593,8 @@ void SpectrogramItem::updateFpsEstimate() {
         m_fpsInitialized = true;
         m_lastFrameTime = now;
         m_fpsValue = 0;
+        m_fpsAccumFrames = 0;
+        m_fpsAccumSeconds = 0.0;
         return;
     }
 
@@ -513,7 +604,16 @@ void SpectrogramItem::updateFpsEstimate() {
         return;
     }
 
-    m_fpsValue = std::clamp(static_cast<int>(std::lround(1.0 / elapsed)), 0, 999);
+    m_fpsAccumFrames += 1;
+    m_fpsAccumSeconds += elapsed;
+    if (m_fpsAccumSeconds < 0.20) {
+        return;
+    }
+
+    const double fps = static_cast<double>(m_fpsAccumFrames) / m_fpsAccumSeconds;
+    m_fpsValue = std::clamp(static_cast<int>(std::lround(fps)), 0, 999);
+    m_fpsAccumFrames = 0;
+    m_fpsAccumSeconds = 0.0;
 }
 
 void SpectrogramItem::drawFpsOverlay(QPainter *painter) const {
