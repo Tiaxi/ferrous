@@ -1,4 +1,4 @@
-#include <QGuiApplication>
+#include <QApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <qqml.h>
@@ -11,7 +11,7 @@
 
 int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);
     BridgeClient bridge;
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
