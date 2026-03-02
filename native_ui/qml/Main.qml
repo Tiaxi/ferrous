@@ -240,6 +240,11 @@ Kirigami.ApplicationWindow {
             selectedLibrarySelectionKey = ""
         }
 
+        if (libraryAlbumView) {
+            const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
+            libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
+        }
+
         Qt.callLater(function() {
             if (!libraryAlbumView) {
                 return
@@ -724,12 +729,12 @@ Kirigami.ApplicationWindow {
                                         id: trackMenu
                                         MenuItem {
                                             text: "Play Track"
-                                            enabled: rowData.trackPath && rowData.trackPath.length > 0
+                                            enabled: !!(rowData.trackPath && rowData.trackPath.length > 0)
                                             onTriggered: uiBridge.playTrack(rowData.trackPath)
                                         }
                                         MenuItem {
                                             text: "Append Track"
-                                            enabled: rowData.trackPath && rowData.trackPath.length > 0
+                                            enabled: !!(rowData.trackPath && rowData.trackPath.length > 0)
                                             onTriggered: uiBridge.appendTrack(rowData.trackPath)
                                         }
                                     }
