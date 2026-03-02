@@ -706,7 +706,7 @@ Kirigami.ApplicationWindow {
                                         anchors.bottom: parent.bottom
                                         width: isArtistRow ? 26 : 42
                                         acceptedButtons: Qt.LeftButton
-                                        onClicked: function(mouse) {
+                                        onPressed: function(mouse) {
                                             if (mouse.button !== Qt.LeftButton) {
                                                 return
                                             }
