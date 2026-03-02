@@ -1009,11 +1009,11 @@ fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
         .collect::<Vec<_>>();
     let selected_queue_index = value
         .get("selected_queue_index")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|v| v as usize);
     let current_queue_index = value
         .get("current_queue_index")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|v| v as usize);
     Some(SessionSnapshot {
         queue,

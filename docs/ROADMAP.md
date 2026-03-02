@@ -180,10 +180,10 @@ Acceptance criteria:
 - [x] Add playlist and library context menus for common actions.
 - [x] Add drag-and-drop from library to playlist.
 - [ ] Add multi-select in playlist and library views.
-- [ ] Add status bar parity items (selection counts, queue duration, mode indicators).
+- [x] Add status bar parity items (selection counts, queue duration, mode indicators).
 
 ### Playback Features
-- [ ] Add repeat/shuffle modes.
+- [x] Add repeat/shuffle modes.
 - [ ] Add ReplayGain support.
 - [ ] Add preamp/volume dB behavior options.
 - [ ] Add output device selector persistence.

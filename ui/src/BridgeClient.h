@@ -24,6 +24,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY snapshotChanged)
     Q_PROPERTY(double volume READ volume NOTIFY snapshotChanged)
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
+    Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY snapshotChanged)
@@ -56,6 +57,7 @@ public:
     double durationSeconds() const;
     double volume() const;
     int queueLength() const;
+    QString queueDurationText() const;
     QStringList queueItems() const;
     int selectedQueueIndex() const;
     int playingQueueIndex() const;
@@ -143,6 +145,7 @@ private:
     double m_durationSeconds{0.0};
     double m_volume{1.0};
     int m_queueLength{0};
+    QString m_queueDurationText{"00:00"};
     QStringList m_queueItems;
     QStringList m_queuePaths;
     int m_selectedQueueIndex{-1};

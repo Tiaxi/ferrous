@@ -316,10 +316,7 @@ mod backend {
 
     use crate::analysis::AnalysisCommand;
 
-    use super::{
-        PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
-        TrackChangeKind,
-    };
+    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
 
     pub fn spawn_engine(
         analysis_tx: Sender<AnalysisCommand>,

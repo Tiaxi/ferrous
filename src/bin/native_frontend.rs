@@ -25,7 +25,7 @@
     clippy::uninlined_format_args
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -390,6 +390,8 @@ struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
     last_queue_digest: Option<QueueDigest>,
+    last_queue_total_duration_secs: f64,
+    last_queue_unknown_duration_count: usize,
     last_spectrogram_seq: u64,
     analysis_frame_seq: u32,
     profile_enabled: bool,
@@ -431,6 +433,32 @@ fn leading_track_number(input: &str) -> Option<u32> {
     } else {
         None
     }
+}
+
+fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
+    let mut duration_by_path: HashMap<&std::path::Path, f64> =
+        HashMap::with_capacity(snapshot.library.tracks.len());
+    for track in &snapshot.library.tracks {
+        let Some(duration_secs) = track.duration_secs else {
+            continue;
+        };
+        let duration = f64::from(duration_secs);
+        if duration.is_finite() && duration > 0.0 {
+            duration_by_path.insert(track.path.as_path(), duration);
+        }
+    }
+
+    let mut total_duration_secs = 0.0;
+    let mut unknown_duration_count = 0usize;
+    for path in &snapshot.queue {
+        if let Some(duration) = duration_by_path.get(path.as_path()) {
+            total_duration_secs += *duration;
+        } else {
+            unknown_duration_count = unknown_duration_count.saturating_add(1);
+        }
+    }
+
+    (total_duration_secs, unknown_duration_count)
 }
 
 fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
@@ -865,6 +893,18 @@ fn encode_snapshot_payload(
     } else {
         serde_json::Value::Null
     };
+    let (queue_total_duration_secs, queue_unknown_duration_count) =
+        if queue_changed || albums_changed {
+            let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(s);
+            emit_state.last_queue_total_duration_secs = total_duration_secs;
+            emit_state.last_queue_unknown_duration_count = unknown_duration_count;
+            (total_duration_secs, unknown_duration_count)
+        } else {
+            (
+                emit_state.last_queue_total_duration_secs,
+                emit_state.last_queue_unknown_duration_count,
+            )
+        };
 
     let waveform_peaks = if include_analysis_payload && analysis_delta.waveform_changed {
         serde_json::Value::Array(
@@ -915,6 +955,8 @@ fn encode_snapshot_payload(
         "queue": {
             "len": s.queue.len(),
             "selected_index": s.selected_queue_index,
+            "total_duration_secs": queue_total_duration_secs,
+            "unknown_duration_count": queue_unknown_duration_count,
             "tracks": queue_tracks,
         },
         "library": {

@@ -270,6 +270,10 @@ int BridgeClient::queueLength() const {
     return m_queueLength;
 }
 
+QString BridgeClient::queueDurationText() const {
+    return m_queueDurationText;
+}
+
 QStringList BridgeClient::queueItems() const {
     return m_queueItems;
 }
@@ -857,6 +861,10 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
         const QString currentPath = playback.value(QStringLiteral("current_path")).toString();
         int playing = playback.value(QStringLiteral("current_queue_index")).toInt(-1);
         const int qlen = queue.value(QStringLiteral("len")).toInt();
+        const double queueDurationSecs =
+            queue.value(QStringLiteral("total_duration_secs")).toDouble(0.0);
+        const int queueUnknownDurationCount =
+            std::max(0, queue.value(QStringLiteral("unknown_duration_count")).toInt(0));
         const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
         const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
 
@@ -920,6 +928,14 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                 m_pendingQueueSelection = -1;
                 m_pendingQueueSelectionUntilMs = 0;
             }
+        }
+        QString nextQueueDurationText = formatSeconds(queueDurationSecs);
+        if (queueUnknownDurationCount > 0) {
+            nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
+        }
+        if (m_queueDurationText != nextQueueDurationText) {
+            m_queueDurationText = nextQueueDurationText;
+            changed = true;
         }
         const QJsonValue queueTracksValue = queue.value(QStringLiteral("tracks"));
         if (queueTracksValue.isArray()) {

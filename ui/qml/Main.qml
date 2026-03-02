@@ -38,6 +38,7 @@ Kirigami.ApplicationWindow {
         property real durationSeconds: 0
         property real volume: 1.0
         property int queueLength: 0
+        property string queueDurationText: "00:00"
         property var queueItems: []
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
@@ -205,19 +206,21 @@ Kirigami.ApplicationWindow {
         return "none"
     }
 
+    function librarySelectionCount() {
+        return selectedLibrarySelectionKey.length > 0 ? 1 : 0
+    }
+
     function statusLineText() {
         if (!uiBridge.connected) {
             return "bridge disconnected"
         }
-        const queueSel = uiBridge.selectedQueueIndex >= 0
-            ? (uiBridge.selectedQueueIndex + 1).toString()
-            : "-"
-        const queuePart = queueSel + "/" + uiBridge.queueLength
+        const queueSelectionCount = uiBridge.selectedQueueIndex >= 0 ? 1 : 0
         return uiBridge.playbackState.toLowerCase()
             + " | " + uiBridge.positionText + "/" + uiBridge.durationText
             + " | tracks " + uiBridge.queueLength
-            + " | qsel " + queuePart
-            + " | lsel " + librarySelectionStatusText()
+            + " | qdur " + uiBridge.queueDurationText
+            + " | sel q:" + queueSelectionCount + " l:" + librarySelectionCount()
+            + " | " + librarySelectionStatusText()
             + " | " + repeatModeText(uiBridge.repeatMode)
             + " | " + (uiBridge.shuffleEnabled ? "shuffle-on" : "shuffle-off")
     }

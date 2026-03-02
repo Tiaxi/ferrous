@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_uchar, CStr, CString};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -37,6 +37,8 @@ struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
     last_queue_digest: Option<QueueDigest>,
+    last_queue_total_duration_secs: f64,
+    last_queue_unknown_duration_count: usize,
     last_spectrogram_seq: u64,
     analysis_frame_seq: u32,
 }
@@ -583,6 +585,32 @@ fn leading_track_number(input: &str) -> Option<u32> {
     }
 }
 
+fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
+    let mut duration_by_path: HashMap<&std::path::Path, f64> =
+        HashMap::with_capacity(snapshot.library.tracks.len());
+    for track in &snapshot.library.tracks {
+        let Some(duration_secs) = track.duration_secs else {
+            continue;
+        };
+        let duration = f64::from(duration_secs);
+        if duration.is_finite() && duration > 0.0 {
+            duration_by_path.insert(track.path.as_path(), duration);
+        }
+    }
+
+    let mut total_duration_secs = 0.0;
+    let mut unknown_duration_count = 0usize;
+    for path in &snapshot.queue {
+        if let Some(duration) = duration_by_path.get(path.as_path()) {
+            total_duration_secs += *duration;
+        } else {
+            unknown_duration_count = unknown_duration_count.saturating_add(1);
+        }
+    }
+
+    (total_duration_secs, unknown_duration_count)
+}
+
 fn encode_snapshot_payload(
     s: &BridgeSnapshot,
     analysis_delta: &AnalysisDelta,
@@ -725,6 +753,18 @@ fn encode_snapshot_payload(
     } else {
         serde_json::Value::Null
     };
+    let (queue_total_duration_secs, queue_unknown_duration_count) =
+        if queue_changed || albums_changed {
+            let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(s);
+            emit_state.last_queue_total_duration_secs = total_duration_secs;
+            emit_state.last_queue_unknown_duration_count = unknown_duration_count;
+            (total_duration_secs, unknown_duration_count)
+        } else {
+            (
+                emit_state.last_queue_total_duration_secs,
+                emit_state.last_queue_unknown_duration_count,
+            )
+        };
 
     let waveform_peaks = if include_analysis_payload && analysis_delta.waveform_changed {
         serde_json::Value::Array(
@@ -775,6 +815,8 @@ fn encode_snapshot_payload(
         "queue": {
             "len": s.queue.len(),
             "selected_index": s.selected_queue_index,
+            "total_duration_secs": queue_total_duration_secs,
+            "unknown_duration_count": queue_unknown_duration_count,
             "tracks": queue_tracks,
         },
         "library": {
@@ -977,7 +1019,7 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
 mod tests {
     use super::*;
     use crate::analysis::AnalysisSnapshot;
-    use crate::library::LibrarySnapshot;
+    use crate::library::{LibrarySnapshot, LibraryTrack};
     use crate::playback::{PlaybackSnapshot, PlaybackState};
     use std::ffi::{CStr, CString};
     use std::sync::Arc;
@@ -1125,7 +1167,17 @@ mod tests {
                 bit_depth: Some(24),
                 cover_art_rgba: None,
             },
-            library: Arc::new(LibrarySnapshot::default()),
+            library: Arc::new(LibrarySnapshot {
+                tracks: vec![LibraryTrack {
+                    path: PathBuf::from("/music/a.flac"),
+                    title: "Sample Track".to_string(),
+                    artist: "Sample Artist".to_string(),
+                    album: "Sample Album".to_string(),
+                    track_no: Some(1),
+                    duration_secs: Some(180.0),
+                }],
+                ..LibrarySnapshot::default()
+            }),
             queue: vec![PathBuf::from("/music/a.flac")],
             selected_queue_index: Some(0),
             settings: super::super::BridgeSettings {
@@ -1162,6 +1214,20 @@ mod tests {
             .get("settings")
             .and_then(|v| v.as_object())
             .is_some());
+        assert_eq!(
+            payload
+                .get("queue")
+                .and_then(|v| v.get("total_duration_secs"))
+                .and_then(|v| v.as_f64()),
+            Some(180.0)
+        );
+        assert_eq!(
+            payload
+                .get("queue")
+                .and_then(|v| v.get("unknown_duration_count"))
+                .and_then(|v| v.as_u64()),
+            Some(0)
+        );
     }
 
     #[test]
