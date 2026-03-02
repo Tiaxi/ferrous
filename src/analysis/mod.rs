@@ -172,7 +172,7 @@ impl AnalysisEngine {
                                     let tx = waveform_tx.clone();
                                     std::thread::spawn(move || {
                                         let _ =
-                                            decode_waveform_peaks_stream(&path, 4096, |peaks, done| {
+                                            decode_waveform_peaks_stream(&path, 2048, |peaks, done| {
                                                 let _ = tx.send(AnalysisCommand::WaveformProgress {
                                                     track_token,
                                                     peaks,
@@ -824,6 +824,7 @@ where
 
         let spec = *decoded.spec();
         let channels = spec.channels.count().max(1);
+        let sample_stride = if channels >= 2 { 2usize } else { 1usize };
         let cap = decoded.capacity() as u64;
         let cap_usize = decoded.capacity();
 
@@ -839,13 +840,14 @@ where
 
         buf.copy_interleaved_ref(decoded);
 
-        for frame in buf.samples().chunks(channels) {
-            let mono = frame.iter().copied().sum::<f32>() / channels as f32;
-            let amp = mono.abs();
+        let samples = buf.samples();
+        let frame_width = channels.saturating_mul(sample_stride).max(1);
+        for base in (0..samples.len()).step_by(frame_width) {
+            let amp = samples[base].abs();
             if amp > bucket_peak {
                 bucket_peak = amp;
             }
-            bucket_count += 1;
+            bucket_count += sample_stride as u64;
 
             if bucket_count >= block_size {
                 peaks.push(bucket_peak.clamp(0.0, 1.0));

@@ -278,7 +278,7 @@ mod backend {
 mod backend {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::{anyhow, Context};
     use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
@@ -401,6 +401,7 @@ mod backend {
         let mut target_volume = 1.0f64;
         let mut applied_volume = 1.0f64;
         let mut startup_gain_ramp = false;
+        let mut seek_hold: Option<(Instant, Duration)> = None;
         playbin.set_property("volume", applied_volume);
 
         loop {
@@ -414,6 +415,7 @@ mod backend {
                         &mut target_volume,
                         &mut applied_volume,
                         &mut startup_gain_ramp,
+                        &mut seek_hold,
                         cmd,
                     );
                 }
@@ -438,6 +440,7 @@ mod backend {
         target_volume: &mut f64,
         applied_volume: &mut f64,
         startup_gain_ramp: &mut bool,
+        seek_hold: &mut Option<(Instant, Duration)>,
         cmd: PlaybackCommand,
     ) {
         match cmd {
@@ -560,6 +563,7 @@ mod backend {
                 soft_mute(playbin, applied_volume);
                 if playbin.set_state(gst::State::Ready).is_ok() {
                     *startup_gain_ramp = false;
+                    *seek_hold = None;
                     snapshot.state = PlaybackState::Stopped;
                     snapshot.position = Duration::ZERO;
                 }
@@ -570,6 +574,10 @@ mod backend {
                 let _ =
                     playbin.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, target);
                 snapshot.position = pos.min(snapshot.duration);
+                *seek_hold = Some((
+                    Instant::now() + Duration::from_millis(220),
+                    snapshot.position,
+                ));
                 let _ = event_tx.send(PlaybackEvent::Seeked);
             }
             PlaybackCommand::SetVolume(vol) => {
@@ -597,8 +605,19 @@ mod backend {
                     playbin.set_property("volume", *applied_volume);
                     snapshot.volume = *applied_volume as f32;
                 }
-                if let Some(pos) = playbin.query_position::<gst::ClockTime>() {
-                    snapshot.position = Duration::from_nanos(pos.nseconds());
+                let mut position_locked = false;
+                if let Some((until, target)) = seek_hold.as_ref().copied() {
+                    if Instant::now() < until {
+                        snapshot.position = target;
+                        position_locked = true;
+                    } else {
+                        *seek_hold = None;
+                    }
+                }
+                if !position_locked {
+                    if let Some(pos) = playbin.query_position::<gst::ClockTime>() {
+                        snapshot.position = Duration::from_nanos(pos.nseconds());
+                    }
                 }
                 if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
                     snapshot.duration = Duration::from_nanos(dur.nseconds());
