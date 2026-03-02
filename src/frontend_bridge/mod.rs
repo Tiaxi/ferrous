@@ -83,7 +83,7 @@ pub enum BridgeSettingsCommand {
 
 #[derive(Debug, Clone)]
 pub enum BridgeEvent {
-    Snapshot(BridgeSnapshot),
+    Snapshot(Box<BridgeSnapshot>),
     Error(String),
     Stopped,
 }
@@ -92,6 +92,7 @@ pub enum BridgeEvent {
 pub struct BridgeSnapshot {
     pub playback: PlaybackSnapshot,
     pub analysis: AnalysisSnapshot,
+    pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
     pub queue: Vec<PathBuf>,
     pub selected_queue_index: Option<usize>,
@@ -133,6 +134,7 @@ impl BridgeState {
         BridgeSnapshot {
             playback: self.playback.clone(),
             analysis: self.analysis.clone(),
+            metadata: self.metadata.clone(),
             library: self.library.clone(),
             queue: self.queue.clone(),
             selected_queue_index: self.selected_queue_index,
@@ -146,13 +148,27 @@ pub struct FrontendBridgeHandle {
     rx: Receiver<BridgeEvent>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct BridgeRuntimeOptions {
+    metadata_delay: Duration,
+}
+
 impl FrontendBridgeHandle {
     pub fn spawn() -> Self {
+        Self::spawn_with_options(BridgeRuntimeOptions::default())
+    }
+
+    #[cfg(all(test, not(feature = "gst")))]
+    fn spawn_with_metadata_delay(metadata_delay: Duration) -> Self {
+        Self::spawn_with_options(BridgeRuntimeOptions { metadata_delay })
+    }
+
+    fn spawn_with_options(options: BridgeRuntimeOptions) -> Self {
         let (cmd_tx, cmd_rx) = unbounded::<BridgeCommand>();
         // Keep snapshot/event queue bounded so a slow UI consumer cannot grow memory unbounded.
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
 
-        std::thread::spawn(move || run_bridge_loop(cmd_rx, event_tx));
+        std::thread::spawn(move || run_bridge_loop(cmd_rx, event_tx, options));
         Self {
             tx: cmd_tx,
             rx: event_rx,
@@ -172,10 +188,14 @@ impl FrontendBridgeHandle {
     }
 }
 
-fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent>) {
+fn run_bridge_loop(
+    cmd_rx: Receiver<BridgeCommand>,
+    event_tx: Sender<BridgeEvent>,
+    options: BridgeRuntimeOptions,
+) {
     let (analysis, analysis_rx) = AnalysisEngine::new();
     let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
-    let (metadata, metadata_rx) = MetadataService::new();
+    let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
     let (library, library_rx) = LibraryService::new();
 
     let mut state = BridgeState::default();
@@ -307,7 +327,7 @@ fn send_snapshot_event(event_tx: &Sender<BridgeEvent>, state: &BridgeState) -> b
     if event_tx.is_full() {
         return false;
     }
-    try_send_event(event_tx, BridgeEvent::Snapshot(state.snapshot())).is_ok()
+    try_send_event(event_tx, BridgeEvent::Snapshot(Box::new(state.snapshot()))).is_ok()
 }
 
 fn current_rss_kb() -> usize {
@@ -1151,17 +1171,17 @@ mod tests {
             if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
                 if let BridgeEvent::Snapshot(snapshot) = event {
                     if predicate(&snapshot) {
-                        return Some(snapshot);
+                        return Some(*snapshot);
                     }
-                    last = Some(snapshot);
+                    last = Some(*snapshot);
                 }
             }
             while let Some(event) = bridge.try_recv() {
                 if let BridgeEvent::Snapshot(snapshot) = event {
                     if predicate(&snapshot) {
-                        return Some(snapshot);
+                        return Some(*snapshot);
                     }
-                    last = Some(snapshot);
+                    last = Some(*snapshot);
                 }
             }
         }
@@ -1350,6 +1370,54 @@ mod tests {
         let handed_off = handed_off.expect("handoff to second track");
         assert_eq!(handed_off.playback.current.as_ref(), Some(&second));
         assert_eq!(handed_off.queue.len(), 2);
+
+        bridge.command(BridgeCommand::Shutdown);
+    }
+
+    #[cfg(not(feature = "gst"))]
+    #[test]
+    fn bridge_natural_handoff_keeps_old_metadata_until_new_metadata_arrives() {
+        let _guard = test_guard();
+        let bridge = FrontendBridgeHandle::spawn_with_metadata_delay(Duration::from_millis(300));
+        let first = p("/tmp/ferrous_metadata_case_a.flac");
+        let second = p("/tmp/ferrous_metadata_case_b.flac");
+        let first_title = "ferrous_metadata_case_a";
+        let second_title = "ferrous_metadata_case_b";
+
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
+            tracks: vec![first.clone(), second.clone()],
+            autoplay: true,
+        }));
+        bridge.command(BridgeCommand::RequestSnapshot);
+        let first_loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(5), |s| {
+            s.queue.len() == 2
+                && s.playback.current.as_ref() == Some(&first)
+                && s.metadata.title == first_title
+        })
+        .expect("first track + metadata loaded");
+        assert_eq!(first_loaded.metadata.title, first_title);
+
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
+            Duration::from_secs(180),
+        )));
+        bridge.command(BridgeCommand::RequestSnapshot);
+        let handoff_snapshot = wait_for_snapshot_matching(&bridge, Duration::from_secs(2), |s| {
+            s.queue.len() == 2
+                && s.playback.current.as_ref() == Some(&second)
+                && s.metadata.title == first_title
+        })
+        .expect("handoff snapshot keeps old metadata before new metadata arrives");
+        assert_eq!(handoff_snapshot.playback.current.as_ref(), Some(&second));
+        assert_eq!(handoff_snapshot.metadata.title, first_title);
+
+        bridge.command(BridgeCommand::RequestSnapshot);
+        let updated_metadata = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+            s.queue.len() == 2
+                && s.playback.current.as_ref() == Some(&second)
+                && s.metadata.title == second_title
+        })
+        .expect("metadata updated for handed-off track");
+        assert_eq!(updated_metadata.metadata.title, second_title);
 
         bridge.command(BridgeCommand::Shutdown);
     }

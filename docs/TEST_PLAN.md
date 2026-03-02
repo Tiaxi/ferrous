@@ -62,11 +62,13 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Queue transitions, seek behavior, gapless handoff, no early metadata/waveform switch.
   - In-process bridge mode and process fallback mode parity checks.
 - Status:
-  - Phase 1 partially implemented:
+  - Phase 1 implemented:
     - Bridge queue roundtrip integration test (`FrontendBridgeHandle` + snapshot assertions).
     - Process-vs-FFI queue replacement parity assertion in `src/bin/native_frontend.rs`.
     - Bridge integration regression test for queue/play-at + seek clamp + remove transition flow in `src/frontend_bridge/mod.rs`.
     - Bridge natural-handoff integration test (non-`gst` backend path) in `src/frontend_bridge/mod.rs`.
+    - Bridge natural-handoff metadata-timing regression proving the previous track metadata remains visible until the new track metadata arrives in `src/frontend_bridge/mod.rs`.
+    - Deterministic `gst`-path natural handoff regression tests for track-start gating in `src/playback/mod.rs`.
     - Playback unit regression test for seek boundary behavior before/at track end in `src/playback/mod.rs`.
     - Playback unit regression test proving natural handoff emits `TrackChanged::Natural` at boundary in `src/playback/mod.rs`.
     - Playback unit tests for volume clamp behavior, seek-clamp + `Seeked` emission, append/next navigation, out-of-bounds `PlayAt` stability, and start-boundary `Previous` behavior in `src/playback/mod.rs`.
@@ -74,7 +76,6 @@ This plan tracks test coverage additions for safe optimization/refactoring.
       - `Seeked` events do not trigger early waveform-track switch side effects
       - `TrackChanged` does not swap metadata until metadata events arrive
       in `src/frontend_bridge/mod.rs`.
-  - Further `gst`-path gapless and end-to-end metadata transition timing cases are still planned.
 
 ## Execution Commands
 
@@ -93,6 +94,4 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 ## Next Coverage Steps
 
-1. Add end-to-end no-early-next-track metadata transition timing regression tests.
-2. Add deterministic integration tests for `gst`-path gapless handoff behavior.
-3. Add performance regression harness for bridge/event throughput and UI frame pacing.
+1. Add performance regression harness for bridge/event throughput and UI frame pacing.

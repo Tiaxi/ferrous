@@ -27,6 +27,10 @@ pub struct MetadataService {
 
 impl MetadataService {
     pub fn new() -> (Self, Receiver<MetadataEvent>) {
+        Self::new_with_delay(std::time::Duration::ZERO)
+    }
+
+    pub(crate) fn new_with_delay(delay: std::time::Duration) -> (Self, Receiver<MetadataEvent>) {
         let (req_tx, req_rx) = unbounded::<PathBuf>();
         let (event_tx, event_rx) = unbounded::<MetadataEvent>();
 
@@ -79,6 +83,9 @@ impl MetadataService {
                     metadata.cover_art_rgba = load_folder_cover_art(&path);
                 }
 
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
                 let _ = event_tx.send(MetadataEvent::Loaded(metadata));
             }
         });

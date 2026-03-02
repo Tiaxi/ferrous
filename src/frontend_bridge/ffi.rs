@@ -126,7 +126,7 @@ impl FfiRuntime {
                 break;
             };
             match event {
-                BridgeEvent::Snapshot(snapshot) => latest_snapshot = Some(snapshot),
+                BridgeEvent::Snapshot(snapshot) => latest_snapshot = Some(*snapshot),
                 BridgeEvent::Error(message) => {
                     self.push_json_event(json!({ "event": "error", "message": message }));
                 }
@@ -700,6 +700,15 @@ fn encode_snapshot_payload(
             "albums_changed": should_emit_albums,
             "albums": library_albums,
         },
+        "metadata": {
+            "title": s.metadata.title.clone(),
+            "artist": s.metadata.artist.clone(),
+            "album": s.metadata.album.clone(),
+            "sample_rate_hz": s.metadata.sample_rate_hz,
+            "bitrate_kbps": s.metadata.bitrate_kbps,
+            "channels": s.metadata.channels,
+            "bit_depth": s.metadata.bit_depth,
+        },
         "analysis": {
             "spectrogram_seq": analysis_delta.spectrogram_seq,
             "spectrogram_reset": include_analysis_payload && analysis_delta.spectrogram_reset,
@@ -919,6 +928,16 @@ mod tests {
                 spectrogram_seq: 2,
                 sample_rate_hz: 48_000,
             },
+            metadata: crate::metadata::TrackMetadata {
+                title: "Sample Track".to_string(),
+                artist: "Sample Artist".to_string(),
+                album: "Sample Album".to_string(),
+                sample_rate_hz: Some(48_000),
+                bitrate_kbps: Some(320),
+                channels: Some(2),
+                bit_depth: Some(24),
+                cover_art_rgba: None,
+            },
             library: Arc::new(LibrarySnapshot::default()),
             queue: vec![PathBuf::from("/music/a.flac")],
             selected_queue_index: Some(0),
@@ -947,6 +966,10 @@ mod tests {
             .is_some());
         assert!(payload.get("queue").and_then(|v| v.as_object()).is_some());
         assert!(payload.get("library").and_then(|v| v.as_object()).is_some());
+        assert!(payload
+            .get("metadata")
+            .and_then(|v| v.as_object())
+            .is_some());
         assert!(payload
             .get("settings")
             .and_then(|v| v.as_object())

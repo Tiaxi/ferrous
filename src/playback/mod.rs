@@ -817,26 +817,39 @@ mod backend {
                 if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
                     snapshot.duration = Duration::from_nanos(dur.nseconds());
                 }
-                // Gapless handoff sets next URI early in about-to-finish.
-                // Emit TrackChanged only once playback has actually rolled over.
-                if snapshot.state == PlaybackState::Playing {
-                    if let Ok(state) = queue_state.lock() {
-                        if let Some(current_path) = state.current() {
-                            let path_changed = snapshot.current.as_ref() != Some(&current_path);
-                            let at_track_start = snapshot.position <= Duration::from_secs(2);
-                            if path_changed && at_track_start {
-                                snapshot.current = Some(current_path.clone());
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path: current_path,
-                                    kind: TrackChangeKind::Natural,
-                                });
-                            }
-                        }
-                    }
-                }
+                let _ = maybe_emit_natural_handoff(queue_state, snapshot, event_tx);
                 let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
         }
+    }
+
+    fn maybe_emit_natural_handoff(
+        queue_state: &Arc<Mutex<GaplessQueue>>,
+        snapshot: &mut PlaybackSnapshot,
+        event_tx: &Sender<PlaybackEvent>,
+    ) -> bool {
+        // Gapless handoff sets next URI early in about-to-finish.
+        // Emit TrackChanged only once playback has actually rolled over.
+        if snapshot.state != PlaybackState::Playing {
+            return false;
+        }
+        let Ok(state) = queue_state.lock() else {
+            return false;
+        };
+        let Some(current_path) = state.current() else {
+            return false;
+        };
+        let path_changed = snapshot.current.as_ref() != Some(&current_path);
+        let at_track_start = snapshot.position <= Duration::from_secs(2);
+        if path_changed && at_track_start {
+            snapshot.current = Some(current_path.clone());
+            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                path: current_path,
+                kind: TrackChangeKind::Natural,
+            });
+            return true;
+        }
+        false
     }
 
     fn switch_track(
@@ -1094,6 +1107,69 @@ mod backend {
             .map_err(|_| anyhow!("failed adding ghost pad to bin"))?;
 
         Ok(bin)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crossbeam_channel::unbounded;
+
+        fn setup_queue_two_tracks(a: &PathBuf, b: &PathBuf) -> Arc<Mutex<GaplessQueue>> {
+            let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
+            let mut queue = queue_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue.set_queue(vec![a.clone(), b.clone()]);
+            let _ = queue.next();
+            drop(queue);
+            queue_state
+        }
+
+        #[test]
+        fn natural_handoff_emits_track_changed_near_track_start() {
+            let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
+            let first = PathBuf::from("/tmp/gst_handoff_a.flac");
+            let second = PathBuf::from("/tmp/gst_handoff_b.flac");
+            let queue_state = setup_queue_two_tracks(&first, &second);
+            let mut snapshot = PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                position: Duration::from_millis(800),
+                current: Some(first),
+                ..PlaybackSnapshot::default()
+            };
+
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot, &event_tx);
+            assert!(emitted);
+            assert_eq!(snapshot.current.as_ref(), Some(&second));
+
+            let event = event_rx.try_recv().expect("natural handoff event");
+            match event {
+                PlaybackEvent::TrackChanged { path, kind } => {
+                    assert_eq!(path, second);
+                    assert!(matches!(kind, TrackChangeKind::Natural));
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn natural_handoff_does_not_emit_before_track_start_window() {
+            let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
+            let first = PathBuf::from("/tmp/gst_handoff_a.flac");
+            let second = PathBuf::from("/tmp/gst_handoff_b.flac");
+            let queue_state = setup_queue_two_tracks(&first, &second);
+            let mut snapshot = PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                position: Duration::from_secs(3),
+                current: Some(first.clone()),
+                ..PlaybackSnapshot::default()
+            };
+
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot, &event_tx);
+            assert!(!emitted);
+            assert_eq!(snapshot.current.as_ref(), Some(&first));
+            assert!(event_rx.try_recv().is_err());
+        }
     }
 
     fn file_uri(path: &Path) -> Option<String> {

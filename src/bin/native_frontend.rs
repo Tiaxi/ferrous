@@ -616,7 +616,7 @@ fn drain_bridge_events_as_json(
             break;
         };
         match event {
-            BridgeEvent::Snapshot(s) => latest_snapshot = Some(s),
+            BridgeEvent::Snapshot(s) => latest_snapshot = Some(*s),
             BridgeEvent::Error(message) => {
                 let _ = emit_json_line(
                     &json!({ "event": "error", "message": message }),
@@ -850,6 +850,15 @@ fn encode_snapshot_payload(
             "scan_in_progress": s.library.scan_in_progress,
             "albums_changed": should_emit_albums,
             "albums": library_albums,
+        },
+        "metadata": {
+            "title": s.metadata.title.clone(),
+            "artist": s.metadata.artist.clone(),
+            "album": s.metadata.album.clone(),
+            "sample_rate_hz": s.metadata.sample_rate_hz,
+            "bitrate_kbps": s.metadata.bitrate_kbps,
+            "channels": s.metadata.channels,
+            "bit_depth": s.metadata.bit_depth,
         },
         "analysis": {
             "spectrogram_seq": analysis_delta.spectrogram_seq,
@@ -1108,7 +1117,7 @@ mod tests {
         while Instant::now() < deadline {
             if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
                 if let BridgeEvent::Snapshot(s) = event {
-                    last = Some(s);
+                    last = Some(*s);
                 }
             }
         }
@@ -1129,9 +1138,9 @@ mod tests {
             if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
                 if let BridgeEvent::Snapshot(snapshot) = event {
                     if predicate(&snapshot) {
-                        return Some(snapshot);
+                        return Some(*snapshot);
                     }
-                    last = Some(snapshot);
+                    last = Some(*snapshot);
                 }
             }
         }
