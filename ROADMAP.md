@@ -62,6 +62,7 @@ Acceptance criteria:
 - [x] Keep DeaDBeeF-like color mapping and dB behavior parity.
 - [x] Keep rolling history and seek behavior parity.
 - [x] Keep implementation notes aligned with DeaDBeeF reference source at `/home/tuomas/Downloads/ddb_spectrogram/`.
+- [ ] Re-tune post-migration spectrogram visual parity against DeaDBeeF (color stops, contrast curve, perceived sharpness) using `/home/tuomas/Downloads/ddb_spectrogram/` as source reference.
 - [x] Replace full-frame redraw with incremental cached-canvas scrolling renderer.
 - [x] Keep background visual rendering off while app is not active/visible.
 - [x] Avoid `QQuickPaintedItem::FramebufferObject` target due alt-tab resume instability (segfault observed); use stable non-FBO path.
@@ -153,6 +154,7 @@ Acceptance criteria:
 - [x] Preserve rolling behavior across seek and track transitions.
 - [ ] Port dB/log-scale controls and settings persistence.
 - [x] Ensure performance parity with current implementation.
+- [ ] Re-validate and fine-tune DeaDBeeF visual parity after Qt migration (final pass).
 
 Acceptance criteria:
 - Spectrogram and waveform behavior are functionally on par with current frontend.
