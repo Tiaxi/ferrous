@@ -3,7 +3,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import QtQml 2.15
-import QtQuick.Dialogs
+import Qt.labs.platform 1.1 as Platform
 import FerrousNative 1.0
 import org.kde.kirigami 2.20 as Kirigami
 
@@ -800,11 +800,11 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    FolderDialog {
+    Platform.FolderDialog {
         id: scanFolderDialog
         title: "Select Music Folder to Scan"
         onAccepted: {
-            const localPath = root.urlToLocalPath(selectedFolder)
+            const localPath = root.urlToLocalPath(folder)
             if (localPath.length > 0) {
                 uiBridge.scanRoot(localPath)
             }
