@@ -171,7 +171,24 @@ void BridgeClient::previous() {
 }
 
 void BridgeClient::seek(double seconds) {
-    sendCommand(QStringLiteral("seek"), std::max(0.0, seconds));
+    const double target = std::max(0.0, seconds);
+    m_pendingSeek = true;
+    m_pendingSeekTargetSeconds = target;
+    m_pendingSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + 900;
+    bool changed = false;
+    if (!qFuzzyCompare(m_positionSeconds + 1.0, target + 1.0)) {
+        m_positionSeconds = target;
+        changed = true;
+    }
+    const QString targetText = formatSeconds(target);
+    if (m_positionText != targetText) {
+        m_positionText = targetText;
+        changed = true;
+    }
+    if (changed) {
+        scheduleSnapshotChanged();
+    }
+    sendCommand(QStringLiteral("seek"), target);
 }
 
 void BridgeClient::setVolume(double value) {
@@ -513,19 +530,32 @@ void BridgeClient::handleStdoutReady() {
             const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
             const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
 
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
             bool changed = false;
             if (m_playbackState != nextState) {
                 m_playbackState = nextState;
                 changed = true;
             }
-            const QString posText = formatSeconds(pos);
-            if (m_positionText != posText) {
-                m_positionText = posText;
-                changed = true;
+            bool applyIncomingPosition = true;
+            if (m_pendingSeek) {
+                if (nowMs >= m_pendingSeekUntilMs) {
+                    m_pendingSeek = false;
+                } else if (std::abs(pos - m_pendingSeekTargetSeconds) <= 0.8) {
+                    m_pendingSeek = false;
+                } else {
+                    applyIncomingPosition = false;
+                }
             }
-            if (!qFuzzyCompare(m_positionSeconds + 1.0, pos + 1.0)) {
-                m_positionSeconds = pos;
-                changed = true;
+            if (applyIncomingPosition) {
+                const QString posText = formatSeconds(pos);
+                if (m_positionText != posText) {
+                    m_positionText = posText;
+                    changed = true;
+                }
+                if (!qFuzzyCompare(m_positionSeconds + 1.0, pos + 1.0)) {
+                    m_positionSeconds = pos;
+                    changed = true;
+                }
             }
             const QString durText = formatSeconds(dur);
             if (m_durationText != durText) {
@@ -564,7 +594,6 @@ void BridgeClient::handleStdoutReady() {
                     changed = true;
                 }
             }
-            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
             if (m_pendingQueueSelection >= 0) {
                 if (selected == m_pendingQueueSelection) {
                     m_pendingQueueSelection = -1;

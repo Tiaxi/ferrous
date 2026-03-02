@@ -119,6 +119,9 @@ private:
     bool m_connected{false};
     bool m_stdoutPumpScheduled{false};
     bool m_snapshotChangedPending{false};
+    bool m_pendingSeek{false};
+    double m_pendingSeekTargetSeconds{0.0};
+    qint64 m_pendingSeekUntilMs{0};
     int m_pendingQueueSelection{-1};
     qint64 m_pendingQueueSelectionUntilMs{0};
     QTimer m_snapshotNotifyTimer;

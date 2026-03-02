@@ -172,7 +172,7 @@ impl AnalysisEngine {
                                     let tx = waveform_tx.clone();
                                     std::thread::spawn(move || {
                                         let _ =
-                                            decode_waveform_peaks_stream(&path, 2048, |peaks, done| {
+                                            decode_waveform_peaks_stream(&path, 1024, |peaks, done| {
                                                 let _ = tx.send(AnalysisCommand::WaveformProgress {
                                                     track_token,
                                                     peaks,
@@ -258,7 +258,7 @@ impl AnalysisEngine {
                                         }
                                     }
                                     waveform_dirty = true;
-                                    if done || snapshot.waveform_peaks.len() >= 128 {
+                                    if done || snapshot.waveform_peaks.len() >= 24 {
                                         emit_snapshot(
                                             &event_tx,
                                             &snapshot,
@@ -800,6 +800,7 @@ where
     let mut peaks = Vec::with_capacity(max_points);
     let mut bucket_peak = 0.0f32;
     let mut bucket_count = 0u64;
+    let mut last_preview_emit = std::time::Instant::now();
 
     let mut packet_counter = 0usize;
     loop {
@@ -824,7 +825,7 @@ where
 
         let spec = *decoded.spec();
         let channels = spec.channels.count().max(1);
-        let sample_stride = if channels >= 2 { 2usize } else { 1usize };
+        let sample_stride = if channels >= 2 { 8usize } else { 4usize };
         let cap = decoded.capacity() as u64;
         let cap_usize = decoded.capacity();
 
@@ -867,6 +868,12 @@ where
                     }
                     peaks = reduced;
                     block_size = block_size.saturating_mul(2).max(1);
+                }
+                if peaks.len() >= 12
+                    && last_preview_emit.elapsed() >= std::time::Duration::from_millis(240)
+                {
+                    on_update(peaks.clone(), false);
+                    last_preview_emit = std::time::Instant::now();
                 }
             }
         }
