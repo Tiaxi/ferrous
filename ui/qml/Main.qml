@@ -1356,7 +1356,7 @@ Kirigami.ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                    onPressed: {
+                                    onPressed: function(mouse) {
                                         root.handleQueueRowSelection(
                                             index,
                                             mouse.button,
