@@ -14,6 +14,8 @@ Kirigami.ApplicationWindow {
     visible: true
     title: "Ferrous"
     property string selectedLibrarySelectionKey: ""
+    property int selectedLibrarySourceIndex: -1
+    property string selectedLibraryCoverPath: ""
     property var filteredLibraryTree: []
     property var libraryRows: []
     property var expandedArtists: ({})
@@ -65,6 +67,7 @@ Kirigami.ApplicationWindow {
         function appendTrack(path) {}
         function replaceArtistByName(artist) {}
         function appendArtistByName(artist) {}
+        function libraryAlbumCoverAt(index) { return "" }
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
@@ -106,6 +109,14 @@ Kirigami.ApplicationWindow {
             return "track|" + (rowData.trackPath || (rowData.sourceIndex + "|" + rowData.trackNumber))
         }
         return ""
+    }
+
+    function refreshSelectedLibraryCover() {
+        if (selectedLibrarySourceIndex < 0) {
+            selectedLibraryCoverPath = ""
+            return
+        }
+        selectedLibraryCoverPath = uiBridge.libraryAlbumCoverAt(selectedLibrarySourceIndex) || ""
     }
 
     function rebuildLibraryFilter() {
@@ -201,6 +212,7 @@ Kirigami.ApplicationWindow {
                     name: album.name || "",
                     count: album.count || 0,
                     sourceIndex: album.sourceIndex,
+                    coverPath: uiBridge.libraryAlbumCoverAt(album.sourceIndex) || "",
                     key: key,
                     expanded: albumExpanded
                 }
@@ -238,6 +250,7 @@ Kirigami.ApplicationWindow {
         }
         if (!selectedStillExists) {
             selectedLibrarySelectionKey = ""
+            selectedLibrarySourceIndex = -1
         }
 
         if (libraryAlbumView) {
@@ -567,10 +580,24 @@ Kirigami.ApplicationWindow {
                         Layout.preferredHeight: width
                         color: "#0c0c0c"
 
+                        Image {
+                            anchors.fill: parent
+                            source: root.selectedLibraryCoverPath.length > 0
+                                ? ("file://" + root.selectedLibraryCoverPath)
+                                : ""
+                            fillMode: Image.PreserveAspectFit
+                            smooth: true
+                            asynchronous: true
+                            cache: true
+                            sourceSize.width: Math.max(256, width)
+                            sourceSize.height: Math.max(256, height)
+                        }
+
                         Text {
                             anchors.centerIn: parent
                             text: "Album Art"
                             color: "#8c8c8c"
+                            visible: root.selectedLibraryCoverPath.length === 0
                         }
                     }
 
@@ -675,6 +702,23 @@ Kirigami.ApplicationWindow {
                                                 : Kirigami.Theme.disabledTextColor
                                         }
 
+                                        Item {
+                                            visible: isAlbumRow
+                                            Layout.preferredWidth: 18
+                                            Layout.preferredHeight: 18
+
+                                            Image {
+                                                anchors.fill: parent
+                                                source: rowData.coverPath && rowData.coverPath.length > 0
+                                                    ? ("file://" + rowData.coverPath)
+                                                    : ""
+                                                fillMode: Image.PreserveAspectFit
+                                                smooth: true
+                                                asynchronous: true
+                                                cache: true
+                                            }
+                                        }
+
                                         Label {
                                             Layout.fillWidth: true
                                             elide: Text.ElideRight
@@ -714,6 +758,7 @@ Kirigami.ApplicationWindow {
                                                 return
                                             }
                                             root.selectedLibrarySelectionKey = rowData.selectionKey || ""
+                                            root.selectedLibrarySourceIndex = (isAlbumRow || isTrackRow) ? sourceIndex : -1
                                             if (isArtistRow && mouse.button === Qt.RightButton) {
                                                 artistMenu.popup()
                                                 return
@@ -939,6 +984,7 @@ Kirigami.ApplicationWindow {
             if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
                 root.rebuildLibraryFilter()
                 root.lastAppliedLibraryVersion = uiBridge.libraryVersion
+                root.refreshSelectedLibraryCover()
             }
             if (uiBridge.spectrogramReset) {
                 spectrogramItem.reset()
@@ -962,5 +1008,10 @@ Kirigami.ApplicationWindow {
     Component.onCompleted: {
         root.rebuildLibraryFilter()
         root.lastAppliedLibraryVersion = uiBridge.libraryVersion
+        root.refreshSelectedLibraryCover()
+    }
+
+    onSelectedLibrarySourceIndexChanged: {
+        root.refreshSelectedLibraryCover()
     }
 }

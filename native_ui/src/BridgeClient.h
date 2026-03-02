@@ -80,6 +80,7 @@ public:
     Q_INVOKABLE void appendTrack(const QString &path);
     Q_INVOKABLE void replaceArtistByName(const QString &artist);
     Q_INVOKABLE void appendArtistByName(const QString &artist);
+    Q_INVOKABLE QString libraryAlbumCoverAt(int index) const;
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
     Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();
@@ -129,6 +130,7 @@ private:
     int m_libraryVersion{0};
     QStringList m_libraryAlbumArtists;
     QStringList m_libraryAlbumNames;
+    QStringList m_libraryAlbumCoverPaths;
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};

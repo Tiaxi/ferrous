@@ -29,6 +29,39 @@ constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
 bool isNewerSeq(quint32 seq, quint32 last) {
     return static_cast<qint32>(seq - last) > 0;
 }
+
+QString findAlbumCoverPath(const QStringList &trackPaths) {
+    static const QStringList kCoverNames{
+        QStringLiteral("cover.jpg"),
+        QStringLiteral("cover.jpeg"),
+        QStringLiteral("cover.png"),
+        QStringLiteral("folder.jpg"),
+        QStringLiteral("folder.jpeg"),
+        QStringLiteral("folder.png"),
+        QStringLiteral("front.jpg"),
+        QStringLiteral("front.jpeg"),
+        QStringLiteral("front.png"),
+        QStringLiteral("album.jpg"),
+        QStringLiteral("album.jpeg"),
+        QStringLiteral("album.png"),
+    };
+
+    for (const QString &trackPath : trackPaths) {
+        const QFileInfo trackInfo(trackPath);
+        if (!trackInfo.exists()) {
+            continue;
+        }
+        const QDir dir = trackInfo.dir();
+        for (const QString &name : kCoverNames) {
+            const QString candidate = dir.filePath(name);
+            const QFileInfo info(candidate);
+            if (info.exists() && info.isFile()) {
+                return info.absoluteFilePath();
+            }
+        }
+    }
+    return {};
+}
 } // namespace
 
 BridgeClient::BridgeClient(QObject *parent)
@@ -322,6 +355,13 @@ void BridgeClient::appendArtistByName(const QString &artist) {
     obj.insert(QStringLiteral("cmd"), QStringLiteral("append_artist_by_key"));
     obj.insert(QStringLiteral("artist"), artist);
     sendJson(obj);
+}
+
+QString BridgeClient::libraryAlbumCoverAt(int index) const {
+    if (index < 0 || index >= m_libraryAlbumCoverPaths.size()) {
+        return {};
+    }
+    return m_libraryAlbumCoverPaths[index];
 }
 
 void BridgeClient::scanRoot(const QString &path) {
@@ -755,6 +795,7 @@ void BridgeClient::handleStdoutReady() {
                 QStringList labels;
                 QStringList artists;
                 QStringList albumNames;
+                QStringList coverPaths;
                 QVariantList libraryTree;
                 QStringList artistOrder;
                 QHash<QString, int> artistToIndex;
@@ -763,6 +804,7 @@ void BridgeClient::handleStdoutReady() {
                 labels.reserve(albums.size());
                 artists.reserve(albums.size());
                 albumNames.reserve(albums.size());
+                coverPaths.reserve(albums.size());
                 for (qsizetype sourceIndex = 0; sourceIndex < albums.size(); ++sourceIndex) {
                     const QJsonValue &entry = albums[static_cast<int>(sourceIndex)];
                     const QJsonObject obj = entry.toObject();
@@ -782,10 +824,12 @@ void BridgeClient::handleStdoutReady() {
                     }
 
                     QVariantList trackTitles;
+                    QStringList trackPaths;
                     const QJsonValue tracksValue = obj.value(QStringLiteral("tracks"));
                     if (tracksValue.isArray()) {
                         const QJsonArray tracks = tracksValue.toArray();
                         trackTitles.reserve(tracks.size());
+                        trackPaths.reserve(tracks.size());
                         for (const QJsonValue &trackValue : tracks) {
                             if (trackValue.isObject()) {
                                 const QJsonObject trackObj = trackValue.toObject();
@@ -795,6 +839,9 @@ void BridgeClient::handleStdoutReady() {
                                 trackEntry.insert(QStringLiteral("title"), title);
                                 trackEntry.insert(QStringLiteral("path"), path);
                                 trackTitles.push_back(trackEntry);
+                                if (!path.isEmpty()) {
+                                    trackPaths.push_back(path);
+                                }
                                 continue;
                             }
                             const QString title = trackValue.toString();
@@ -810,11 +857,13 @@ void BridgeClient::handleStdoutReady() {
                         if (pathsValue.isArray()) {
                             const QJsonArray paths = pathsValue.toArray();
                             trackTitles.reserve(paths.size());
+                            trackPaths.reserve(paths.size());
                             for (const QJsonValue &pathValue : paths) {
                                 const QString path = pathValue.toString();
                                 if (path.isEmpty()) {
                                     continue;
                                 }
+                                trackPaths.push_back(path);
                                 const QFileInfo info(path);
                                 QString title = info.completeBaseName();
                                 if (title.isEmpty()) {
@@ -829,6 +878,7 @@ void BridgeClient::handleStdoutReady() {
                             }
                         }
                     }
+                    coverPaths.push_back(findAlbumCoverPath(trackPaths));
 
                     QVariantMap albumEntry;
                     albumEntry.insert(QStringLiteral("name"), name);
@@ -868,6 +918,11 @@ void BridgeClient::handleStdoutReady() {
                 }
                 if (m_libraryAlbumNames != albumNames) {
                     m_libraryAlbumNames = albumNames;
+                    changed = true;
+                    libraryStructureChanged = true;
+                }
+                if (m_libraryAlbumCoverPaths != coverPaths) {
+                    m_libraryAlbumCoverPaths = coverPaths;
                     changed = true;
                     libraryStructureChanged = true;
                 }

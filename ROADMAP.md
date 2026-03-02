@@ -139,7 +139,7 @@ Acceptance criteria:
 - [x] Implement album interactions (on current album list view):
   - double-click = replace playlist + play
   - context menu append option
-- [ ] Implement library album-art thumbnails and cover panel.
+- [x] Implement library album-art thumbnails and cover panel.
 
 Acceptance criteria:
 - Library browsing and enqueue/play workflows match current behavior.
