@@ -741,6 +741,9 @@ Kirigami.ApplicationWindow {
                                     readonly property bool isArtistRow: rowType === "artist"
                                     readonly property bool isAlbumRow: rowType === "album"
                                     readonly property bool isTrackRow: rowType === "track"
+                                    readonly property bool draggableLibraryItem: isArtistRow
+                                        || isAlbumRow
+                                        || (isTrackRow && trackPath && trackPath.length > 0)
                                     readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
                                     width: ListView.view.width
                                     height: 24
@@ -813,10 +816,31 @@ Kirigami.ApplicationWindow {
                                         }
                                     }
 
+                                    Item {
+                                        id: libraryDragProxy
+                                        visible: false
+                                    }
+
+                                    Drag.active: libraryRowMouseArea.drag.active && draggableLibraryItem
+                                    Drag.source: libraryRow
+                                    Drag.hotSpot.x: 16
+                                    Drag.hotSpot.y: height * 0.5
+                                    Drag.supportedActions: Qt.CopyAction
+                                    Drag.keys: ["ferrous/library-item"]
+
                                     MouseArea {
+                                        id: libraryRowMouseArea
                                         anchors.fill: parent
                                         preventStealing: true
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        drag.target: ((pressedButtons & Qt.LeftButton) && draggableLibraryItem)
+                                            ? libraryDragProxy
+                                            : null
+                                        drag.smoothed: false
+                                        onReleased: {
+                                            libraryDragProxy.x = 0
+                                            libraryDragProxy.y = 0
+                                        }
                                         onClicked: function(mouse) {
                                             if (mouse.button === Qt.LeftButton
                                                     && (isArtistRow || isAlbumRow)
@@ -1096,6 +1120,41 @@ Kirigami.ApplicationWindow {
                                 }
                             }
                         }
+                    }
+
+                    DropArea {
+                        id: playlistDropArea
+                        anchors.fill: parent
+                        keys: ["ferrous/library-item"]
+
+                        onDropped: function(drop) {
+                            const src = drop.source
+                            if (!src || !src.draggableLibraryItem) {
+                                return
+                            }
+                            if (src.isArtistRow && src.artist && src.artist.length > 0) {
+                                uiBridge.appendArtistByName(src.artist)
+                                drop.acceptProposedAction()
+                                return
+                            }
+                            if (src.isAlbumRow && src.sourceIndexResolved >= 0) {
+                                uiBridge.appendAlbumAt(src.sourceIndexResolved)
+                                drop.acceptProposedAction()
+                                return
+                            }
+                            if (src.isTrackRow && src.trackPath && src.trackPath.length > 0) {
+                                uiBridge.appendTrack(src.trackPath)
+                                drop.acceptProposedAction()
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "transparent"
+                        border.width: playlistDropArea.containsDrag ? 2 : 0
+                        border.color: Kirigami.Theme.highlightColor
+                        visible: playlistDropArea.containsDrag
                     }
                 }
 
