@@ -287,6 +287,23 @@ void BridgeClient::setVolume(double value) {
     sendCommand(QStringLiteral("set_volume"), std::clamp(value, 0.0, 1.0));
 }
 
+void BridgeClient::setDbRange(double value) {
+    const double clamped = std::clamp(value, 50.0, 120.0);
+    if (!qFuzzyCompare(m_dbRange + 1.0, clamped + 1.0)) {
+        m_dbRange = clamped;
+        scheduleSnapshotChanged();
+    }
+    sendCommand(QStringLiteral("set_db_range"), clamped);
+}
+
+void BridgeClient::setLogScale(bool value) {
+    if (m_logScale != value) {
+        m_logScale = value;
+        scheduleSnapshotChanged();
+    }
+    sendCommand(QStringLiteral("set_log_scale"), value ? 1.0 : 0.0);
+}
+
 void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;

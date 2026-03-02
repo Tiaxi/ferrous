@@ -152,7 +152,7 @@ Acceptance criteria:
 
 - [x] Port spectrogram widget rendering path to native frontend.
 - [x] Preserve rolling behavior across seek and track transitions.
-- [ ] Port dB/log-scale controls and settings persistence.
+- [x] Port dB/log-scale controls and settings persistence.
 - [x] Ensure performance parity with current implementation.
 - [x] Re-validate and fine-tune DeaDBeeF visual parity after Qt migration (final pass).
 

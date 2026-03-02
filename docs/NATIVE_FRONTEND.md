@@ -50,6 +50,8 @@ Commands in bootstrap shell:
 - `play`, `pause`, `stop`, `next`, `prev`
 - `vol <0..1>`
 - `seek <seconds>`
+- `dbrange <50..120>`
+- `log <0|1>`
 - `snap`
 - `quit`
 
@@ -64,6 +66,8 @@ Input is line-delimited JSON commands, for example:
 ```json
 {"cmd":"play"}
 {"cmd":"set_volume","value":0.5}
+{"cmd":"set_db_range","value":90}
+{"cmd":"set_log_scale","value":1}
 {"cmd":"seek","value":42.25}
 {"cmd":"play_at","value":3}
 {"cmd":"select_queue","value":3}

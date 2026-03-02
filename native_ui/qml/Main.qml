@@ -58,6 +58,8 @@ Kirigami.ApplicationWindow {
         function previous() {}
         function seek(seconds) {}
         function setVolume(value) {}
+        function setDbRange(value) {}
+        function setLogScale(value) {}
         function playAt(index) {}
         function selectQueueIndex(index) {}
         function removeAt(index) {}
@@ -740,13 +742,80 @@ Kirigami.ApplicationWindow {
                     color: "#0b0b0f"
                     border.color: Qt.rgba(0, 0, 0, 0.25)
 
-                    SpectrogramItem {
-                        id: spectrogramItem
+                    ColumnLayout {
                         anchors.fill: parent
-                        maxColumns: Math.max(640, Math.floor(width))
-                        dbRange: uiBridge.dbRange
-                        logScale: uiBridge.logScale
-                        sampleRateHz: uiBridge.sampleRateHz
+                        spacing: 0
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 36
+                            color: "#12121a"
+                            border.color: Qt.rgba(0, 0, 0, 0.25)
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                spacing: 10
+
+                                Label {
+                                    text: "Spectrogram"
+                                    font.bold: true
+                                }
+
+                                Label {
+                                    text: "dB range"
+                                }
+
+                                Slider {
+                                    id: dbRangeSlider
+                                    Layout.fillWidth: true
+                                    from: 50
+                                    to: 120
+                                    stepSize: 1
+                                    onMoved: uiBridge.setDbRange(value)
+                                    onPressedChanged: {
+                                        if (!pressed) {
+                                            uiBridge.setDbRange(value)
+                                        }
+                                    }
+                                }
+
+                                Binding {
+                                    target: dbRangeSlider
+                                    property: "value"
+                                    value: uiBridge.dbRange
+                                    when: !dbRangeSlider.pressed
+                                }
+
+                                Label {
+                                    text: Math.round(dbRangeSlider.value) + " dB"
+                                    Layout.preferredWidth: 56
+                                    horizontalAlignment: Text.AlignRight
+                                }
+
+                                CheckBox {
+                                    text: "Log scale"
+                                    checked: uiBridge.logScale
+                                    onToggled: uiBridge.setLogScale(checked)
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            color: "#0b0b0f"
+
+                            SpectrogramItem {
+                                id: spectrogramItem
+                                anchors.fill: parent
+                                maxColumns: Math.max(640, Math.floor(width))
+                                dbRange: uiBridge.dbRange
+                                logScale: uiBridge.logScale
+                                sampleRateHz: uiBridge.sampleRateHz
+                            }
+                        }
                     }
                 }
             }

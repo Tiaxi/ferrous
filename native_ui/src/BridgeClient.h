@@ -76,6 +76,8 @@ public:
     Q_INVOKABLE void previous();
     Q_INVOKABLE void seek(double seconds);
     Q_INVOKABLE void setVolume(double value);
+    Q_INVOKABLE void setDbRange(double value);
+    Q_INVOKABLE void setLogScale(bool value);
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);

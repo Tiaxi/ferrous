@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, unbounded, Sender, TrySendError};
 use ferrous::frontend_bridge::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSnapshot, FrontendBridgeHandle,
+    BridgeSettingsCommand, BridgeSnapshot, FrontendBridgeHandle,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -33,7 +33,9 @@ fn main() {
 
 fn run_interactive_cli(bridge: FrontendBridgeHandle) {
     println!("Ferrous native frontend bootstrap");
-    println!("Commands: play, pause, stop, next, prev, vol <0..1>, seek <secs>, snap, quit");
+    println!(
+        "Commands: play, pause, stop, next, prev, vol <0..1>, seek <secs>, dbrange <50..120>, log <0|1>, snap, quit"
+    );
 
     loop {
         print!("native> ");
@@ -77,6 +79,20 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
                     BridgePlaybackCommand::Seek(Duration::from_secs_f64(seconds)),
                 )),
                 _ => eprintln!("invalid seek value"),
+            }
+        } else if let Some(rest) = line.strip_prefix("dbrange ") {
+            match rest.parse::<f64>() {
+                Ok(value) if value.is_finite() => bridge.command(BridgeCommand::Settings(
+                    BridgeSettingsCommand::SetDbRange(value as f32),
+                )),
+                _ => eprintln!("invalid dbrange value"),
+            }
+        } else if let Some(rest) = line.strip_prefix("log ") {
+            match rest.parse::<i32>() {
+                Ok(value) => bridge.command(BridgeCommand::Settings(
+                    BridgeSettingsCommand::SetLogScale(value != 0),
+                )),
+                Err(_) => eprintln!("invalid log value, expected 0 or 1"),
             }
         } else if line == "snap" {
             bridge.command(BridgeCommand::RequestSnapshot);
@@ -388,6 +404,28 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             }
             Some(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
                 Duration::from_secs_f64(value),
+            )))
+        }
+        "set_db_range" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_db_range requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_db_range value must be a finite number".to_string());
+            }
+            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetDbRange(
+                value as f32,
+            )))
+        }
+        "set_log_scale" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_log_scale requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_log_scale value must be a finite number".to_string());
+            }
+            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(
+                value != 0.0,
             )))
         }
         "play_at" => {
