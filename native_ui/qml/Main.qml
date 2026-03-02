@@ -265,8 +265,26 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    function currentArtistExpandedState(artistName) {
+        const autoExpand = librarySearchField.text.trim().length > 0
+        if (autoExpand) {
+            return true
+        }
+        const hasArtistState = Object.prototype.hasOwnProperty.call(expandedArtists, artistName)
+        return hasArtistState ? expandedArtists[artistName] === true : true
+    }
+
+    function currentAlbumExpandedState(albumKey) {
+        const autoExpand = librarySearchField.text.trim().length > 0
+        if (autoExpand) {
+            return true
+        }
+        const hasAlbumState = Object.prototype.hasOwnProperty.call(expandedAlbums, albumKey)
+        return hasAlbumState ? expandedAlbums[albumKey] === true : false
+    }
+
     function toggleArtist(artistName) {
-        const currentlyExpanded = expandedArtists[artistName] === true
+        const currentlyExpanded = currentArtistExpandedState(artistName)
         const next = Object.assign({}, expandedArtists)
         next[artistName] = !currentlyExpanded
         expandedArtists = next
@@ -277,7 +295,7 @@ Kirigami.ApplicationWindow {
     }
 
     function toggleAlbum(albumKey) {
-        const currentlyExpanded = expandedAlbums[albumKey] === true
+        const currentlyExpanded = currentAlbumExpandedState(albumKey)
         const next = Object.assign({}, expandedAlbums)
         next[albumKey] = !currentlyExpanded
         expandedAlbums = next
