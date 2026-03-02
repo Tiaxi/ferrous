@@ -1,0 +1,6 @@
+[advisories]
+# paste is currently transitive via gstreamer/lofty/eframe stack.
+# Revisit on dependency upgrades and remove this ignore when upstreams migrate away.
+ignore = [
+  "RUSTSEC-2024-0436",
+]

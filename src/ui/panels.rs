@@ -195,7 +195,7 @@ pub fn draw_footer_panel(
         });
 }
 
-pub fn draw_center_panel(
+pub fn draw_center_panel<S: std::hash::BuildHasher>(
     ctx: &egui::Context,
     analysis: &AnalysisSnapshot,
     metadata: &TrackMetadata,
@@ -206,7 +206,7 @@ pub fn draw_center_panel(
     library_query: &mut String,
     selected_library_root: &mut Option<PathBuf>,
     selected_library_track: &mut Option<PathBuf>,
-    expanded_library_groups: &mut HashMap<String, bool>,
+    expanded_library_groups: &mut HashMap<String, bool, S>,
     spectro_ui: &mut SpectrogramUiSettings,
     cover_art_cache: &mut CoverArtCache,
     library_art_cache: &mut LibraryArtCache,

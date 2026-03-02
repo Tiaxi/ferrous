@@ -7,7 +7,6 @@
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::implicit_hasher,
     clippy::match_same_arms,
     clippy::missing_safety_doc,
     clippy::must_use_candidate,
@@ -23,8 +22,7 @@
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::type_complexity,
-    clippy::uninlined_format_args,
-    clippy::unnecessary_cast
+    clippy::uninlined_format_args
 )]
 
 use std::collections::BTreeMap;

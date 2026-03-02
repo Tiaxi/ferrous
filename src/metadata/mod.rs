@@ -44,8 +44,8 @@ impl MetadataService {
                 if let Ok(tagged) = lofty::read_from_path(&path) {
                     let props = tagged.properties();
                     metadata.sample_rate_hz = props.sample_rate();
-                    metadata.channels = props.channels().map(|v| v as u8);
-                    metadata.bit_depth = props.bit_depth().map(|v| v as u8);
+                    metadata.channels = props.channels();
+                    metadata.bit_depth = props.bit_depth();
                     metadata.bitrate_kbps = props.audio_bitrate();
 
                     if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
