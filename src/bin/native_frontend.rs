@@ -1088,7 +1088,16 @@ mod tests {
         ferrous_ffi_bridge_poll, ferrous_ffi_bridge_pop_json_event, ferrous_ffi_bridge_send_json,
     };
     use std::ffi::{CStr, CString};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn wait_bridge_snapshot(
         bridge: &FrontendBridgeHandle,
@@ -1190,6 +1199,30 @@ mod tests {
             })
     }
 
+    fn snapshot_playback_position_secs(snapshot: &serde_json::Value) -> f64 {
+        snapshot
+            .get("playback")
+            .and_then(|v| v.get("position_secs"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+    }
+
+    fn snapshot_playback_current_queue_index(snapshot: &serde_json::Value) -> i64 {
+        snapshot
+            .get("playback")
+            .and_then(|v| v.get("current_queue_index"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1)
+    }
+
+    fn snapshot_playback_current_path(snapshot: &serde_json::Value) -> Option<String> {
+        snapshot
+            .get("playback")
+            .and_then(|v| v.get("current_path"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+    }
+
     unsafe fn wait_ffi_snapshot_json(
         handle: *mut ferrous::frontend_bridge::ffi::FerrousFfiBridge,
         timeout: Duration,
@@ -1226,6 +1259,7 @@ mod tests {
 
     #[test]
     fn process_parser_and_ffi_path_match_queue_transition_sequence() {
+        let _guard = test_guard();
         let commands = [
             r#"{"cmd":"replace_album","paths":["/tmp/a.flac","/tmp/b.flac","/tmp/c.flac"]}"#,
             r#"{"cmd":"select_queue","value":2}"#,
@@ -1285,6 +1319,7 @@ mod tests {
 
     #[test]
     fn process_parser_and_ffi_path_match_invalid_seek_error() {
+        let _guard = test_guard();
         let expected = parse_json_command(r#"{"cmd":"seek","value":-1}"#).unwrap_err();
 
         let ffi_handle = ferrous_ffi_bridge_create();
@@ -1308,7 +1343,87 @@ mod tests {
     }
 
     #[test]
+    fn process_parser_and_ffi_path_match_successful_seek_snapshot() {
+        let _guard = test_guard();
+        let direct_bridge = FrontendBridgeHandle::spawn();
+        for line in [
+            r#"{"cmd":"replace_album","paths":["/tmp/a.flac"]}"#,
+            r#"{"cmd":"seek","value":42.5}"#,
+        ] {
+            let cmd = parse_json_command(line).expect("parse").expect("cmd");
+            direct_bridge.command(cmd);
+        }
+        direct_bridge.command(BridgeCommand::RequestSnapshot);
+        let direct_snapshot =
+            wait_bridge_snapshot_matching(&direct_bridge, Duration::from_secs(4), |snapshot| {
+                snapshot.queue.len() == 1 && snapshot.playback.current.is_some()
+            })
+            .expect("direct seek snapshot");
+
+        let ffi_handle = ferrous_ffi_bridge_create();
+        assert!(!ffi_handle.is_null());
+        for line in [
+            r#"{"cmd":"replace_album","paths":["/tmp/a.flac"]}"#,
+            r#"{"cmd":"seek","value":42.5}"#,
+            r#"{"cmd":"request_snapshot"}"#,
+        ] {
+            let cmd = CString::new(line).expect("cstring");
+            assert!(unsafe { ferrous_ffi_bridge_send_json(ffi_handle, cmd.as_ptr()) });
+        }
+        let ffi_snapshot = unsafe {
+            wait_ffi_json_event_matching(ffi_handle, Duration::from_secs(4), |value| {
+                value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
+                    && snapshot_queue_len(value) == 1
+                    && snapshot_playback_current_path(value).is_some()
+            })
+        }
+        .expect("ffi seek snapshot");
+
+        let direct_current_path = direct_snapshot
+            .playback
+            .current
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let direct_current_queue_index = direct_snapshot
+            .playback
+            .current
+            .as_ref()
+            .and_then(|current| {
+                direct_snapshot
+                    .queue
+                    .iter()
+                    .position(|path| path == current)
+            })
+            .map_or(-1, |idx| idx as i64);
+
+        assert_eq!(
+            direct_snapshot.queue.len() as u64,
+            snapshot_queue_len(&ffi_snapshot)
+        );
+        assert_eq!(
+            direct_snapshot
+                .selected_queue_index
+                .map_or(-1, |idx| idx as i64),
+            snapshot_selected_index(&ffi_snapshot)
+        );
+        assert_eq!(
+            direct_current_queue_index,
+            snapshot_playback_current_queue_index(&ffi_snapshot)
+        );
+        assert_eq!(
+            direct_current_path,
+            snapshot_playback_current_path(&ffi_snapshot)
+        );
+        assert!(direct_snapshot.playback.position.as_secs_f64() >= 0.0);
+        assert!(snapshot_playback_position_secs(&ffi_snapshot) >= 0.0);
+
+        direct_bridge.command(BridgeCommand::Shutdown);
+        unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
+    }
+
+    #[test]
     fn process_parser_and_ffi_path_have_matching_queue_outcome() {
+        let _guard = test_guard();
         let direct_bridge = FrontendBridgeHandle::spawn();
         let cmd =
             parse_json_command(r#"{"cmd":"replace_album","paths":["/tmp/a.flac","/tmp/b.flac"]}"#)

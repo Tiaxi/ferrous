@@ -137,6 +137,29 @@ mod tests {
         assert_eq!(snap.state, PlaybackState::Stopped);
         assert_eq!(snap.position, Duration::ZERO);
     }
+
+    #[test]
+    fn seek_only_advances_to_next_track_at_duration_boundary() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(120)));
+        engine.command(PlaybackCommand::Poll);
+
+        let pre_end = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot pre-end");
+        assert_eq!(pre_end.current.as_ref(), Some(&a));
+
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(180)));
+        engine.command(PlaybackCommand::Poll);
+
+        let post_end = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot post-end");
+        assert_eq!(post_end.current.as_ref(), Some(&b));
+    }
 }
 
 #[cfg(not(feature = "gst"))]

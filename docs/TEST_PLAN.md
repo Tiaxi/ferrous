@@ -41,8 +41,9 @@ This plan tracks test coverage additions for safe optimization/refactoring.
     - `src/bin/native_frontend.rs` parity tests confirm process-style command parsing path and in-process FFI path produce matching outcomes for:
       - queue replacement via album paths
       - queue transition sequence (`select_queue`, `move_queue`, `remove_at`) including resulting queue order
+      - successful seek command path preserving queue/current playback invariants
       - invalid seek command error payload parity
-  - Future: broaden parity checks to successful seek/playback-state transitions.
+  - Future: broaden parity checks to play/pause/next/previous playback-state transitions.
 
 ### Layer 3: Native UI Smoke Tests (Qt)
 
@@ -62,7 +63,9 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Phase 1 partially implemented:
     - Bridge queue roundtrip integration test (`FrontendBridgeHandle` + snapshot assertions).
     - Process-vs-FFI queue replacement parity assertion in `src/bin/native_frontend.rs`.
-  - Further queue/seek/gapless and metadata transition cases are still planned.
+    - Bridge integration regression test for queue/play-at + seek clamp + remove transition flow in `src/frontend_bridge/mod.rs`.
+    - Playback unit regression test for seek boundary behavior before/at track end in `src/playback/mod.rs`.
+  - Further gapless and metadata/waveform transition cases are still planned.
 
 ## Execution Commands
 
@@ -79,7 +82,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 ## Next Coverage Steps
 
-1. Expand process-vs-in-process parity tests to successful seek/playback-state transitions (not just parser error parity).
-2. Add deterministic integration tests for queue transitions and playback edge cases.
-3. Add no-early-next-track metadata/waveform regression tests.
+1. Expand process-vs-in-process parity tests to play/pause/next/previous playback-state transitions.
+2. Add no-early-next-track metadata/waveform regression tests.
+3. Add deterministic integration tests for gapless handoff behavior.
 4. Add performance regression harness for bridge/event throughput and UI frame pacing.

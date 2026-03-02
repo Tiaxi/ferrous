@@ -1128,4 +1128,42 @@ mod tests {
 
         bridge.command(BridgeCommand::Shutdown);
     }
+
+    #[test]
+    fn bridge_queue_play_seek_clamp_and_remove_integration() {
+        let bridge = FrontendBridgeHandle::spawn();
+        let first = p("/music/a.flac");
+        let second = p("/music/b.flac");
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
+            tracks: vec![first.clone(), second.clone()],
+            autoplay: false,
+        }));
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::PlayAt(1)));
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
+            Duration::from_secs(500),
+        )));
+        bridge.command(BridgeCommand::RequestSnapshot);
+        let seeked = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+            s.queue.len() == 2
+                && s.selected_queue_index == Some(1)
+                && s.playback.current.as_ref() == Some(&second)
+                && s.playback.position >= Duration::from_secs(179)
+        })
+        .expect("snapshot after play-at + clamped seek");
+        assert_eq!(seeked.playback.current.as_ref(), Some(&second));
+        assert_eq!(seeked.selected_queue_index, Some(1));
+
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Remove(1)));
+        bridge.command(BridgeCommand::RequestSnapshot);
+        let removed = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+            s.queue.len() == 1
+                && s.selected_queue_index == Some(0)
+                && s.playback.current.as_ref() == Some(&first)
+        })
+        .expect("snapshot after removing selected track");
+        assert_eq!(removed.playback.current.as_ref(), Some(&first));
+        assert_eq!(removed.selected_queue_index, Some(0));
+
+        bridge.command(BridgeCommand::Shutdown);
+    }
 }
