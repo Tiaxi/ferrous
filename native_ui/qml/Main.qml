@@ -619,9 +619,11 @@ Kirigami.ApplicationWindow {
                                     readonly property bool isArtistRow: rowData.rowType === "artist"
                                     readonly property bool isAlbumRow: rowData.rowType === "album"
                                     readonly property bool isTrackRow: rowData.rowType === "track"
+                                    readonly property int expanderHitWidth: isArtistRow ? 34 : (isAlbumRow ? 52 : 0)
                                     readonly property int sourceIndex: rowData.sourceIndex !== undefined
                                         ? rowData.sourceIndex
                                         : -1
+                                    property bool suppressClickAfterExpanderPress: false
                                     width: ListView.view.width
                                     height: 24
                                     color: rowData.selectionKey === root.selectedLibrarySelectionKey
@@ -642,12 +644,13 @@ Kirigami.ApplicationWindow {
 
                                         Label {
                                             id: expanderIcon
-                                            Layout.preferredWidth: 20
+                                            Layout.preferredWidth: 24
                                             horizontalAlignment: Text.AlignHCenter
                                             text: (isArtistRow || isAlbumRow)
                                                 ? (rowData.expanded ? "▾" : "▸")
                                                 : ""
-                                            font.pixelSize: 16
+                                            font.pixelSize: 20
+                                            font.bold: true
                                             color: rowData.selectionKey === root.selectedLibrarySelectionKey
                                                 ? Kirigami.Theme.highlightedTextColor
                                                 : Kirigami.Theme.disabledTextColor
@@ -671,7 +674,26 @@ Kirigami.ApplicationWindow {
                                     MouseArea {
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        onPressed: function(mouse) {
+                                            suppressClickAfterExpanderPress = false
+                                            if (mouse.button !== Qt.LeftButton) {
+                                                return
+                                            }
+                                            if ((isArtistRow || isAlbumRow) && mouse.x <= expanderHitWidth) {
+                                                if (isArtistRow) {
+                                                    root.toggleArtist(rowData.artist)
+                                                } else {
+                                                    root.toggleAlbum(rowData.key)
+                                                }
+                                                suppressClickAfterExpanderPress = true
+                                                mouse.accepted = true
+                                            }
+                                        }
                                         onClicked: function(mouse) {
+                                            if (suppressClickAfterExpanderPress) {
+                                                suppressClickAfterExpanderPress = false
+                                                return
+                                            }
                                             root.selectedLibrarySelectionKey = rowData.selectionKey || ""
                                             if (isArtistRow && mouse.button === Qt.RightButton) {
                                                 artistMenu.popup()
@@ -696,26 +718,6 @@ Kirigami.ApplicationWindow {
                                             } else if (isTrackRow && rowData.trackPath && rowData.trackPath.length > 0) {
                                                 uiBridge.playTrack(rowData.trackPath)
                                             }
-                                        }
-                                    }
-
-                                    MouseArea {
-                                        visible: isArtistRow || isAlbumRow
-                                        anchors.left: parent.left
-                                        anchors.top: parent.top
-                                        anchors.bottom: parent.bottom
-                                        width: isArtistRow ? 26 : 42
-                                        acceptedButtons: Qt.LeftButton
-                                        onPressed: function(mouse) {
-                                            if (mouse.button !== Qt.LeftButton) {
-                                                return
-                                            }
-                                            if (isArtistRow) {
-                                                root.toggleArtist(rowData.artist)
-                                            } else if (isAlbumRow) {
-                                                root.toggleAlbum(rowData.key)
-                                            }
-                                            mouse.accepted = true
                                         }
                                     }
 
