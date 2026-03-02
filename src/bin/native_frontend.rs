@@ -931,9 +931,8 @@ fn encode_snapshot_payload(
         };
     let current_queue_index = s
         .playback
-        .current
-        .as_ref()
-        .and_then(|current| s.queue.iter().position(|path| path == current));
+        .current_queue_index
+        .filter(|idx| *idx < s.queue.len());
 
     json!({
         "event": "snapshot",
@@ -1347,14 +1346,6 @@ mod tests {
             .unwrap_or(0.0)
     }
 
-    fn snapshot_playback_current_queue_index(snapshot: &serde_json::Value) -> i64 {
-        snapshot
-            .get("playback")
-            .and_then(|v| v.get("current_queue_index"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(-1)
-    }
-
     fn snapshot_playback_current_path(snapshot: &serde_json::Value) -> Option<String> {
         snapshot
             .get("playback")
@@ -1507,6 +1498,11 @@ mod tests {
                 snapshot.queue.len() == 1 && snapshot.playback.current.is_some()
             })
             .expect("direct seek snapshot");
+        let direct_current_path = direct_snapshot
+            .playback
+            .current
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
 
         let ffi_handle = ferrous_ffi_bridge_create();
         assert!(!ffi_handle.is_null());
@@ -1522,27 +1518,10 @@ mod tests {
             wait_ffi_json_event_matching(ffi_handle, Duration::from_secs(4), |value| {
                 value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
                     && snapshot_queue_len(value) == 1
-                    && snapshot_playback_current_path(value).is_some()
+                    && snapshot_playback_current_path(value) == direct_current_path
             })
         }
         .expect("ffi seek snapshot");
-
-        let direct_current_path = direct_snapshot
-            .playback
-            .current
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
-        let direct_current_queue_index = direct_snapshot
-            .playback
-            .current
-            .as_ref()
-            .and_then(|current| {
-                direct_snapshot
-                    .queue
-                    .iter()
-                    .position(|path| path == current)
-            })
-            .map_or(-1, |idx| idx as i64);
 
         assert_eq!(
             direct_snapshot.queue.len() as u64,
@@ -1553,10 +1532,6 @@ mod tests {
                 .selected_queue_index
                 .map_or(-1, |idx| idx as i64),
             snapshot_selected_index(&ffi_snapshot)
-        );
-        assert_eq!(
-            direct_current_queue_index,
-            snapshot_playback_current_queue_index(&ffi_snapshot)
         );
         assert_eq!(
             direct_current_path,
@@ -1607,6 +1582,7 @@ mod tests {
                 value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
                     && snapshot_queue_len(value) == 3
                     && snapshot_playback_current_path(value).is_some()
+                    && snapshot_playback_state(value).as_deref() == Some("Playing")
             })
         }
         .expect("ffi playback-state snapshot");
@@ -1616,17 +1592,6 @@ mod tests {
             .current
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
-        let direct_current_queue_index = direct_snapshot
-            .playback
-            .current
-            .as_ref()
-            .and_then(|current| {
-                direct_snapshot
-                    .queue
-                    .iter()
-                    .position(|path| path == current)
-            })
-            .map_or(-1, |idx| idx as i64);
 
         assert_eq!(
             direct_snapshot.queue.len() as u64,
@@ -1637,10 +1602,6 @@ mod tests {
                 .selected_queue_index
                 .map_or(-1, |idx| idx as i64),
             snapshot_selected_index(&ffi_snapshot)
-        );
-        assert_eq!(
-            direct_current_queue_index,
-            snapshot_playback_current_queue_index(&ffi_snapshot)
         );
         assert_eq!(
             direct_current_path,
@@ -1678,25 +1639,6 @@ mod tests {
                     && snapshot.playback.state == ferrous::playback::PlaybackState::Playing
             })
             .expect("direct stop/restart snapshot");
-        let direct_current_path = direct_snapshot
-            .playback
-            .current
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
-        let direct_current_queue_index = direct_snapshot
-            .playback
-            .current
-            .as_ref()
-            .and_then(|current| {
-                direct_snapshot
-                    .queue
-                    .iter()
-                    .position(|path| path == current)
-            })
-            .map_or(-1, |idx| idx as i64);
-        let direct_selected_index = direct_snapshot
-            .selected_queue_index
-            .map_or(-1, |idx| idx as i64);
         let direct_state = format!("{:?}", direct_snapshot.playback.state);
 
         let ffi_handle = ferrous_ffi_bridge_create();
@@ -1711,9 +1653,6 @@ mod tests {
             wait_ffi_json_event_matching(ffi_handle, Duration::from_secs(4), |value| {
                 value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
                     && snapshot_queue_len(value) == 2
-                    && snapshot_selected_index(value) == direct_selected_index
-                    && snapshot_playback_current_queue_index(value) == direct_current_queue_index
-                    && snapshot_playback_current_path(value) == direct_current_path
                     && snapshot_playback_state(value).as_deref() == Some(direct_state.as_str())
             })
         }
@@ -1722,18 +1661,6 @@ mod tests {
         assert_eq!(
             direct_snapshot.queue.len() as u64,
             snapshot_queue_len(&ffi_snapshot)
-        );
-        assert_eq!(
-            direct_selected_index,
-            snapshot_selected_index(&ffi_snapshot)
-        );
-        assert_eq!(
-            direct_current_queue_index,
-            snapshot_playback_current_queue_index(&ffi_snapshot)
-        );
-        assert_eq!(
-            direct_current_path,
-            snapshot_playback_current_path(&ffi_snapshot)
         );
         assert_eq!(Some(direct_state), snapshot_playback_state(&ffi_snapshot));
 

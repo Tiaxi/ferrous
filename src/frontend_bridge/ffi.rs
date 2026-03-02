@@ -791,9 +791,8 @@ fn encode_snapshot_payload(
         };
     let current_queue_index = s
         .playback
-        .current
-        .as_ref()
-        .and_then(|current| s.queue.iter().position(|path| path == current));
+        .current_queue_index
+        .filter(|idx| *idx < s.queue.len());
 
     json!({
         "event": "snapshot",
@@ -1147,6 +1146,7 @@ mod tests {
                 position: Duration::from_secs(12),
                 duration: Duration::from_secs(180),
                 current: Some(PathBuf::from("/music/a.flac")),
+                current_queue_index: Some(0),
                 volume: 0.75,
                 repeat_mode: RepeatMode::Off,
                 shuffle_enabled: false,

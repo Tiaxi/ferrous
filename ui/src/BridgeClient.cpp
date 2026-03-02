@@ -984,7 +984,9 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             m_currentTrackPath = currentPath;
             changed = true;
         }
-        if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
+        if (nextState == QStringLiteral("Stopped")) {
+            playing = -1;
+        } else if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
             playing = m_queuePaths.indexOf(currentPath);
         }
         if (m_playingQueueIndex != playing) {

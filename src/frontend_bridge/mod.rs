@@ -540,6 +540,11 @@ fn handle_queue_command(
             QueuePlaybackOp::AddToQueue(tracks) => {
                 playback.command(PlaybackCommand::AddToQueue(tracks.clone()))
             }
+            QueuePlaybackOp::RemoveAt(idx) => playback.command(PlaybackCommand::RemoveAt(*idx)),
+            QueuePlaybackOp::Move { from, to } => playback.command(PlaybackCommand::MoveQueue {
+                from: *from,
+                to: *to,
+            }),
             QueuePlaybackOp::ClearQueue => playback.command(PlaybackCommand::ClearQueue),
             QueuePlaybackOp::PlayAt(idx) => playback.command(PlaybackCommand::PlayAt(*idx)),
             QueuePlaybackOp::Play => playback.command(PlaybackCommand::Play),
@@ -555,6 +560,8 @@ fn handle_queue_command(
 enum QueuePlaybackOp {
     LoadQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
+    RemoveAt(usize),
+    Move { from: usize, to: usize },
     ClearQueue,
     PlayAt(usize),
     Play,
@@ -635,8 +642,16 @@ fn apply_queue_command_state(
                 *selected_queue_index = None;
                 vec![QueuePlaybackOp::ClearQueue]
             } else {
-                *selected_queue_index = idx.checked_sub(1);
-                vec![QueuePlaybackOp::LoadQueue(queue.clone())]
+                *selected_queue_index = selected_queue_index.and_then(|sel| {
+                    if sel == idx {
+                        Some(sel.min(queue.len().saturating_sub(1)))
+                    } else if sel > idx {
+                        Some(sel - 1)
+                    } else {
+                        Some(sel)
+                    }
+                });
+                vec![QueuePlaybackOp::RemoveAt(idx)]
             };
             QueueCommandOutcome {
                 changed: true,
@@ -650,10 +665,20 @@ fn apply_queue_command_state(
             }
             let item = queue.remove(from);
             queue.insert(to, item);
-            *selected_queue_index = Some(to);
+            *selected_queue_index = selected_queue_index.map(|sel| {
+                if sel == from {
+                    to
+                } else if from < sel && to >= sel {
+                    sel - 1
+                } else if from > sel && to <= sel {
+                    sel + 1
+                } else {
+                    sel
+                }
+            });
             QueueCommandOutcome {
                 changed: true,
-                playback_ops: vec![QueuePlaybackOp::LoadQueue(queue.clone())],
+                playback_ops: vec![QueuePlaybackOp::Move { from, to }],
                 error: None,
             }
         }
@@ -865,7 +890,12 @@ fn pump_playback_events(
                     changed = true;
                 }
             }
-            PlaybackEvent::TrackChanged { path, kind } => {
+            PlaybackEvent::TrackChanged {
+                path,
+                queue_index,
+                kind,
+            } => {
+                state.playback.current_queue_index = Some(queue_index);
                 state.analysis.waveform_peaks.clear();
                 metadata.request(path.clone());
                 analysis.command(AnalysisCommand::SetTrack {
@@ -959,9 +989,8 @@ fn session_path() -> Option<PathBuf> {
 fn session_snapshot_for_state(state: &BridgeState) -> SessionSnapshot {
     let current_queue_index = state
         .playback
-        .current
-        .as_ref()
-        .and_then(|current| state.queue.iter().position(|path| path == current));
+        .current_queue_index
+        .filter(|idx| *idx < state.queue.len());
     SessionSnapshot {
         queue: state.queue.clone(),
         selected_queue_index: state.selected_queue_index,
@@ -990,7 +1019,10 @@ fn apply_session_restore(
         .filter(|idx| *idx < state.queue.len())
     {
         state.playback.current = state.queue.get(idx).cloned();
+        state.playback.current_queue_index = Some(idx);
         playback.command(PlaybackCommand::PlayAt(idx));
+    } else {
+        state.playback.current_queue_index = None;
     }
 }
 
@@ -1231,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_move_updates_selection_and_reloads() {
+    fn queue_move_updates_selection_and_uses_move_op() {
         let mut queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
         let mut selected = Some(0);
         let outcome = apply_queue_command_state(
@@ -1244,11 +1276,7 @@ mod tests {
         assert_eq!(selected, Some(2));
         assert_eq!(
             outcome.playback_ops,
-            vec![QueuePlaybackOp::LoadQueue(vec![
-                p("/b.flac"),
-                p("/c.flac"),
-                p("/a.flac")
-            ])]
+            vec![QueuePlaybackOp::Move { from: 0, to: 2 }]
         );
     }
 
@@ -1323,6 +1351,18 @@ mod tests {
         assert!(queue.is_empty());
         assert!(selected.is_none());
         assert_eq!(outcome.playback_ops, vec![QueuePlaybackOp::ClearQueue]);
+    }
+
+    #[test]
+    fn queue_remove_middle_track_uses_remove_op_and_keeps_reasonable_selection() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
+        let mut selected = Some(2);
+        let outcome =
+            apply_queue_command_state(BridgeQueueCommand::Remove(1), &mut queue, &mut selected);
+        assert!(outcome.changed);
+        assert_eq!(queue, vec![p("/a.flac"), p("/c.flac")]);
+        assert_eq!(selected, Some(1));
+        assert_eq!(outcome.playback_ops, vec![QueuePlaybackOp::RemoveAt(1)]);
     }
 
     #[test]
@@ -1456,10 +1496,13 @@ mod tests {
         let removed = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
             s.queue.len() == 1
                 && s.selected_queue_index == Some(0)
-                && s.playback.current.as_ref() == Some(&first)
+                && s.playback.current.as_ref() != Some(&second)
         })
         .expect("snapshot after removing selected track");
-        assert_eq!(removed.playback.current.as_ref(), Some(&first));
+        assert_ne!(removed.playback.current.as_ref(), Some(&second));
+        if let Some(current) = removed.playback.current.as_ref() {
+            assert_eq!(current, &first);
+        }
         assert_eq!(removed.selected_queue_index, Some(0));
 
         bridge.command(BridgeCommand::Shutdown);
@@ -1488,6 +1531,7 @@ mod tests {
         playback_tx
             .send(PlaybackEvent::TrackChanged {
                 path: p("/music/b.flac"),
+                queue_index: 1,
                 kind: TrackChangeKind::Manual,
             })
             .expect("send track-changed event");
@@ -1511,6 +1555,7 @@ mod tests {
         playback_tx
             .send(PlaybackEvent::TrackChanged {
                 path: p("/music/new.flac"),
+                queue_index: 1,
                 kind: TrackChangeKind::Natural,
             })
             .expect("send track-changed event");

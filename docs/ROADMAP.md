@@ -181,10 +181,12 @@ Acceptance criteria:
 - [x] Add drag-and-drop from library to playlist.
 - [x] Add multi-select in playlist and library views.
 - [x] Add status bar parity items (selection counts, queue duration, mode indicators).
+- [ ] Add seek-drag time overlay (floating timestamp near seekbar while dragging).
 
 ### Playback Features
 - [x] Add repeat/shuffle modes.
 - [ ] Add ReplayGain support.
+- [ ] Add Last.fm scrobbling support.
 - [ ] Add preamp/volume dB behavior options.
 - [ ] Add output device selector persistence.
 - [ ] Add optional crossfade and buffer tuning controls.

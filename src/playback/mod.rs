@@ -27,6 +27,7 @@ pub struct PlaybackSnapshot {
     pub position: Duration,
     pub duration: Duration,
     pub current: Option<PathBuf>,
+    pub current_queue_index: Option<usize>,
     pub volume: f32,
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
@@ -36,6 +37,8 @@ pub struct PlaybackSnapshot {
 pub enum PlaybackCommand {
     LoadQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
+    RemoveAt(usize),
+    MoveQueue { from: usize, to: usize },
     ClearQueue,
     PlayAt(usize),
     Next,
@@ -61,6 +64,7 @@ pub enum PlaybackEvent {
     Snapshot(PlaybackSnapshot),
     TrackChanged {
         path: PathBuf,
+        queue_index: usize,
         kind: TrackChangeKind,
     },
     Seeked,
@@ -205,7 +209,12 @@ mod tests {
         let mut observed = None;
         while Instant::now() < deadline {
             if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
-                if let PlaybackEvent::TrackChanged { path, kind } = evt {
+                if let PlaybackEvent::TrackChanged {
+                    path,
+                    queue_index: _,
+                    kind,
+                } = evt
+                {
                     if path == b && matches!(kind, TrackChangeKind::Natural) {
                         observed = Some((path, kind));
                         break;
@@ -270,6 +279,52 @@ mod tests {
 
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.current.as_ref(), Some(&b));
+    }
+
+    #[test]
+    fn remove_at_preserves_current_track_when_other_row_removed() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        let c = PathBuf::from("/tmp/c.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ]));
+        engine.command(PlaybackCommand::PlayAt(2));
+        engine.command(PlaybackCommand::RemoveAt(0));
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&c));
+        assert_eq!(snap.current_queue_index, Some(1));
+    }
+
+    #[test]
+    fn move_queue_keeps_current_track_identity() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        let c = PathBuf::from("/tmp/c.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ]));
+        engine.command(PlaybackCommand::PlayAt(2));
+        engine.command(PlaybackCommand::MoveQueue { from: 2, to: 0 });
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&c));
+        assert_eq!(snap.current_queue_index, Some(0));
     }
 
     #[test]
@@ -351,9 +406,15 @@ mod backend {
                             snapshot.position = Duration::ZERO;
                             snapshot.duration = Duration::from_secs(180);
                             snapshot.current = queue.first().cloned();
+                            snapshot.current_queue_index = if snapshot.current.is_some() {
+                                Some(queue_idx)
+                            } else {
+                                None
+                            };
                             if let Some(path) = snapshot.current.clone() {
                                 let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                     path,
+                                    queue_index: queue_idx,
                                     kind: TrackChangeKind::Manual,
                                 });
                                 let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(48_000));
@@ -362,10 +423,60 @@ mod backend {
                         PlaybackCommand::AddToQueue(paths) => {
                             queue.extend(paths);
                         }
+                        PlaybackCommand::RemoveAt(idx) => {
+                            if idx < queue.len() {
+                                queue.remove(idx);
+                                if queue.is_empty() {
+                                    queue_idx = 0;
+                                    snapshot.current = None;
+                                    snapshot.current_queue_index = None;
+                                    snapshot.state = PlaybackState::Stopped;
+                                    snapshot.position = Duration::ZERO;
+                                    snapshot.duration = Duration::ZERO;
+                                } else {
+                                    if idx < queue_idx {
+                                        queue_idx = queue_idx.saturating_sub(1);
+                                    } else if idx == queue_idx && queue_idx >= queue.len() {
+                                        queue_idx = queue.len().saturating_sub(1);
+                                    }
+                                    snapshot.current = queue.get(queue_idx).cloned();
+                                    snapshot.current_queue_index = Some(queue_idx);
+                                    snapshot.position = Duration::ZERO;
+                                    snapshot.duration = Duration::from_secs(180);
+                                    if let Some(path) = snapshot.current.clone() {
+                                        let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                            path,
+                                            queue_index: queue_idx,
+                                            kind: TrackChangeKind::Manual,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        PlaybackCommand::MoveQueue { from, to } => {
+                            if from < queue.len() && to < queue.len() && from != to {
+                                let item = queue.remove(from);
+                                queue.insert(to, item);
+                                if queue_idx == from {
+                                    queue_idx = to;
+                                } else if from < queue_idx && to >= queue_idx {
+                                    queue_idx = queue_idx.saturating_sub(1);
+                                } else if from > queue_idx && to <= queue_idx {
+                                    queue_idx += 1;
+                                }
+                                snapshot.current = queue.get(queue_idx).cloned();
+                                snapshot.current_queue_index = if snapshot.current.is_some() {
+                                    Some(queue_idx)
+                                } else {
+                                    None
+                                };
+                            }
+                        }
                         PlaybackCommand::ClearQueue => {
                             queue.clear();
                             queue_idx = 0;
                             snapshot.current = None;
+                            snapshot.current_queue_index = None;
                             snapshot.state = PlaybackState::Stopped;
                             snapshot.position = Duration::ZERO;
                             snapshot.duration = Duration::ZERO;
@@ -374,10 +485,12 @@ mod backend {
                             if let Some(path) = queue.get(idx).cloned() {
                                 queue_idx = idx;
                                 snapshot.current = Some(path.clone());
+                                snapshot.current_queue_index = Some(queue_idx);
                                 snapshot.position = Duration::ZERO;
                                 snapshot.duration = Duration::from_secs(180);
                                 let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                     path,
+                                    queue_index: queue_idx,
                                     kind: TrackChangeKind::Manual,
                                 });
                             }
@@ -387,10 +500,12 @@ mod backend {
                                 queue_idx += 1;
                                 if let Some(next) = queue.get(queue_idx).cloned() {
                                     snapshot.current = Some(next.clone());
+                                    snapshot.current_queue_index = Some(queue_idx);
                                     snapshot.position = Duration::ZERO;
                                     snapshot.duration = Duration::from_secs(180);
                                     let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                         path: next,
+                                        queue_index: queue_idx,
                                         kind: TrackChangeKind::Manual,
                                     });
                                 }
@@ -401,10 +516,12 @@ mod backend {
                                 queue_idx -= 1;
                                 if let Some(prev) = queue.get(queue_idx).cloned() {
                                     snapshot.current = Some(prev.clone());
+                                    snapshot.current_queue_index = Some(queue_idx);
                                     snapshot.position = Duration::ZERO;
                                     snapshot.duration = Duration::from_secs(180);
                                     let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                         path: prev,
+                                        queue_index: queue_idx,
                                         kind: TrackChangeKind::Manual,
                                     });
                                 }
@@ -412,6 +529,11 @@ mod backend {
                         }
                         PlaybackCommand::Play => {
                             snapshot.state = PlaybackState::Playing;
+                            snapshot.current_queue_index = if snapshot.current.is_some() {
+                                Some(queue_idx)
+                            } else {
+                                None
+                            };
                         }
                         PlaybackCommand::Pause => {
                             snapshot.state = PlaybackState::Paused;
@@ -419,6 +541,7 @@ mod backend {
                         PlaybackCommand::Stop => {
                             snapshot.state = PlaybackState::Stopped;
                             snapshot.position = Duration::ZERO;
+                            snapshot.current_queue_index = None;
                         }
                         PlaybackCommand::Seek(pos) => {
                             snapshot.position = pos.min(snapshot.duration);
@@ -453,15 +576,18 @@ mod backend {
                                 queue_idx += 1;
                                 if let Some(next) = queue.get(queue_idx).cloned() {
                                     snapshot.current = Some(next.clone());
+                                    snapshot.current_queue_index = Some(queue_idx);
                                     snapshot.position = Duration::ZERO;
                                     snapshot.duration = Duration::from_secs(180);
                                     let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                         path: next,
+                                        queue_index: queue_idx,
                                         kind: TrackChangeKind::Natural,
                                     });
                                 } else {
                                     snapshot.state = PlaybackState::Stopped;
                                     snapshot.position = Duration::ZERO;
+                                    snapshot.current_queue_index = None;
                                 }
                             }
                         }
@@ -540,6 +666,14 @@ mod backend {
             self.queue.get(self.current_idx).cloned()
         }
 
+        fn current_index(&self) -> Option<usize> {
+            if self.queue.is_empty() {
+                None
+            } else {
+                Some(self.current_idx)
+            }
+        }
+
         fn set_current(&mut self, idx: usize) -> Option<PathBuf> {
             if idx < self.queue.len() {
                 self.current_idx = idx;
@@ -549,6 +683,44 @@ mod backend {
             } else {
                 None
             }
+        }
+
+        fn remove_at(&mut self, idx: usize) -> Option<PathBuf> {
+            if idx >= self.queue.len() {
+                return self.current();
+            }
+            self.queue.remove(idx);
+            if self.queue.is_empty() {
+                self.current_idx = 0;
+                self.shuffle_history.clear();
+                self.shuffle_pool.clear();
+                return None;
+            }
+            if idx < self.current_idx {
+                self.current_idx = self.current_idx.saturating_sub(1);
+            } else if idx == self.current_idx && self.current_idx >= self.queue.len() {
+                self.current_idx = self.queue.len().saturating_sub(1);
+            }
+            self.shuffle_history.clear();
+            self.rebuild_shuffle_pool();
+            self.current()
+        }
+
+        fn move_item(&mut self, from: usize, to: usize) {
+            if from >= self.queue.len() || to >= self.queue.len() || from == to {
+                return;
+            }
+            let item = self.queue.remove(from);
+            self.queue.insert(to, item);
+            if self.current_idx == from {
+                self.current_idx = to;
+            } else if from < self.current_idx && to >= self.current_idx {
+                self.current_idx = self.current_idx.saturating_sub(1);
+            } else if from > self.current_idx && to <= self.current_idx {
+                self.current_idx += 1;
+            }
+            self.shuffle_history.clear();
+            self.rebuild_shuffle_pool();
         }
 
         fn set_repeat_mode(&mut self, mode: RepeatMode) {
@@ -820,6 +992,7 @@ mod backend {
                     snapshot.shuffle_enabled = state.shuffle_enabled;
                     if let Some(first) = state.current() {
                         if let Some(uri) = file_uri(&first) {
+                            snapshot.current_queue_index = state.current_index();
                             switch_track(
                                 playbin,
                                 snapshot,
@@ -830,6 +1003,7 @@ mod backend {
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: first.clone(),
+                                queue_index: state.current_index().unwrap_or(0),
                                 kind: TrackChangeKind::Manual,
                             });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
@@ -844,6 +1018,52 @@ mod backend {
                     snapshot.shuffle_enabled = state.shuffle_enabled;
                 }
             }
+            PlaybackCommand::RemoveAt(idx) => {
+                if let Ok(mut state) = queue_state.lock() {
+                    let old_current = snapshot.current.clone();
+                    let next_current = state.remove_at(idx);
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
+                    snapshot.current_queue_index = state.current_index();
+                    if let Some(path) = next_current {
+                        if old_current.as_ref() != Some(&path) {
+                            if let Some(uri) = file_uri(&path) {
+                                switch_track(
+                                    playbin,
+                                    snapshot,
+                                    &path,
+                                    &uri,
+                                    applied_volume,
+                                    startup_gain_ramp,
+                                );
+                            }
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                path: path.clone(),
+                                queue_index: snapshot.current_queue_index.unwrap_or(0),
+                                kind: TrackChangeKind::Manual,
+                            });
+                        } else {
+                            snapshot.current = Some(path);
+                        }
+                    } else {
+                        soft_mute(playbin, applied_volume);
+                        let _ = playbin.set_state(gst::State::Ready);
+                        *startup_gain_ramp = false;
+                        snapshot.current = None;
+                        snapshot.state = PlaybackState::Stopped;
+                        snapshot.position = Duration::ZERO;
+                        snapshot.duration = Duration::ZERO;
+                    }
+                }
+            }
+            PlaybackCommand::MoveQueue { from, to } => {
+                if let Ok(mut state) = queue_state.lock() {
+                    state.move_item(from, to);
+                    snapshot.repeat_mode = state.repeat_mode;
+                    snapshot.shuffle_enabled = state.shuffle_enabled;
+                    snapshot.current_queue_index = state.current_index();
+                }
+            }
             PlaybackCommand::ClearQueue => {
                 if let Ok(mut state) = queue_state.lock() {
                     state.clear();
@@ -854,6 +1074,7 @@ mod backend {
                 let _ = playbin.set_state(gst::State::Ready);
                 *startup_gain_ramp = false;
                 snapshot.current = None;
+                snapshot.current_queue_index = None;
                 snapshot.state = PlaybackState::Stopped;
                 snapshot.position = Duration::ZERO;
                 snapshot.duration = Duration::ZERO;
@@ -865,6 +1086,7 @@ mod backend {
                     snapshot.shuffle_enabled = state.shuffle_enabled;
                     if let Some(path) = state.set_current(idx) {
                         if let Some(uri) = file_uri(&path) {
+                            snapshot.current_queue_index = state.current_index();
                             switch_track(
                                 playbin,
                                 snapshot,
@@ -875,6 +1097,7 @@ mod backend {
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: path.clone(),
+                                queue_index: state.current_index().unwrap_or(idx),
                                 kind: TrackChangeKind::Manual,
                             });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
@@ -888,6 +1111,7 @@ mod backend {
                     snapshot.shuffle_enabled = state.shuffle_enabled;
                     if let Some(path) = state.next_manual() {
                         if let Some(uri) = file_uri(&path) {
+                            snapshot.current_queue_index = state.current_index();
                             switch_track(
                                 playbin,
                                 snapshot,
@@ -898,6 +1122,7 @@ mod backend {
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: path.clone(),
+                                queue_index: state.current_index().unwrap_or(0),
                                 kind: TrackChangeKind::Manual,
                             });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
@@ -911,6 +1136,7 @@ mod backend {
                     snapshot.shuffle_enabled = state.shuffle_enabled;
                     if let Some(path) = state.previous_manual() {
                         if let Some(uri) = file_uri(&path) {
+                            snapshot.current_queue_index = state.current_index();
                             switch_track(
                                 playbin,
                                 snapshot,
@@ -921,6 +1147,7 @@ mod backend {
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: path.clone(),
+                                queue_index: state.current_index().unwrap_or(0),
                                 kind: TrackChangeKind::Manual,
                             });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
@@ -930,6 +1157,9 @@ mod backend {
             }
             PlaybackCommand::Play => {
                 let was_stopped = snapshot.state == PlaybackState::Stopped;
+                if let Ok(state) = queue_state.lock() {
+                    snapshot.current_queue_index = state.current_index();
+                }
                 if was_stopped {
                     // Prime startup gain before entering Playing so first output buffer starts silent.
                     *applied_volume = 0.0;
@@ -957,6 +1187,7 @@ mod backend {
                     *seek_hold = None;
                     snapshot.state = PlaybackState::Stopped;
                     snapshot.position = Duration::ZERO;
+                    snapshot.current_queue_index = None;
                     let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                 }
             }
@@ -1080,12 +1311,15 @@ mod backend {
         let Some(current_path) = state.current() else {
             return false;
         };
+        let current_index = state.current_index().unwrap_or(0);
         let path_changed = snapshot.current.as_ref() != Some(&current_path);
         let at_track_start = snapshot.position <= Duration::from_secs(2);
         if path_changed && at_track_start {
             snapshot.current = Some(current_path.clone());
+            snapshot.current_queue_index = Some(current_index);
             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                 path: current_path,
+                queue_index: current_index,
                 kind: TrackChangeKind::Natural,
             });
             return true;
@@ -1390,7 +1624,11 @@ mod backend {
 
             let event = event_rx.try_recv().expect("natural handoff event");
             match event {
-                PlaybackEvent::TrackChanged { path, kind } => {
+                PlaybackEvent::TrackChanged {
+                    path,
+                    queue_index: _,
+                    kind,
+                } => {
                     assert_eq!(path, second);
                     assert!(matches!(kind, TrackChangeKind::Natural));
                 }
