@@ -75,8 +75,10 @@ impl AnalysisEngine {
 
         let waveform_tx = cmd_tx.clone();
         std::thread::spawn(move || {
-            let mut snapshot = AnalysisSnapshot::default();
-            snapshot.sample_rate_hz = 48_000;
+            let mut snapshot = AnalysisSnapshot {
+                sample_rate_hz: 48_000,
+                ..AnalysisSnapshot::default()
+            };
             let mut pending_rows: Vec<Vec<f32>> = Vec::new();
             let mut waveform_dirty = false;
             let mut last_emit = std::time::Instant::now();
@@ -868,7 +870,7 @@ where
                 bucket_count = 0;
                 // Keep waveform memory bounded even when duration/frame estimates are inaccurate.
                 while peaks.len() > max_points {
-                    let mut reduced = Vec::with_capacity((peaks.len() + 1) / 2);
+                    let mut reduced = Vec::with_capacity(peaks.len().div_ceil(2));
                     for chunk in peaks.chunks(2) {
                         let mut p = 0.0f32;
                         for &v in chunk {
@@ -891,7 +893,7 @@ where
         }
 
         // Keep this worker from starving UI/render threads on heavy FLAC decode.
-        if packet_counter % 64 == 0 {
+        if packet_counter.is_multiple_of(64) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }

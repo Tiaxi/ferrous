@@ -420,8 +420,10 @@ mod backend {
         }
 
         let bus = playbin.bus().context("playbin has no bus")?;
-        let mut snapshot = PlaybackSnapshot::default();
-        snapshot.volume = 1.0;
+        let mut snapshot = PlaybackSnapshot {
+            volume: 1.0,
+            ..PlaybackSnapshot::default()
+        };
         let mut target_volume = 1.0f64;
         let mut applied_volume = 1.0f64;
         let mut startup_gain_ramp = false;

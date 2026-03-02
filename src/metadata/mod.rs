@@ -32,12 +32,14 @@ impl MetadataService {
 
         std::thread::spawn(move || {
             while let Ok(path) = req_rx.recv() {
-                let mut metadata = TrackMetadata::default();
-                metadata.title = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
+                let mut metadata = TrackMetadata {
+                    title: path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    ..TrackMetadata::default()
+                };
 
                 if let Ok(tagged) = lofty::read_from_path(&path) {
                     let props = tagged.properties();
