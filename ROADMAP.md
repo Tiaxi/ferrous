@@ -59,13 +59,16 @@ Acceptance criteria:
 
 - [x] Replace QML `Canvas` spectrogram with C++ render item (`QQuickPaintedItem` baseline landed).
 - [x] Move palette mapping + bin projection to C++ (no per-frame JS loops).
-- [ ] Keep DeaDBeeF-like color mapping and dB behavior parity.
-- [ ] Keep rolling history and seek behavior parity.
-- [ ] Keep implementation notes aligned with DeaDBeeF reference source at `/home/tuomas/Downloads/ddb_spectrogram/`.
+- [x] Keep DeaDBeeF-like color mapping and dB behavior parity.
+- [x] Keep rolling history and seek behavior parity.
+- [x] Keep implementation notes aligned with DeaDBeeF reference source at `/home/tuomas/Downloads/ddb_spectrogram/`.
+- [x] Replace full-frame redraw with incremental cached-canvas scrolling renderer.
+- [x] Keep background visual rendering off while app is not active/visible.
+- [x] Avoid `QQuickPaintedItem::FramebufferObject` target due alt-tab resume instability (segfault observed); use stable non-FBO path.
 
 Acceptance criteria:
-- Spectrogram rendering no longer causes observable UI hitching.
-- Playlist/library interactions remain responsive while spectrogram is active.
+- [x] Spectrogram rendering no longer causes observable UI hitching.
+- [x] Playlist/library interactions remain responsive while spectrogram is active.
 
 ### Phase P2: Split Transport by Data Rate
 
@@ -147,9 +150,9 @@ Acceptance criteria:
 ## Milestone E: Spectrogram + Analysis View Migration
 
 - [x] Port spectrogram widget rendering path to native frontend.
-- [ ] Preserve rolling behavior across seek and track transitions.
+- [x] Preserve rolling behavior across seek and track transitions.
 - [ ] Port dB/log-scale controls and settings persistence.
-- [ ] Ensure performance parity with current implementation.
+- [x] Ensure performance parity with current implementation.
 
 Acceptance criteria:
 - Spectrogram and waveform behavior are functionally on par with current frontend.
