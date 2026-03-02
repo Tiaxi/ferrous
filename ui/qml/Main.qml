@@ -3,6 +3,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import QtQml 2.15
+import QtQuick.Dialogs
 import FerrousNative 1.0
 import org.kde.kirigami 2.20 as Kirigami
 
@@ -502,6 +503,14 @@ Kirigami.ApplicationWindow {
         librarySearchField.selectAll()
     }
 
+    function urlToLocalPath(urlValue) {
+        const value = String(urlValue || "")
+        if (value.startsWith("file://")) {
+            return decodeURIComponent(value.substring(7))
+        }
+        return value
+    }
+
     Action {
         id: quitAction
         text: "Quit"
@@ -525,6 +534,11 @@ Kirigami.ApplicationWindow {
         text: "Scan Music Folder"
         shortcut: "Ctrl+R"
         onTriggered: uiBridge.scanDefaultMusicRoot()
+    }
+    Action {
+        id: scanFolderAction
+        text: "Scan Folder..."
+        onTriggered: scanFolderDialog.open()
     }
     Action {
         id: removeSelectedTrackAction
@@ -683,6 +697,7 @@ Kirigami.ApplicationWindow {
                 { label: playLibrarySelectionAction.text, shortcut: "" },
                 { label: appendLibrarySelectionAction.text, shortcut: "" },
                 { label: scanMusicAction.text, shortcut: String(scanMusicAction.shortcut) },
+                { label: scanFolderAction.text, shortcut: "" },
                 { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
                 { label: quitAction.text, shortcut: String(quitAction.shortcut) }
             ])
@@ -690,6 +705,7 @@ Kirigami.ApplicationWindow {
             MenuItem { action: appendLibrarySelectionAction }
             MenuSeparator {}
             MenuItem { action: scanMusicAction }
+            MenuItem { action: scanFolderAction }
             MenuItem { action: refreshSnapshotAction }
             MenuSeparator {}
             MenuItem { action: quitAction }
@@ -781,6 +797,17 @@ Kirigami.ApplicationWindow {
             wrapMode: Text.Wrap
             text: "Ferrous is a KDE-first audio player prototype with a Qt/QML UI and Rust backend."
             color: Kirigami.Theme.textColor
+        }
+    }
+
+    FolderDialog {
+        id: scanFolderDialog
+        title: "Select Music Folder to Scan"
+        onAccepted: {
+            const localPath = root.urlToLocalPath(selectedFolder)
+            if (localPath.length > 0) {
+                uiBridge.scanRoot(localPath)
+            }
         }
     }
 
@@ -982,6 +1009,7 @@ Kirigami.ApplicationWindow {
                                 ToolButton {
                                     icon.name: "document-edit"
                                     display: AbstractButton.IconOnly
+                                    onClicked: scanFolderAction.trigger()
                                 }
                                 Button {
                                     text: "Scan Music"

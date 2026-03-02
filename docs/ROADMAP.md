@@ -192,7 +192,7 @@ Acceptance criteria:
 ### Library/Metadata
 - [x] Add persistent playlist/session restore.
 - [ ] Add incremental library updates via filesystem watcher.
-- [ ] Add configurable library roots/config dialog parity.
+- [x] Add configurable library roots/config dialog parity.
 - [ ] Add richer sort/group/filter modes and extended metadata fields.
 
 ### Spectrogram/Waveform Controls
