@@ -460,9 +460,7 @@ void BridgeClient::startBridgeProcess() {
         const QDir appDir(QCoreApplication::applicationDirPath());
         const QStringList candidates{
             appDir.absoluteFilePath(QStringLiteral("../../target/release/native_frontend")),
-            appDir.absoluteFilePath(QStringLiteral("../../target/debug/native_frontend")),
             QDir::current().absoluteFilePath(QStringLiteral("target/release/native_frontend")),
-            QDir::current().absoluteFilePath(QStringLiteral("target/debug/native_frontend")),
         };
 
         for (const QString &candidate : candidates) {

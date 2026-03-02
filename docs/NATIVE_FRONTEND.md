@@ -42,7 +42,7 @@ Package names differ by distro. Install the Qt6 + Kirigami/KF6 development meta-
 ## Running current bootstrap
 
 ```bash
-cargo run --bin native_frontend --features gst
+cargo run --release --bin native_frontend --features gst
 ```
 
 Commands in bootstrap shell:
@@ -56,7 +56,7 @@ Commands in bootstrap shell:
 ## Running JSON bridge mode
 
 ```bash
-cargo run --bin native_frontend --features gst -- --json-bridge
+cargo run --release --bin native_frontend --features gst -- --json-bridge
 ```
 
 Input is line-delimited JSON commands, for example:
@@ -86,7 +86,7 @@ are delta-style payloads and may be `null` when unchanged.
 cd native_ui
 cmake -B build -G Ninja
 cmake --build build
-FERROUS_BRIDGE_CMD='cargo run --bin native_frontend --features gst -- --json-bridge' ./build/ferrous_kirigami_shell
+FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge' ./build/ferrous_kirigami_shell
 ```
 
 One-command dev path from repo root:
@@ -95,7 +95,7 @@ One-command dev path from repo root:
 ./scripts/run-native-ui.sh
 ```
 
-The script builds and uses `target/debug/native_frontend --json-bridge`
+The script builds and uses `target/release/native_frontend --json-bridge`
 to avoid `cargo run` staying as the long-lived bridge process.
 
 Build-only check:

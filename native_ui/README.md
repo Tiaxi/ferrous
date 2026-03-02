@@ -19,7 +19,7 @@ From repo root:
 ```
 
 This script builds `native_frontend` first and runs the bridge as:
-`target/debug/native_frontend --json-bridge` (not `cargo run`).
+`target/release/native_frontend --json-bridge` (not `cargo run`).
 
 Build-only (no GUI launch):
 
@@ -30,10 +30,12 @@ Build-only (no GUI launch):
 ## Run (dev mode)
 
 ```bash
-FERROUS_BRIDGE_CMD='cargo run --bin native_frontend --features gst -- --json-bridge' ./build/ferrous_kirigami_shell
+FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge' ./build/ferrous_kirigami_shell
 ```
 
-If `FERROUS_BRIDGE_CMD` is not set, the app uses this same command as default.
+If `FERROUS_BRIDGE_CMD` is not set, the app auto-detects
+`target/release/native_frontend --json-bridge`, then falls back to
+`cargo run --release --bin native_frontend --features gst -- --json-bridge`.
 
 ## Scope (Milestone A)
 
