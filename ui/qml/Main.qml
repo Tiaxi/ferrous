@@ -778,9 +778,12 @@ Kirigami.ApplicationWindow {
                                     readonly property bool isArtistRow: rowType === "artist"
                                     readonly property bool isAlbumRow: rowType === "album"
                                     readonly property bool isTrackRow: rowType === "track"
+                                    readonly property string artistName: artist !== undefined ? artist : ""
+                                    readonly property string albumName: name !== undefined ? name : ""
+                                    readonly property string trackPathResolved: trackPath !== undefined ? trackPath : ""
                                     readonly property bool draggableLibraryItem: isArtistRow
                                         || isAlbumRow
-                                        || (isTrackRow && trackPath && trackPath.length > 0)
+                                        || (isTrackRow && trackPathResolved.length > 0)
                                     readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
                                     width: ListView.view.width
                                     height: 24
@@ -853,26 +856,24 @@ Kirigami.ApplicationWindow {
                                         }
                                     }
 
-                                    Item {
-                                        id: libraryDragProxy
-                                        visible: false
-                                    }
-
                                     Drag.active: libraryRowMouseArea.drag.active && draggableLibraryItem
                                     Drag.source: libraryRow
                                     Drag.hotSpot.x: 16
                                     Drag.hotSpot.y: height * 0.5
+                                    Drag.dragType: Drag.Automatic
                                     Drag.supportedActions: Qt.CopyAction
-                                    Drag.keys: ["ferrous/library-item"]
+
+                                    Item {
+                                        id: libraryDragProxy
+                                        visible: false
+                                    }
 
                                     MouseArea {
                                         id: libraryRowMouseArea
                                         anchors.fill: parent
                                         preventStealing: true
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        drag.target: ((pressedButtons & Qt.LeftButton) && draggableLibraryItem)
-                                            ? libraryDragProxy
-                                            : null
+                                        drag.target: draggableLibraryItem ? libraryDragProxy : null
                                         drag.smoothed: false
                                         onReleased: {
                                             libraryDragProxy.x = 0
@@ -1162,15 +1163,14 @@ Kirigami.ApplicationWindow {
                     DropArea {
                         id: playlistDropArea
                         anchors.fill: parent
-                        keys: ["ferrous/library-item"]
 
                         onDropped: function(drop) {
                             const src = drop.source
                             if (!src || !src.draggableLibraryItem) {
                                 return
                             }
-                            if (src.isArtistRow && src.artist && src.artist.length > 0) {
-                                uiBridge.appendArtistByName(src.artist)
+                            if (src.isArtistRow && src.artistName && src.artistName.length > 0) {
+                                uiBridge.appendArtistByName(src.artistName)
                                 drop.acceptProposedAction()
                                 return
                             }
@@ -1179,8 +1179,10 @@ Kirigami.ApplicationWindow {
                                 drop.acceptProposedAction()
                                 return
                             }
-                            if (src.isTrackRow && src.trackPath && src.trackPath.length > 0) {
-                                uiBridge.appendTrack(src.trackPath)
+                            if (src.isTrackRow
+                                    && src.trackPathResolved
+                                    && src.trackPathResolved.length > 0) {
+                                uiBridge.appendTrack(src.trackPathResolved)
                                 drop.acceptProposedAction()
                             }
                         }
