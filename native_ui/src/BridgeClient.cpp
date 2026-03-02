@@ -13,7 +13,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QHash>
 #include <QMetaObject>
+#include <QVector>
 #include <QtEndian>
 
 namespace {
@@ -140,6 +142,10 @@ bool BridgeClient::logScale() const {
 
 QStringList BridgeClient::libraryAlbums() const {
     return m_libraryAlbums;
+}
+
+QVariantList BridgeClient::libraryTree() const {
+    return m_libraryTree;
 }
 
 bool BridgeClient::libraryScanInProgress() const {
@@ -704,10 +710,15 @@ void BridgeClient::handleStdoutReady() {
                 QStringList labels;
                 QStringList artists;
                 QStringList albumNames;
+                QVariantList libraryTree;
+                QStringList artistOrder;
+                QHash<QString, int> artistToIndex;
+                QVector<QVariantList> artistAlbums;
                 labels.reserve(albums.size());
                 artists.reserve(albums.size());
                 albumNames.reserve(albums.size());
-                for (const QJsonValue &entry : albums) {
+                for (qsizetype sourceIndex = 0; sourceIndex < albums.size(); ++sourceIndex) {
+                    const QJsonValue &entry = albums[static_cast<int>(sourceIndex)];
                     const QJsonObject obj = entry.toObject();
                     const QString artist = obj.value(QStringLiteral("artist")).toString();
                     const QString name = obj.value(QStringLiteral("name")).toString();
@@ -715,9 +726,63 @@ void BridgeClient::handleStdoutReady() {
                     labels.push_back(QStringLiteral("%1 - %2 (%3)").arg(artist, name).arg(count));
                     artists.push_back(artist);
                     albumNames.push_back(name);
+
+                    int artistIndex = artistToIndex.value(artist, -1);
+                    if (artistIndex < 0) {
+                        artistIndex = artistOrder.size();
+                        artistToIndex.insert(artist, artistIndex);
+                        artistOrder.push_back(artist);
+                        artistAlbums.push_back(QVariantList{});
+                    }
+
+                    QVariantList trackTitles;
+                    const QJsonValue pathsValue = obj.value(QStringLiteral("paths"));
+                    if (pathsValue.isArray()) {
+                        const QJsonArray paths = pathsValue.toArray();
+                        trackTitles.reserve(paths.size());
+                        for (const QJsonValue &pathValue : paths) {
+                            const QString path = pathValue.toString();
+                            if (path.isEmpty()) {
+                                continue;
+                            }
+                            const QFileInfo info(path);
+                            QString title = info.completeBaseName();
+                            if (title.isEmpty()) {
+                                title = info.fileName();
+                            }
+                            if (!title.isEmpty()) {
+                                trackTitles.push_back(title);
+                            }
+                        }
+                    }
+
+                    QVariantMap albumEntry;
+                    albumEntry.insert(QStringLiteral("name"), name);
+                    albumEntry.insert(QStringLiteral("count"), count);
+                    albumEntry.insert(QStringLiteral("sourceIndex"), static_cast<int>(sourceIndex));
+                    albumEntry.insert(QStringLiteral("tracks"), trackTitles);
+                    artistAlbums[artistIndex].push_back(albumEntry);
+                }
+
+                for (int i = 0; i < artistOrder.size(); ++i) {
+                    const QString &artist = artistOrder[i];
+                    const QVariantList &albumsForArtist = artistAlbums[i];
+                    int artistTrackCount = 0;
+                    for (const QVariant &albumValue : albumsForArtist) {
+                        artistTrackCount += albumValue.toMap().value(QStringLiteral("count")).toInt();
+                    }
+                    QVariantMap artistEntry;
+                    artistEntry.insert(QStringLiteral("artist"), artist);
+                    artistEntry.insert(QStringLiteral("count"), artistTrackCount);
+                    artistEntry.insert(QStringLiteral("albums"), albumsForArtist);
+                    libraryTree.push_back(artistEntry);
                 }
                 if (m_libraryAlbums != labels) {
                     m_libraryAlbums = labels;
+                    changed = true;
+                }
+                if (m_libraryTree != libraryTree) {
+                    m_libraryTree = libraryTree;
                     changed = true;
                 }
                 if (m_libraryAlbumArtists != artists) {

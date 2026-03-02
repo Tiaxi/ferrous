@@ -134,7 +134,7 @@ Acceptance criteria:
 
 ## Milestone D: Library Pane Migration
 
-- [ ] Implement library tree/grouping UI (artist/album/track hierarchy).
+- [x] Implement library tree/grouping UI (artist/album/track hierarchy).
 - [x] Wire search/filter and indexed roots display.
 - [x] Implement album interactions (on current album list view):
   - double-click = replace playlist + play
