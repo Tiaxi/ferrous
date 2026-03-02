@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QMetaObject>
 #include <QMutex>
 #include <QQuickPaintedItem>
 #include <QByteArray>
@@ -10,6 +11,8 @@
 #include <chrono>
 #include <deque>
 #include <vector>
+
+class QQuickWindow;
 
 class SpectrogramItem : public QQuickPaintedItem {
     Q_OBJECT
@@ -61,7 +64,9 @@ private:
     void drawColumnAt(int x, const std::vector<quint8> &col);
     void appendColumnAndRender(std::vector<quint8> &&col);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
-    void updateFpsEstimate();
+    void bindWindowFpsTracking(QQuickWindow *window);
+    void handleWindowFrameSwapped();
+    void updateFpsEstimateLocked();
     void drawFpsOverlay(QPainter *painter) const;
 
     double m_dbRange{90.0};
@@ -83,5 +88,6 @@ private:
     int m_fpsAccumFrames{0};
     double m_fpsAccumSeconds{0.0};
     std::chrono::steady_clock::time_point m_lastFrameTime{};
+    QMetaObject::Connection m_frameSwapConnection;
     mutable QMutex m_stateMutex;
 };

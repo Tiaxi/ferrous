@@ -7,7 +7,6 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QProcess>
-#include <QMetaObject>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -107,9 +106,6 @@ private:
     void handleAnalysisSocketReady();
     void scheduleSnapshotChanged();
     void startBridgeProcess();
-    void setupDisplayRefreshTracking();
-    void updateTargetVisualFpsFromScreen();
-    void sendTargetVisualFps();
     void sendJson(const QJsonObject &obj);
     void sendCommand(const QString &cmd, double value = -1.0);
     void handleStdoutReady();
@@ -168,6 +164,4 @@ private:
     bool m_hasAnalysisFrameSeq{false};
     quint32 m_lastAnalysisFrameSeq{0};
     quint64 m_analysisDroppedFrames{0};
-    QMetaObject::Connection m_screenRefreshConnection;
-    double m_targetVisualFps{0.0};
 };

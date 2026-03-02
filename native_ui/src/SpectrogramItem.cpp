@@ -2,6 +2,7 @@
 
 #include <QMutexLocker>
 #include <QPainter>
+#include <QQuickWindow>
 #include <QString>
 
 #include <algorithm>
@@ -49,6 +50,8 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     setAntialiasing(false);
     setOpaquePainting(true);
     rebuildPalette();
+    connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
+    bindWindowFpsTracking(window());
 }
 
 double SpectrogramItem::dbRange() const {
@@ -232,7 +235,6 @@ void SpectrogramItem::paint(QPainter *painter) {
         }
     }
 
-    updateFpsEstimate();
     drawFpsOverlay(painter);
 }
 
@@ -496,7 +498,41 @@ std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) con
     return out;
 }
 
-void SpectrogramItem::updateFpsEstimate() {
+void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
+    if (m_frameSwapConnection) {
+        disconnect(m_frameSwapConnection);
+        m_frameSwapConnection = QMetaObject::Connection{};
+    }
+    QMutexLocker lock(&m_stateMutex);
+    m_fpsInitialized = false;
+    m_fpsValue = 0;
+    m_fpsAccumFrames = 0;
+    m_fpsAccumSeconds = 0.0;
+    lock.unlock();
+
+    if (window == nullptr) {
+        return;
+    }
+    m_frameSwapConnection = connect(
+        window,
+        &QQuickWindow::frameSwapped,
+        this,
+        &SpectrogramItem::handleWindowFrameSwapped,
+        Qt::QueuedConnection);
+}
+
+void SpectrogramItem::handleWindowFrameSwapped() {
+    QMutexLocker lock(&m_stateMutex);
+    const int prev = m_fpsValue;
+    updateFpsEstimateLocked();
+    const bool changed = m_fpsValue != prev;
+    lock.unlock();
+    if (changed) {
+        update();
+    }
+}
+
+void SpectrogramItem::updateFpsEstimateLocked() {
     using Clock = std::chrono::steady_clock;
     const auto now = Clock::now();
     if (!m_fpsInitialized) {

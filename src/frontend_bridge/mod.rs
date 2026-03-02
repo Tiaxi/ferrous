@@ -67,7 +67,6 @@ pub enum BridgeLibraryCommand {
 #[derive(Debug, Clone)]
 pub enum BridgeAnalysisCommand {
     SetFftSize(usize),
-    SetTargetVisualFps(f32),
 }
 
 #[derive(Debug, Clone)]
@@ -369,11 +368,6 @@ fn handle_bridge_command(
                 *settings_dirty = true;
                 analysis.command(AnalysisCommand::SetFftSize(fft));
                 true
-            }
-            BridgeAnalysisCommand::SetTargetVisualFps(fps) => {
-                let fps = fps.clamp(24.0, 240.0);
-                analysis.command(AnalysisCommand::SetTargetVisualFps(fps));
-                false
             }
         },
         BridgeCommand::Settings(cmd) => {

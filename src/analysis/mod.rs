@@ -23,7 +23,6 @@ pub enum AnalysisCommand {
     },
     SetSampleRate(u32),
     SetFftSize(usize),
-    SetTargetVisualFps(f32),
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -82,11 +81,7 @@ impl AnalysisEngine {
             let mut waveform_dirty = false;
             let mut last_emit = std::time::Instant::now();
 
-            let mut fft_size = 8192usize;
-            let mut target_visual_fps = 0.0f32;
-            let mut hop_size =
-                compute_spectrogram_hop_size(fft_size, snapshot.sample_rate_hz, target_visual_fps);
-            let mut stft = StftComputer::new(fft_size, hop_size);
+            let mut stft = StftComputer::new(8192, 1024);
             let mut decimator = SpectrogramDecimator::new(1);
             let mut active_track_token = 0u64;
             let mut active_track_path: Option<PathBuf> = None;
@@ -198,22 +193,6 @@ impl AnalysisEngine {
                             AnalysisCommand::SetSampleRate(rate) => {
                                 if rate > 0 {
                                     snapshot.sample_rate_hz = rate;
-                                    let next_hop = compute_spectrogram_hop_size(
-                                        fft_size,
-                                        snapshot.sample_rate_hz,
-                                        target_visual_fps,
-                                    );
-                                    if next_hop != hop_size {
-                                        hop_size = next_hop;
-                                        stft = StftComputer::new(fft_size, hop_size);
-                                        decimator.reset();
-                                        pending_rows.clear();
-                                        snapshot.spectrogram_seq = 0;
-                                        drain_pcm_queue(&pcm_rx);
-                                        pcm_fifo.clear();
-                                        sample_credit = 0.0;
-                                        last_tick_time = std::time::Instant::now();
-                                    }
                                     emit_snapshot(
                                         &event_tx,
                                         &snapshot,
@@ -225,13 +204,9 @@ impl AnalysisEngine {
                                 }
                             }
                             AnalysisCommand::SetFftSize(size) => {
-                                fft_size = size.clamp(512, 8192).next_power_of_two();
-                                hop_size = compute_spectrogram_hop_size(
-                                    fft_size,
-                                    snapshot.sample_rate_hz,
-                                    target_visual_fps,
-                                );
-                                stft = StftComputer::new(fft_size, hop_size);
+                                let fft = size.clamp(512, 8192).next_power_of_two();
+                                let hop = (fft / 8).max(64);
+                                stft = StftComputer::new(fft, hop);
                                 decimator.reset();
                                 pending_rows.clear();
                                 snapshot.spectrogram_seq = 0;
@@ -247,37 +222,6 @@ impl AnalysisEngine {
                                     &mut last_emit,
                                     true,
                                 );
-                            }
-                            AnalysisCommand::SetTargetVisualFps(fps) => {
-                                let clamped = fps.clamp(24.0, 240.0);
-                                if (target_visual_fps - clamped).abs() < f32::EPSILON {
-                                    continue;
-                                }
-                                target_visual_fps = clamped;
-                                let next_hop = compute_spectrogram_hop_size(
-                                    fft_size,
-                                    snapshot.sample_rate_hz,
-                                    target_visual_fps,
-                                );
-                                if next_hop != hop_size {
-                                    hop_size = next_hop;
-                                    stft = StftComputer::new(fft_size, hop_size);
-                                    decimator.reset();
-                                    pending_rows.clear();
-                                    snapshot.spectrogram_seq = 0;
-                                    drain_pcm_queue(&pcm_rx);
-                                    pcm_fifo.clear();
-                                    sample_credit = 0.0;
-                                    last_tick_time = std::time::Instant::now();
-                                    emit_snapshot(
-                                        &event_tx,
-                                        &snapshot,
-                                        &mut pending_rows,
-                                        &mut waveform_dirty,
-                                        &mut last_emit,
-                                        true,
-                                    );
-                                }
                             }
                             AnalysisCommand::WaveformProgress {
                                 track_token,
@@ -452,21 +396,6 @@ impl AnalysisEngine {
 
 fn drain_pcm_queue(pcm_rx: &Receiver<Vec<f32>>) {
     while pcm_rx.try_recv().is_ok() {}
-}
-
-fn compute_spectrogram_hop_size(
-    fft_size: usize,
-    sample_rate_hz: u32,
-    target_visual_fps: f32,
-) -> usize {
-    let fallback = (fft_size / 8).max(64);
-    if target_visual_fps <= 0.0 || !target_visual_fps.is_finite() {
-        return fallback;
-    }
-    let sr = sample_rate_hz.max(1) as f64;
-    let fps = target_visual_fps.clamp(24.0, 240.0) as f64;
-    let desired = (sr / fps).round() as usize;
-    desired.clamp(64, (fft_size / 2).max(64))
 }
 
 fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {

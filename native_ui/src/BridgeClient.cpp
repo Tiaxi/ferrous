@@ -6,7 +6,6 @@
 #include <limits>
 
 #include <QCoreApplication>
-#include <QGuiApplication>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QDir>
@@ -18,7 +17,6 @@
 #include <QHash>
 #include <QMetaObject>
 #include <QSet>
-#include <QScreen>
 #include <QUrl>
 #include <QVector>
 #include <QtEndian>
@@ -108,7 +106,6 @@ BridgeClient::BridgeClient(QObject *parent)
             emit snapshotChanged();
         }
     });
-    setupDisplayRefreshTracking();
     setupAnalysisSocketServer();
     startBridgeProcess();
 }
@@ -633,51 +630,6 @@ void BridgeClient::startBridgeProcess() {
     m_process.start(shell, args);
 }
 
-void BridgeClient::setupDisplayRefreshTracking() {
-    auto bindScreen = [this](QScreen *screen) {
-        if (m_screenRefreshConnection) {
-            disconnect(m_screenRefreshConnection);
-            m_screenRefreshConnection = QMetaObject::Connection{};
-        }
-        if (screen != nullptr) {
-            m_screenRefreshConnection = connect(screen, &QScreen::refreshRateChanged, this, [this]() {
-                updateTargetVisualFpsFromScreen();
-            });
-        }
-        updateTargetVisualFpsFromScreen();
-    };
-
-    connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [bindScreen](QScreen *screen) {
-        bindScreen(screen);
-    });
-    bindScreen(qGuiApp ? qGuiApp->primaryScreen() : nullptr);
-}
-
-void BridgeClient::updateTargetVisualFpsFromScreen() {
-    double fps = 0.0;
-    if (qGuiApp != nullptr) {
-        if (QScreen *screen = qGuiApp->primaryScreen(); screen != nullptr) {
-            fps = screen->refreshRate();
-        }
-    }
-    if (!std::isfinite(fps)) {
-        fps = 0.0;
-    }
-    fps = std::clamp(fps, 24.0, 240.0);
-    if (std::abs(m_targetVisualFps - fps) < 0.5) {
-        return;
-    }
-    m_targetVisualFps = fps;
-    sendTargetVisualFps();
-}
-
-void BridgeClient::sendTargetVisualFps() {
-    if (m_process.state() != QProcess::Running || m_targetVisualFps <= 0.0) {
-        return;
-    }
-    sendCommand(QStringLiteral("set_target_visual_fps"), m_targetVisualFps);
-}
-
 void BridgeClient::sendCommand(const QString &cmd, double value) {
     QJsonObject obj;
     obj.insert(QStringLiteral("cmd"), cmd);
@@ -1160,7 +1112,6 @@ void BridgeClient::handleProcessStarted() {
         m_connected = true;
         emit connectedChanged();
     }
-    sendTargetVisualFps();
     requestSnapshot();
 }
 

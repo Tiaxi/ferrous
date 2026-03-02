@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, unbounded, Sender, TrySendError};
 use ferrous::frontend_bridge::{
-    BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
-    BridgeQueueCommand, BridgeSnapshot, FrontendBridgeHandle,
+    BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
+    BridgeSnapshot, FrontendBridgeHandle,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -522,17 +522,6 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             Some(BridgeCommand::Library(BridgeLibraryCommand::ScanRoot(
                 PathBuf::from(path),
             )))
-        }
-        "set_target_visual_fps" => {
-            let value = parsed.value.ok_or_else(|| {
-                "set_target_visual_fps requires numeric field 'value'".to_string()
-            })?;
-            if !value.is_finite() || value <= 0.0 {
-                return Err("set_target_visual_fps value must be > 0".to_string());
-            }
-            Some(BridgeCommand::Analysis(
-                BridgeAnalysisCommand::SetTargetVisualFps(value as f32),
-            ))
         }
         "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),
         "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
