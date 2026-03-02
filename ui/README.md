@@ -1,13 +1,13 @@
-# Ferrous Native UI (Qt6/QML + Kirigami)
+# Ferrous UI (Qt6/QML + Kirigami)
 
-This directory contains the KDE-native frontend scaffold for Ferrous.
+This directory contains the KDE frontend scaffold for Ferrous.
 
 Default runtime mode uses an in-process Rust backend via C FFI.
 
 ## Build
 
 ```bash
-cd native_ui
+cd ui
 cmake -B build -G Ninja
 cmake --build build
 ```
@@ -17,24 +17,24 @@ cmake --build build
 From repo root:
 
 ```bash
-./scripts/run-native-ui.sh
+./scripts/run-ui.sh
 ```
 
-This script builds Rust artifacts first, then launches the native UI.
+This script builds Rust artifacts first, then launches the UI.
 By default, no bridge subprocess is spawned.
 
 Build-only (no GUI launch):
 
 ```bash
-./scripts/run-native-ui.sh --no-run
+./scripts/run-ui.sh --no-run
 ```
 
 ## Tests
 
 ```bash
-cmake -S native_ui -B native_ui/build
-cmake --build native_ui/build
-ctest --test-dir native_ui/build --output-on-failure
+cmake -S ui -B ui/build
+cmake --build ui/build
+ctest --test-dir ui/build --output-on-failure
 ```
 
 ## Run (process bridge fallback)
@@ -51,7 +51,7 @@ If `FERROUS_BRIDGE_MODE=process` and `FERROUS_BRIDGE_CMD` is not set, the app au
 
 ## Scope (Milestone A)
 
-- Native shell window and menu/footer scaffolding
+- UI shell window and menu/footer scaffolding
 - Top transport controls wired to backend bridge
 - Live bridge status/snapshot display
 - Placeholder panes for playlist/library/spectrogram until later milestones

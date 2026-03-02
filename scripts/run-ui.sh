@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-NATIVE_UI_DIR="${REPO_ROOT}/native_ui"
-BUILD_DIR="${FERROUS_NATIVE_BUILD_DIR:-${NATIVE_UI_DIR}/build}"
+UI_DIR="${REPO_ROOT}/ui"
+BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${FERROUS_NATIVE_BUILD_DIR:-${UI_DIR}/build}}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 DEFAULT_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge'
 DEFAULT_BRIDGE_BIN="${REPO_ROOT}/target/release/native_frontend"
@@ -15,9 +15,22 @@ DO_RUN=1
 FORCE_PROCESS_BRIDGE=0
 APP_ARGS=()
 
+reset_stale_cmake_cache() {
+    local cache_file="${BUILD_DIR}/CMakeCache.txt"
+    local home_dir=""
+
+    if [[ -f "${cache_file}" ]]; then
+        home_dir="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "${cache_file}" | head -n 1)"
+        if [[ -n "${home_dir}" && "${home_dir}" != "${UI_DIR}" ]]; then
+            echo "Resetting stale CMake cache in ${BUILD_DIR} (was configured for ${home_dir})"
+            rm -rf "${BUILD_DIR}/CMakeCache.txt" "${BUILD_DIR}/CMakeFiles"
+        fi
+    fi
+}
+
 usage() {
     cat <<USAGE
-Usage: $(basename "$0") [options] [-- <native-ui-args...>]
+Usage: $(basename "$0") [options] [-- <ui-args...>]
 
 Options:
   --no-configure    Skip cmake configure step
@@ -29,7 +42,8 @@ Options:
 Environment:
   FERROUS_BRIDGE_CMD       Override bridge command (default: ${DEFAULT_BRIDGE_CMD})
   FERROUS_BRIDGE_MODE      Set to 'process' to force legacy process bridge
-  FERROUS_NATIVE_BUILD_DIR Override build dir (default: ${NATIVE_UI_DIR}/build)
+  FERROUS_UI_BUILD_DIR     Override build dir (default: ${UI_DIR}/build)
+  FERROUS_NATIVE_BUILD_DIR Backward-compatible alias for FERROUS_UI_BUILD_DIR
   CMAKE_GENERATOR          Override generator (default: Ninja)
 USAGE
 }
@@ -89,7 +103,8 @@ if [[ "${BRIDGE_MODE}" == "process" ]]; then
 fi
 
 if [[ ${DO_CONFIGURE} -eq 1 ]]; then
-    cmake -S "${NATIVE_UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}"
+    reset_stale_cmake_cache
+    cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}"
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then

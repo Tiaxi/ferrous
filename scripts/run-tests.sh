@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-NATIVE_UI_DIR="${REPO_ROOT}/native_ui"
-BUILD_DIR="${FERROUS_NATIVE_BUILD_DIR:-${NATIVE_UI_DIR}/build}"
+UI_DIR="${REPO_ROOT}/ui"
+BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${FERROUS_NATIVE_BUILD_DIR:-${UI_DIR}/build}}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 
 RUN_RUST=1
@@ -17,6 +17,19 @@ RUN_COVERAGE="${FERROUS_RUN_COVERAGE:-0}"
 COVERAGE_MIN="${FERROUS_COVERAGE_MIN:-35}"
 RUST_FEATURES="${FERROUS_TEST_FEATURES:-gst}"
 
+reset_stale_cmake_cache() {
+    local cache_file="${BUILD_DIR}/CMakeCache.txt"
+    local home_dir=""
+
+    if [[ -f "${cache_file}" ]]; then
+        home_dir="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "${cache_file}" | head -n 1)"
+        if [[ -n "${home_dir}" && "${home_dir}" != "${UI_DIR}" ]]; then
+            echo "Resetting stale CMake cache in ${BUILD_DIR} (was configured for ${home_dir})"
+            rm -rf "${BUILD_DIR}/CMakeCache.txt" "${BUILD_DIR}/CMakeFiles"
+        fi
+    fi
+}
+
 usage() {
     cat <<USAGE
 Usage: $(basename "$0") [options]
@@ -24,10 +37,10 @@ Usage: $(basename "$0") [options]
 Options:
   --rust-only       Run only Rust checks/tests
   --ui-only         Run only UI smoke tests
-  --no-clippy       Skip strict Clippy (`-D clippy::pedantic`)
+  --no-clippy       Skip strict Clippy (-D clippy::pedantic)
   --no-audit        Skip cargo audit
-  --coverage        Run Rust tests via `cargo llvm-cov` with line threshold gate
-  --no-coverage     Skip coverage gate (`cargo llvm-cov`)
+  --coverage        Run Rust tests via cargo llvm-cov with line threshold gate
+  --no-coverage     Skip coverage gate (cargo llvm-cov)
   --no-configure    Skip CMake configure step for UI tests
   --no-build        Skip CMake build step for UI tests
   -h, --help        Show this help
@@ -38,8 +51,10 @@ Environment:
   FERROUS_RUN_AUDIT       Run cargo audit in Rust checks (default: 1)
   FERROUS_RUN_COVERAGE    Run coverage gate via cargo-llvm-cov (default: 0)
   FERROUS_COVERAGE_MIN    Minimum line coverage percent for gate (default: 35)
+  FERROUS_UI_BUILD_DIR
+                          UI build dir (default: ui/build)
   FERROUS_NATIVE_BUILD_DIR
-                          UI build dir (default: native_ui/build)
+                          Backward-compatible alias for FERROUS_UI_BUILD_DIR
   CMAKE_GENERATOR         CMake generator (default: Ninja)
 USAGE
 }
@@ -127,7 +142,8 @@ fi
 
 if [[ ${RUN_UI} -eq 1 ]]; then
     if [[ ${DO_CONFIGURE} -eq 1 ]]; then
-        cmake -S "${NATIVE_UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}"
+        reset_stale_cmake_cache
+        cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}"
     fi
     if [[ ${DO_BUILD} -eq 1 ]]; then
         cmake --build "${BUILD_DIR}"

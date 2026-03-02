@@ -29,7 +29,7 @@ jobs:
           cargo test --features gst
           cargo clippy --features gst -- -D clippy::pedantic
 
-  native-ui:
+  ui:
     name: UI Build + Smoke Tests
     runs-on: ubuntu-latest
     container:
@@ -59,10 +59,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure UI
-        run: cmake -S native_ui -B native_ui/build -G Ninja
+        run: cmake -S ui -B ui/build -G Ninja
 
       - name: Build UI
-        run: cmake --build native_ui/build -j2
+        run: cmake --build ui/build -j2
 
       - name: Run UI smoke tests
-        run: ctest --test-dir native_ui/build --output-on-failure
+        run: ctest --test-dir ui/build --output-on-failure

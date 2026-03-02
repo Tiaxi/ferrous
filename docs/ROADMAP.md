@@ -167,7 +167,7 @@ Acceptance criteria:
 
 - [x] Make Kirigami frontend the default build/run path.
 - [x] Remove or archive egui-specific UI modules after migration sign-off.
-- [x] Update CI to test UI build and backend integration (`.github/workflows/native_frontend_ci.yml`).
+- [x] Update CI to test UI build and backend integration (`.github/workflows/ui_ci.yml`).
 - [x] Write migration notes/changelog for users (`docs/MIGRATION_NOTES.md`).
 
 Acceptance criteria:

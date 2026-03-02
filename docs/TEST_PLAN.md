@@ -54,7 +54,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Bridge fallback path remains loadable.
 - Status:
   - Phase 1 implemented:
-    - `native_ui/tests/tst_qml_smoke.cpp`.
+    - `ui/tests/tst_qml_smoke.cpp`.
 
 ### Layer 4: Integration/Playback Regression Tests (Rust + UI)
 
@@ -85,9 +85,9 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - `cargo audit`
   - `cargo llvm-cov --features gst --workspace --all-targets --summary-only --fail-under-lines <min>`
 - UI smoke tests:
-  - `cmake -S native_ui -B native_ui/build`
-  - `cmake --build native_ui/build`
-  - `ctest --test-dir native_ui/build --output-on-failure`
+  - `cmake -S ui -B ui/build`
+  - `cmake --build ui/build`
+  - `ctest --test-dir ui/build --output-on-failure`
 - One-shot verification script:
   - `./scripts/run-tests.sh`
   - Coverage gate enabled: `./scripts/run-tests.sh --coverage`

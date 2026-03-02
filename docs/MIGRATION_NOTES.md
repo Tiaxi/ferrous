@@ -4,7 +4,7 @@ This document summarizes the current frontend migration state and what changed f
 
 ## Summary
 
-- Primary UI path is now the KDE frontend in `native_ui/` (Qt6/QML + Kirigami).
+- Primary UI path is now the KDE frontend in `ui/` (Qt6/QML + Kirigami).
 - UI uses the in-process Rust FFI bridge by default (single-process runtime path).
 - Legacy process/stdout JSON bridge remains available for fallback/debug use.
 - Legacy egui frontend has been removed from the repository.
@@ -14,7 +14,7 @@ This document summarizes the current frontend migration state and what changed f
 Use the UI launcher script from repository root:
 
 ```bash
-./scripts/run-native-ui.sh
+./scripts/run-ui.sh
 ```
 
 By default this launches:
@@ -37,13 +37,13 @@ No long-lived `native_frontend --json-bridge` subprocess is started in this defa
 Use when debugging transport/fallback behavior:
 
 ```bash
-./scripts/run-native-ui.sh --process-bridge
+./scripts/run-ui.sh --process-bridge
 ```
 
 Equivalent environment override:
 
 ```bash
-FERROUS_BRIDGE_MODE=process ./scripts/run-native-ui.sh
+FERROUS_BRIDGE_MODE=process ./scripts/run-ui.sh
 ```
 
 Optional custom bridge command:
@@ -51,7 +51,7 @@ Optional custom bridge command:
 ```bash
 FERROUS_BRIDGE_MODE=process \
 FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge' \
-./scripts/run-native-ui.sh
+./scripts/run-ui.sh
 ```
 
 ## Legacy Frontend Status
