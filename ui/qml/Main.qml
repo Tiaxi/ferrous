@@ -1013,7 +1013,6 @@ Kirigami.ApplicationWindow {
                     libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
                 }
             }
-            applyAnalysisDelta()
         }
         function onAnalysisChanged() {
             applyAnalysisDelta()

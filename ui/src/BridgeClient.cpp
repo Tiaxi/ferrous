@@ -819,7 +819,7 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                 m_positionText = posText;
                 changed = true;
             }
-            if (!qFuzzyCompare(m_positionSeconds + 1.0, pos + 1.0)) {
+            if (std::abs(m_positionSeconds - pos) >= 0.10) {
                 m_positionSeconds = pos;
                 changed = true;
             }
