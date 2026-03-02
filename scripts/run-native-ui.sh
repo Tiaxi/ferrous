@@ -6,8 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NATIVE_UI_DIR="${REPO_ROOT}/native_ui"
 BUILD_DIR="${FERROUS_NATIVE_BUILD_DIR:-${NATIVE_UI_DIR}/build}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
-DEFAULT_BRIDGE_CMD='cargo run --bin native_frontend --features gst -- --json-bridge'
-DEFAULT_BRIDGE_BIN="${REPO_ROOT}/target/debug/native_frontend"
+DEFAULT_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge'
+DEFAULT_BRIDGE_BIN="${REPO_ROOT}/target/release/native_frontend"
 
 DO_CONFIGURE=1
 DO_BUILD=1
@@ -79,7 +79,7 @@ if [[ ${DO_CONFIGURE} -eq 1 ]]; then
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then
-    cargo build --bin native_frontend --features gst
+    cargo build --release --bin native_frontend --features gst
     cmake --build "${BUILD_DIR}" -j
 fi
 

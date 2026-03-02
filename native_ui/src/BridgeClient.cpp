@@ -459,10 +459,10 @@ void BridgeClient::startBridgeProcess() {
         // Prefer a prebuilt bridge binary for lower overhead and predictable runtime memory.
         const QDir appDir(QCoreApplication::applicationDirPath());
         const QStringList candidates{
-            appDir.absoluteFilePath(QStringLiteral("../../target/debug/native_frontend")),
             appDir.absoluteFilePath(QStringLiteral("../../target/release/native_frontend")),
-            QDir::current().absoluteFilePath(QStringLiteral("target/debug/native_frontend")),
+            appDir.absoluteFilePath(QStringLiteral("../../target/debug/native_frontend")),
             QDir::current().absoluteFilePath(QStringLiteral("target/release/native_frontend")),
+            QDir::current().absoluteFilePath(QStringLiteral("target/debug/native_frontend")),
         };
 
         for (const QString &candidate : candidates) {
@@ -474,7 +474,8 @@ void BridgeClient::startBridgeProcess() {
         }
 
         if (command.isEmpty()) {
-            command = QStringLiteral("cargo run --bin native_frontend --features gst -- --json-bridge");
+            command =
+                QStringLiteral("cargo run --release --bin native_frontend --features gst -- --json-bridge");
         }
     }
 
