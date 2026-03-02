@@ -16,6 +16,7 @@
 #include <QJsonValue>
 #include <QHash>
 #include <QMetaObject>
+#include <QSet>
 #include <QVector>
 #include <QtEndian>
 
@@ -31,36 +32,62 @@ bool isNewerSeq(quint32 seq, quint32 last) {
 }
 
 QString findAlbumCoverPath(const QStringList &trackPaths) {
-    static const QStringList kCoverNames{
-        QStringLiteral("cover.jpg"),
-        QStringLiteral("cover.jpeg"),
-        QStringLiteral("cover.png"),
-        QStringLiteral("folder.jpg"),
-        QStringLiteral("folder.jpeg"),
-        QStringLiteral("folder.png"),
-        QStringLiteral("front.jpg"),
-        QStringLiteral("front.jpeg"),
-        QStringLiteral("front.png"),
-        QStringLiteral("album.jpg"),
-        QStringLiteral("album.jpeg"),
-        QStringLiteral("album.png"),
+    static const QSet<QString> kImageExts{
+        QStringLiteral("jpg"),
+        QStringLiteral("jpeg"),
+        QStringLiteral("png"),
+        QStringLiteral("webp"),
+        QStringLiteral("bmp"),
+    };
+    static const QStringList kPreferredBases{
+        QStringLiteral("cover"),
+        QStringLiteral("folder"),
+        QStringLiteral("front"),
+        QStringLiteral("album"),
+        QStringLiteral("artwork"),
     };
 
+    QString bestPath;
+    int bestScore = std::numeric_limits<int>::max();
+    QSet<QString> scannedDirs;
     for (const QString &trackPath : trackPaths) {
         const QFileInfo trackInfo(trackPath);
         if (!trackInfo.exists()) {
             continue;
         }
         const QDir dir = trackInfo.dir();
-        for (const QString &name : kCoverNames) {
-            const QString candidate = dir.filePath(name);
-            const QFileInfo info(candidate);
-            if (info.exists() && info.isFile()) {
-                return info.absoluteFilePath();
+        const QString dirPath = dir.absolutePath();
+        if (scannedDirs.contains(dirPath)) {
+            continue;
+        }
+        scannedDirs.insert(dirPath);
+
+        const QFileInfoList files = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QFileInfo &info : files) {
+            const QString ext = info.suffix().toLower();
+            if (!kImageExts.contains(ext)) {
+                continue;
+            }
+            const QString base = info.completeBaseName().toLower();
+            int score = 4;
+            for (int i = 0; i < kPreferredBases.size(); ++i) {
+                const QString &preferred = kPreferredBases[i];
+                if (base == preferred) {
+                    score = i;
+                    break;
+                }
+                if (base.startsWith(preferred)) {
+                    score = i + 1;
+                }
+            }
+            if (bestPath.isEmpty() || score < bestScore
+                || (score == bestScore && info.absoluteFilePath() < bestPath)) {
+                bestPath = info.absoluteFilePath();
+                bestScore = score;
             }
         }
     }
-    return {};
+    return bestPath;
 }
 } // namespace
 
@@ -623,7 +650,7 @@ void BridgeClient::handleStdoutReady() {
             const QString nextState = playback.value(QStringLiteral("state")).toString();
             const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
             const double dur = playback.value(QStringLiteral("duration_secs")).toDouble();
-            const double vol = playback.value(QStringLiteral("volume")).toDouble();
+            const double playbackVol = playback.value(QStringLiteral("volume")).toDouble();
             const int qlen = queue.value(QStringLiteral("len")).toInt();
             const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
             const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
@@ -664,8 +691,9 @@ void BridgeClient::handleStdoutReady() {
                 m_durationSeconds = dur;
                 changed = true;
             }
-            if (!qFuzzyCompare(m_volume + 1.0, vol + 1.0)) {
-                m_volume = vol;
+            const double uiVol = settings.value(QStringLiteral("volume")).toDouble(playbackVol);
+            if (!qFuzzyCompare(m_volume + 1.0, uiVol + 1.0)) {
+                m_volume = uiVol;
                 changed = true;
             }
             if (m_queueLength != qlen) {

@@ -582,9 +582,7 @@ Kirigami.ApplicationWindow {
 
                         Image {
                             anchors.fill: parent
-                            source: root.selectedLibraryCoverPath.length > 0
-                                ? ("file://" + root.selectedLibraryCoverPath)
-                                : ""
+                            source: root.selectedLibraryCoverPath
                             fillMode: Image.PreserveAspectFit
                             smooth: true
                             asynchronous: true
@@ -709,9 +707,7 @@ Kirigami.ApplicationWindow {
 
                                             Image {
                                                 anchors.fill: parent
-                                                source: rowData.coverPath && rowData.coverPath.length > 0
-                                                    ? ("file://" + rowData.coverPath)
-                                                    : ""
+                                                source: rowData.coverPath || ""
                                                 fillMode: Image.PreserveAspectFit
                                                 smooth: true
                                                 asynchronous: true
