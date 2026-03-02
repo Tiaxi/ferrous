@@ -608,6 +608,9 @@ Kirigami.ApplicationWindow {
                                             }
                                             if (isAlbumRow) {
                                                 root.selectedLibraryAlbumIndex = sourceIndex
+                                                if (mouse.button === Qt.LeftButton) {
+                                                    root.toggleAlbum(rowData.key)
+                                                }
                                                 if (mouse.button === Qt.RightButton) {
                                                     albumMenu.popup()
                                                 }
@@ -622,22 +625,6 @@ Kirigami.ApplicationWindow {
                                                 uiBridge.replaceAlbumAt(sourceIndex)
                                             } else if (isArtistRow) {
                                                 root.toggleArtist(rowData.artist)
-                                            }
-                                        }
-                                    }
-
-                                    MouseArea {
-                                        visible: isAlbumRow
-                                        anchors.left: parent.left
-                                        anchors.leftMargin: 0
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: 40
-                                        height: parent.height
-                                        acceptedButtons: Qt.LeftButton
-                                        onClicked: function(mouse) {
-                                            if (mouse.button === Qt.LeftButton) {
-                                                root.toggleAlbum(rowData.key)
-                                                mouse.accepted = true
                                             }
                                         }
                                     }
