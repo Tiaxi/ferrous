@@ -103,7 +103,7 @@ pub fn draw_top_panel(
             ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
             ui.spacing_mut().slider_width = 140.0;
             ui.spacing_mut().interact_size.y = 27.0;
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.label("File");
                 ui.label("Edit");
                 ui.label("View");
@@ -504,11 +504,11 @@ pub fn draw_center_panel<S: std::hash::BuildHasher>(
                                                         resp.context_menu(|ui| {
                                                             if ui.button("Play Album (Replace Playlist)").clicked() {
                                                                 replace_with_album = true;
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             if ui.button("Add Album To Playlist").clicked() {
                                                                 append_album = true;
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                         });
                                                     });
@@ -1655,7 +1655,7 @@ fn ensure_spectrogram_texture(
     cache.filled = false;
     cache.last_seq = 0;
 
-    let image = ColorImage::new([width, height], Color32::BLACK);
+    let image = ColorImage::filled([width, height], Color32::BLACK);
     cache.texture = Some(ui.ctx().load_texture(
         "spectrogram_texture",
         image,
@@ -1681,7 +1681,7 @@ fn update_spectrogram_texture(
         cache.filled = false;
         if let Some(tex) = cache.texture.as_mut() {
             tex.set(
-                ColorImage::new([cache.width, cache.height], Color32::BLACK),
+                ColorImage::filled([cache.width, cache.height], Color32::BLACK),
                 TextureOptions::NEAREST,
             );
         }
@@ -1758,10 +1758,7 @@ fn build_column_strip(
         }
     }
 
-    ColorImage {
-        size: [w, height],
-        pixels,
-    }
+    ColorImage::new([w, height], pixels)
 }
 
 fn paint_ring_texture(

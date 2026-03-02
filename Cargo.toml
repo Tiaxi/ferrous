@@ -9,17 +9,17 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 anyhow = "1"
 crossbeam-channel = "0.5"
-eframe = "0.31"
-egui = "0.31"
-gstreamer = { version = "0.23", optional = true }
-gstreamer-app = { version = "0.23", optional = true }
-gstreamer-audio = { version = "0.23", optional = true }
+eframe = "0.33"
+egui = "0.33"
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
+gstreamer-audio = { version = "0.25", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-lofty = "0.22"
+lofty = "0.23"
 parking_lot = "0.12"
 realfft = "3"
-rfd = "0.15"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rfd = "0.17"
+rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.5", default-features = false, features = ["flac", "mp3"] }
