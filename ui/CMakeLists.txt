@@ -22,15 +22,13 @@ qt_policy(SET QTP0004 NEW)
 set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
 
-add_custom_command(
-    OUTPUT "${FERROUS_RUST_STATIC_LIB}"
+add_custom_target(ferrous_rust_bridge ALL
     COMMAND /bin/zsh -lc "if [ -f \"$HOME/.cargo/env\" ]; then source \"$HOME/.cargo/env\"; fi; cargo build --release --features gst --lib"
     WORKING_DIRECTORY "${FERROUS_ROOT_DIR}"
+    BYPRODUCTS "${FERROUS_RUST_STATIC_LIB}"
     COMMENT "Building Rust static library for in-process bridge"
     VERBATIM
 )
-
-add_custom_target(ferrous_rust_bridge ALL DEPENDS "${FERROUS_RUST_STATIC_LIB}")
 
 qt_add_executable(ferrous_kirigami_shell
     src/main.cpp
