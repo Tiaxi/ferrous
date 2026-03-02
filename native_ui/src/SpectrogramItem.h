@@ -3,7 +3,6 @@
 #include <QImage>
 #include <QMutex>
 #include <QQuickPaintedItem>
-#include <QTimer>
 #include <QByteArray>
 #include <QVariantList>
 
@@ -61,7 +60,6 @@ private:
     void shiftCanvasLeft(int columns);
     void drawColumnAt(int x, const std::vector<quint8> &col);
     void appendColumnAndRender(std::vector<quint8> &&col);
-    void noteRowsAppended(int rowCount);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void updateFpsEstimate();
     void drawFpsOverlay(QPainter *painter) const;
@@ -80,10 +78,6 @@ private:
     QImage m_canvas;
     bool m_canvasDirty{true};
     std::deque<std::vector<quint8>> m_columns;
-    bool m_hasRowTiming{false};
-    double m_rowIntervalSec{1.0 / 45.0};
-    std::chrono::steady_clock::time_point m_lastAppendTime{};
-    QTimer m_animationTimer;
     bool m_fpsInitialized{false};
     int m_fpsValue{0};
     int m_fpsAccumFrames{0};
