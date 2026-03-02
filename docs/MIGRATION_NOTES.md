@@ -7,7 +7,7 @@ This document summarizes the current frontend migration state and what changed f
 - Primary UI path is now the native KDE frontend in `native_ui/` (Qt6/QML + Kirigami).
 - Native UI uses the in-process Rust FFI bridge by default (single-process runtime path).
 - Legacy process/stdout JSON bridge remains available for fallback/debug use.
-- Legacy egui frontend remains buildable during cutover.
+- Legacy egui frontend has been removed from the repository.
 
 ## Default Run Path
 
@@ -56,13 +56,7 @@ FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- 
 
 ## Legacy Frontend Status
 
-- Legacy egui frontend is still available via:
-
-```bash
-cargo run --features gst
-```
-
-- It is considered a temporary compatibility path while cleanup/cutover tasks complete.
+- `eframe/egui` frontend modules (`src/main.rs`, `src/app/`, `src/ui/`) have been removed.
 
 ## Notes for Contributors
 

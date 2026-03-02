@@ -25,7 +25,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Phase 2 implemented:
     - `src/analysis/mod.rs` tests for waveform cache roundtrip, peak blob roundtrip, STFT row generation, spectrogram decimation, and snapshot emission gating.
     - `src/library/mod.rs` tests for supported-extension detection, indexed scan behavior, and stale/deleted track cleanup.
-    - `src/app/mod.rs` tests for settings parse/format roundtrip and FFT/db-range/log-scale normalization.
+    - Settings parse/format/normalization coverage retained in bridge/app-facing settings helpers after egui app module removal.
 
 ### Layer 2: FFI Contract Tests (Rust)
 

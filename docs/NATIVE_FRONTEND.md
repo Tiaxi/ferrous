@@ -14,7 +14,6 @@ Build a Kirigami frontend on top of the existing Rust backend (playback, analysi
   - interactive CLI mode
   - JSON bridge mode (`--json-bridge`) for external UI clients.
 - A Kirigami shell exists in `native_ui/` and uses the in-process Rust FFI bridge by default.
-- Existing egui frontend (`src/main.rs`) remains buildable.
 
 ## Engineering Plans
 

@@ -6,7 +6,7 @@ Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`)
 ## Product Direction
 
 - Frontend strategy selected: `Qt6/QML + Kirigami` (KDE-native).
-- Existing `eframe/egui` UI is now considered a legacy frontend during migration.
+- Legacy `eframe/egui` UI has been removed after migration cutover.
 - Rust playback/analysis/library services remain the core backend.
 
 ## Migration Goal
@@ -23,7 +23,7 @@ Ship a Kirigami frontend that reaches current Ferrous behavior parity, then cont
 ## Migration Principles
 
 - Keep business logic in Rust backend; UI layer should stay thin.
-- Avoid feature freeze on backend improvements, but avoid new large egui-only UX work.
+- Avoid feature freeze on backend improvements while keeping UI behavior centralized in native frontend code.
 - Migrate screen-by-screen with runnable checkpoints.
 - Keep one source of truth for queue/playback/library state (no duplicated state machines in QML).
 - Performance target: minimum 60 FPS rendering, and target the active display refresh rate (no hardcoded 120 Hz assumptions).
@@ -102,7 +102,7 @@ Acceptance criteria:
 ## Milestone A: Frontend Foundation (QML/Kirigami bootstrap)
 
 - [x] Select and implement initial Rust↔frontend bridge approach (fallback bridge bootstrap now in place; CXX-Qt binding integration pending).
-- [x] Add new app target/entrypoint for native frontend (keep egui target buildable during migration).
+- [x] Add new app target/entrypoint for native frontend.
 - [x] Define typed bridge API for:
   - playback controls/events
   - queue queries/mutations
@@ -114,7 +114,6 @@ Acceptance criteria:
 
 Acceptance criteria:
 - Kirigami shell launches and can call Rust backend (`Play/Pause/Stop` roundtrip works).
-- Legacy egui build still compiles.
 
 ## Milestone B: Native Main Layout Skeleton
 
@@ -139,7 +138,7 @@ Acceptance criteria:
 - [x] Implement volume control UX in native frontend.
 
 Acceptance criteria:
-- [x] Day-to-day playback can be driven fully from Kirigami UI without egui.
+- [x] Day-to-day playback can be driven fully from Kirigami UI.
 
 ## Milestone D: Library Pane Migration
 
@@ -167,7 +166,7 @@ Acceptance criteria:
 ## Milestone F: Cutover and Cleanup
 
 - [x] Make Kirigami frontend the default build/run path.
-- [ ] Remove or archive egui-specific UI modules after migration sign-off.
+- [x] Remove or archive egui-specific UI modules after migration sign-off.
 - [x] Update CI to test native frontend build and backend integration (`.github/workflows/native_frontend_ci.yml`).
 - [x] Write migration notes/changelog for users (`docs/MIGRATION_NOTES.md`).
 

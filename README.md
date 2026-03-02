@@ -31,7 +31,6 @@ source "$HOME/.cargo/env"
 ```
 
 Install Qt6 + Kirigami/KF6 development/runtime packages for your distro (primary native UI path).
-Install GTK/file-dialog runtime dependencies as needed for the legacy `eframe` frontend.
 
 When enabling real playback with GStreamer later, install:
 
@@ -46,10 +45,10 @@ Primary app run path (Kirigami UI + in-process Rust backend):
 ./scripts/run-native-ui.sh
 ```
 
-Legacy egui frontend (kept buildable during cutover):
+Backend CLI/debug shell:
 
 ```bash
-cargo run --features gst
+cargo run --bin native_frontend --features gst
 ```
 
 Force legacy process bridge mode for debugging:
@@ -99,9 +98,8 @@ Roadmap and engineering plans live under `docs/`:
 ## Project layout
 
 - `native_ui/`: Qt6/QML + Kirigami frontend (primary UI path)
-- `src/main.rs`: legacy egui app entrypoint
-- `src/app/`: app coordinator and event loop wiring
+- `src/bin/native_frontend.rs`: backend CLI/debug entrypoint + JSON bridge fallback
 - `src/playback/`: playback engine command/event model (`gst` + stub backends)
 - `src/analysis/`: waveform/spectrogram worker
 - `src/metadata/`: track metadata + cover art extraction
-- `src/ui/`: legacy `egui` panels and visual rendering
+- `src/frontend_bridge/`: typed bridge orchestration + FFI boundary
