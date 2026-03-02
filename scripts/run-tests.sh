@@ -23,7 +23,7 @@ Usage: $(basename "$0") [options]
 
 Options:
   --rust-only       Run only Rust checks/tests
-  --ui-only         Run only native UI smoke tests
+  --ui-only         Run only UI smoke tests
   --no-clippy       Skip strict Clippy (`-D clippy::pedantic`)
   --no-audit        Skip cargo audit
   --coverage        Run Rust tests via `cargo llvm-cov` with line threshold gate
@@ -39,7 +39,7 @@ Environment:
   FERROUS_RUN_COVERAGE    Run coverage gate via cargo-llvm-cov (default: 0)
   FERROUS_COVERAGE_MIN    Minimum line coverage percent for gate (default: 35)
   FERROUS_NATIVE_BUILD_DIR
-                          Native UI build dir (default: native_ui/build)
+                          UI build dir (default: native_ui/build)
   CMAKE_GENERATOR         CMake generator (default: Ninja)
 USAGE
 }

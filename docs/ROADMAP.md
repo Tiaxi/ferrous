@@ -23,7 +23,7 @@ Ship a Kirigami frontend that reaches current Ferrous behavior parity, then cont
 ## Migration Principles
 
 - Keep business logic in Rust backend; UI layer should stay thin.
-- Avoid feature freeze on backend improvements while keeping UI behavior centralized in native frontend code.
+- Avoid feature freeze on backend improvements while keeping UI behavior centralized in UI code.
 - Migrate screen-by-screen with runnable checkpoints.
 - Keep one source of truth for queue/playback/library state (no duplicated state machines in QML).
 - Performance target: minimum 60 FPS rendering, and target the active display refresh rate (no hardcoded 120 Hz assumptions).
@@ -91,18 +91,18 @@ Acceptance criteria:
 
 ### Phase P3: In-Process Integration (Bridge Replacement)
 
-- [x] Introduce in-process Rust backend integration for native UI (FFI boundary).
+- [x] Introduce in-process Rust backend integration for UI (FFI boundary).
 - [x] Remove stdout JSON process bridge from steady-state runtime for both control and analysis paths.
 - [x] Keep CLI/debug bridge as optional developer fallback tool.
 
 Acceptance criteria:
 - No pipe/stdio backpressure risk in production UI path.
-- Native frontend + Rust backend run as one process with explicit threading model.
+- UI + Rust backend run as one process with explicit threading model.
 
 ## Milestone A: Frontend Foundation (QML/Kirigami bootstrap)
 
 - [x] Select and implement initial Rust↔frontend bridge approach (fallback bridge bootstrap now in place; CXX-Qt binding integration pending).
-- [x] Add new app target/entrypoint for native frontend.
+- [x] Add new app target/entrypoint for UI.
 - [x] Define typed bridge API for:
   - playback controls/events
   - queue queries/mutations
@@ -124,7 +124,7 @@ Acceptance criteria:
   - bottom spectrogram pane
   - footer status line
 - [x] Recreate top control semantics with native KDE look/behavior.
-- [x] Implement centralized action/shortcut map in native shell (`Space`, media controls, etc.).
+- [x] Implement centralized action/shortcut map in UI shell (`Space`, media controls, etc.).
 
 Acceptance criteria:
 - [x] Layout parity exists with placeholder/static content.
@@ -134,8 +134,8 @@ Acceptance criteria:
 
 - [x] Implement native playlist table (header + rows + selection + double-click play).
 - [x] Wire queue reordering, remove, clear, and play-at operations.
-- [x] Implement waveform seekbar in native frontend with current behavior.
-- [x] Implement volume control UX in native frontend.
+- [x] Implement waveform seekbar in UI with current behavior.
+- [x] Implement volume control UX in UI.
 
 Acceptance criteria:
 - [x] Day-to-day playback can be driven fully from Kirigami UI.
@@ -154,7 +154,7 @@ Acceptance criteria:
 
 ## Milestone E: Spectrogram + Analysis View Migration
 
-- [x] Port spectrogram widget rendering path to native frontend.
+- [x] Port spectrogram widget rendering path to UI.
 - [x] Preserve rolling behavior across seek and track transitions.
 - [x] Port dB/log-scale controls and settings persistence.
 - [x] Ensure performance parity with current implementation.
@@ -167,11 +167,11 @@ Acceptance criteria:
 
 - [x] Make Kirigami frontend the default build/run path.
 - [x] Remove or archive egui-specific UI modules after migration sign-off.
-- [x] Update CI to test native frontend build and backend integration (`.github/workflows/native_frontend_ci.yml`).
+- [x] Update CI to test UI build and backend integration (`.github/workflows/native_frontend_ci.yml`).
 - [x] Write migration notes/changelog for users (`docs/MIGRATION_NOTES.md`).
 
 Acceptance criteria:
-- Native frontend is the primary supported UI with no functional regressions vs pre-cutover baseline.
+- UI is the primary supported frontend with no functional regressions vs pre-cutover baseline.
 
 ## Post-Migration Parity/Feature Backlog
 
@@ -203,7 +203,7 @@ Acceptance criteria:
 ### Quality/Performance
 - [x] Add test coverage planning document and phased matrix (`docs/TEST_PLAN.md`).
 - [x] Add optimization planning document and prioritized backlog (`docs/OPTIMIZATION_PLAN.md`).
-- [x] Implement test plan phase 1 (backend/FFI unit tests + native UI smoke test scaffold).
+- [x] Implement test plan phase 1 (backend/FFI unit tests + UI smoke test scaffold).
 - [x] Implement test plan phase 2 (FFI integration tests + initial bridge mode parity test).
 - [x] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior): expanded process-vs-FFI parity coverage for queue transition flows, stop/restart, play-at edge errors, successful seek path invariants, playback-state transitions (`pause`/`play`/`next`/`prev`), and invalid-seek error parity in `src/bin/native_frontend.rs`; added deterministic bridge queue/play-at/seek-clamp/remove integration test, non-`gst` bridge natural-handoff integration test, no-early-metadata-switch handoff timing regression test, seek-event no-early-waveform-switch regression test, track-change metadata-transition regression test, deterministic `gst` natural-handoff gating regressions, playback seek-boundary/natural-handoff regression unit tests, and additional playback/queue branch-coverage unit tests.
 - [x] Add strict lint/security verification steps (`cargo clippy -- -D clippy::pedantic`, `cargo audit`) to regular verification script.

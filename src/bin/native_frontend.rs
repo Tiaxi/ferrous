@@ -59,13 +59,13 @@ fn main() {
 }
 
 fn run_interactive_cli(bridge: FrontendBridgeHandle) {
-    println!("Ferrous native frontend bootstrap");
+    println!("Ferrous UI bootstrap");
     println!(
         "Commands: play, pause, stop, next, prev, vol <0..1>, seek <secs>, dbrange <50..120>, log <0|1>, snap, quit"
     );
 
     loop {
-        print!("native> ");
+        print!("ui> ");
         let _ = io::stdout().flush();
 
         let mut line = String::new();

@@ -1,4 +1,4 @@
-name: Native Frontend CI
+name: UI CI
 
 on: [push, pull_request]
 
@@ -30,7 +30,7 @@ jobs:
           cargo clippy --features gst -- -D clippy::pedantic
 
   native-ui:
-    name: Native UI Build + Smoke Tests
+    name: UI Build + Smoke Tests
     runs-on: ubuntu-latest
     container:
       image: fedora:42
@@ -58,11 +58,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure native UI
+      - name: Configure UI
         run: cmake -S native_ui -B native_ui/build -G Ninja
 
-      - name: Build native UI
+      - name: Build UI
         run: cmake --build native_ui/build -j2
 
-      - name: Run native UI smoke tests
+      - name: Run UI smoke tests
         run: ctest --test-dir native_ui/build --output-on-failure

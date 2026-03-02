@@ -1,6 +1,6 @@
-# Native Frontend Bootstrap (Qt6/QML + Kirigami)
+# UI Bootstrap (Qt6/QML + Kirigami)
 
-This document tracks the KDE-native frontend bootstrap and local build expectations.
+This document tracks the KDE UI bootstrap and local build expectations.
 
 ## Goal
 
@@ -31,7 +31,7 @@ Before wiring Qt/QML bindings, we need:
 ## Current Qt/Kirigami integration path
 
 1. Keep `frontend_bridge` as backend orchestration layer.
-2. Native UI now links Rust backend in-process via C FFI bridge by default.
+2. UI now links Rust backend in-process via C FFI bridge by default.
 3. Keep JSON bridge mode from `native_frontend --json-bridge` as optional fallback/debug path.
 
 ## KDE dev prerequisites (target environment)
@@ -119,5 +119,5 @@ Build-only check:
 
 Notes:
 
-- The native shell now runs against the in-process Rust bridge by default.
+- The UI shell now runs against the in-process Rust bridge by default.
 - Process bridge mode remains available for fallback/debugging only.

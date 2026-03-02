@@ -6,7 +6,7 @@ A high-performance Linux audio player prototype in Rust, inspired by Foobar2000/
 
 This is a runnable architecture scaffold with:
 
-- KDE-native Qt6/QML (Kirigami) frontend (`native_ui/`) as the primary UI path
+- KDE Qt6/QML (Kirigami) frontend (`native_ui/`) as the primary UI path
 - playback worker thread with queue/state/seek commands
 - metadata worker using `lofty` (title/artist/album + embedded cover art extraction)
 - analysis worker with live waveform accumulation + STFT spectrogram
@@ -30,7 +30,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-Install Qt6 + Kirigami/KF6 development/runtime packages for your distro (primary native UI path).
+Install Qt6 + Kirigami/KF6 development/runtime packages for your distro (primary UI path).
 
 When enabling real playback with GStreamer later, install:
 
@@ -57,7 +57,7 @@ Force legacy process bridge mode for debugging:
 ./scripts/run-native-ui.sh --process-bridge
 ```
 
-Run project tests (Rust + native UI smoke test):
+Run project tests (Rust + UI smoke test):
 
 ```bash
 ./scripts/run-tests.sh

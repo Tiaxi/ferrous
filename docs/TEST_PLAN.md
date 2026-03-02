@@ -5,7 +5,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 ## Goals
 
 - Catch behavioral regressions early in backend and bridge code.
-- Add a fast smoke layer for native UI loading and basic runtime integrity.
+- Add a fast smoke layer for UI loading and basic runtime integrity.
 - Establish CI-friendly commands for repeatable verification.
 
 ## Test Matrix
@@ -47,7 +47,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
       - playback state transition sequence (`pause`/`play`/`next`/`prev`) preserving queue/current playback parity
       - invalid seek command error payload parity
 
-### Layer 3: Native UI Smoke Tests (Qt)
+### Layer 3: UI Smoke Tests (Qt)
 
 - Scope:
   - Main QML loads headlessly and instantiates root object.
@@ -84,7 +84,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - `cargo clippy --features gst -- -D clippy::pedantic`
   - `cargo audit`
   - `cargo llvm-cov --features gst --workspace --all-targets --summary-only --fail-under-lines <min>`
-- Native UI smoke tests:
+- UI smoke tests:
   - `cmake -S native_ui -B native_ui/build`
   - `cmake --build native_ui/build`
   - `ctest --test-dir native_ui/build --output-on-failure`
