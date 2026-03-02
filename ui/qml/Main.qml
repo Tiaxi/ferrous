@@ -848,7 +848,11 @@ Kirigami.ApplicationWindow {
                                                 }
                                             }
                                         }
-                                        onDoubleClicked: function() {
+                                        onDoubleClicked: function(mouse) {
+                                            if ((isArtistRow || isAlbumRow)
+                                                    && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
+                                                return
+                                            }
                                             if (isArtistRow) {
                                                 uiBridge.replaceArtistByName(artist)
                                             } else

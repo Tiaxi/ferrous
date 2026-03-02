@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TrySendError};
+use serde_json::json;
 
 use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
 use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot};
@@ -152,6 +153,13 @@ impl BridgeState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SessionSnapshot {
+    queue: Vec<PathBuf>,
+    selected_queue_index: Option<usize>,
+    current_queue_index: Option<usize>,
+}
+
 fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
     TrackMetadata {
         title: metadata.title.clone(),
@@ -228,10 +236,13 @@ fn run_bridge_loop(
     state.playback.volume = state.settings.volume;
     playback.command(PlaybackCommand::SetVolume(state.settings.volume));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+    apply_session_restore(&mut state, &playback, load_session_snapshot().as_ref());
 
     let mut running = true;
     let mut settings_dirty = false;
     let mut last_settings_save = Instant::now();
+    let mut last_session_save = Instant::now();
+    let mut last_saved_session: Option<SessionSnapshot> = None;
     let ticker = tick(Duration::from_millis(16));
     let playing_poll_interval_ms = std::env::var("FERROUS_PLAYBACK_POLL_MS")
         .ok()
@@ -356,9 +367,19 @@ fn run_bridge_loop(
             settings_dirty = false;
             last_settings_save = Instant::now();
         }
+
+        if last_session_save.elapsed() >= Duration::from_secs(2) {
+            let session = session_snapshot_for_state(&state);
+            if last_saved_session.as_ref() != Some(&session) {
+                save_session_snapshot(&session);
+                last_saved_session = Some(session);
+            }
+            last_session_save = Instant::now();
+        }
     }
 
     save_settings(&state.settings);
+    save_session_snapshot(&session_snapshot_for_state(&state));
     let _ = try_send_event(&event_tx, BridgeEvent::Stopped);
 }
 
@@ -916,15 +937,113 @@ fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeSt
     changed
 }
 
-fn settings_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+fn config_base_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .map(|h| h.join(".config"))
-        })?;
-    Some(base.join("ferrous").join("settings.txt"))
+        })
+        .map(|base| base.join("ferrous"))
+}
+
+fn settings_path() -> Option<PathBuf> {
+    config_base_path().map(|base| base.join("settings.txt"))
+}
+
+fn session_path() -> Option<PathBuf> {
+    config_base_path().map(|base| base.join("session.json"))
+}
+
+fn session_snapshot_for_state(state: &BridgeState) -> SessionSnapshot {
+    let current_queue_index = state
+        .playback
+        .current
+        .as_ref()
+        .and_then(|current| state.queue.iter().position(|path| path == current));
+    SessionSnapshot {
+        queue: state.queue.clone(),
+        selected_queue_index: state.selected_queue_index,
+        current_queue_index,
+    }
+}
+
+fn apply_session_restore(
+    state: &mut BridgeState,
+    playback: &PlaybackEngine,
+    session: Option<&SessionSnapshot>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    state.queue = session.queue.clone();
+    state.selected_queue_index = session
+        .selected_queue_index
+        .filter(|idx| *idx < state.queue.len());
+    if state.queue.is_empty() {
+        return;
+    }
+    playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+    if let Some(idx) = session
+        .current_queue_index
+        .filter(|idx| *idx < state.queue.len())
+    {
+        state.playback.current = state.queue.get(idx).cloned();
+        playback.command(PlaybackCommand::PlayAt(idx));
+    }
+}
+
+fn load_session_snapshot() -> Option<SessionSnapshot> {
+    let path = session_path()?;
+    let text = fs::read_to_string(path).ok()?;
+    parse_session_text(&text)
+}
+
+fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let queue_values = value.get("queue")?.as_array()?;
+    let queue = queue_values
+        .iter()
+        .filter_map(|v| v.as_str().map(PathBuf::from))
+        .collect::<Vec<_>>();
+    let selected_queue_index = value
+        .get("selected_queue_index")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let current_queue_index = value
+        .get("current_queue_index")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    Some(SessionSnapshot {
+        queue,
+        selected_queue_index,
+        current_queue_index,
+    })
+}
+
+fn format_session_text(session: &SessionSnapshot) -> String {
+    let payload = json!({
+        "queue": session
+            .queue
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+        "selected_queue_index": session.selected_queue_index,
+        "current_queue_index": session.current_queue_index,
+    });
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn save_session_snapshot(session: &SessionSnapshot) {
+    let Some(path) = session_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let text = format_session_text(session);
+    let _ = fs::write(path, text);
 }
 
 fn load_settings_into(settings: &mut BridgeSettings) {
@@ -1044,6 +1163,24 @@ mod tests {
         assert_eq!(settings.db_range, 120.0);
         assert!(!settings.log_scale);
         assert!(settings.show_fps);
+    }
+
+    #[test]
+    fn session_roundtrip_text_format() {
+        let session = SessionSnapshot {
+            queue: vec![p("/a.flac"), p("/b.flac")],
+            selected_queue_index: Some(1),
+            current_queue_index: Some(0),
+        };
+        let text = format_session_text(&session);
+        let parsed = parse_session_text(&text).expect("parse session text");
+        assert_eq!(parsed, session);
+    }
+
+    #[test]
+    fn session_parse_rejects_missing_queue_array() {
+        let parsed = parse_session_text(r#"{"selected_queue_index":1}"#);
+        assert!(parsed.is_none());
     }
 
     #[test]

@@ -190,7 +190,7 @@ Acceptance criteria:
 - [ ] Add optional crossfade and buffer tuning controls.
 
 ### Library/Metadata
-- [ ] Add persistent playlist/session restore.
+- [x] Add persistent playlist/session restore.
 - [ ] Add incremental library updates via filesystem watcher.
 - [ ] Add configurable library roots/config dialog parity.
 - [ ] Add richer sort/group/filter modes and extended metadata fields.
