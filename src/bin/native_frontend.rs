@@ -354,7 +354,11 @@ fn leading_track_number(input: &str) -> Option<u32> {
             break;
         }
     }
-    if saw_digit { Some(n) } else { None }
+    if saw_digit {
+        Some(n)
+    } else {
+        None
+    }
 }
 
 fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
@@ -480,9 +484,9 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             ))
         }
         "replace_artist_by_key" => {
-            let artist = parsed
-                .artist
-                .ok_or_else(|| "replace_artist_by_key requires string field 'artist'".to_string())?;
+            let artist = parsed.artist.ok_or_else(|| {
+                "replace_artist_by_key requires string field 'artist'".to_string()
+            })?;
             Some(BridgeCommand::Library(
                 BridgeLibraryCommand::ReplaceArtistByKey { artist },
             ))
@@ -627,7 +631,8 @@ fn encode_snapshot_payload(
         albums_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
     emit_state.last_library_digest = Some(library_digest);
     let library_albums = if should_emit_albums {
-        let mut grouped: BTreeMap<(String, String), Vec<(u8, u32, String, String)>> = BTreeMap::new();
+        let mut grouped: BTreeMap<(String, String), Vec<(u8, u32, String, String)>> =
+            BTreeMap::new();
         for track in &s.library.tracks {
             let album = if track.album.trim().is_empty() {
                 String::from("Unknown Album")
@@ -648,13 +653,12 @@ fn encode_snapshot_payload(
             } else {
                 track.title.clone()
             };
-            let fallback_number = leading_track_number(title.trim_start())
-                .or_else(|| {
-                    track
-                        .path
-                        .file_stem()
-                        .and_then(|s| leading_track_number(&s.to_string_lossy()))
-                });
+            let fallback_number = leading_track_number(title.trim_start()).or_else(|| {
+                track
+                    .path
+                    .file_stem()
+                    .and_then(|s| leading_track_number(&s.to_string_lossy()))
+            });
             let rank = if track.track_no.is_some() {
                 0
             } else if fallback_number.is_some() {
@@ -664,22 +668,26 @@ fn encode_snapshot_payload(
             };
             let sort_number = track.track_no.or(fallback_number).unwrap_or(u32::MAX);
             let path_string = track.path.to_string_lossy().to_string();
-            grouped
-                .entry((artist, album))
-                .or_default()
-                .push((rank, sort_number, title, path_string));
+            grouped.entry((artist, album)).or_default().push((
+                rank,
+                sort_number,
+                title,
+                path_string,
+            ));
         }
         serde_json::Value::Array(
             grouped
                 .into_iter()
                 .map(|((artist, album), mut tracks)| {
-                    tracks.sort_by(|(a_rank, a_no, a_title, a_path), (b_rank, b_no, b_title, b_path)| {
-                        a_rank
-                            .cmp(b_rank)
-                            .then_with(|| a_no.cmp(b_no))
-                            .then_with(|| a_path.cmp(b_path))
-                            .then_with(|| a_title.cmp(b_title))
-                    });
+                    tracks.sort_by(
+                        |(a_rank, a_no, a_title, a_path), (b_rank, b_no, b_title, b_path)| {
+                            a_rank
+                                .cmp(b_rank)
+                                .then_with(|| a_no.cmp(b_no))
+                                .then_with(|| a_path.cmp(b_path))
+                                .then_with(|| a_title.cmp(b_title))
+                        },
+                    );
                     let count = tracks.len();
                     let track_items: Vec<serde_json::Value> = tracks
                         .into_iter()
@@ -825,17 +833,13 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut JsonEmitState) ->
     let spectrogram_delta =
         spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
     let spectrogram_rows_u8 = if spectrogram_delta > 0 && !s.analysis.spectrogram_rows.is_empty() {
-        let tail = spectrogram_delta
-            .min(s.analysis.spectrogram_rows.len())
-            .min(12);
+        let tail = spectrogram_delta.min(s.analysis.spectrogram_rows.len());
         let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
         s.analysis.spectrogram_rows[start..]
             .iter()
             .map(|row| {
-                let reduced = downsample_spectrogram_row(row, 1024);
-                reduced
-                    .into_iter()
-                    .map(|v| to_u8_spectrum(v, s.settings.db_range))
+                row.iter()
+                    .map(|v| to_u8_spectrum(*v, s.settings.db_range))
                     .collect::<Vec<u8>>()
             })
             .collect()
@@ -997,28 +1001,6 @@ fn spawn_json_writer(profile_enabled: bool, dropped_counter: Arc<AtomicUsize>) -
         }
     });
     tx
-}
-
-fn downsample_spectrogram_row(row: &[f32], max_bins: usize) -> Vec<f32> {
-    if row.len() <= max_bins || max_bins == 0 {
-        return row.to_vec();
-    }
-    let mut out = Vec::with_capacity(max_bins);
-    for i in 0..max_bins {
-        let start = i * row.len() / max_bins;
-        let mut end = (i + 1) * row.len() / max_bins;
-        if end <= start {
-            end = (start + 1).min(row.len());
-        }
-        let mut peak = 0.0f32;
-        for &v in &row[start..end] {
-            if v > peak {
-                peak = v;
-            }
-        }
-        out.push(peak);
-    }
-    out
 }
 
 fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {

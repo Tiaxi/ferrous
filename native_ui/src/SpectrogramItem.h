@@ -49,6 +49,8 @@ protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
 
 private:
+    static constexpr int kGradientTableSize = 2048;
+
     void rebuildPalette();
     void invalidateMapping();
     void ensureMapping(int height);
@@ -66,10 +68,10 @@ private:
     int m_maxColumns{640};
     int m_binsPerColumn{0};
 
-    std::array<std::array<quint8, 3>, 256> m_palette{};
-    std::array<QRgb, 256> m_palette32{};
-    std::vector<int> m_yToBin;
-    int m_yToBinHeight{-1};
+    std::array<QRgb, kGradientTableSize> m_palette32{};
+    std::vector<int> m_iToBin;
+    int m_mappingHeight{-1};
+    int m_lowResEnd{0};
 
     QImage m_canvas;
     bool m_canvasDirty{true};

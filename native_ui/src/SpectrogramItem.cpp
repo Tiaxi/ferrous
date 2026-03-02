@@ -9,32 +9,37 @@
 #include <cstring>
 
 namespace {
-std::array<quint8, 3> ddbColor(double norm) {
-    static const std::array<std::array<int, 3>, 7> kColors{{
-        {{255, 255, 255}},
-        {{255, 255, 255}},
-        {{255, 247, 0}},
-        {{242, 54, 0}},
-        {{176, 0, 91}},
-        {{48, 0, 115}},
-        {{4, 1, 71}},
-    }};
+constexpr double kMinFreqHz = 25.0;
+constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
+    {{65535, 65535, 65535}},
+    {{65535, 65535, 65535}},
+    {{65535, 63479, 0}},
+    {{62194, 13878, 0}},
+    {{45232, 0, 23387}},
+    {{12336, 0, 29555}},
+    {{1027, 256, 18247}},
+}};
 
-    const double clamped = std::clamp(norm, 0.0, 1.0);
-    const double pos = (1.0 - clamped) * static_cast<double>(kColors.size() - 1);
-    const int i0 = static_cast<int>(std::floor(pos));
-    const int i1 = std::min<int>(kColors.size() - 1, i0 + 1);
-    const double t = pos - static_cast<double>(i0);
+double linearInterpolate(double y1, double y2, double mu) {
+    return y1 * (1.0 - mu) + y2 * mu;
+}
 
-    std::array<quint8, 3> out{};
-    for (int c = 0; c < 3; ++c) {
-        const double v = static_cast<double>(kColors[static_cast<size_t>(i0)][static_cast<size_t>(c)])
-            + (static_cast<double>(kColors[static_cast<size_t>(i1)][static_cast<size_t>(c)])
-               - static_cast<double>(kColors[static_cast<size_t>(i0)][static_cast<size_t>(c)]))
-                * t;
-        out[static_cast<size_t>(c)] = static_cast<quint8>(std::clamp<int>(static_cast<int>(std::lround(v)), 0, 255));
+quint8 spectrogramGetValue(const std::vector<quint8> &row, int start, int end) {
+    if (row.empty()) {
+        return 0;
     }
-    return out;
+    const int last = static_cast<int>(row.size()) - 1;
+    const int endClamped = std::clamp(end, 0, last);
+    const int startClamped = std::clamp(start, 0, endClamped);
+    if (startClamped >= endClamped) {
+        return row[static_cast<size_t>(endClamped)];
+    }
+
+    quint8 value = 0;
+    for (int i = startClamped; i < endClamped; ++i) {
+        value = std::max(value, row[static_cast<size_t>(i)]);
+    }
+    return value;
 }
 } // namespace
 
@@ -241,16 +246,39 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
 }
 
 void SpectrogramItem::rebuildPalette() {
-    for (int i = 0; i < 256; ++i) {
-        m_palette[static_cast<size_t>(i)] = ddbColor(static_cast<double>(i) / 255.0);
-        const auto &rgb = m_palette[static_cast<size_t>(i)];
-        m_palette32[static_cast<size_t>(i)] = qRgb(rgb[0], rgb[1], rgb[2]);
+    constexpr double scale = 255.0 / 65535.0;
+    constexpr int numSegments = static_cast<int>(kGradientColors16.size()) - 1;
+    for (int i = 0; i < kGradientTableSize; ++i) {
+        const double position = static_cast<double>(i) / static_cast<double>(kGradientTableSize);
+        const double m = static_cast<double>(numSegments) * position;
+        const int n = std::clamp(static_cast<int>(std::floor(m)), 0, numSegments);
+        const double f = std::clamp(m - static_cast<double>(n), 0.0, 1.0);
+        const int n1 = std::min(numSegments, n + 1);
+
+        const int r = static_cast<int>(
+            (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][0]) * scale)
+            + f * ((static_cast<double>(kGradientColors16[static_cast<size_t>(n1)][0]) * scale)
+                   - (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][0]) * scale)));
+        const int g = static_cast<int>(
+            (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][1]) * scale)
+            + f * ((static_cast<double>(kGradientColors16[static_cast<size_t>(n1)][1]) * scale)
+                   - (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][1]) * scale)));
+        const int b = static_cast<int>(
+            (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][2]) * scale)
+            + f * ((static_cast<double>(kGradientColors16[static_cast<size_t>(n1)][2]) * scale)
+                   - (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][2]) * scale)));
+
+        m_palette32[static_cast<size_t>(i)] = qRgb(
+            std::clamp(r, 0, 255),
+            std::clamp(g, 0, 255),
+            std::clamp(b, 0, 255));
     }
 }
 
 void SpectrogramItem::invalidateMapping() {
-    m_yToBin.clear();
-    m_yToBinHeight = -1;
+    m_iToBin.clear();
+    m_mappingHeight = -1;
+    m_lowResEnd = 0;
 }
 
 void SpectrogramItem::invalidateCanvas() {
@@ -262,33 +290,34 @@ void SpectrogramItem::ensureMapping(int height) {
     if (height <= 0 || m_binsPerColumn <= 0) {
         return;
     }
-    if (m_yToBinHeight == height && static_cast<int>(m_yToBin.size()) == height) {
+    if (m_mappingHeight == height && static_cast<int>(m_iToBin.size()) == height) {
         return;
     }
 
-    m_yToBin.resize(static_cast<size_t>(height));
+    m_iToBin.resize(static_cast<size_t>(height));
+    m_lowResEnd = 0;
     if (m_logScale) {
-        const double minFreq = 25.0;
-        const double nyquist = std::max(0.5 * static_cast<double>(m_sampleRateHz), minFreq * 1.1);
-        const double logStep = (std::log2(nyquist) - std::log2(minFreq)) / std::max(1, height);
+        const double nyquist = std::max(0.5 * static_cast<double>(m_sampleRateHz), kMinFreqHz * 1.1);
+        const double logStep = (std::log2(nyquist) - std::log2(kMinFreqHz)) / std::max(1, height);
         const double freqRes = std::max(1.0, static_cast<double>(m_sampleRateHz)
                                                / (2.0 * std::max(1, m_binsPerColumn - 1)));
-        for (int y = 0; y < height; ++y) {
-            const int i = height - 1 - y;
-            const double freq = std::pow(2.0, static_cast<double>(i) * logStep + std::log2(minFreq));
-            const int bin = static_cast<int>(std::lround(freq / freqRes));
-            m_yToBin[static_cast<size_t>(y)] = std::clamp(bin, 0, m_binsPerColumn - 1);
+        for (int i = 0; i < height; ++i) {
+            const double freq = std::pow(2.0, static_cast<double>(i) * logStep + std::log2(kMinFreqHz));
+            const int bin = std::clamp(static_cast<int>(std::lround(freq / freqRes)), 0, m_binsPerColumn - 1);
+            m_iToBin[static_cast<size_t>(i)] = bin;
+            if (i > 0 && m_iToBin[static_cast<size_t>(i - 1)] == bin) {
+                m_lowResEnd = i;
+            }
         }
     } else {
-        for (int y = 0; y < height; ++y) {
-            const int i = height - 1 - y;
+        for (int i = 0; i < height; ++i) {
             const int bin = static_cast<int>(std::floor((static_cast<double>(i) / std::max(1, height - 1))
                                                         * static_cast<double>(m_binsPerColumn - 1)));
-            m_yToBin[static_cast<size_t>(y)] = std::clamp(bin, 0, m_binsPerColumn - 1);
+            m_iToBin[static_cast<size_t>(i)] = std::clamp(bin, 0, m_binsPerColumn - 1);
         }
     }
 
-    m_yToBinHeight = height;
+    m_mappingHeight = height;
 }
 
 void SpectrogramItem::ensureCanvas(int width, int height) {
@@ -353,12 +382,74 @@ void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
         return;
     }
 
-    const int maxBin = std::max(0, m_binsPerColumn - 1);
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int bin = std::clamp(m_yToBin[static_cast<size_t>(y)], 0, maxBin);
-        const quint8 idx = col[static_cast<size_t>(bin)];
+    const int height = m_canvas.height();
+    const int srcBins = std::max(1, m_binsPerColumn);
+    const int maxBin = srcBins - 1;
+    const int ratio = std::clamp(
+        static_cast<int>(std::lround(static_cast<double>(srcBins) / static_cast<double>(std::max(1, height)))),
+        0,
+        1023);
+
+    for (int y = 0; y < height; ++y) {
+        const int i = height - 1 - y;
+
+        int bin0 = 0;
+        int bin1 = 0;
+        int bin2 = 0;
+        if (m_logScale && static_cast<int>(m_iToBin.size()) == height) {
+            bin0 = m_iToBin[static_cast<size_t>(std::clamp(i - 1, 0, height - 1))];
+            bin1 = m_iToBin[static_cast<size_t>(i)];
+            bin2 = m_iToBin[static_cast<size_t>(std::clamp(i + 1, 0, height - 1))];
+        } else {
+            bin0 = (i - 1) * ratio;
+            bin1 = i * ratio;
+            bin2 = (i + 1) * ratio;
+        }
+
+        int index0 = bin0 + static_cast<int>(std::lround(static_cast<double>(bin1 - bin0) / 2.0));
+        if (index0 == bin0) {
+            index0 = bin1;
+        }
+        int index1 = bin1 + static_cast<int>(std::lround(static_cast<double>(bin2 - bin1) / 2.0));
+        if (index1 == bin2) {
+            index1 = bin1;
+        }
+        index0 = std::clamp(index0, 0, maxBin);
+        index1 = std::clamp(index1, 0, maxBin);
+
+        double intensity = static_cast<double>(spectrogramGetValue(col, index0, index1));
+
+        if (m_logScale && static_cast<int>(m_iToBin.size()) == height && i <= m_lowResEnd) {
+            const int target = m_iToBin[static_cast<size_t>(i)];
+            int j = 0;
+            while (i + j < height && m_iToBin[static_cast<size_t>(i + j)] == target) {
+                ++j;
+            }
+
+            const int nextI = std::min(i + j, height - 1);
+            const int nextBin = std::clamp(m_iToBin[static_cast<size_t>(nextI)], 0, maxBin);
+            const double v0 = intensity;
+            const double v1 = static_cast<double>(col[static_cast<size_t>(nextBin)]);
+
+            int k = 0;
+            int span = j;
+            while (i + k >= 0 && m_iToBin[static_cast<size_t>(i + k)] == target) {
+                ++span;
+                --k;
+            }
+
+            if (span > 1) {
+                const double mu = (1.0 / static_cast<double>(span - 1))
+                    * static_cast<double>((-k) - 1);
+                intensity = linearInterpolate(v0, v1, std::clamp(mu, 0.0, 1.0));
+            }
+        }
+
+        int paletteIndex = kGradientTableSize
+            - static_cast<int>(std::lround((static_cast<double>(kGradientTableSize) / 255.0) * intensity));
+        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
         auto *line = reinterpret_cast<QRgb *>(m_canvas.scanLine(y));
-        line[x] = m_palette32[static_cast<size_t>(idx)];
+        line[x] = m_palette32[static_cast<size_t>(paletteIndex)];
     }
 }
 
