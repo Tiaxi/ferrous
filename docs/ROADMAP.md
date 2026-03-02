@@ -215,6 +215,7 @@ Acceptance criteria:
 - [x] Add integration tests for queue transitions, gapless handoff, seek behavior (including deterministic `gst`-path natural-handoff gating regression coverage).
 - [x] Add regression tests for no early next-track waveform/metadata switch (waveform side-effects on seek + metadata transition timing during handoff).
 - [ ] Add DB migration/versioning strategy.
+- [ ] Plan and execute Rust edition upgrade to `2024` (`cargo fix --edition`, follow-up cleanup, full verification). Deferred; not on current critical path.
 - [ ] Add profiling/telemetry for decode/analyze/render timing.
 
 ## Working Rules
