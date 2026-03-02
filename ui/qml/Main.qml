@@ -55,6 +55,7 @@ Kirigami.ApplicationWindow {
         property int libraryTrackCount: 0
         property bool connected: false
         signal snapshotChanged()
+        signal analysisChanged()
         signal bridgeError(string message)
         function play() {}
         function pause() {}
@@ -985,6 +986,15 @@ Kirigami.ApplicationWindow {
 
     Connections {
         target: uiBridge
+        function applyAnalysisDelta() {
+            if (uiBridge.spectrogramReset && root.visualFeedsEnabled) {
+                spectrogramItem.reset()
+            }
+            const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
+            if (root.visualFeedsEnabled && delta.rows > 0 && delta.bins > 0) {
+                spectrogramItem.appendPackedRows(delta.data, delta.rows, delta.bins)
+            }
+        }
         function onSnapshotChanged() {
             if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
                 const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
@@ -1003,13 +1013,10 @@ Kirigami.ApplicationWindow {
                     libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
                 }
             }
-            if (uiBridge.spectrogramReset && root.visualFeedsEnabled) {
-                spectrogramItem.reset()
-            }
-            const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
-            if (root.visualFeedsEnabled && delta.rows > 0 && delta.bins > 0) {
-                spectrogramItem.appendPackedRows(delta.data, delta.rows, delta.bins)
-            }
+            applyAnalysisDelta()
+        }
+        function onAnalysisChanged() {
+            applyAnalysisDelta()
         }
         function onBridgeError(message) {
             if (message.indexOf("[analysis]") !== -1

@@ -29,9 +29,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY snapshotChanged)
-    Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY snapshotChanged)
-    Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY snapshotChanged)
-    Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY snapshotChanged)
+    Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
+    Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY analysisChanged)
+    Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
@@ -100,6 +100,7 @@ public:
 
 signals:
     void snapshotChanged();
+    void analysisChanged();
     void connectedChanged();
     void bridgeError(const QString &message);
 
@@ -113,6 +114,7 @@ private:
     bool processBridgeJsonObject(const QJsonObject &root);
     void processAnalysisBytes(const QByteArray &chunk);
     void scheduleSnapshotChanged();
+    void scheduleAnalysisChanged();
     void startBridgeProcess();
     void sendJson(const QJsonObject &obj);
     void sendCommand(const QString &cmd, double value = -1.0);
@@ -160,12 +162,14 @@ private:
     bool m_useInProcessBridge{false};
     bool m_stdoutPumpScheduled{false};
     bool m_snapshotChangedPending{false};
+    bool m_analysisChangedPending{false};
     bool m_pendingSeek{false};
     double m_pendingSeekTargetSeconds{0.0};
     qint64 m_pendingSeekUntilMs{0};
     int m_pendingQueueSelection{-1};
     qint64 m_pendingQueueSelectionUntilMs{0};
     QTimer m_snapshotNotifyTimer;
+    QTimer m_analysisNotifyTimer;
     QByteArray m_stderrBuffer;
     QLocalServer m_analysisServer;
     QLocalSocket *m_analysisSocket{nullptr};

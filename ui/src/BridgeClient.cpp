@@ -117,6 +117,14 @@ BridgeClient::BridgeClient(QObject *parent)
             emit snapshotChanged();
         }
     });
+    m_analysisNotifyTimer.setSingleShot(true);
+    m_analysisNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_ANALYSIS_NOTIFY_MS", 16));
+    connect(&m_analysisNotifyTimer, &QTimer::timeout, this, [this]() {
+        if (m_analysisChangedPending) {
+            m_analysisChangedPending = false;
+            emit analysisChanged();
+        }
+    });
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
@@ -132,6 +140,7 @@ BridgeClient::BridgeClient(QObject *parent)
 
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
+    m_analysisNotifyTimer.stop();
     if (m_ffiBridge != nullptr) {
         ferrous_ffi_bridge_destroy(m_ffiBridge);
         m_ffiBridge = nullptr;
@@ -692,7 +701,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
     }
 
     if (changed) {
-        scheduleSnapshotChanged();
+        scheduleAnalysisChanged();
     }
 }
 
@@ -700,6 +709,13 @@ void BridgeClient::scheduleSnapshotChanged() {
     m_snapshotChangedPending = true;
     if (!m_snapshotNotifyTimer.isActive()) {
         m_snapshotNotifyTimer.start();
+    }
+}
+
+void BridgeClient::scheduleAnalysisChanged() {
+    m_analysisChangedPending = true;
+    if (!m_analysisNotifyTimer.isActive()) {
+        m_analysisNotifyTimer.start();
     }
 }
 
@@ -782,6 +798,7 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
 
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         bool changed = false;
+        bool analysisOnlyChanged = false;
         if (m_playbackState != nextState) {
             m_playbackState = nextState;
             changed = true;
@@ -895,7 +912,7 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
             if (m_spectrogramReset != spectrogramReset) {
                 m_spectrogramReset = spectrogramReset;
-                changed = true;
+                analysisOnlyChanged = true;
             }
             const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
             if (spectrogramRowsValue.isArray()) {
@@ -935,12 +952,12 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                         m_spectrogramRowsPacked.remove(0, dropBytes);
                         m_spectrogramPackedRows = kMaxPendingSpectrogramRows;
                     }
-                    changed = true;
+                    analysisOnlyChanged = true;
                 }
             }
             if (m_sampleRateHz != sampleRate) {
                 m_sampleRateHz = sampleRate;
-                changed = true;
+                analysisOnlyChanged = true;
             }
         }
         const double dbRange = settings.value(QStringLiteral("db_range")).toDouble(m_dbRange);
@@ -1144,9 +1161,12 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                 }
                 if (m_waveformPeaksPacked != peaks) {
                     m_waveformPeaksPacked = peaks;
-                    changed = true;
+                    analysisOnlyChanged = true;
                 }
             }
+        }
+        if (analysisOnlyChanged) {
+            scheduleAnalysisChanged();
         }
         return changed;
     }
