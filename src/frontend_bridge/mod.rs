@@ -208,16 +208,16 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
                 match msg {
                     Ok(cmd) => {
                         let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
-                        let changed = handle_bridge_command(
-                            cmd,
-                            &mut state,
-                            &playback,
-                            &analysis,
-                            &library,
-                            &event_tx,
-                            &mut running,
-                            &mut settings_dirty,
-                        );
+                        let mut command_context = BridgeCommandContext {
+                            playback: &playback,
+                            analysis: &analysis,
+                            library: &library,
+                            event_tx: &event_tx,
+                            running: &mut running,
+                            settings_dirty: &mut settings_dirty,
+                        };
+                        let changed =
+                            handle_bridge_command(cmd, &mut state, &mut command_context);
                         if changed {
                             snapshot_dirty = true;
                         }
@@ -326,48 +326,59 @@ fn current_rss_kb() -> usize {
     0
 }
 
-#[allow(clippy::too_many_arguments)]
+struct BridgeCommandContext<'a> {
+    playback: &'a PlaybackEngine,
+    analysis: &'a AnalysisEngine,
+    library: &'a LibraryService,
+    event_tx: &'a Sender<BridgeEvent>,
+    running: &'a mut bool,
+    settings_dirty: &'a mut bool,
+}
+
 fn handle_bridge_command(
     cmd: BridgeCommand,
     state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    analysis: &AnalysisEngine,
-    library: &LibraryService,
-    event_tx: &Sender<BridgeEvent>,
-    running: &mut bool,
-    settings_dirty: &mut bool,
+    context: &mut BridgeCommandContext<'_>,
 ) -> bool {
     match cmd {
         BridgeCommand::RequestSnapshot => true,
         BridgeCommand::Shutdown => {
-            *running = false;
+            *context.running = false;
             false
         }
         BridgeCommand::Playback(cmd) => {
             match cmd {
-                BridgePlaybackCommand::Play => playback.command(PlaybackCommand::Play),
-                BridgePlaybackCommand::Pause => playback.command(PlaybackCommand::Pause),
-                BridgePlaybackCommand::Stop => playback.command(PlaybackCommand::Stop),
-                BridgePlaybackCommand::Next => playback.command(PlaybackCommand::Next),
-                BridgePlaybackCommand::Previous => playback.command(PlaybackCommand::Previous),
-                BridgePlaybackCommand::Seek(pos) => playback.command(PlaybackCommand::Seek(pos)),
+                BridgePlaybackCommand::Play => context.playback.command(PlaybackCommand::Play),
+                BridgePlaybackCommand::Pause => context.playback.command(PlaybackCommand::Pause),
+                BridgePlaybackCommand::Stop => context.playback.command(PlaybackCommand::Stop),
+                BridgePlaybackCommand::Next => context.playback.command(PlaybackCommand::Next),
+                BridgePlaybackCommand::Previous => {
+                    context.playback.command(PlaybackCommand::Previous)
+                }
+                BridgePlaybackCommand::Seek(pos) => {
+                    context.playback.command(PlaybackCommand::Seek(pos))
+                }
                 BridgePlaybackCommand::SetVolume(v) => {
                     let v = v.clamp(0.0, 1.0);
-                    playback.command(PlaybackCommand::SetVolume(v));
+                    context.playback.command(PlaybackCommand::SetVolume(v));
                     state.settings.volume = v;
-                    *settings_dirty = true;
+                    *context.settings_dirty = true;
                 }
             }
             false
         }
-        BridgeCommand::Queue(cmd) => handle_queue_command(cmd, state, playback, event_tx),
-        BridgeCommand::Library(cmd) => handle_library_command(cmd, state, playback, library),
+        BridgeCommand::Queue(cmd) => {
+            handle_queue_command(cmd, state, context.playback, context.event_tx)
+        }
+        BridgeCommand::Library(cmd) => {
+            handle_library_command(cmd, state, context.playback, context.library)
+        }
         BridgeCommand::Analysis(cmd) => match cmd {
             BridgeAnalysisCommand::SetFftSize(size) => {
                 let fft = size.clamp(512, 8192).next_power_of_two();
                 state.settings.fft_size = fft;
-                *settings_dirty = true;
-                analysis.command(AnalysisCommand::SetFftSize(fft));
+                *context.settings_dirty = true;
+                context.analysis.command(AnalysisCommand::SetFftSize(fft));
                 true
             }
         },
@@ -375,32 +386,36 @@ fn handle_bridge_command(
             match cmd {
                 BridgeSettingsCommand::LoadFromDisk => {
                     load_settings_into(&mut state.settings);
-                    playback.command(PlaybackCommand::SetVolume(state.settings.volume));
-                    analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+                    context
+                        .playback
+                        .command(PlaybackCommand::SetVolume(state.settings.volume));
+                    context
+                        .analysis
+                        .command(AnalysisCommand::SetFftSize(state.settings.fft_size));
                 }
                 BridgeSettingsCommand::SaveToDisk => {
                     save_settings(&state.settings);
-                    *settings_dirty = false;
+                    *context.settings_dirty = false;
                 }
                 BridgeSettingsCommand::SetVolume(v) => {
                     let v = v.clamp(0.0, 1.0);
                     state.settings.volume = v;
-                    playback.command(PlaybackCommand::SetVolume(v));
-                    *settings_dirty = true;
+                    context.playback.command(PlaybackCommand::SetVolume(v));
+                    *context.settings_dirty = true;
                 }
                 BridgeSettingsCommand::SetFftSize(size) => {
                     let fft = size.clamp(512, 8192).next_power_of_two();
                     state.settings.fft_size = fft;
-                    analysis.command(AnalysisCommand::SetFftSize(fft));
-                    *settings_dirty = true;
+                    context.analysis.command(AnalysisCommand::SetFftSize(fft));
+                    *context.settings_dirty = true;
                 }
                 BridgeSettingsCommand::SetDbRange(v) => {
                     state.settings.db_range = v.clamp(50.0, 120.0);
-                    *settings_dirty = true;
+                    *context.settings_dirty = true;
                 }
                 BridgeSettingsCommand::SetLogScale(v) => {
                     state.settings.log_scale = v;
-                    *settings_dirty = true;
+                    *context.settings_dirty = true;
                 }
             }
             true
