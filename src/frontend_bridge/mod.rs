@@ -782,8 +782,10 @@ fn pump_playback_events(
         };
         match event {
             PlaybackEvent::Snapshot(snapshot) => {
-                state.playback = snapshot;
-                changed = true;
+                if state.playback != snapshot {
+                    state.playback = snapshot;
+                    changed = true;
+                }
             }
             PlaybackEvent::TrackChanged { path, kind } => {
                 state.analysis.waveform_peaks.clear();

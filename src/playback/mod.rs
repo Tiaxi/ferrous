@@ -13,7 +13,7 @@ pub enum PlaybackState {
     Paused,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
     pub position: Duration,
@@ -747,11 +747,13 @@ mod backend {
                     if (*target_volume - *applied_volume).abs() > f64::EPSILON {
                         *startup_gain_ramp = true;
                     }
+                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                 }
             }
             PlaybackCommand::Pause => {
                 if playbin.set_state(gst::State::Paused).is_ok() {
                     snapshot.state = PlaybackState::Paused;
+                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                 }
             }
             PlaybackCommand::Stop => {
@@ -761,6 +763,7 @@ mod backend {
                     *seek_hold = None;
                     snapshot.state = PlaybackState::Stopped;
                     snapshot.position = Duration::ZERO;
+                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                 }
             }
             PlaybackCommand::Seek(pos) => {
@@ -781,6 +784,7 @@ mod backend {
                 let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
             }
             PlaybackCommand::Poll => {
+                let mut snapshot_changed = false;
                 let delta = *target_volume - *applied_volume;
                 if delta.abs() > f64::EPSILON
                     && (snapshot.state == PlaybackState::Playing || *startup_gain_ramp)
@@ -798,27 +802,46 @@ mod backend {
                         *applied_volume += delta.signum() * step;
                     }
                     playbin.set_property("volume", *applied_volume);
-                    snapshot.volume = *applied_volume as f32;
+                    let volume = *applied_volume as f32;
+                    if (snapshot.volume - volume).abs() > f32::EPSILON {
+                        snapshot.volume = volume;
+                        snapshot_changed = true;
+                    }
                 }
                 let mut position_locked = false;
                 if let Some((until, target)) = seek_hold.as_ref().copied() {
                     if Instant::now() < until {
-                        snapshot.position = target;
+                        if snapshot.position != target {
+                            snapshot.position = target;
+                            snapshot_changed = true;
+                        }
                         position_locked = true;
                     } else {
                         *seek_hold = None;
                     }
                 }
-                if !position_locked {
+                if !position_locked && snapshot.state != PlaybackState::Stopped {
                     if let Some(pos) = playbin.query_position::<gst::ClockTime>() {
-                        snapshot.position = Duration::from_nanos(pos.nseconds());
+                        let next_pos = Duration::from_nanos(pos.nseconds());
+                        if snapshot.position != next_pos {
+                            snapshot.position = next_pos;
+                            snapshot_changed = true;
+                        }
                     }
                 }
-                if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
-                    snapshot.duration = Duration::from_nanos(dur.nseconds());
+                if snapshot.state != PlaybackState::Stopped || snapshot.duration == Duration::ZERO {
+                    if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
+                        let next_dur = Duration::from_nanos(dur.nseconds());
+                        if snapshot.duration != next_dur {
+                            snapshot.duration = next_dur;
+                            snapshot_changed = true;
+                        }
+                    }
                 }
-                let _ = maybe_emit_natural_handoff(queue_state, snapshot, event_tx);
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+                snapshot_changed |= maybe_emit_natural_handoff(queue_state, snapshot, event_tx);
+                if snapshot_changed {
+                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+                }
             }
         }
     }
