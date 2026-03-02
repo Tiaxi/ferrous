@@ -92,6 +92,7 @@ cargo install cargo-llvm-cov
 Roadmap and engineering plans live under `docs/`:
 
 - `docs/ROADMAP.md`
+- `docs/MIGRATION_NOTES.md`
 - `docs/TEST_PLAN.md`
 - `docs/OPTIMIZATION_PLAN.md`
 
