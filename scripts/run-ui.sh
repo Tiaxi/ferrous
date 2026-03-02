@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 UI_DIR="${REPO_ROOT}/ui"
 BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${FERROUS_NATIVE_BUILD_DIR:-${UI_DIR}/build}}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
+BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 DEFAULT_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge'
 DEFAULT_BRIDGE_BIN="${REPO_ROOT}/target/release/native_frontend"
 
@@ -44,6 +45,7 @@ Environment:
   FERROUS_BRIDGE_MODE      Set to 'process' to force legacy process bridge
   FERROUS_UI_BUILD_DIR     Override build dir (default: ${UI_DIR}/build)
   FERROUS_NATIVE_BUILD_DIR Backward-compatible alias for FERROUS_UI_BUILD_DIR
+  CMAKE_BUILD_TYPE         Build type for single-config generators (default: RelWithDebInfo)
   CMAKE_GENERATOR          Override generator (default: Ninja)
 USAGE
 }
@@ -104,7 +106,7 @@ fi
 
 if [[ ${DO_CONFIGURE} -eq 1 ]]; then
     reset_stale_cmake_cache
-    cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}"
+    cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then
