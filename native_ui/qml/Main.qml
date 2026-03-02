@@ -615,6 +615,7 @@ Kirigami.ApplicationWindow {
                                 }
 
                                 delegate: Rectangle {
+                                    id: libraryRow
                                     readonly property var rowData: modelData
                                     readonly property bool isArtistRow: rowData.rowType === "artist"
                                     readonly property bool isAlbumRow: rowData.rowType === "album"
@@ -675,7 +676,7 @@ Kirigami.ApplicationWindow {
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                                         onPressed: function(mouse) {
-                                            suppressClickAfterExpanderPress = false
+                                            libraryRow.suppressClickAfterExpanderPress = false
                                             if (mouse.button !== Qt.LeftButton) {
                                                 return
                                             }
@@ -685,13 +686,13 @@ Kirigami.ApplicationWindow {
                                                 } else {
                                                     root.toggleAlbum(rowData.key)
                                                 }
-                                                suppressClickAfterExpanderPress = true
+                                                libraryRow.suppressClickAfterExpanderPress = true
                                                 mouse.accepted = true
                                             }
                                         }
                                         onClicked: function(mouse) {
-                                            if (suppressClickAfterExpanderPress) {
-                                                suppressClickAfterExpanderPress = false
+                                            if (libraryRow.suppressClickAfterExpanderPress) {
+                                                libraryRow.suppressClickAfterExpanderPress = false
                                                 return
                                             }
                                             root.selectedLibrarySelectionKey = rowData.selectionKey || ""
