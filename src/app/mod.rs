@@ -252,7 +252,7 @@ fn format_app_settings_text(state: &AppState) -> String {
         state.playback.volume,
         state.spectro_ui.fft_size,
         state.spectro_ui.db_range,
-        if state.spectro_ui.log_scale { 1 } else { 0 },
+        i32::from(state.spectro_ui.log_scale),
     )
 }
 
@@ -411,14 +411,12 @@ impl eframe::App for FerrousApp {
                 queue_move_to: Some((from, to)),
                 ..
             } => {
-                if from != to {
-                    if from < self.state.queue.len() && to < self.state.queue.len() {
-                        let item = self.state.queue.remove(from);
-                        self.state.queue.insert(to, item);
-                        let tracks = self.state.queue.clone();
-                        self.state.selected_queue_index = Some(to);
-                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
-                    }
+                if from != to && from < self.state.queue.len() && to < self.state.queue.len() {
+                    let item = self.state.queue.remove(from);
+                    self.state.queue.insert(to, item);
+                    let tracks = self.state.queue.clone();
+                    self.state.selected_queue_index = Some(to);
+                    self.playback.command(PlaybackCommand::LoadQueue(tracks));
                 }
             }
             CenterPanelAction {
@@ -426,13 +424,11 @@ impl eframe::App for FerrousApp {
                 ..
             } => {
                 if let Some(sel) = self.state.selected_queue_index {
-                    if sel > 0 {
-                        if sel < self.state.queue.len() {
-                            self.state.queue.swap(sel - 1, sel);
-                            let tracks = self.state.queue.clone();
-                            self.state.selected_queue_index = Some(sel - 1);
-                            self.playback.command(PlaybackCommand::LoadQueue(tracks));
-                        }
+                    if sel > 0 && sel < self.state.queue.len() {
+                        self.state.queue.swap(sel - 1, sel);
+                        let tracks = self.state.queue.clone();
+                        self.state.selected_queue_index = Some(sel - 1);
+                        self.playback.command(PlaybackCommand::LoadQueue(tracks));
                     }
                 }
             }

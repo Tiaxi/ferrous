@@ -1075,12 +1075,9 @@ fn ensure_album_thumb_texture_id(
         return None;
     }
 
-    let tagged = match lofty::read_from_path(track_path) {
-        Ok(v) => v,
-        Err(_) => {
-            cache.missing.insert(key);
-            return None;
-        }
+    let Ok(tagged) = lofty::read_from_path(track_path) else {
+        cache.missing.insert(key);
+        return None;
     };
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
         cache.missing.insert(key);
@@ -1144,10 +1141,10 @@ fn load_album_thumb_from_folder(
                 continue;
             };
             let ext = ext.to_ascii_lowercase();
-            if ext == "jpg" || ext == "jpeg" || ext == "png" {
-                if !candidates.iter().any(|c| c == &p) {
-                    candidates.push(p);
-                }
+            if (ext == "jpg" || ext == "jpeg" || ext == "png")
+                && !candidates.iter().any(|c| c == &p)
+            {
+                candidates.push(p);
             }
         }
     }

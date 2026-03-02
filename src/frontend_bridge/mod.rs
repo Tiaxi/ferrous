@@ -887,7 +887,7 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.volume,
         settings.fft_size,
         settings.db_range,
-        if settings.log_scale { 1 } else { 0 },
+        i32::from(settings.log_scale),
     )
 }
 

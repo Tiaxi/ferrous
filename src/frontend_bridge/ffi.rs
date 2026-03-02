@@ -536,10 +536,7 @@ fn encode_snapshot_payload(
             .last()
             .map(|t| t.path.to_string_lossy().to_string()),
     };
-    let albums_changed = emit_state
-        .last_library_digest
-        .as_ref()
-        .map_or(true, |d| d != &library_digest);
+    let albums_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
     let should_emit_albums =
         albums_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
     emit_state.last_library_digest = Some(library_digest);
@@ -629,10 +626,7 @@ fn encode_snapshot_payload(
         first: s.queue.first().map(|p| p.to_string_lossy().to_string()),
         last: s.queue.last().map(|p| p.to_string_lossy().to_string()),
     };
-    let queue_changed = emit_state
-        .last_queue_digest
-        .as_ref()
-        .map_or(true, |d| d != &queue_digest);
+    let queue_changed = emit_state.last_queue_digest.as_ref() != Some(&queue_digest);
     let queue_tracks = if queue_changed {
         emit_state.last_queue_digest = Some(queue_digest);
         serde_json::Value::Array(

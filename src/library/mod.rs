@@ -245,9 +245,8 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
             continue;
         }
 
-        let metadata = match fs::metadata(path) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(metadata) = fs::metadata(path) else {
+            continue;
         };
         let size_bytes = metadata.len() as i64;
         let mtime_ns = metadata
@@ -259,11 +258,10 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
         let path_string = path.to_string_lossy().to_string();
         seen_paths.insert(path_string.clone());
 
-        let needs_update = existing
-            .get(&path_string)
-            .map_or(true, |(old_mtime, old_size)| {
-                *old_mtime != mtime_ns || *old_size != size_bytes
-            });
+        let needs_update = match existing.get(&path_string) {
+            Some((old_mtime, old_size)) => *old_mtime != mtime_ns || *old_size != size_bytes,
+            None => true,
+        };
 
         if needs_update {
             let indexed = read_track_info(path);

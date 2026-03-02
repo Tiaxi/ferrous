@@ -663,10 +663,7 @@ mod backend {
                 if snapshot.state == PlaybackState::Playing {
                     if let Ok(state) = queue_state.lock() {
                         if let Some(current_path) = state.current() {
-                            let path_changed = snapshot
-                                .current
-                                .as_ref()
-                                .map_or(true, |p| p != &current_path);
+                            let path_changed = snapshot.current.as_ref() != Some(&current_path);
                             let at_track_start = snapshot.position <= Duration::from_secs(2);
                             if path_changed && at_track_start {
                                 snapshot.current = Some(current_path.clone());

@@ -115,10 +115,10 @@ fn load_folder_cover_art(track_path: &PathBuf) -> Option<(usize, usize, Vec<u8>)
                 continue;
             };
             let ext = ext.to_ascii_lowercase();
-            if ext == "jpg" || ext == "jpeg" || ext == "png" {
-                if !candidates.iter().any(|c| c == &p) {
-                    candidates.push(p);
-                }
+            if (ext == "jpg" || ext == "jpeg" || ext == "png")
+                && !candidates.iter().any(|c| c == &p)
+            {
+                candidates.push(p);
             }
         }
     }
