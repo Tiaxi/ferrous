@@ -103,10 +103,11 @@ impl FerrousApp {
                     // New track: clear old precomputed waveform until new one arrives.
                     self.state.analysis.waveform_peaks.clear();
                     self.metadata.request(path.clone());
-                    self.analysis.command(crate::analysis::AnalysisCommand::SetTrack {
-                        path,
-                        reset_spectrogram: true,
-                    });
+                    self.analysis
+                        .command(crate::analysis::AnalysisCommand::SetTrack {
+                            path,
+                            reset_spectrogram: true,
+                        });
                 }
                 PlaybackEvent::Seeked => {
                     // Keep existing spectrogram history visible across seeks.

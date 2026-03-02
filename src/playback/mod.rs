@@ -47,7 +47,10 @@ pub enum TrackChangeKind {
 #[derive(Debug, Clone)]
 pub enum PlaybackEvent {
     Snapshot(PlaybackSnapshot),
-    TrackChanged { path: PathBuf, kind: TrackChangeKind },
+    TrackChanged {
+        path: PathBuf,
+        kind: TrackChangeKind,
+    },
     Seeked,
 }
 
