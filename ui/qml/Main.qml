@@ -1748,6 +1748,7 @@ Kirigami.ApplicationWindow {
         }
 
         Rectangle {
+            z: 20
             anchors.top: parent.top
             anchors.right: parent.right
             anchors.margins: 12
@@ -1766,6 +1767,7 @@ Kirigami.ApplicationWindow {
 
         Item {
             id: albumArtViewport
+            z: 1
             anchors.fill: parent
             anchors.margins: 20
             clip: true
@@ -1787,25 +1789,6 @@ Kirigami.ApplicationWindow {
                     smooth: true
                     asynchronous: true
                     cache: true
-                }
-            }
-
-            WheelHandler {
-                target: null
-                onWheel: function(event) {
-                    const oldZoom = root.albumArtZoom
-                    const delta = event.angleDelta.y > 0 ? 1.1 : 0.9
-                    const nextZoom = Math.max(1.0, Math.min(6.0, oldZoom * delta))
-                    if (Math.abs(nextZoom - oldZoom) < 0.0001) {
-                        return
-                    }
-                    const pivotX = event.x - albumArtViewport.width / 2
-                    const pivotY = event.y - albumArtViewport.height / 2
-                    const ratio = nextZoom / oldZoom
-                    root.albumArtZoom = nextZoom
-                    root.albumArtPanX = (root.albumArtPanX + pivotX) * ratio - pivotX
-                    root.albumArtPanY = (root.albumArtPanY + pivotY) * ratio - pivotY
-                    albumArtViewer.clampPan()
                 }
             }
 
@@ -1848,6 +1831,23 @@ Kirigami.ApplicationWindow {
                         root.albumArtZoom = 2.0
                         albumArtViewer.clampPan()
                     }
+                }
+                onWheel: function(wheel) {
+                    const oldZoom = root.albumArtZoom
+                    const delta = wheel.angleDelta.y > 0 ? 1.1 : 0.9
+                    const nextZoom = Math.max(1.0, Math.min(6.0, oldZoom * delta))
+                    if (Math.abs(nextZoom - oldZoom) < 0.0001) {
+                        wheel.accepted = true
+                        return
+                    }
+                    const pivotX = wheel.x - albumArtViewport.width / 2
+                    const pivotY = wheel.y - albumArtViewport.height / 2
+                    const ratio = nextZoom / oldZoom
+                    root.albumArtZoom = nextZoom
+                    root.albumArtPanX = (root.albumArtPanX + pivotX) * ratio - pivotX
+                    root.albumArtPanY = (root.albumArtPanY + pivotY) * ratio - pivotY
+                    albumArtViewer.clampPan()
+                    wheel.accepted = true
                 }
             }
         }
