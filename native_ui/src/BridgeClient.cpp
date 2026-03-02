@@ -736,22 +736,34 @@ void BridgeClient::handleStdoutReady() {
                     }
 
                     QVariantList trackTitles;
-                    const QJsonValue pathsValue = obj.value(QStringLiteral("paths"));
-                    if (pathsValue.isArray()) {
-                        const QJsonArray paths = pathsValue.toArray();
-                        trackTitles.reserve(paths.size());
-                        for (const QJsonValue &pathValue : paths) {
-                            const QString path = pathValue.toString();
-                            if (path.isEmpty()) {
-                                continue;
-                            }
-                            const QFileInfo info(path);
-                            QString title = info.completeBaseName();
-                            if (title.isEmpty()) {
-                                title = info.fileName();
-                            }
+                    const QJsonValue tracksValue = obj.value(QStringLiteral("tracks"));
+                    if (tracksValue.isArray()) {
+                        const QJsonArray tracks = tracksValue.toArray();
+                        trackTitles.reserve(tracks.size());
+                        for (const QJsonValue &titleValue : tracks) {
+                            const QString title = titleValue.toString();
                             if (!title.isEmpty()) {
                                 trackTitles.push_back(title);
+                            }
+                        }
+                    } else {
+                        const QJsonValue pathsValue = obj.value(QStringLiteral("paths"));
+                        if (pathsValue.isArray()) {
+                            const QJsonArray paths = pathsValue.toArray();
+                            trackTitles.reserve(paths.size());
+                            for (const QJsonValue &pathValue : paths) {
+                                const QString path = pathValue.toString();
+                                if (path.isEmpty()) {
+                                    continue;
+                                }
+                                const QFileInfo info(path);
+                                QString title = info.completeBaseName();
+                                if (title.isEmpty()) {
+                                    title = info.fileName();
+                                }
+                                if (!title.isEmpty()) {
+                                    trackTitles.push_back(title);
+                                }
                             }
                         }
                     }

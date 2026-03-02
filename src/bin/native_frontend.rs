@@ -581,7 +581,7 @@ fn encode_snapshot_payload(
         albums_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
     emit_state.last_library_digest = Some(library_digest);
     let library_albums = if should_emit_albums {
-        let mut grouped: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut grouped: BTreeMap<(String, String), Vec<(Option<u32>, String)>> = BTreeMap::new();
         for track in &s.library.tracks {
             let album = if track.album.trim().is_empty() {
                 String::from("Unknown Album")
@@ -593,16 +593,37 @@ fn encode_snapshot_payload(
             } else {
                 track.artist.clone()
             };
-            *grouped.entry((artist, album)).or_insert(0) += 1;
+            let title = if track.title.trim().is_empty() {
+                track
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| track.path.to_string_lossy().to_string())
+            } else {
+                track.title.clone()
+            };
+            grouped
+                .entry((artist, album))
+                .or_default()
+                .push((track.track_no, title));
         }
         serde_json::Value::Array(
             grouped
                 .into_iter()
-                .map(|((artist, album), count)| {
+                .map(|((artist, album), mut tracks)| {
+                    tracks.sort_by(|(a_no, a_title), (b_no, b_title)| {
+                        let a_key = a_no.unwrap_or(u32::MAX);
+                        let b_key = b_no.unwrap_or(u32::MAX);
+                        a_key.cmp(&b_key).then_with(|| a_title.cmp(b_title))
+                    });
+                    let count = tracks.len();
+                    let track_titles: Vec<String> =
+                        tracks.into_iter().map(|(_, title)| title).collect();
                     json!({
                         "artist": artist,
                         "name": album,
                         "count": count,
+                        "tracks": track_titles,
                     })
                 })
                 .collect(),

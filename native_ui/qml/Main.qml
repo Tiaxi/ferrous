@@ -573,11 +573,13 @@ Kirigami.ApplicationWindow {
                                         }
 
                                         Label {
-                                            Layout.preferredWidth: 14
+                                            id: expanderIcon
+                                            Layout.preferredWidth: 20
                                             horizontalAlignment: Text.AlignHCenter
                                             text: (isArtistRow || isAlbumRow)
                                                 ? (rowData.expanded ? "▾" : "▸")
                                                 : ""
+                                            font.pixelSize: 16
                                             color: ((isAlbumRow || isTrackRow) && sourceIndex === root.selectedLibraryAlbumIndex)
                                                 ? Kirigami.Theme.highlightedTextColor
                                                 : Kirigami.Theme.disabledTextColor
@@ -602,15 +604,8 @@ Kirigami.ApplicationWindow {
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                                         onClicked: function(mouse) {
-                                            if (isArtistRow) {
-                                                root.toggleArtist(rowData.artist)
-                                                return
-                                            }
                                             if (isAlbumRow) {
                                                 root.selectedLibraryAlbumIndex = sourceIndex
-                                                if (mouse.button === Qt.LeftButton) {
-                                                    root.toggleAlbum(rowData.key)
-                                                }
                                                 if (mouse.button === Qt.RightButton) {
                                                     albumMenu.popup()
                                                 }
@@ -623,9 +618,27 @@ Kirigami.ApplicationWindow {
                                                 uiBridge.replaceAlbumAt(sourceIndex)
                                             } else if (isTrackRow && sourceIndex >= 0) {
                                                 uiBridge.replaceAlbumAt(sourceIndex)
-                                            } else if (isArtistRow) {
-                                                root.toggleArtist(rowData.artist)
                                             }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        visible: isArtistRow || isAlbumRow
+                                        anchors.left: parent.left
+                                        anchors.top: parent.top
+                                        anchors.bottom: parent.bottom
+                                        width: isArtistRow ? 26 : 42
+                                        acceptedButtons: Qt.LeftButton
+                                        onClicked: function(mouse) {
+                                            if (mouse.button !== Qt.LeftButton) {
+                                                return
+                                            }
+                                            if (isArtistRow) {
+                                                root.toggleArtist(rowData.artist)
+                                            } else if (isAlbumRow) {
+                                                root.toggleAlbum(rowData.key)
+                                            }
+                                            mouse.accepted = true
                                         }
                                     }
 
