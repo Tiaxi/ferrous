@@ -42,8 +42,9 @@ This plan tracks test coverage additions for safe optimization/refactoring.
       - queue replacement via album paths
       - queue transition sequence (`select_queue`, `move_queue`, `remove_at`) including resulting queue order
       - successful seek command path preserving queue/current playback invariants
+      - playback state transition sequence (`pause`/`play`/`next`/`prev`) preserving queue/current playback parity
       - invalid seek command error payload parity
-  - Future: broaden parity checks to play/pause/next/previous playback-state transitions.
+  - Future: broaden parity checks to stop/restart and explicit play-at edge transitions.
 
 ### Layer 3: Native UI Smoke Tests (Qt)
 
@@ -65,7 +66,8 @@ This plan tracks test coverage additions for safe optimization/refactoring.
     - Process-vs-FFI queue replacement parity assertion in `src/bin/native_frontend.rs`.
     - Bridge integration regression test for queue/play-at + seek clamp + remove transition flow in `src/frontend_bridge/mod.rs`.
     - Playback unit regression test for seek boundary behavior before/at track end in `src/playback/mod.rs`.
-  - Further gapless and metadata/waveform transition cases are still planned.
+    - Bridge regression test proving `Seeked` events do not trigger early waveform-track switch side effects in `src/frontend_bridge/mod.rs`.
+  - Further gapless and metadata transition cases are still planned.
 
 ## Execution Commands
 
@@ -82,7 +84,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 ## Next Coverage Steps
 
-1. Expand process-vs-in-process parity tests to play/pause/next/previous playback-state transitions.
-2. Add no-early-next-track metadata/waveform regression tests.
-3. Add deterministic integration tests for gapless handoff behavior.
+1. Add no-early-next-track metadata transition regression tests.
+2. Add deterministic integration tests for gapless handoff behavior.
+3. Expand process-vs-in-process parity tests for stop/restart and play-at edge transitions.
 4. Add performance regression harness for bridge/event throughput and UI frame pacing.

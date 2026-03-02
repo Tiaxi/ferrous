@@ -1166,4 +1166,35 @@ mod tests {
 
         bridge.command(BridgeCommand::Shutdown);
     }
+
+    #[test]
+    fn seek_event_does_not_trigger_early_track_switch_side_effects() {
+        let (analysis, _analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+
+        let mut state = BridgeState::default();
+        state.analysis.waveform_peaks = vec![0.2, 0.4, 0.6];
+        state.metadata.title = "Track A".to_string();
+        state.metadata.artist = "Artist A".to_string();
+
+        playback_tx
+            .send(PlaybackEvent::Seeked)
+            .expect("send seeked event");
+        let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        assert!(!changed);
+        assert_eq!(state.analysis.waveform_peaks, vec![0.2, 0.4, 0.6]);
+        assert_eq!(state.metadata.title, "Track A");
+        assert_eq!(state.metadata.artist, "Artist A");
+
+        playback_tx
+            .send(PlaybackEvent::TrackChanged {
+                path: p("/music/b.flac"),
+                kind: TrackChangeKind::Manual,
+            })
+            .expect("send track-changed event");
+        let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        assert!(changed);
+        assert!(state.analysis.waveform_peaks.is_empty());
+    }
 }
