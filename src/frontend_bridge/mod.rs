@@ -1197,4 +1197,43 @@ mod tests {
         assert!(changed);
         assert!(state.analysis.waveform_peaks.is_empty());
     }
+
+    #[test]
+    fn track_change_does_not_swap_metadata_until_metadata_event_arrives() {
+        let (analysis, _analysis_rx) = AnalysisEngine::new();
+        let (metadata_service, _metadata_rx) = MetadataService::new();
+        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+        let (metadata_tx, metadata_rx) = crossbeam_channel::unbounded::<MetadataEvent>();
+
+        let mut state = BridgeState::default();
+        state.metadata.title = "Old Title".to_string();
+        state.metadata.artist = "Old Artist".to_string();
+        state.metadata.album = "Old Album".to_string();
+
+        playback_tx
+            .send(PlaybackEvent::TrackChanged {
+                path: p("/music/new.flac"),
+                kind: TrackChangeKind::Natural,
+            })
+            .expect("send track-changed event");
+        let changed = pump_playback_events(&playback_rx, &analysis, &metadata_service, &mut state);
+        assert!(changed);
+        assert_eq!(state.metadata.title, "Old Title");
+        assert_eq!(state.metadata.artist, "Old Artist");
+        assert_eq!(state.metadata.album, "Old Album");
+
+        metadata_tx
+            .send(MetadataEvent::Loaded(TrackMetadata {
+                title: "New Title".to_string(),
+                artist: "New Artist".to_string(),
+                album: "New Album".to_string(),
+                ..TrackMetadata::default()
+            }))
+            .expect("send metadata event");
+        let changed = pump_metadata_events(&metadata_rx, &mut state);
+        assert!(changed);
+        assert_eq!(state.metadata.title, "New Title");
+        assert_eq!(state.metadata.artist, "New Artist");
+        assert_eq!(state.metadata.album, "New Album");
+    }
 }

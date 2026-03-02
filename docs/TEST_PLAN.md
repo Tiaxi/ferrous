@@ -66,7 +66,11 @@ This plan tracks test coverage additions for safe optimization/refactoring.
     - Process-vs-FFI queue replacement parity assertion in `src/bin/native_frontend.rs`.
     - Bridge integration regression test for queue/play-at + seek clamp + remove transition flow in `src/frontend_bridge/mod.rs`.
     - Playback unit regression test for seek boundary behavior before/at track end in `src/playback/mod.rs`.
-    - Bridge regression test proving `Seeked` events do not trigger early waveform-track switch side effects in `src/frontend_bridge/mod.rs`.
+    - Playback unit regression test proving natural handoff emits `TrackChanged::Natural` at boundary in `src/playback/mod.rs`.
+    - Bridge regression tests proving:
+      - `Seeked` events do not trigger early waveform-track switch side effects
+      - `TrackChanged` does not swap metadata until metadata events arrive
+      in `src/frontend_bridge/mod.rs`.
   - Further gapless and metadata transition cases are still planned.
 
 ## Execution Commands

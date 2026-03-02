@@ -79,7 +79,7 @@ mod tests {
 
     use crossbeam_channel::unbounded;
 
-    use super::{PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackState};
+    use super::{PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackState, TrackChangeKind};
 
     fn recv_snapshot(
         rx: &crossbeam_channel::Receiver<PlaybackEvent>,
@@ -95,6 +95,21 @@ mod tests {
             }
         }
         last
+    }
+
+    fn recv_track_change_path_and_kind(
+        rx: &crossbeam_channel::Receiver<PlaybackEvent>,
+        timeout: Duration,
+    ) -> Option<(PathBuf, TrackChangeKind)> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
+                if let PlaybackEvent::TrackChanged { path, kind } = evt {
+                    return Some((path, kind));
+                }
+            }
+        }
+        None
     }
 
     #[test]
@@ -159,6 +174,25 @@ mod tests {
 
         let post_end = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot post-end");
         assert_eq!(post_end.current.as_ref(), Some(&b));
+    }
+
+    #[test]
+    fn boundary_handoff_emits_natural_track_changed_event() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(180)));
+        engine.command(PlaybackCommand::Poll);
+
+        let (path, kind) =
+            recv_track_change_path_and_kind(&rx, Duration::from_millis(300)).expect("track change");
+        assert_eq!(path, b);
+        assert!(matches!(kind, TrackChangeKind::Natural));
     }
 }
 
