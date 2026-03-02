@@ -30,6 +30,8 @@ Kirigami.ApplicationWindow {
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
     property real albumArtZoom: 1.0
+    property real albumArtPanX: 0.0
+    property real albumArtPanY: 0.0
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -632,6 +634,8 @@ Kirigami.ApplicationWindow {
             return
         }
         albumArtZoom = 1.0
+        albumArtPanX = 0.0
+        albumArtPanY = 0.0
         albumArtViewer.open()
     }
 
@@ -1729,9 +1733,18 @@ Kirigami.ApplicationWindow {
         background: Rectangle {
             color: "#dd000000"
         }
+        function clampPan() {
+            const scaledW = albumArtTransform.width * root.albumArtZoom
+            const scaledH = albumArtTransform.height * root.albumArtZoom
+            const limitX = Math.max(0, (scaledW - albumArtViewport.width) / 2)
+            const limitY = Math.max(0, (scaledH - albumArtViewport.height) / 2)
+            root.albumArtPanX = Math.max(-limitX, Math.min(limitX, root.albumArtPanX))
+            root.albumArtPanY = Math.max(-limitY, Math.min(limitY, root.albumArtPanY))
+        }
         onOpened: {
-            albumArtFlick.contentX = Math.max(0, (albumArtFlick.contentWidth - albumArtFlick.width) / 2)
-            albumArtFlick.contentY = Math.max(0, (albumArtFlick.contentHeight - albumArtFlick.height) / 2)
+            root.albumArtZoom = 1.0
+            root.albumArtPanX = 0.0
+            root.albumArtPanY = 0.0
         }
 
         Rectangle {
@@ -1751,37 +1764,29 @@ Kirigami.ApplicationWindow {
             }
         }
 
-        Flickable {
-            id: albumArtFlick
+        Item {
+            id: albumArtViewport
             anchors.fill: parent
             anchors.margins: 20
             clip: true
-            interactive: contentWidth > width || contentHeight > height
-            boundsBehavior: Flickable.StopAtBounds
-            contentWidth: Math.max(width, (albumArtBase.width * root.albumArtZoom) + 40)
-            contentHeight: Math.max(height, (albumArtBase.height * root.albumArtZoom) + 40)
 
             Item {
-                width: albumArtFlick.contentWidth
-                height: albumArtFlick.contentHeight
+                id: albumArtTransform
+                width: albumArtViewport.width * 0.92
+                height: albumArtViewport.height * 0.92
+                x: (albumArtViewport.width - width) / 2 + root.albumArtPanX
+                y: (albumArtViewport.height - height) / 2 + root.albumArtPanY
+                scale: root.albumArtZoom
+                transformOrigin: Item.Center
 
-                Item {
-                    id: albumArtBase
-                    width: albumArtFlick.width * 0.92
-                    height: albumArtFlick.height * 0.92
-                    anchors.centerIn: parent
-                    scale: root.albumArtZoom
-                    transformOrigin: Item.Center
-
-                    Image {
-                        id: albumArtImageFull
-                        anchors.fill: parent
-                        source: uiBridge.currentTrackCoverPath
-                        fillMode: Image.PreserveAspectFit
-                        smooth: true
-                        asynchronous: true
-                        cache: true
-                    }
+                Image {
+                    id: albumArtImageFull
+                    anchors.fill: parent
+                    source: uiBridge.currentTrackCoverPath
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                    asynchronous: true
+                    cache: true
                 }
             }
 
@@ -1794,20 +1799,55 @@ Kirigami.ApplicationWindow {
                     if (Math.abs(nextZoom - oldZoom) < 0.0001) {
                         return
                     }
-                    const pivotX = albumArtFlick.contentX + event.x
-                    const pivotY = albumArtFlick.contentY + event.y
+                    const pivotX = event.x - albumArtViewport.width / 2
+                    const pivotY = event.y - albumArtViewport.height / 2
+                    const ratio = nextZoom / oldZoom
                     root.albumArtZoom = nextZoom
-                    const zoomRatio = nextZoom / oldZoom
-                    albumArtFlick.contentX = Math.max(
-                        0,
-                        Math.min(
-                            albumArtFlick.contentWidth - albumArtFlick.width,
-                            (pivotX * zoomRatio) - event.x))
-                    albumArtFlick.contentY = Math.max(
-                        0,
-                        Math.min(
-                            albumArtFlick.contentHeight - albumArtFlick.height,
-                            (pivotY * zoomRatio) - event.y))
+                    root.albumArtPanX = (root.albumArtPanX + pivotX) * ratio - pivotX
+                    root.albumArtPanY = (root.albumArtPanY + pivotY) * ratio - pivotY
+                    albumArtViewer.clampPan()
+                }
+            }
+
+            MouseArea {
+                id: albumArtPanArea
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                hoverEnabled: true
+                preventStealing: true
+                property real lastX: 0
+                property real lastY: 0
+                cursorShape: root.albumArtZoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
+                onPressed: function(mouse) {
+                    lastX = mouse.x
+                    lastY = mouse.y
+                    cursorShape = Qt.ClosedHandCursor
+                }
+                onReleased: {
+                    cursorShape = root.albumArtZoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
+                }
+                onPositionChanged: function(mouse) {
+                    if (!pressed || root.albumArtZoom <= 1.0) {
+                        return
+                    }
+                    root.albumArtPanX += mouse.x - lastX
+                    root.albumArtPanY += mouse.y - lastY
+                    lastX = mouse.x
+                    lastY = mouse.y
+                    albumArtViewer.clampPan()
+                }
+                onDoubleClicked: function(mouse) {
+                    if (mouse.button !== Qt.LeftButton) {
+                        return
+                    }
+                    if (root.albumArtZoom > 1.0) {
+                        root.albumArtZoom = 1.0
+                        root.albumArtPanX = 0.0
+                        root.albumArtPanY = 0.0
+                    } else {
+                        root.albumArtZoom = 2.0
+                        albumArtViewer.clampPan()
+                    }
                 }
             }
         }
