@@ -116,12 +116,8 @@ impl FfiRuntime {
         }
 
         let mut latest_snapshot: Option<BridgeSnapshot> = None;
-        for i in 0..max_events.max(1) {
-            let event = if i == 0 {
-                self.bridge.recv_timeout(Duration::from_millis(1))
-            } else {
-                self.bridge.try_recv()
-            };
+        for _ in 0..max_events.max(1) {
+            let event = self.bridge.try_recv();
             let Some(event) = event else {
                 break;
             };

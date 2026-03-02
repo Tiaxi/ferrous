@@ -212,7 +212,11 @@ fn run_bridge_loop(
     let mut profile_last = Instant::now();
     let mut prof_snapshots_sent = 0usize;
     let mut prof_snapshots_dropped = 0usize;
-    let snapshot_interval = Duration::from_millis(8);
+    let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SNAPSHOT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(16, |v| v.clamp(8, 1000));
+    let snapshot_interval = Duration::from_millis(snapshot_interval_ms);
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;
 

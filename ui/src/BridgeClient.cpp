@@ -34,6 +34,15 @@ bool isNewerSeq(quint32 seq, quint32 last) {
     return static_cast<qint32>(seq - last) > 0;
 }
 
+int readEnvMillis(const char *key, int fallback) {
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue(key, &ok);
+    if (!ok) {
+        return fallback;
+    }
+    return std::clamp(value, 8, 1000);
+}
+
 QString findAlbumCoverPath(const QStringList &trackPaths) {
     static const QSet<QString> kImageExts{
         QStringLiteral("jpg"),
@@ -101,14 +110,14 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_process, &QProcess::started, this, &BridgeClient::handleProcessStarted);
     connect(&m_process, &QProcess::finished, this, &BridgeClient::handleProcessFinished);
     m_snapshotNotifyTimer.setSingleShot(true);
-    m_snapshotNotifyTimer.setInterval(8);
+    m_snapshotNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_SNAPSHOT_NOTIFY_MS", 16));
     connect(&m_snapshotNotifyTimer, &QTimer::timeout, this, [this]() {
         if (m_snapshotChangedPending) {
             m_snapshotChangedPending = false;
             emit snapshotChanged();
         }
     });
-    m_bridgePollTimer.setInterval(8);
+    m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
     const QString bridgeMode = qEnvironmentVariable("FERROUS_BRIDGE_MODE").trimmed().toLower();
