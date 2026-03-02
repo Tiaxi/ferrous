@@ -8,6 +8,7 @@
 #include <QVariantList>
 
 #include <array>
+#include <chrono>
 #include <deque>
 #include <vector>
 
@@ -61,6 +62,8 @@ private:
     void drawColumnAt(int x, const std::vector<quint8> &col);
     void appendColumnAndRender(std::vector<quint8> &&col);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
+    void updateFpsEstimate();
+    void drawFpsOverlay(QPainter *painter) const;
 
     double m_dbRange{90.0};
     bool m_logScale{false};
@@ -76,5 +79,9 @@ private:
     QImage m_canvas;
     bool m_canvasDirty{true};
     std::deque<std::vector<quint8>> m_columns;
+    bool m_fpsInitialized{false};
+    int m_fpsFrameCount{0};
+    double m_fpsValue{0.0};
+    std::chrono::steady_clock::time_point m_fpsWindowStart{};
     mutable QMutex m_stateMutex;
 };

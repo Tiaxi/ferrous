@@ -2,6 +2,7 @@
 
 #include <QMutexLocker>
 #include <QPainter>
+#include <QString>
 
 #include <algorithm>
 #include <array>
@@ -224,16 +225,16 @@ void SpectrogramItem::paint(QPainter *painter) {
     const int h = std::max(1, static_cast<int>(std::floor(height())));
 
     painter->fillRect(QRect(0, 0, w, h), QColor(0x0b, 0x0b, 0x0f));
-    if (m_columns.empty() || m_binsPerColumn <= 0) {
-        return;
+    if (!m_columns.empty() && m_binsPerColumn > 0) {
+        ensureCanvas(w, h);
+        if (!m_canvas.isNull()) {
+            const int drawX = w - m_canvas.width();
+            painter->drawImage(QPoint(drawX, 0), m_canvas);
+        }
     }
 
-    ensureCanvas(w, h);
-    if (m_canvas.isNull()) {
-        return;
-    }
-    const int drawX = w - m_canvas.width();
-    painter->drawImage(QPoint(drawX, 0), m_canvas);
+    updateFpsEstimate();
+    drawFpsOverlay(painter);
 }
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
@@ -494,4 +495,44 @@ std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) con
     }
 
     return out;
+}
+
+void SpectrogramItem::updateFpsEstimate() {
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    if (!m_fpsInitialized) {
+        m_fpsInitialized = true;
+        m_fpsWindowStart = now;
+        m_fpsFrameCount = 0;
+        m_fpsValue = 0.0;
+        return;
+    }
+
+    m_fpsFrameCount++;
+    const double elapsed = std::chrono::duration<double>(now - m_fpsWindowStart).count();
+    if (elapsed < 0.5) {
+        return;
+    }
+
+    const double instantFps = static_cast<double>(m_fpsFrameCount) / elapsed;
+    if (m_fpsValue <= 0.0) {
+        m_fpsValue = instantFps;
+    } else {
+        // Light smoothing keeps the value stable while still reflecting spikes/drops.
+        m_fpsValue = (m_fpsValue * 0.8) + (instantFps * 0.2);
+    }
+    m_fpsFrameCount = 0;
+    m_fpsWindowStart = now;
+}
+
+void SpectrogramItem::drawFpsOverlay(QPainter *painter) const {
+    if (!painter || m_fpsValue <= 0.0) {
+        return;
+    }
+
+    QFont font = painter->font();
+    font.setPixelSize(10);
+    painter->setFont(font);
+    painter->setPen(QColor(190, 190, 200, 150));
+    painter->drawText(QPointF(8.0, 14.0), QStringLiteral("%1 fps").arg(m_fpsValue, 0, 'f', 1));
 }
