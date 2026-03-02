@@ -24,7 +24,6 @@ Kirigami.ApplicationWindow {
     property int lastCenteredQueueIndex: -2
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
-    readonly property int menuPopupMinWidth: 220
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -95,6 +94,26 @@ Kirigami.ApplicationWindow {
         } else {
             uiBridge.play()
         }
+    }
+
+    function menuPopupWidth(items) {
+        let maxPx = 0
+        for (let i = 0; i < items.length; ++i) {
+            const item = items[i]
+            const label = item.label || ""
+            const shortcut = item.shortcut || ""
+            let px = menuFontMetrics.boundingRect(label).width + 72
+            if (shortcut.length > 0) {
+                px += menuFontMetrics.boundingRect(shortcut).width + 24
+            }
+            maxPx = Math.max(maxPx, px)
+        }
+        return Math.max(140, Math.ceil(maxPx))
+    }
+
+    FontMetrics {
+        id: menuFontMetrics
+        font: root.font
     }
 
     Timer {
@@ -330,7 +349,13 @@ Kirigami.ApplicationWindow {
     menuBar: MenuBar {
         Menu {
             title: "File"
-            width: root.menuPopupMinWidth
+            width: root.menuPopupWidth([
+                { label: playLibrarySelectionAction.text, shortcut: "" },
+                { label: appendLibrarySelectionAction.text, shortcut: "" },
+                { label: scanMusicAction.text, shortcut: String(scanMusicAction.shortcut) },
+                { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
+                { label: quitAction.text, shortcut: String(quitAction.shortcut) }
+            ])
             MenuItem { action: playLibrarySelectionAction }
             MenuItem { action: appendLibrarySelectionAction }
             MenuSeparator {}
@@ -341,7 +366,14 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "Edit"
-            width: root.menuPopupMinWidth
+            width: root.menuPopupWidth([
+                { label: removeSelectedTrackAction.text, shortcut: String(removeSelectedTrackAction.shortcut) },
+                { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut) },
+                { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut) },
+                { label: selectPreviousTrackAction.text, shortcut: String(selectPreviousTrackAction.shortcut) },
+                { label: selectNextTrackAction.text, shortcut: String(selectNextTrackAction.shortcut) },
+                { label: clearPlaylistAction.text, shortcut: "" }
+            ])
             MenuItem { action: removeSelectedTrackAction }
             MenuItem { action: moveTrackUpAction }
             MenuItem { action: moveTrackDownAction }
@@ -353,7 +385,13 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "View"
-            width: root.menuPopupMinWidth
+            width: root.menuPopupWidth([
+                { label: focusSearchAction.text, shortcut: String(focusSearchAction.shortcut) },
+                { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
+                { label: autoCenterSelectionAction.text, shortcut: "" },
+                { label: resetSpectrogramAction.text, shortcut: "" },
+                { label: showFpsOverlayAction.text, shortcut: "" }
+            ])
             MenuItem { action: focusSearchAction }
             MenuItem { action: refreshSnapshotAction }
             MenuSeparator {}
@@ -363,7 +401,16 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "Playback"
-            width: root.menuPopupMinWidth
+            width: root.menuPopupWidth([
+                { label: previousAction.text, shortcut: String(previousAction.shortcut) },
+                { label: playAction.text, shortcut: String(playAction.shortcut) },
+                { label: pauseAction.text, shortcut: String(pauseAction.shortcut) },
+                { label: stopAction.text, shortcut: String(stopAction.shortcut) },
+                { label: nextAction.text, shortcut: String(nextAction.shortcut) },
+                { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut) },
+                { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut) },
+                { label: clearPlaylistAction.text, shortcut: "" }
+            ])
             MenuItem { action: previousAction }
             MenuItem { action: playAction }
             MenuItem { action: pauseAction }
@@ -377,7 +424,9 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "Help"
-            width: root.menuPopupMinWidth
+            width: root.menuPopupWidth([
+                { label: aboutAction.text, shortcut: "" }
+            ])
             MenuItem { action: aboutAction }
         }
     }
