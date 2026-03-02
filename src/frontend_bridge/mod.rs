@@ -58,6 +58,8 @@ pub enum BridgeLibraryCommand {
     AppendAlbum(Vec<PathBuf>),
     ReplaceAlbumByKey { artist: String, album: String },
     AppendAlbumByKey { artist: String, album: String },
+    ReplaceArtistByKey { artist: String },
+    AppendArtistByKey { artist: String },
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +596,58 @@ fn handle_library_command(
                         track.album.as_str()
                     };
                     track_artist == artist && track_album == album
+                })
+                .map(|track| track.path.clone())
+                .collect();
+            if paths.is_empty() {
+                return false;
+            }
+            if state.queue.is_empty() {
+                state.queue.extend(paths);
+                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+            } else {
+                state.queue.extend(paths.clone());
+                playback.command(PlaybackCommand::AddToQueue(paths));
+            }
+            true
+        }
+        BridgeLibraryCommand::ReplaceArtistByKey { artist } => {
+            let paths: Vec<PathBuf> = state
+                .library
+                .tracks
+                .iter()
+                .filter(|track| {
+                    let track_artist = if track.artist.trim().is_empty() {
+                        "Unknown Artist"
+                    } else {
+                        track.artist.as_str()
+                    };
+                    track_artist == artist
+                })
+                .map(|track| track.path.clone())
+                .collect();
+            if paths.is_empty() {
+                return false;
+            }
+            state.queue = paths;
+            state.selected_queue_index = Some(0);
+            playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+            playback.command(PlaybackCommand::PlayAt(0));
+            playback.command(PlaybackCommand::Play);
+            true
+        }
+        BridgeLibraryCommand::AppendArtistByKey { artist } => {
+            let paths: Vec<PathBuf> = state
+                .library
+                .tracks
+                .iter()
+                .filter(|track| {
+                    let track_artist = if track.artist.trim().is_empty() {
+                        "Unknown Artist"
+                    } else {
+                        track.artist.as_str()
+                    };
+                    track_artist == artist
                 })
                 .map(|track| track.path.clone())
                 .collect();

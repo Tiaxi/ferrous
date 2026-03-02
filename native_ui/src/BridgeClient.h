@@ -76,6 +76,10 @@ public:
     Q_INVOKABLE void clearQueue();
     Q_INVOKABLE void replaceAlbumAt(int index);
     Q_INVOKABLE void appendAlbumAt(int index);
+    Q_INVOKABLE void playTrack(const QString &path);
+    Q_INVOKABLE void appendTrack(const QString &path);
+    Q_INVOKABLE void replaceArtistByName(const QString &artist);
+    Q_INVOKABLE void appendArtistByName(const QString &artist);
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
     Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();

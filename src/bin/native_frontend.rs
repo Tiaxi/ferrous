@@ -343,6 +343,20 @@ struct QueueDigest {
     last: Option<String>,
 }
 
+fn leading_track_number(input: &str) -> Option<u32> {
+    let mut n: u32 = 0;
+    let mut saw_digit = false;
+    for ch in input.chars() {
+        if let Some(d) = ch.to_digit(10) {
+            saw_digit = true;
+            n = n.saturating_mul(10).saturating_add(d);
+        } else {
+            break;
+        }
+    }
+    if saw_digit { Some(n) } else { None }
+}
+
 fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
     let parsed: JsonCommand =
         serde_json::from_str(line).map_err(|err| format!("invalid json command: {err}"))?;
@@ -465,6 +479,38 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 BridgeLibraryCommand::AppendAlbumByKey { artist, album },
             ))
         }
+        "replace_artist_by_key" => {
+            let artist = parsed
+                .artist
+                .ok_or_else(|| "replace_artist_by_key requires string field 'artist'".to_string())?;
+            Some(BridgeCommand::Library(
+                BridgeLibraryCommand::ReplaceArtistByKey { artist },
+            ))
+        }
+        "append_artist_by_key" => {
+            let artist = parsed
+                .artist
+                .ok_or_else(|| "append_artist_by_key requires string field 'artist'".to_string())?;
+            Some(BridgeCommand::Library(
+                BridgeLibraryCommand::AppendArtistByKey { artist },
+            ))
+        }
+        "add_track" => {
+            let path = parsed
+                .path
+                .ok_or_else(|| "add_track requires string field 'path'".to_string())?;
+            Some(BridgeCommand::Library(BridgeLibraryCommand::AddTrack(
+                PathBuf::from(path),
+            )))
+        }
+        "play_track" => {
+            let path = parsed
+                .path
+                .ok_or_else(|| "play_track requires string field 'path'".to_string())?;
+            Some(BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(
+                PathBuf::from(path),
+            )))
+        }
         "scan_root" => {
             let path = parsed
                 .path
@@ -581,7 +627,7 @@ fn encode_snapshot_payload(
         albums_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
     emit_state.last_library_digest = Some(library_digest);
     let library_albums = if should_emit_albums {
-        let mut grouped: BTreeMap<(String, String), Vec<(Option<u32>, String)>> = BTreeMap::new();
+        let mut grouped: BTreeMap<(String, String), Vec<(u8, u32, String, String)>> = BTreeMap::new();
         for track in &s.library.tracks {
             let album = if track.album.trim().is_empty() {
                 String::from("Unknown Album")
@@ -602,28 +648,53 @@ fn encode_snapshot_payload(
             } else {
                 track.title.clone()
             };
+            let fallback_number = leading_track_number(title.trim_start())
+                .or_else(|| {
+                    track
+                        .path
+                        .file_stem()
+                        .and_then(|s| leading_track_number(&s.to_string_lossy()))
+                });
+            let rank = if track.track_no.is_some() {
+                0
+            } else if fallback_number.is_some() {
+                1
+            } else {
+                2
+            };
+            let sort_number = track.track_no.or(fallback_number).unwrap_or(u32::MAX);
+            let path_string = track.path.to_string_lossy().to_string();
             grouped
                 .entry((artist, album))
                 .or_default()
-                .push((track.track_no, title));
+                .push((rank, sort_number, title, path_string));
         }
         serde_json::Value::Array(
             grouped
                 .into_iter()
                 .map(|((artist, album), mut tracks)| {
-                    tracks.sort_by(|(a_no, a_title), (b_no, b_title)| {
-                        let a_key = a_no.unwrap_or(u32::MAX);
-                        let b_key = b_no.unwrap_or(u32::MAX);
-                        a_key.cmp(&b_key).then_with(|| a_title.cmp(b_title))
+                    tracks.sort_by(|(a_rank, a_no, a_title, a_path), (b_rank, b_no, b_title, b_path)| {
+                        a_rank
+                            .cmp(b_rank)
+                            .then_with(|| a_no.cmp(b_no))
+                            .then_with(|| a_path.cmp(b_path))
+                            .then_with(|| a_title.cmp(b_title))
                     });
                     let count = tracks.len();
-                    let track_titles: Vec<String> =
-                        tracks.into_iter().map(|(_, title)| title).collect();
+                    let track_items: Vec<serde_json::Value> = tracks
+                        .into_iter()
+                        .map(|(_, _, title, path)| {
+                            json!({
+                                "title": title,
+                                "path": path,
+                            })
+                        })
+                        .collect();
                     json!({
                         "artist": artist,
                         "name": album,
                         "count": count,
-                        "tracks": track_titles,
+                        "tracks": track_items,
                     })
                 })
                 .collect(),

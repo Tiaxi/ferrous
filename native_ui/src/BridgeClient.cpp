@@ -284,6 +284,46 @@ void BridgeClient::appendAlbumAt(int index) {
     sendJson(obj);
 }
 
+void BridgeClient::playTrack(const QString &path) {
+    if (path.trimmed().isEmpty()) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("play_track"));
+    obj.insert(QStringLiteral("path"), path);
+    sendJson(obj);
+}
+
+void BridgeClient::appendTrack(const QString &path) {
+    if (path.trimmed().isEmpty()) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("add_track"));
+    obj.insert(QStringLiteral("path"), path);
+    sendJson(obj);
+}
+
+void BridgeClient::replaceArtistByName(const QString &artist) {
+    if (artist.trimmed().isEmpty()) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_artist_by_key"));
+    obj.insert(QStringLiteral("artist"), artist);
+    sendJson(obj);
+}
+
+void BridgeClient::appendArtistByName(const QString &artist) {
+    if (artist.trimmed().isEmpty()) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_artist_by_key"));
+    obj.insert(QStringLiteral("artist"), artist);
+    sendJson(obj);
+}
+
 void BridgeClient::scanRoot(const QString &path) {
     if (path.trimmed().isEmpty()) {
         return;
@@ -746,10 +786,23 @@ void BridgeClient::handleStdoutReady() {
                     if (tracksValue.isArray()) {
                         const QJsonArray tracks = tracksValue.toArray();
                         trackTitles.reserve(tracks.size());
-                        for (const QJsonValue &titleValue : tracks) {
-                            const QString title = titleValue.toString();
+                        for (const QJsonValue &trackValue : tracks) {
+                            if (trackValue.isObject()) {
+                                const QJsonObject trackObj = trackValue.toObject();
+                                const QString title = trackObj.value(QStringLiteral("title")).toString();
+                                const QString path = trackObj.value(QStringLiteral("path")).toString();
+                                QVariantMap trackEntry;
+                                trackEntry.insert(QStringLiteral("title"), title);
+                                trackEntry.insert(QStringLiteral("path"), path);
+                                trackTitles.push_back(trackEntry);
+                                continue;
+                            }
+                            const QString title = trackValue.toString();
                             if (!title.isEmpty()) {
-                                trackTitles.push_back(title);
+                                QVariantMap trackEntry;
+                                trackEntry.insert(QStringLiteral("title"), title);
+                                trackEntry.insert(QStringLiteral("path"), QString{});
+                                trackTitles.push_back(trackEntry);
                             }
                         }
                     } else {
@@ -768,7 +821,10 @@ void BridgeClient::handleStdoutReady() {
                                     title = info.fileName();
                                 }
                                 if (!title.isEmpty()) {
-                                    trackTitles.push_back(title);
+                                    QVariantMap trackEntry;
+                                    trackEntry.insert(QStringLiteral("title"), title);
+                                    trackEntry.insert(QStringLiteral("path"), path);
+                                    trackTitles.push_back(trackEntry);
                                 }
                             }
                         }

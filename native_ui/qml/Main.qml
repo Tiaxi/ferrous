@@ -13,7 +13,7 @@ Kirigami.ApplicationWindow {
     minimumHeight: 780
     visible: true
     title: "Ferrous"
-    property int selectedLibraryAlbumIndex: -1
+    property string selectedLibrarySelectionKey: ""
     property var filteredLibraryTree: []
     property var libraryRows: []
     property var expandedArtists: ({})
@@ -61,6 +61,10 @@ Kirigami.ApplicationWindow {
         function clearQueue() {}
         function replaceAlbumAt(index) {}
         function appendAlbumAt(index) {}
+        function playTrack(path) {}
+        function appendTrack(path) {}
+        function replaceArtistByName(artist) {}
+        function appendArtistByName(artist) {}
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
@@ -91,6 +95,19 @@ Kirigami.ApplicationWindow {
         return artist + "|" + sourceIndex + "|" + albumName
     }
 
+    function selectionKeyForRow(rowData) {
+        if (rowData.rowType === "artist") {
+            return "artist|" + rowData.artist
+        }
+        if (rowData.rowType === "album") {
+            return "album|" + rowData.sourceIndex
+        }
+        if (rowData.rowType === "track") {
+            return "track|" + (rowData.trackPath || (rowData.sourceIndex + "|" + rowData.trackNumber))
+        }
+        return ""
+    }
+
     function rebuildLibraryFilter() {
         const tree = uiBridge.libraryTree || []
         const term = librarySearchField.text.trim().toLowerCase()
@@ -107,17 +124,20 @@ Kirigami.ApplicationWindow {
                 const album = albums[j]
                 const albumName = album.name || ""
                 const albumMatch = term.length === 0 || albumName.toLowerCase().indexOf(term) !== -1
-                const tracks = album.tracks || []
+                const tracksRaw = album.tracks || []
                 let filteredTracks = []
 
-                if (term.length === 0 || artistMatch || albumMatch) {
-                    filteredTracks = tracks.slice(0)
-                } else {
-                    for (let k = 0; k < tracks.length; k++) {
-                        const trackTitle = tracks[k] || ""
-                        if (trackTitle.toLowerCase().indexOf(term) !== -1) {
-                            filteredTracks.push(trackTitle)
-                        }
+                for (let k = 0; k < tracksRaw.length; k++) {
+                    const t = tracksRaw[k]
+                    const title = (typeof t === "string") ? t : (t.title || "")
+                    const path = (typeof t === "string") ? "" : (t.path || "")
+                    const trackObj = { title: title, path: path }
+                    if (term.length === 0 || artistMatch || albumMatch) {
+                        filteredTracks.push(trackObj)
+                    } else if (title.toLowerCase().indexOf(term) !== -1) {
+                        filteredTracks.push(trackObj)
+                    } else if (path.toLowerCase().indexOf(term) !== -1) {
+                        filteredTracks.push(trackObj)
                     }
                 }
 
@@ -145,25 +165,11 @@ Kirigami.ApplicationWindow {
         }
 
         filteredLibraryTree = filteredArtists
-        if (selectedLibraryAlbumIndex >= 0) {
-            let found = false
-            for (let i = 0; i < filteredLibraryTree.length && !found; i++) {
-                const albums = filteredLibraryTree[i].albums || []
-                for (let j = 0; j < albums.length; j++) {
-                    if (albums[j].sourceIndex === selectedLibraryAlbumIndex) {
-                        found = true
-                        break
-                    }
-                }
-            }
-            if (!found) {
-                selectedLibraryAlbumIndex = -1
-            }
-        }
         rebuildLibraryRows()
     }
 
     function rebuildLibraryRows() {
+        const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
         const rows = []
         const autoExpand = librarySearchField.text.trim().length > 0
         for (let i = 0; i < filteredLibraryTree.length; i++) {
@@ -171,12 +177,14 @@ Kirigami.ApplicationWindow {
             const artistName = artistEntry.artist || ""
             const hasArtistState = Object.prototype.hasOwnProperty.call(expandedArtists, artistName)
             const artistExpanded = autoExpand || (hasArtistState ? expandedArtists[artistName] === true : true)
-            rows.push({
+            const artistRow = {
                 rowType: "artist",
                 artist: artistName,
                 count: artistEntry.count || 0,
                 expanded: artistExpanded
-            })
+            }
+            artistRow.selectionKey = selectionKeyForRow(artistRow)
+            rows.push(artistRow)
             if (!artistExpanded) {
                 continue
             }
@@ -187,7 +195,7 @@ Kirigami.ApplicationWindow {
                 const key = albumExpandKey(artistName, album.sourceIndex, album.name || "")
                 const hasAlbumState = Object.prototype.hasOwnProperty.call(expandedAlbums, key)
                 const albumExpanded = autoExpand || (hasAlbumState ? expandedAlbums[key] === true : false)
-                rows.push({
+                const albumRow = {
                     rowType: "album",
                     artist: artistName,
                     name: album.name || "",
@@ -195,23 +203,50 @@ Kirigami.ApplicationWindow {
                     sourceIndex: album.sourceIndex,
                     key: key,
                     expanded: albumExpanded
-                })
+                }
+                albumRow.selectionKey = selectionKeyForRow(albumRow)
+                rows.push(albumRow)
                 if (!albumExpanded) {
                     continue
                 }
 
                 const tracks = album.tracks || []
                 for (let k = 0; k < tracks.length; k++) {
-                    rows.push({
+                    const t = tracks[k]
+                    const trackRow = {
                         rowType: "track",
                         sourceIndex: album.sourceIndex,
                         trackNumber: k + 1,
-                        title: tracks[k] || ""
-                    })
+                        title: t.title || "",
+                        trackPath: t.path || ""
+                    }
+                    trackRow.selectionKey = selectionKeyForRow(trackRow)
+                    rows.push(trackRow)
                 }
             }
         }
         libraryRows = rows
+
+        let selectedStillExists = selectedLibrarySelectionKey.length === 0
+        if (!selectedStillExists) {
+            for (let i = 0; i < rows.length; i++) {
+                if (rows[i].selectionKey === selectedLibrarySelectionKey) {
+                    selectedStillExists = true
+                    break
+                }
+            }
+        }
+        if (!selectedStillExists) {
+            selectedLibrarySelectionKey = ""
+        }
+
+        Qt.callLater(function() {
+            if (!libraryAlbumView) {
+                return
+            }
+            const maxY = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
+            libraryAlbumView.contentY = Math.min(preserveY, maxY)
+        })
     }
 
     function toggleArtist(artistName) {
@@ -226,14 +261,6 @@ Kirigami.ApplicationWindow {
         next[albumKey] = !(expandedAlbums[albumKey] === true)
         expandedAlbums = next
         rebuildLibraryRows()
-    }
-
-    function ensureLibrarySelectionInBounds() {
-        if (selectedLibraryAlbumIndex >= uiBridge.libraryAlbums.length) {
-            selectedLibraryAlbumIndex = uiBridge.libraryAlbums.length > 0
-                ? uiBridge.libraryAlbums.length - 1
-                : -1
-        }
     }
 
     Action {
@@ -547,6 +574,11 @@ Kirigami.ApplicationWindow {
                                 Layout.fillHeight: true
                                 clip: true
                                 model: root.libraryRows
+                                reuseItems: true
+                                cacheBuffer: 1600
+                                boundsBehavior: Flickable.StopAtBounds
+                                flickDeceleration: 2600
+                                maximumFlickVelocity: 5200
                                 ScrollBar.vertical: ScrollBar {
                                     policy: ScrollBar.AlwaysOn
                                 }
@@ -561,7 +593,7 @@ Kirigami.ApplicationWindow {
                                         : -1
                                     width: ListView.view.width
                                     height: 24
-                                    color: (isAlbumRow || isTrackRow) && sourceIndex === root.selectedLibraryAlbumIndex
+                                    color: rowData.selectionKey === root.selectedLibrarySelectionKey
                                         ? Kirigami.Theme.highlightColor
                                         : (index % 2 === 0
                                             ? Kirigami.Theme.backgroundColor
@@ -585,7 +617,7 @@ Kirigami.ApplicationWindow {
                                                 ? (rowData.expanded ? "▾" : "▸")
                                                 : ""
                                             font.pixelSize: 16
-                                            color: ((isAlbumRow || isTrackRow) && sourceIndex === root.selectedLibraryAlbumIndex)
+                                            color: rowData.selectionKey === root.selectedLibrarySelectionKey
                                                 ? Kirigami.Theme.highlightedTextColor
                                                 : Kirigami.Theme.disabledTextColor
                                         }
@@ -599,7 +631,7 @@ Kirigami.ApplicationWindow {
                                                     ? (rowData.name + " (" + rowData.count + ")")
                                                     : (rowData.trackNumber.toString().padStart(2, "0")
                                                        + "  " + rowData.title))
-                                            color: ((isAlbumRow || isTrackRow) && sourceIndex === root.selectedLibraryAlbumIndex)
+                                            color: rowData.selectionKey === root.selectedLibrarySelectionKey
                                                 ? Kirigami.Theme.highlightedTextColor
                                                 : Kirigami.Theme.textColor
                                         }
@@ -609,20 +641,29 @@ Kirigami.ApplicationWindow {
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                                         onClicked: function(mouse) {
+                                            root.selectedLibrarySelectionKey = rowData.selectionKey || ""
+                                            if (isArtistRow && mouse.button === Qt.RightButton) {
+                                                artistMenu.popup()
+                                                return
+                                            }
                                             if (isAlbumRow) {
-                                                root.selectedLibraryAlbumIndex = sourceIndex
                                                 if (mouse.button === Qt.RightButton) {
                                                     albumMenu.popup()
                                                 }
                                             } else if (isTrackRow) {
-                                                root.selectedLibraryAlbumIndex = sourceIndex
+                                                if (mouse.button === Qt.RightButton) {
+                                                    trackMenu.popup()
+                                                }
                                             }
                                         }
                                         onDoubleClicked: {
+                                            if (isArtistRow) {
+                                                uiBridge.replaceArtistByName(rowData.artist)
+                                            } else
                                             if (isAlbumRow && sourceIndex >= 0) {
                                                 uiBridge.replaceAlbumAt(sourceIndex)
-                                            } else if (isTrackRow && sourceIndex >= 0) {
-                                                uiBridge.replaceAlbumAt(sourceIndex)
+                                            } else if (isTrackRow && rowData.trackPath && rowData.trackPath.length > 0) {
+                                                uiBridge.playTrack(rowData.trackPath)
                                             }
                                         }
                                     }
@@ -664,6 +705,32 @@ Kirigami.ApplicationWindow {
                                                     uiBridge.appendAlbumAt(sourceIndex)
                                                 }
                                             }
+                                        }
+                                    }
+
+                                    Menu {
+                                        id: artistMenu
+                                        MenuItem {
+                                            text: "Play Artist"
+                                            onTriggered: uiBridge.replaceArtistByName(rowData.artist)
+                                        }
+                                        MenuItem {
+                                            text: "Append Artist"
+                                            onTriggered: uiBridge.appendArtistByName(rowData.artist)
+                                        }
+                                    }
+
+                                    Menu {
+                                        id: trackMenu
+                                        MenuItem {
+                                            text: "Play Track"
+                                            enabled: rowData.trackPath && rowData.trackPath.length > 0
+                                            onTriggered: uiBridge.playTrack(rowData.trackPath)
+                                        }
+                                        MenuItem {
+                                            text: "Append Track"
+                                            enabled: rowData.trackPath && rowData.trackPath.length > 0
+                                            onTriggered: uiBridge.appendTrack(rowData.trackPath)
                                         }
                                     }
                                 }
@@ -819,7 +886,6 @@ Kirigami.ApplicationWindow {
         function onSnapshotChanged() {
             if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
                 root.rebuildLibraryFilter()
-                root.ensureLibrarySelectionInBounds()
                 root.lastAppliedLibraryVersion = uiBridge.libraryVersion
             }
             if (uiBridge.spectrogramReset) {
