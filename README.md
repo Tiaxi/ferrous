@@ -62,6 +62,19 @@ Run project tests (Rust + native UI smoke test):
 ./scripts/run-tests.sh
 ```
 
+Rust verification now also includes strict lint/security checks by default:
+
+- `cargo clippy --features gst -- -D clippy::pedantic`
+- `cargo audit` (requires `cargo-audit` installed)
+
+Install `cargo-audit` once:
+
+```bash
+cargo install cargo-audit
+```
+
+Use `./scripts/run-tests.sh --no-clippy --no-audit` to temporarily skip them.
+
 Roadmap and engineering plans live under `docs/`:
 
 - `docs/ROADMAP.md`

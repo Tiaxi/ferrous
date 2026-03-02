@@ -20,6 +20,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 - Status:
   - Phase 1 implemented:
     - `src/frontend_bridge/mod.rs` tests for settings + queue state logic.
+    - Queue-state coverage includes replace/autoplay, append (empty/non-empty), move, remove, select, and out-of-bounds play-at behavior.
     - `src/frontend_bridge/ffi.rs` tests for command parsing + snapshot/analysis encoding contract.
   - Phase 2 implemented:
     - `src/analysis/mod.rs` tests for waveform cache roundtrip, peak blob roundtrip, STFT row generation, spectrogram decimation, and snapshot emission gating.
@@ -64,10 +65,14 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 - Rust tests:
   - `cargo test --features gst`
+  - `cargo clippy --features gst -- -D clippy::pedantic`
+  - `cargo audit`
 - Native UI smoke tests:
   - `cmake -S native_ui -B native_ui/build`
   - `cmake --build native_ui/build`
   - `ctest --test-dir native_ui/build --output-on-failure`
+- One-shot verification script:
+  - `./scripts/run-tests.sh`
 
 ## Next Coverage Steps
 

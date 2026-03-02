@@ -207,6 +207,8 @@ Acceptance criteria:
 - [x] Implement test plan phase 1 (backend/FFI unit tests + native UI smoke test scaffold).
 - [x] Implement test plan phase 2 (FFI integration tests + initial bridge mode parity test).
 - [ ] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior).
+- [x] Add strict lint/security verification steps (`cargo clippy -- -D clippy::pedantic`, `cargo audit`) to regular verification script.
+- [ ] Burn down current strict `clippy::pedantic` backlog so regular verification passes without `--no-clippy`.
 - [ ] Execute optimization backlog phase P0 from `docs/OPTIMIZATION_PLAN.md` (typed low-rate in-process path, remove internal JSON churn). Deferred until test coverage phases are complete.
 - [ ] Add integration tests for queue transitions, gapless handoff, seek behavior.
 - [ ] Add regression tests for no early next-track waveform/metadata switch.

@@ -984,6 +984,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn queue_replace_autoplay_loads_and_starts_playback() {
+        let mut queue = Vec::new();
+        let mut selected = None;
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Replace {
+                tracks: vec![p("/a.flac"), p("/b.flac")],
+                autoplay: true,
+            },
+            &mut queue,
+            &mut selected,
+        );
+        assert!(outcome.changed);
+        assert_eq!(selected, Some(0));
+        assert_eq!(
+            outcome.playback_ops,
+            vec![
+                QueuePlaybackOp::LoadQueue(vec![p("/a.flac"), p("/b.flac")]),
+                QueuePlaybackOp::PlayAt(0),
+                QueuePlaybackOp::Play,
+            ]
+        );
+    }
+
+    #[test]
+    fn queue_append_non_empty_uses_add_to_queue_op() {
+        let mut queue = vec![p("/a.flac")];
+        let mut selected = Some(0);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Append(vec![p("/b.flac"), p("/c.flac")]),
+            &mut queue,
+            &mut selected,
+        );
+        assert!(outcome.changed);
+        assert_eq!(queue, vec![p("/a.flac"), p("/b.flac"), p("/c.flac")]);
+        assert_eq!(selected, Some(0));
+        assert_eq!(
+            outcome.playback_ops,
+            vec![QueuePlaybackOp::AddToQueue(vec![
+                p("/b.flac"),
+                p("/c.flac")
+            ])]
+        );
+    }
+
+    #[test]
+    fn queue_remove_last_track_clears_selection_and_playback_queue() {
+        let mut queue = vec![p("/only.flac")];
+        let mut selected = Some(0);
+        let outcome =
+            apply_queue_command_state(BridgeQueueCommand::Remove(0), &mut queue, &mut selected);
+        assert!(outcome.changed);
+        assert!(queue.is_empty());
+        assert!(selected.is_none());
+        assert_eq!(outcome.playback_ops, vec![QueuePlaybackOp::ClearQueue]);
+    }
+
+    #[test]
+    fn queue_select_updates_state_without_playback_ops() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac")];
+        let mut selected = Some(0);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Select(Some(1)),
+            &mut queue,
+            &mut selected,
+        );
+        assert!(outcome.changed);
+        assert_eq!(selected, Some(1));
+        assert!(outcome.playback_ops.is_empty());
+        assert!(outcome.error.is_none());
+    }
+
     fn wait_for_snapshot_matching<F>(
         bridge: &FrontendBridgeHandle,
         timeout: Duration,
