@@ -165,10 +165,10 @@ Kirigami.ApplicationWindow {
         }
 
         filteredLibraryTree = filteredArtists
-        rebuildLibraryRows()
+        rebuildLibraryRows("")
     }
 
-    function rebuildLibraryRows() {
+    function rebuildLibraryRows(revealParentSelectionKey) {
         const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
         const rows = []
         const autoExpand = librarySearchField.text.trim().length > 0
@@ -245,27 +245,53 @@ Kirigami.ApplicationWindow {
             libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
         }
 
-        Qt.callLater(function() {
-            if (!libraryAlbumView) {
-                return
-            }
-            const maxY = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
-            libraryAlbumView.contentY = Math.min(preserveY, maxY)
-        })
+        if (revealParentSelectionKey && revealParentSelectionKey.length > 0) {
+            Qt.callLater(function() {
+                if (!libraryAlbumView) {
+                    return
+                }
+                let parentIndex = -1
+                for (let i = 0; i < libraryRows.length; i++) {
+                    if (libraryRows[i].selectionKey === revealParentSelectionKey) {
+                        parentIndex = i
+                        break
+                    }
+                }
+                const childIndex = parentIndex + 1
+                if (parentIndex >= 0 && childIndex < libraryRows.length) {
+                    libraryAlbumView.positionViewAtIndex(childIndex, ListView.Contain)
+                }
+            })
+        }
     }
 
     function toggleArtist(artistName) {
+        const currentlyExpanded = expandedArtists[artistName] === true
         const next = Object.assign({}, expandedArtists)
-        next[artistName] = !(expandedArtists[artistName] === true)
+        next[artistName] = !currentlyExpanded
         expandedArtists = next
-        rebuildLibraryRows()
+        const revealKey = !currentlyExpanded
+            ? selectionKeyForRow({ rowType: "artist", artist: artistName })
+            : ""
+        rebuildLibraryRows(revealKey)
     }
 
     function toggleAlbum(albumKey) {
+        const currentlyExpanded = expandedAlbums[albumKey] === true
         const next = Object.assign({}, expandedAlbums)
-        next[albumKey] = !(expandedAlbums[albumKey] === true)
+        next[albumKey] = !currentlyExpanded
         expandedAlbums = next
-        rebuildLibraryRows()
+        let revealKey = ""
+        if (!currentlyExpanded) {
+            for (let i = 0; i < libraryRows.length; i++) {
+                const row = libraryRows[i]
+                if (row.rowType === "album" && row.key === albumKey) {
+                    revealKey = row.selectionKey || ""
+                    break
+                }
+            }
+        }
+        rebuildLibraryRows(revealKey)
     }
 
     Action {
