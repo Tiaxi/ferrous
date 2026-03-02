@@ -909,3 +909,83 @@ where
     on_update(peaks, true);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::unbounded;
+
+    #[test]
+    fn peaks_blob_roundtrip() {
+        let peaks = vec![0.0f32, 0.25, 0.5, 1.0];
+        let blob = encode_peaks_blob(&peaks);
+        let decoded = decode_peaks_blob(&blob, peaks.len()).expect("decode");
+        assert_eq!(decoded, peaks);
+    }
+
+    #[test]
+    fn waveform_cache_persist_and_load_roundtrip() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let path = PathBuf::from("/tmp/test_track.flac");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 1234,
+            modified_secs: 100,
+            modified_nanos: 55,
+        };
+        let peaks = vec![0.1f32, 0.3, 0.9];
+        persist_waveform_to_db(&conn, &path, stamp, &peaks).expect("persist");
+        let loaded = load_waveform_from_db(&conn, &path, stamp).expect("load");
+        assert_eq!(loaded, peaks);
+    }
+
+    #[test]
+    fn spectrogram_decimator_averages_rows() {
+        let mut decimator = SpectrogramDecimator::new(2);
+        let first = decimator.push(vec![2.0, 4.0]);
+        assert!(first.is_none());
+        let second = decimator.push(vec![4.0, 6.0]).expect("averaged row");
+        assert_eq!(second, vec![3.0, 5.0]);
+    }
+
+    #[test]
+    fn stft_computer_produces_rows_from_samples() {
+        let mut stft = StftComputer::new(512, 128);
+        let mut samples = Vec::new();
+        for i in 0..4096usize {
+            let x = (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / 48_000.0)).sin();
+            samples.push(x);
+        }
+        stft.enqueue_samples(&samples, 48_000);
+        let rows = stft.take_rows(4);
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0].len(), 257);
+    }
+
+    #[test]
+    fn emit_snapshot_respects_force_and_waveform_dirty() {
+        let (tx, rx) = unbounded::<AnalysisEvent>();
+        let snapshot = AnalysisSnapshot {
+            waveform_peaks: vec![0.1, 0.2],
+            spectrogram_rows: Vec::new(),
+            spectrogram_seq: 0,
+            sample_rate_hz: 48_000,
+        };
+        let mut pending_rows = Vec::<Vec<f32>>::new();
+        let mut waveform_dirty = true;
+        let mut last_emit = std::time::Instant::now() - Duration::from_secs(1);
+
+        emit_snapshot(
+            &tx,
+            &snapshot,
+            &mut pending_rows,
+            &mut waveform_dirty,
+            &mut last_emit,
+            true,
+        );
+        let evt = rx.try_recv().expect("snapshot event");
+        match evt {
+            AnalysisEvent::Snapshot(s) => assert_eq!(s.waveform_peaks, vec![0.1, 0.2]),
+        }
+    }
+}

@@ -1062,3 +1062,117 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrous::frontend_bridge::ffi::{
+        ferrous_ffi_bridge_create, ferrous_ffi_bridge_destroy, ferrous_ffi_bridge_free_json_event,
+        ferrous_ffi_bridge_poll, ferrous_ffi_bridge_pop_json_event, ferrous_ffi_bridge_send_json,
+    };
+    use std::ffi::{CStr, CString};
+    use std::time::Instant;
+
+    fn wait_bridge_snapshot(
+        bridge: &FrontendBridgeHandle,
+        timeout: Duration,
+    ) -> Option<BridgeSnapshot> {
+        let deadline = Instant::now() + timeout;
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
+                if let BridgeEvent::Snapshot(s) = event {
+                    last = Some(s);
+                }
+            }
+        }
+        last
+    }
+
+    unsafe fn wait_ffi_snapshot_json(
+        handle: *mut ferrous::frontend_bridge::ffi::FerrousFfiBridge,
+        timeout: Duration,
+        expected_queue_len: u64,
+    ) -> Option<serde_json::Value> {
+        let deadline = Instant::now() + timeout;
+        let mut latest = None;
+        while Instant::now() < deadline {
+            ferrous_ffi_bridge_poll(handle, 64);
+            loop {
+                let ptr = ferrous_ffi_bridge_pop_json_event(handle);
+                if ptr.is_null() {
+                    break;
+                }
+                let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+                ferrous_ffi_bridge_free_json_event(ptr);
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if value.get("event").and_then(|v| v.as_str()) == Some("snapshot") {
+                        let queue_len = value
+                            .get("queue")
+                            .and_then(|v| v.get("len"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        latest = Some(value.clone());
+                        if queue_len == expected_queue_len {
+                            return Some(value);
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        latest
+    }
+
+    #[test]
+    fn process_parser_and_ffi_path_have_matching_queue_outcome() {
+        let direct_bridge = FrontendBridgeHandle::spawn();
+        let cmd =
+            parse_json_command(r#"{"cmd":"replace_album","paths":["/tmp/a.flac","/tmp/b.flac"]}"#)
+                .expect("parse")
+                .expect("cmd");
+        direct_bridge.command(cmd);
+        direct_bridge.command(BridgeCommand::RequestSnapshot);
+        let direct_snapshot =
+            wait_bridge_snapshot(&direct_bridge, Duration::from_secs(4)).expect("direct snapshot");
+
+        let ffi_handle = ferrous_ffi_bridge_create();
+        assert!(!ffi_handle.is_null());
+        let line = CString::new(r#"{"cmd":"replace_album","paths":["/tmp/a.flac","/tmp/b.flac"]}"#)
+            .expect("cstring");
+        assert!(unsafe { ferrous_ffi_bridge_send_json(ffi_handle, line.as_ptr()) });
+        let request = CString::new(r#"{"cmd":"request_snapshot"}"#).expect("cstring");
+        assert!(unsafe { ferrous_ffi_bridge_send_json(ffi_handle, request.as_ptr()) });
+        let ffi_snapshot = unsafe {
+            wait_ffi_snapshot_json(
+                ffi_handle,
+                Duration::from_secs(4),
+                direct_snapshot.queue.len() as u64,
+            )
+        }
+        .expect("ffi snapshot");
+
+        let ffi_queue_len = ffi_snapshot
+            .get("queue")
+            .and_then(|v| v.get("len"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ffi_selected = ffi_snapshot
+            .get("queue")
+            .and_then(|v| v.get("selected_index"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+
+        assert_eq!(direct_snapshot.queue.len() as u64, ffi_queue_len);
+        assert_eq!(
+            direct_snapshot
+                .selected_queue_index
+                .map(|i| i as i64)
+                .unwrap_or(-1),
+            ffi_selected
+        );
+
+        direct_bridge.command(BridgeCommand::Shutdown);
+        unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
+    }
+}

@@ -199,35 +199,7 @@ impl FerrousApp {
         let Ok(text) = fs::read_to_string(path) else {
             return;
         };
-        for line in text.lines() {
-            let Some((k, v)) = line.split_once('=') else {
-                continue;
-            };
-            match k {
-                "volume" => {
-                    if let Ok(x) = v.parse::<f32>() {
-                        self.state.playback.volume = x.clamp(0.0, 1.0);
-                    }
-                }
-                "fft_size" => {
-                    if let Ok(x) = v.parse::<usize>() {
-                        let _ = x;
-                        self.state.spectro_ui.fft_size = 8192;
-                    }
-                }
-                "db_range" => {
-                    if let Ok(x) = v.parse::<f32>() {
-                        self.state.spectro_ui.db_range = x.clamp(50.0, 120.0);
-                    }
-                }
-                "log_scale" => {
-                    if let Ok(x) = v.parse::<i32>() {
-                        self.state.spectro_ui.log_scale = x != 0;
-                    }
-                }
-                _ => {}
-            }
-        }
+        parse_app_settings_text(&mut self.state, &text);
     }
 
     fn save_settings(&mut self) {
@@ -237,20 +209,51 @@ impl FerrousApp {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let text = format!(
-            "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\n",
-            self.state.playback.volume,
-            self.state.spectro_ui.fft_size,
-            self.state.spectro_ui.db_range,
-            if self.state.spectro_ui.log_scale {
-                1
-            } else {
-                0
-            },
-        );
+        let text = format_app_settings_text(&self.state);
         let _ = fs::write(path, text);
         self.last_settings_save = Instant::now();
     }
+}
+
+fn parse_app_settings_text(state: &mut AppState, text: &str) {
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        match k {
+            "volume" => {
+                if let Ok(x) = v.parse::<f32>() {
+                    state.playback.volume = x.clamp(0.0, 1.0);
+                }
+            }
+            "fft_size" => {
+                if let Ok(x) = v.parse::<usize>() {
+                    state.spectro_ui.fft_size = x.clamp(512, 8192).next_power_of_two();
+                }
+            }
+            "db_range" => {
+                if let Ok(x) = v.parse::<f32>() {
+                    state.spectro_ui.db_range = x.clamp(50.0, 120.0);
+                }
+            }
+            "log_scale" => {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.spectro_ui.log_scale = x != 0;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn format_app_settings_text(state: &AppState) -> String {
+    format!(
+        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\n",
+        state.playback.volume,
+        state.spectro_ui.fft_size,
+        state.spectro_ui.db_range,
+        if state.spectro_ui.log_scale { 1 } else { 0 },
+    )
 }
 
 impl eframe::App for FerrousApp {
@@ -465,5 +468,42 @@ impl eframe::App for FerrousApp {
             self.save_settings();
         }
         ctx.request_repaint_after(Duration::from_millis(16));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_settings_roundtrip_text() {
+        let mut state = AppState::default();
+        state.playback.volume = 0.37;
+        state.spectro_ui.fft_size = 4096;
+        state.spectro_ui.db_range = 77.0;
+        state.spectro_ui.log_scale = true;
+
+        let text = format_app_settings_text(&state);
+        let mut parsed = AppState::default();
+        parse_app_settings_text(&mut parsed, &text);
+
+        assert!((parsed.playback.volume - 0.37).abs() < 0.0001);
+        assert_eq!(parsed.spectro_ui.fft_size, 4096);
+        assert!((parsed.spectro_ui.db_range - 77.0).abs() < 0.0001);
+        assert!(parsed.spectro_ui.log_scale);
+    }
+
+    #[test]
+    fn app_settings_parse_clamps_and_normalizes_fft() {
+        let mut state = AppState::default();
+        parse_app_settings_text(
+            &mut state,
+            "volume=2.0\nfft_size=7000\ndb_range=30\nlog_scale=0\n",
+        );
+
+        assert_eq!(state.playback.volume, 1.0);
+        assert_eq!(state.spectro_ui.fft_size, 8192);
+        assert_eq!(state.spectro_ui.db_range, 50.0);
+        assert!(!state.spectro_ui.log_scale);
     }
 }

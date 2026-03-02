@@ -21,6 +21,10 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Phase 1 implemented:
     - `src/frontend_bridge/mod.rs` tests for settings + queue state logic.
     - `src/frontend_bridge/ffi.rs` tests for command parsing + snapshot/analysis encoding contract.
+  - Phase 2 implemented:
+    - `src/analysis/mod.rs` tests for waveform cache roundtrip, peak blob roundtrip, STFT row generation, spectrogram decimation, and snapshot emission gating.
+    - `src/library/mod.rs` tests for supported-extension detection, indexed scan behavior, and stale/deleted track cleanup.
+    - `src/app/mod.rs` tests for settings parse/format roundtrip and FFT/db-range/log-scale normalization.
 
 ### Layer 2: FFI Contract Tests (Rust)
 
@@ -32,7 +36,9 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Phase 1 implemented in `src/frontend_bridge/ffi.rs` (unit-level contract checks).
   - Phase 2 implemented:
     - End-to-end tests now drive exported `ferrous_ffi_bridge_*` functions for snapshot/error/stopped flow.
-  - Future: add process-vs-in-process parity integration checks for key command flows.
+  - Phase 3 implemented:
+    - `src/bin/native_frontend.rs` parity test confirms process-style command parsing path and in-process FFI path produce matching queue snapshot outcomes for album replacement.
+  - Future: broaden parity checks to seek/selection/reorder/error paths.
 
 ### Layer 3: Native UI Smoke Tests (Qt)
 
@@ -51,7 +57,8 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 - Status:
   - Phase 1 partially implemented:
     - Bridge queue roundtrip integration test (`FrontendBridgeHandle` + snapshot assertions).
-  - Further queue/seek/gapless and metadata transition cases still planned.
+    - Process-vs-FFI queue replacement parity assertion in `src/bin/native_frontend.rs`.
+  - Further queue/seek/gapless and metadata transition cases are still planned.
 
 ## Execution Commands
 
@@ -64,7 +71,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 ## Next Coverage Steps
 
-1. Add process-vs-in-process bridge parity integration tests.
-2. Expand queue/playback integration tests with deterministic fixtures.
-3. Add seek/gapless/metadata transition regression tests.
+1. Expand process-vs-in-process parity tests beyond queue replacement (seek/select/move/remove/error flows).
+2. Add deterministic integration tests for queue transitions and playback edge cases.
+3. Add no-early-next-track metadata/waveform regression tests.
 4. Add performance regression harness for bridge/event throughput and UI frame pacing.

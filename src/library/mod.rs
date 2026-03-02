@@ -369,3 +369,88 @@ fn unix_ts_i64() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!(
+            "ferrous-libtest-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        p
+    }
+
+    #[test]
+    fn supported_audio_extensions_are_detected() {
+        assert!(is_supported_audio(Path::new("a.mp3")));
+        assert!(is_supported_audio(Path::new("a.flac")));
+        assert!(!is_supported_audio(Path::new("a.wav")));
+        assert!(!is_supported_audio(Path::new("a")));
+    }
+
+    #[test]
+    fn scan_root_indexes_supported_files_only() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+
+        let root = test_dir("index");
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mp3 = root.join("song1.mp3");
+        let flac = root.join("song2.flac");
+        let txt = root.join("notes.txt");
+        fs::File::create(&mp3)
+            .and_then(|mut f| f.write_all(b"not-real-mp3"))
+            .expect("create mp3");
+        fs::File::create(&flac)
+            .and_then(|mut f| f.write_all(b"not-real-flac"))
+            .expect("create flac");
+        fs::File::create(&txt)
+            .and_then(|mut f| f.write_all(b"ignore me"))
+            .expect("create txt");
+
+        let mut snapshot = LibrarySnapshot::default();
+        scan_root(&conn, &root, &mut snapshot).expect("scan");
+        load_snapshot(&conn, &mut snapshot);
+
+        let paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
+        assert!(paths.iter().any(|p| p.ends_with("song1.mp3")));
+        assert!(paths.iter().any(|p| p.ends_with("song2.flac")));
+        assert!(!paths.iter().any(|p| p.ends_with("notes.txt")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_root_removes_stale_deleted_tracks() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+
+        let root = test_dir("stale");
+        fs::create_dir_all(&root).expect("mkdir");
+        let mp3 = root.join("song1.mp3");
+        fs::File::create(&mp3)
+            .and_then(|mut f| f.write_all(b"not-real-mp3"))
+            .expect("create mp3");
+
+        let mut snapshot = LibrarySnapshot::default();
+        scan_root(&conn, &root, &mut snapshot).expect("initial scan");
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks.len(), 1);
+
+        fs::remove_file(&mp3).expect("remove mp3");
+        scan_root(&conn, &root, &mut snapshot).expect("rescan");
+        load_snapshot(&conn, &mut snapshot);
+        assert!(snapshot.tracks.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+}
