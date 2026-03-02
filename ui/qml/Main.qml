@@ -24,6 +24,7 @@ Kirigami.ApplicationWindow {
     property int lastCenteredQueueIndex: -2
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
+    readonly property int menuPopupMinWidth: 220
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -207,18 +208,21 @@ Kirigami.ApplicationWindow {
     Action {
         id: removeSelectedTrackAction
         text: "Remove Selected Track"
+        shortcut: "Delete"
         enabled: uiBridge.selectedQueueIndex >= 0
         onTriggered: root.removeSelectedQueueTrack()
     }
     Action {
         id: selectPreviousTrackAction
         text: "Select Previous Track"
+        shortcut: "Ctrl+Up"
         enabled: uiBridge.queueLength > 0
         onTriggered: root.selectQueueRelative(-1)
     }
     Action {
         id: selectNextTrackAction
         text: "Select Next Track"
+        shortcut: "Ctrl+Down"
         enabled: uiBridge.queueLength > 0
         onTriggered: root.selectQueueRelative(1)
     }
@@ -301,11 +305,13 @@ Kirigami.ApplicationWindow {
     Action {
         id: moveTrackUpAction
         text: "Move Track Up"
+        shortcut: "Ctrl+Shift+Up"
         onTriggered: root.moveSelected(-1)
     }
     Action {
         id: moveTrackDownAction
         text: "Move Track Down"
+        shortcut: "Ctrl+Shift+Down"
         onTriggered: root.moveSelected(1)
     }
 
@@ -321,30 +327,10 @@ Kirigami.ApplicationWindow {
         sequence: "Media Next"
         onActivated: nextAction.trigger()
     }
-    Shortcut {
-        sequence: "Delete"
-        onActivated: removeSelectedTrackAction.trigger()
-    }
-    Shortcut {
-        sequence: "Ctrl+Up"
-        onActivated: selectPreviousTrackAction.trigger()
-    }
-    Shortcut {
-        sequence: "Ctrl+Down"
-        onActivated: selectNextTrackAction.trigger()
-    }
-    Shortcut {
-        sequence: "Ctrl+Shift+Up"
-        onActivated: moveTrackUpAction.trigger()
-    }
-    Shortcut {
-        sequence: "Ctrl+Shift+Down"
-        onActivated: moveTrackDownAction.trigger()
-    }
-
     menuBar: MenuBar {
         Menu {
             title: "File"
+            width: root.menuPopupMinWidth
             MenuItem { action: playLibrarySelectionAction }
             MenuItem { action: appendLibrarySelectionAction }
             MenuSeparator {}
@@ -355,6 +341,7 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "Edit"
+            width: root.menuPopupMinWidth
             MenuItem { action: removeSelectedTrackAction }
             MenuItem { action: moveTrackUpAction }
             MenuItem { action: moveTrackDownAction }
@@ -366,6 +353,7 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "View"
+            width: root.menuPopupMinWidth
             MenuItem { action: focusSearchAction }
             MenuItem { action: refreshSnapshotAction }
             MenuSeparator {}
@@ -375,6 +363,7 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "Playback"
+            width: root.menuPopupMinWidth
             MenuItem { action: previousAction }
             MenuItem { action: playAction }
             MenuItem { action: pauseAction }
@@ -388,6 +377,7 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "Help"
+            width: root.menuPopupMinWidth
             MenuItem { action: aboutAction }
         }
     }
