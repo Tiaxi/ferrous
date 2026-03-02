@@ -758,6 +758,11 @@ fn encode_snapshot_payload(
         } else {
             serde_json::Value::Null
         };
+    let current_queue_index = s
+        .playback
+        .current
+        .as_ref()
+        .and_then(|current| s.queue.iter().position(|path| path == current));
 
     json!({
         "event": "snapshot",
@@ -767,6 +772,8 @@ fn encode_snapshot_payload(
             "duration_secs": s.playback.duration.as_secs_f64(),
             "volume": s.playback.volume,
             "has_current": s.playback.current.is_some(),
+            "current_path": s.playback.current.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "current_queue_index": current_queue_index,
         },
         "queue": {
             "len": s.queue.len(),

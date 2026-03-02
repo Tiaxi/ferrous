@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QByteArray>
+#include <QHash>
 #include <QJsonObject>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -23,6 +24,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
+    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY snapshotChanged)
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY snapshotChanged)
     Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY snapshotChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY snapshotChanged)
@@ -49,6 +53,9 @@ public:
     int queueLength() const;
     QStringList queueItems() const;
     int selectedQueueIndex() const;
+    int playingQueueIndex() const;
+    QString currentTrackPath() const;
+    QString currentTrackCoverPath() const;
     QByteArray waveformPeaksPacked() const;
     bool spectrogramReset() const;
     int sampleRateHz() const;
@@ -116,7 +123,11 @@ private:
     double m_volume{1.0};
     int m_queueLength{0};
     QStringList m_queueItems;
+    QStringList m_queuePaths;
     int m_selectedQueueIndex{-1};
+    int m_playingQueueIndex{-1};
+    QString m_currentTrackPath;
+    QString m_currentTrackCoverPath;
     QByteArray m_waveformPeaksPacked;
     QByteArray m_spectrogramRowsPacked;
     int m_spectrogramPackedRows{0};
@@ -131,6 +142,7 @@ private:
     QStringList m_libraryAlbumArtists;
     QStringList m_libraryAlbumNames;
     QStringList m_libraryAlbumCoverPaths;
+    QHash<QString, QString> m_trackCoverByPath;
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};

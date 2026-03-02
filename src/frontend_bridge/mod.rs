@@ -8,7 +8,9 @@ use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TryS
 use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
 use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot};
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
-use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot};
+use crate::playback::{
+    PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, TrackChangeKind,
+};
 
 #[derive(Debug, Clone)]
 pub enum BridgeCommand {
@@ -682,10 +684,13 @@ fn pump_playback_events(
                 state.playback = snapshot;
                 changed = true;
             }
-            PlaybackEvent::TrackChanged(path) => {
+            PlaybackEvent::TrackChanged { path, kind } => {
                 state.analysis.waveform_peaks.clear();
                 metadata.request(path.clone());
-                analysis.command(AnalysisCommand::SetTrack(path));
+                analysis.command(AnalysisCommand::SetTrack {
+                    path,
+                    reset_spectrogram: matches!(kind, TrackChangeKind::Manual),
+                });
                 changed = true;
             }
             PlaybackEvent::Seeked => {}

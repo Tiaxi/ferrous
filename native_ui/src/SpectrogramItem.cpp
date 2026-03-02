@@ -1,10 +1,12 @@
 #include "SpectrogramItem.h"
 
+#include <QMutexLocker>
 #include <QPainter>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 
 namespace {
 std::array<quint8, 3> ddbColor(double norm) {
@@ -48,6 +50,7 @@ double SpectrogramItem::dbRange() const {
 }
 
 void SpectrogramItem::setDbRange(double value) {
+    QMutexLocker lock(&m_stateMutex);
     const double clamped = std::clamp(value, 50.0, 120.0);
     if (std::abs(m_dbRange - clamped) < 0.001) {
         return;
@@ -62,12 +65,14 @@ bool SpectrogramItem::logScale() const {
 }
 
 void SpectrogramItem::setLogScale(bool value) {
+    QMutexLocker lock(&m_stateMutex);
     if (m_logScale == value) {
         return;
     }
     m_logScale = value;
     emit logScaleChanged();
     invalidateMapping();
+    invalidateCanvas();
     update();
 }
 
@@ -76,6 +81,7 @@ int SpectrogramItem::sampleRateHz() const {
 }
 
 void SpectrogramItem::setSampleRateHz(int value) {
+    QMutexLocker lock(&m_stateMutex);
     const int clamped = std::max(1000, value);
     if (m_sampleRateHz == clamped) {
         return;
@@ -83,6 +89,7 @@ void SpectrogramItem::setSampleRateHz(int value) {
     m_sampleRateHz = clamped;
     emit sampleRateHzChanged();
     invalidateMapping();
+    invalidateCanvas();
     update();
 }
 
@@ -91,6 +98,7 @@ int SpectrogramItem::maxColumns() const {
 }
 
 void SpectrogramItem::setMaxColumns(int value) {
+    QMutexLocker lock(&m_stateMutex);
     const int clamped = std::clamp(value, 128, 4096);
     if (m_maxColumns == clamped) {
         return;
@@ -100,17 +108,21 @@ void SpectrogramItem::setMaxColumns(int value) {
     while (static_cast<int>(m_columns.size()) > m_maxColumns) {
         m_columns.pop_front();
     }
+    invalidateCanvas();
     update();
 }
 
 void SpectrogramItem::reset() {
+    QMutexLocker lock(&m_stateMutex);
     m_columns.clear();
     m_binsPerColumn = 0;
     invalidateMapping();
+    invalidateCanvas();
     update();
 }
 
 void SpectrogramItem::appendRows(const QVariantList &rows) {
+    QMutexLocker lock(&m_stateMutex);
     if (rows.isEmpty()) {
         return;
     }
@@ -132,7 +144,7 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         if (static_cast<int>(mapped.size()) != m_binsPerColumn) {
             continue;
         }
-        m_columns.emplace_back(std::move(mapped));
+        appendColumnAndRender(std::move(mapped));
         anyAdded = true;
     }
 
@@ -140,13 +152,11 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         return;
     }
 
-    while (static_cast<int>(m_columns.size()) > m_maxColumns) {
-        m_columns.pop_front();
-    }
     update();
 }
 
 void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow) {
+    QMutexLocker lock(&m_stateMutex);
     if (packedRows.isEmpty() || rowCount <= 0 || binsPerRow <= 0) {
         return;
     }
@@ -163,21 +173,48 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
         return;
     }
 
+    int appended = 0;
     const auto *src = reinterpret_cast<const quint8 *>(packedRows.constData());
     for (int r = 0; r < rowCount; ++r) {
         std::vector<quint8> col(static_cast<size_t>(binsPerRow));
-        std::copy_n(src + static_cast<qsizetype>(r) * static_cast<qsizetype>(binsPerRow),
-                    binsPerRow,
-                    col.begin());
+        std::copy_n(
+            src + static_cast<qsizetype>(r) * static_cast<qsizetype>(binsPerRow),
+            binsPerRow,
+            col.begin());
         m_columns.emplace_back(std::move(col));
+        appended++;
     }
     while (static_cast<int>(m_columns.size()) > m_maxColumns) {
         m_columns.pop_front();
+    }
+    if (appended <= 0) {
+        return;
+    }
+
+    const int w = std::max(1, static_cast<int>(std::floor(width())));
+    const int h = std::max(1, static_cast<int>(std::floor(height())));
+    ensureCanvas(w, h);
+    if (m_canvas.isNull()) {
+        update();
+        return;
+    }
+
+    const int shift = std::min(appended, m_canvas.width());
+    if (shift >= m_canvas.width()) {
+        rebuildCanvasFromColumns();
+    } else {
+        shiftCanvasLeft(shift);
+        const int sourceStart = static_cast<int>(m_columns.size()) - shift;
+        const int xStart = m_canvas.width() - shift;
+        for (int i = 0; i < shift; ++i) {
+            drawColumnAt(xStart + i, m_columns[static_cast<size_t>(sourceStart + i)]);
+        }
     }
     update();
 }
 
 void SpectrogramItem::paint(QPainter *painter) {
+    QMutexLocker lock(&m_stateMutex);
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
 
@@ -186,49 +223,39 @@ void SpectrogramItem::paint(QPainter *painter) {
         return;
     }
 
-    ensureMapping(h);
-    const int cols = std::min<int>(std::min<int>(w, m_maxColumns), static_cast<int>(m_columns.size()));
-    if (cols <= 0) {
+    ensureCanvas(w, h);
+    if (m_canvas.isNull()) {
         return;
     }
-
-    QImage img(cols, h, QImage::Format_RGBA8888);
-    img.fill(Qt::black);
-
-    const int start = static_cast<int>(m_columns.size()) - cols;
-    for (int x = 0; x < cols; ++x) {
-        const auto &col = m_columns[static_cast<size_t>(start + x)];
-        for (int y = 0; y < h; ++y) {
-            const int bin = std::clamp(m_yToBin[static_cast<size_t>(y)], 0, m_binsPerColumn - 1);
-            const quint8 idx = col[static_cast<size_t>(bin)];
-            const auto &rgb = m_palette[static_cast<size_t>(idx)];
-            uchar *px = img.scanLine(y) + x * 4;
-            px[0] = rgb[0];
-            px[1] = rgb[1];
-            px[2] = rgb[2];
-            px[3] = 255;
-        }
-    }
-
-    painter->drawImage(QPoint(w - cols, 0), img);
+    const int drawX = w - m_canvas.width();
+    painter->drawImage(QPoint(drawX, 0), m_canvas);
 }
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.size() != oldGeometry.size()) {
+        QMutexLocker lock(&m_stateMutex);
         invalidateMapping();
+        invalidateCanvas();
     }
 }
 
 void SpectrogramItem::rebuildPalette() {
     for (int i = 0; i < 256; ++i) {
         m_palette[static_cast<size_t>(i)] = ddbColor(static_cast<double>(i) / 255.0);
+        const auto &rgb = m_palette[static_cast<size_t>(i)];
+        m_palette32[static_cast<size_t>(i)] = qRgb(rgb[0], rgb[1], rgb[2]);
     }
 }
 
 void SpectrogramItem::invalidateMapping() {
     m_yToBin.clear();
     m_yToBinHeight = -1;
+}
+
+void SpectrogramItem::invalidateCanvas() {
+    m_canvas = QImage();
+    m_canvasDirty = true;
 }
 
 void SpectrogramItem::ensureMapping(int height) {
@@ -262,6 +289,97 @@ void SpectrogramItem::ensureMapping(int height) {
     }
 
     m_yToBinHeight = height;
+}
+
+void SpectrogramItem::ensureCanvas(int width, int height) {
+    if (width <= 0 || height <= 0 || m_binsPerColumn <= 0) {
+        return;
+    }
+
+    const int cols = std::max(1, std::min(width, m_maxColumns));
+    ensureMapping(height);
+    if (m_canvas.width() != cols || m_canvas.height() != height || m_canvas.format() != QImage::Format_RGB32) {
+        m_canvas = QImage(cols, height, QImage::Format_RGB32);
+        m_canvas.fill(Qt::black);
+        m_canvasDirty = true;
+    }
+    if (m_canvasDirty) {
+        rebuildCanvasFromColumns();
+    }
+}
+
+void SpectrogramItem::rebuildCanvasFromColumns() {
+    if (m_canvas.isNull()) {
+        return;
+    }
+    m_canvas.fill(Qt::black);
+    const int cols = m_canvas.width();
+    if (m_columns.empty() || cols <= 0) {
+        m_canvasDirty = false;
+        return;
+    }
+    const int available = static_cast<int>(m_columns.size());
+    const int drawCols = std::min(cols, available);
+    const int start = available - drawCols;
+    const int xStart = cols - drawCols;
+    for (int i = 0; i < drawCols; ++i) {
+        drawColumnAt(xStart + i, m_columns[static_cast<size_t>(start + i)]);
+    }
+    m_canvasDirty = false;
+}
+
+void SpectrogramItem::shiftCanvasLeft(int columns) {
+    if (m_canvas.isNull() || columns <= 0) {
+        return;
+    }
+    const int cols = m_canvas.width();
+    if (columns >= cols) {
+        m_canvas.fill(Qt::black);
+        return;
+    }
+
+    const int bytesPerPixel = static_cast<int>(sizeof(QRgb));
+    const int movePixels = cols - columns;
+    const int moveBytes = movePixels * bytesPerPixel;
+    for (int y = 0; y < m_canvas.height(); ++y) {
+        auto *line = reinterpret_cast<QRgb *>(m_canvas.scanLine(y));
+        std::memmove(line, line + columns, static_cast<size_t>(moveBytes));
+        std::fill(line + movePixels, line + cols, qRgb(0, 0, 0));
+    }
+}
+
+void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
+    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width() || col.empty()) {
+        return;
+    }
+
+    const int maxBin = std::max(0, m_binsPerColumn - 1);
+    for (int y = 0; y < m_canvas.height(); ++y) {
+        const int bin = std::clamp(m_yToBin[static_cast<size_t>(y)], 0, maxBin);
+        const quint8 idx = col[static_cast<size_t>(bin)];
+        auto *line = reinterpret_cast<QRgb *>(m_canvas.scanLine(y));
+        line[x] = m_palette32[static_cast<size_t>(idx)];
+    }
+}
+
+void SpectrogramItem::appendColumnAndRender(std::vector<quint8> &&col) {
+    if (static_cast<int>(col.size()) != m_binsPerColumn) {
+        return;
+    }
+
+    m_columns.emplace_back(std::move(col));
+    while (static_cast<int>(m_columns.size()) > m_maxColumns) {
+        m_columns.pop_front();
+    }
+
+    const int w = std::max(1, static_cast<int>(std::floor(width())));
+    const int h = std::max(1, static_cast<int>(std::floor(height())));
+    ensureCanvas(w, h);
+    if (m_canvas.isNull()) {
+        return;
+    }
+    shiftCanvasLeft(1);
+    drawColumnAt(m_canvas.width() - 1, m_columns.back());
 }
 
 std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) const {

@@ -39,9 +39,15 @@ pub enum PlaybackCommand {
 }
 
 #[derive(Debug, Clone)]
+pub enum TrackChangeKind {
+    Manual,
+    Natural,
+}
+
+#[derive(Debug, Clone)]
 pub enum PlaybackEvent {
     Snapshot(PlaybackSnapshot),
-    TrackChanged(PathBuf),
+    TrackChanged { path: PathBuf, kind: TrackChangeKind },
     Seeked,
 }
 
@@ -140,7 +146,7 @@ mod backend {
 
     use crate::analysis::AnalysisCommand;
 
-    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState};
+    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
 
     pub fn spawn_engine(
         analysis_tx: Sender<AnalysisCommand>,
@@ -172,7 +178,10 @@ mod backend {
                         snapshot.duration = Duration::from_secs(180);
                         snapshot.current = queue.first().cloned();
                         if let Some(path) = snapshot.current.clone() {
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                path,
+                                kind: TrackChangeKind::Manual,
+                            });
                             let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(48_000));
                         }
                     }
@@ -193,7 +202,10 @@ mod backend {
                             snapshot.current = Some(path.clone());
                             snapshot.position = Duration::ZERO;
                             snapshot.duration = Duration::from_secs(180);
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path));
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                path,
+                                kind: TrackChangeKind::Manual,
+                            });
                         }
                     }
                     PlaybackCommand::Next => {
@@ -203,7 +215,10 @@ mod backend {
                                 snapshot.current = Some(next.clone());
                                 snapshot.position = Duration::ZERO;
                                 snapshot.duration = Duration::from_secs(180);
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged(next));
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                    path: next,
+                                    kind: TrackChangeKind::Manual,
+                                });
                             }
                         }
                     }
@@ -214,7 +229,10 @@ mod backend {
                                 snapshot.current = Some(prev.clone());
                                 snapshot.position = Duration::ZERO;
                                 snapshot.duration = Duration::from_secs(180);
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged(prev));
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                    path: prev,
+                                    kind: TrackChangeKind::Manual,
+                                });
                             }
                         }
                     }
@@ -257,7 +275,10 @@ mod backend {
                                 snapshot.current = Some(next.clone());
                                 snapshot.position = Duration::ZERO;
                                 snapshot.duration = Duration::from_secs(180);
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged(next));
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                    path: next,
+                                    kind: TrackChangeKind::Natural,
+                                });
                             } else {
                                 snapshot.state = PlaybackState::Stopped;
                                 snapshot.position = Duration::ZERO;
@@ -288,7 +309,7 @@ mod backend {
 
     use crate::analysis::AnalysisCommand;
 
-    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState};
+    use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
 
     struct GaplessQueue {
         queue: Vec<PathBuf>,
@@ -461,7 +482,10 @@ mod backend {
                                 applied_volume,
                                 startup_gain_ramp,
                             );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(first.clone()));
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                path: first.clone(),
+                                kind: TrackChangeKind::Manual,
+                            });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
@@ -497,7 +521,10 @@ mod backend {
                                 applied_volume,
                                 startup_gain_ramp,
                             );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                path: path.clone(),
+                                kind: TrackChangeKind::Manual,
+                            });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
@@ -515,7 +542,10 @@ mod backend {
                                 applied_volume,
                                 startup_gain_ramp,
                             );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                path: path.clone(),
+                                kind: TrackChangeKind::Manual,
+                            });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
@@ -533,7 +563,10 @@ mod backend {
                                 applied_volume,
                                 startup_gain_ramp,
                             );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged(path.clone()));
+                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                path: path.clone(),
+                                kind: TrackChangeKind::Manual,
+                            });
                             let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                         }
                     }
@@ -635,7 +668,10 @@ mod backend {
                             let at_track_start = snapshot.position <= Duration::from_secs(2);
                             if path_changed && at_track_start {
                                 snapshot.current = Some(current_path.clone());
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged(current_path));
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                    path: current_path,
+                                    kind: TrackChangeKind::Natural,
+                                });
                             }
                         }
                     }

@@ -17,7 +17,10 @@ use symphonia::core::probe::Hint;
 
 #[derive(Debug, Clone)]
 pub enum AnalysisCommand {
-    SetTrack(PathBuf),
+    SetTrack {
+        path: PathBuf,
+        reset_spectrogram: bool,
+    },
     SetSampleRate(u32),
     SetFftSize(usize),
     WaveformProgress {
@@ -105,22 +108,27 @@ impl AnalysisEngine {
                     recv(cmd_rx) -> msg => {
                         let Ok(cmd) = msg else { break; };
                         match cmd {
-                            AnalysisCommand::SetTrack(path) => {
+                            AnalysisCommand::SetTrack {
+                                path,
+                                reset_spectrogram,
+                            } => {
                                 active_track_token = active_track_token.wrapping_add(1);
                                 let track_token = active_track_token;
                                 active_track_stamp = source_stamp(&path);
                                 active_track_path = Some(path.clone());
 
                                 snapshot.waveform_peaks.clear();
-                                snapshot.spectrogram_seq = 0;
-                                pending_rows.clear();
                                 waveform_dirty = true;
-                                stft.reset_full();
-                                decimator.reset();
-                                drain_pcm_queue(&pcm_rx);
-                                pcm_fifo.clear();
-                                last_tick_time = std::time::Instant::now();
-                                sample_credit = 0.0;
+                                if reset_spectrogram {
+                                    snapshot.spectrogram_seq = 0;
+                                    pending_rows.clear();
+                                    stft.reset_full();
+                                    decimator.reset();
+                                    drain_pcm_queue(&pcm_rx);
+                                    pcm_fifo.clear();
+                                    last_tick_time = std::time::Instant::now();
+                                    sample_credit = 0.0;
+                                }
                                 emit_snapshot(
                                     &event_tx,
                                     &snapshot,

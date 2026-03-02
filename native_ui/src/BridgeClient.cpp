@@ -17,6 +17,7 @@
 #include <QHash>
 #include <QMetaObject>
 #include <QSet>
+#include <QUrl>
 #include <QVector>
 #include <QtEndian>
 
@@ -179,6 +180,18 @@ QStringList BridgeClient::queueItems() const {
 
 int BridgeClient::selectedQueueIndex() const {
     return m_selectedQueueIndex;
+}
+
+int BridgeClient::playingQueueIndex() const {
+    return m_playingQueueIndex;
+}
+
+QString BridgeClient::currentTrackPath() const {
+    return m_currentTrackPath;
+}
+
+QString BridgeClient::currentTrackCoverPath() const {
+    return m_currentTrackCoverPath;
 }
 
 QByteArray BridgeClient::waveformPeaksPacked() const {
@@ -388,7 +401,11 @@ QString BridgeClient::libraryAlbumCoverAt(int index) const {
     if (index < 0 || index >= m_libraryAlbumCoverPaths.size()) {
         return {};
     }
-    return m_libraryAlbumCoverPaths[index];
+    const QString path = m_libraryAlbumCoverPaths[index];
+    if (path.isEmpty()) {
+        return {};
+    }
+    return QUrl::fromLocalFile(path).toString();
 }
 
 void BridgeClient::scanRoot(const QString &path) {
@@ -650,7 +667,8 @@ void BridgeClient::handleStdoutReady() {
             const QString nextState = playback.value(QStringLiteral("state")).toString();
             const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
             const double dur = playback.value(QStringLiteral("duration_secs")).toDouble();
-            const double playbackVol = playback.value(QStringLiteral("volume")).toDouble();
+            const QString currentPath = playback.value(QStringLiteral("current_path")).toString();
+            int playing = playback.value(QStringLiteral("current_queue_index")).toInt(-1);
             const int qlen = queue.value(QStringLiteral("len")).toInt();
             const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
             const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
@@ -691,8 +709,11 @@ void BridgeClient::handleStdoutReady() {
                 m_durationSeconds = dur;
                 changed = true;
             }
-            const double uiVol = settings.value(QStringLiteral("volume")).toDouble(playbackVol);
-            if (!qFuzzyCompare(m_volume + 1.0, uiVol + 1.0)) {
+            const QJsonValue settingsVolumeValue = settings.value(QStringLiteral("volume"));
+            const double uiVol = settingsVolumeValue.isDouble()
+                ? settingsVolumeValue.toDouble()
+                : m_volume;
+            if (std::abs(m_volume - uiVol) > 0.0005) {
                 m_volume = uiVol;
                 changed = true;
             }
@@ -708,15 +729,22 @@ void BridgeClient::handleStdoutReady() {
             if (queueTracksValue.isArray()) {
                 const QJsonArray queueTracks = queueTracksValue.toArray();
                 QStringList items;
+                QStringList paths;
                 items.reserve(queueTracks.size());
+                paths.reserve(queueTracks.size());
                 for (const QJsonValue &track : queueTracks) {
                     const QJsonObject obj = track.toObject();
                     const QString title = obj.value(QStringLiteral("title")).toString();
                     const QString path = obj.value(QStringLiteral("path")).toString();
+                    paths.push_back(path);
                     items.push_back(title.isEmpty() ? path : title);
                 }
                 if (m_queueItems != items) {
                     m_queueItems = items;
+                    changed = true;
+                }
+                if (m_queuePaths != paths) {
+                    m_queuePaths = paths;
                     changed = true;
                 }
             }
@@ -738,6 +766,22 @@ void BridgeClient::handleStdoutReady() {
                 }
             } else if (m_selectedQueueIndex != selected) {
                 m_selectedQueueIndex = selected;
+                changed = true;
+            }
+            if (m_currentTrackPath != currentPath) {
+                m_currentTrackPath = currentPath;
+                changed = true;
+            }
+            if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
+                playing = m_queuePaths.indexOf(currentPath);
+            }
+            if (m_playingQueueIndex != playing) {
+                m_playingQueueIndex = playing;
+                changed = true;
+            }
+            const QString currentCover = m_trackCoverByPath.value(currentPath);
+            if (m_currentTrackCoverPath != currentCover) {
+                m_currentTrackCoverPath = currentCover;
                 changed = true;
             }
             if (!m_analysisSocketConnected) {
@@ -824,6 +868,7 @@ void BridgeClient::handleStdoutReady() {
                 QStringList artists;
                 QStringList albumNames;
                 QStringList coverPaths;
+                QHash<QString, QString> trackCoverByPath;
                 QVariantList libraryTree;
                 QStringList artistOrder;
                 QHash<QString, int> artistToIndex;
@@ -906,12 +951,22 @@ void BridgeClient::handleStdoutReady() {
                             }
                         }
                     }
-                    coverPaths.push_back(findAlbumCoverPath(trackPaths));
+                    const QString coverPath = findAlbumCoverPath(trackPaths);
+                    coverPaths.push_back(coverPath);
+                    const QString coverUrl = coverPath.isEmpty()
+                        ? QString{}
+                        : QUrl::fromLocalFile(coverPath).toString();
+                    for (const QString &trackPath : trackPaths) {
+                        if (!trackPath.isEmpty()) {
+                            trackCoverByPath.insert(trackPath, coverUrl);
+                        }
+                    }
 
                     QVariantMap albumEntry;
                     albumEntry.insert(QStringLiteral("name"), name);
                     albumEntry.insert(QStringLiteral("count"), count);
                     albumEntry.insert(QStringLiteral("sourceIndex"), static_cast<int>(sourceIndex));
+                    albumEntry.insert(QStringLiteral("coverPath"), coverUrl);
                     albumEntry.insert(QStringLiteral("tracks"), trackTitles);
                     artistAlbums[artistIndex].push_back(albumEntry);
                 }
@@ -953,6 +1008,14 @@ void BridgeClient::handleStdoutReady() {
                     m_libraryAlbumCoverPaths = coverPaths;
                     changed = true;
                     libraryStructureChanged = true;
+                }
+                if (m_trackCoverByPath != trackCoverByPath) {
+                    m_trackCoverByPath = trackCoverByPath;
+                    const QString currentCover = m_trackCoverByPath.value(m_currentTrackPath);
+                    if (m_currentTrackCoverPath != currentCover) {
+                        m_currentTrackCoverPath = currentCover;
+                    }
+                    changed = true;
                 }
                 if (libraryStructureChanged) {
                     m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()

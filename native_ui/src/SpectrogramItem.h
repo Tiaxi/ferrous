@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QMutex>
 #include <QQuickPaintedItem>
 #include <QTimer>
 #include <QByteArray>
@@ -51,6 +52,12 @@ private:
     void rebuildPalette();
     void invalidateMapping();
     void ensureMapping(int height);
+    void invalidateCanvas();
+    void ensureCanvas(int width, int height);
+    void rebuildCanvasFromColumns();
+    void shiftCanvasLeft(int columns);
+    void drawColumnAt(int x, const std::vector<quint8> &col);
+    void appendColumnAndRender(std::vector<quint8> &&col);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
 
     double m_dbRange{90.0};
@@ -60,8 +67,12 @@ private:
     int m_binsPerColumn{0};
 
     std::array<std::array<quint8, 3>, 256> m_palette{};
+    std::array<QRgb, 256> m_palette32{};
     std::vector<int> m_yToBin;
     int m_yToBinHeight{-1};
 
+    QImage m_canvas;
+    bool m_canvasDirty{true};
     std::deque<std::vector<quint8>> m_columns;
+    mutable QMutex m_stateMutex;
 };

@@ -5,6 +5,7 @@
 #include <QQuickStyle>
 
 #include "BridgeClient.h"
+#include "LibraryTreeModel.h"
 #include "SpectrogramItem.h"
 #include "WaveformItem.h"
 
@@ -12,10 +13,12 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
     QGuiApplication app(argc, argv);
     BridgeClient bridge;
+    LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     qmlRegisterType<SpectrogramItem>("FerrousNative", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousNative", 1, 0, "WaveformItem");
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
 
     QObject::connect(
         &engine,
