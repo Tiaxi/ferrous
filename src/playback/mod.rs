@@ -313,143 +313,145 @@ mod backend {
         let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
         let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
 
-        std::thread::spawn(move || {
-            let mut snapshot = PlaybackSnapshot {
-                volume: 1.0,
-                ..PlaybackSnapshot::default()
-            };
-            let mut queue: Vec<PathBuf> = Vec::new();
-            let mut queue_idx = 0usize;
-            let mut last_tick = Instant::now();
-            let mut phase = 0.0f32;
+        let _ = std::thread::Builder::new()
+            .name("ferrous-playback-sim".to_string())
+            .spawn(move || {
+                let mut snapshot = PlaybackSnapshot {
+                    volume: 1.0,
+                    ..PlaybackSnapshot::default()
+                };
+                let mut queue: Vec<PathBuf> = Vec::new();
+                let mut queue_idx = 0usize;
+                let mut last_tick = Instant::now();
+                let mut phase = 0.0f32;
 
-            while let Ok(cmd) = cmd_rx.recv() {
-                if snapshot.state == PlaybackState::Playing {
-                    let delta = last_tick.elapsed();
-                    snapshot.position = snapshot.position.saturating_add(delta);
-                }
-                last_tick = Instant::now();
+                while let Ok(cmd) = cmd_rx.recv() {
+                    if snapshot.state == PlaybackState::Playing {
+                        let delta = last_tick.elapsed();
+                        snapshot.position = snapshot.position.saturating_add(delta);
+                    }
+                    last_tick = Instant::now();
 
-                match cmd {
-                    PlaybackCommand::LoadQueue(paths) => {
-                        queue = paths;
-                        queue_idx = 0;
-                        snapshot.position = Duration::ZERO;
-                        snapshot.duration = Duration::from_secs(180);
-                        snapshot.current = queue.first().cloned();
-                        if let Some(path) = snapshot.current.clone() {
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path,
-                                kind: TrackChangeKind::Manual,
-                            });
-                            let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(48_000));
-                        }
-                    }
-                    PlaybackCommand::AddToQueue(paths) => {
-                        queue.extend(paths);
-                    }
-                    PlaybackCommand::ClearQueue => {
-                        queue.clear();
-                        queue_idx = 0;
-                        snapshot.current = None;
-                        snapshot.state = PlaybackState::Stopped;
-                        snapshot.position = Duration::ZERO;
-                        snapshot.duration = Duration::ZERO;
-                    }
-                    PlaybackCommand::PlayAt(idx) => {
-                        if let Some(path) = queue.get(idx).cloned() {
-                            queue_idx = idx;
-                            snapshot.current = Some(path.clone());
+                    match cmd {
+                        PlaybackCommand::LoadQueue(paths) => {
+                            queue = paths;
+                            queue_idx = 0;
                             snapshot.position = Duration::ZERO;
                             snapshot.duration = Duration::from_secs(180);
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path,
-                                kind: TrackChangeKind::Manual,
-                            });
+                            snapshot.current = queue.first().cloned();
+                            if let Some(path) = snapshot.current.clone() {
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                    path,
+                                    kind: TrackChangeKind::Manual,
+                                });
+                                let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(48_000));
+                            }
                         }
-                    }
-                    PlaybackCommand::Next => {
-                        if queue_idx + 1 < queue.len() {
-                            queue_idx += 1;
-                            if let Some(next) = queue.get(queue_idx).cloned() {
-                                snapshot.current = Some(next.clone());
+                        PlaybackCommand::AddToQueue(paths) => {
+                            queue.extend(paths);
+                        }
+                        PlaybackCommand::ClearQueue => {
+                            queue.clear();
+                            queue_idx = 0;
+                            snapshot.current = None;
+                            snapshot.state = PlaybackState::Stopped;
+                            snapshot.position = Duration::ZERO;
+                            snapshot.duration = Duration::ZERO;
+                        }
+                        PlaybackCommand::PlayAt(idx) => {
+                            if let Some(path) = queue.get(idx).cloned() {
+                                queue_idx = idx;
+                                snapshot.current = Some(path.clone());
                                 snapshot.position = Duration::ZERO;
                                 snapshot.duration = Duration::from_secs(180);
                                 let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path: next,
+                                    path,
                                     kind: TrackChangeKind::Manual,
                                 });
                             }
                         }
-                    }
-                    PlaybackCommand::Previous => {
-                        if queue_idx > 0 {
-                            queue_idx -= 1;
-                            if let Some(prev) = queue.get(queue_idx).cloned() {
-                                snapshot.current = Some(prev.clone());
-                                snapshot.position = Duration::ZERO;
-                                snapshot.duration = Duration::from_secs(180);
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path: prev,
-                                    kind: TrackChangeKind::Manual,
-                                });
-                            }
-                        }
-                    }
-                    PlaybackCommand::Play => {
-                        snapshot.state = PlaybackState::Playing;
-                    }
-                    PlaybackCommand::Pause => {
-                        snapshot.state = PlaybackState::Paused;
-                    }
-                    PlaybackCommand::Stop => {
-                        snapshot.state = PlaybackState::Stopped;
-                        snapshot.position = Duration::ZERO;
-                    }
-                    PlaybackCommand::Seek(pos) => {
-                        snapshot.position = pos.min(snapshot.duration);
-                        let _ = event_tx.send(PlaybackEvent::Seeked);
-                    }
-                    PlaybackCommand::SetVolume(vol) => {
-                        snapshot.volume = vol.clamp(0.0, 1.0);
-                    }
-                    PlaybackCommand::Poll => {
-                        if snapshot.state == PlaybackState::Playing {
-                            // Generate synthetic PCM when GStreamer is disabled, so visuals remain testable.
-                            let mut chunk = Vec::with_capacity(1024);
-                            for _ in 0..1024 {
-                                chunk.push(0.25 * phase.sin());
-                                phase += (2.0 * PI * 440.0) / 48_000.0;
-                                if phase > 2.0 * PI {
-                                    phase -= 2.0 * PI;
+                        PlaybackCommand::Next => {
+                            if queue_idx + 1 < queue.len() {
+                                queue_idx += 1;
+                                if let Some(next) = queue.get(queue_idx).cloned() {
+                                    snapshot.current = Some(next.clone());
+                                    snapshot.position = Duration::ZERO;
+                                    snapshot.duration = Duration::from_secs(180);
+                                    let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                        path: next,
+                                        kind: TrackChangeKind::Manual,
+                                    });
                                 }
                             }
-                            let _ = pcm_tx.try_send(chunk);
                         }
+                        PlaybackCommand::Previous => {
+                            if queue_idx > 0 {
+                                queue_idx -= 1;
+                                if let Some(prev) = queue.get(queue_idx).cloned() {
+                                    snapshot.current = Some(prev.clone());
+                                    snapshot.position = Duration::ZERO;
+                                    snapshot.duration = Duration::from_secs(180);
+                                    let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                        path: prev,
+                                        kind: TrackChangeKind::Manual,
+                                    });
+                                }
+                            }
+                        }
+                        PlaybackCommand::Play => {
+                            snapshot.state = PlaybackState::Playing;
+                        }
+                        PlaybackCommand::Pause => {
+                            snapshot.state = PlaybackState::Paused;
+                        }
+                        PlaybackCommand::Stop => {
+                            snapshot.state = PlaybackState::Stopped;
+                            snapshot.position = Duration::ZERO;
+                        }
+                        PlaybackCommand::Seek(pos) => {
+                            snapshot.position = pos.min(snapshot.duration);
+                            let _ = event_tx.send(PlaybackEvent::Seeked);
+                        }
+                        PlaybackCommand::SetVolume(vol) => {
+                            snapshot.volume = vol.clamp(0.0, 1.0);
+                        }
+                        PlaybackCommand::Poll => {
+                            if snapshot.state == PlaybackState::Playing {
+                                // Generate synthetic PCM when GStreamer is disabled, so visuals remain testable.
+                                let mut chunk = Vec::with_capacity(1024);
+                                for _ in 0..1024 {
+                                    chunk.push(0.25 * phase.sin());
+                                    phase += (2.0 * PI * 440.0) / 48_000.0;
+                                    if phase > 2.0 * PI {
+                                        phase -= 2.0 * PI;
+                                    }
+                                }
+                                let _ = pcm_tx.try_send(chunk);
+                            }
 
-                        if snapshot.state == PlaybackState::Playing
-                            && snapshot.position >= snapshot.duration
-                        {
-                            queue_idx += 1;
-                            if let Some(next) = queue.get(queue_idx).cloned() {
-                                snapshot.current = Some(next.clone());
-                                snapshot.position = Duration::ZERO;
-                                snapshot.duration = Duration::from_secs(180);
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path: next,
-                                    kind: TrackChangeKind::Natural,
-                                });
-                            } else {
-                                snapshot.state = PlaybackState::Stopped;
-                                snapshot.position = Duration::ZERO;
+                            if snapshot.state == PlaybackState::Playing
+                                && snapshot.position >= snapshot.duration
+                            {
+                                queue_idx += 1;
+                                if let Some(next) = queue.get(queue_idx).cloned() {
+                                    snapshot.current = Some(next.clone());
+                                    snapshot.position = Duration::ZERO;
+                                    snapshot.duration = Duration::from_secs(180);
+                                    let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                        path: next,
+                                        kind: TrackChangeKind::Natural,
+                                    });
+                                } else {
+                                    snapshot.state = PlaybackState::Stopped;
+                                    snapshot.position = Duration::ZERO;
+                                }
                             }
                         }
                     }
-                }
 
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-            }
-        });
+                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+                }
+            });
 
         (cmd_tx, event_rx)
     }
@@ -532,11 +534,13 @@ mod backend {
         let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
         let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
 
-        std::thread::spawn(move || {
-            if let Err(err) = run_gst_engine(cmd_rx, event_tx.clone(), analysis_tx, pcm_tx) {
-                tracing::error!("gstreamer playback engine failed: {err:#}");
-            }
-        });
+        let _ = std::thread::Builder::new()
+            .name("ferrous-playback-gst".to_string())
+            .spawn(move || {
+                if let Err(err) = run_gst_engine(cmd_rx, event_tx.clone(), analysis_tx, pcm_tx) {
+                    tracing::error!("gstreamer playback engine failed: {err:#}");
+                }
+            });
 
         (cmd_tx, event_rx)
     }
@@ -1016,6 +1020,11 @@ mod backend {
             .sync(true)
             .build();
 
+        let tap_chunk_samples = std::env::var("FERROUS_GST_TAP_CHUNK_SAMPLES")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .map_or(2048, |v| v.clamp(256, 16384));
+
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample({
@@ -1052,8 +1061,8 @@ mod backend {
                                                     }
                                                 }
                                             }
-                                            // Split large buffers into smaller chunks for smoother analysis pacing.
-                                            for part in pcm.chunks(512) {
+                                            // Chunking balances analysis pacing against per-chunk allocation overhead.
+                                            for part in pcm.chunks(tap_chunk_samples) {
                                                 if pcm_tx.try_send(part.to_vec()).is_ok() {
                                                     prof_sent += 1;
                                                     prof_samples += part.len();

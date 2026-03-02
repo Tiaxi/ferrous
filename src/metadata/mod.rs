@@ -34,61 +34,63 @@ impl MetadataService {
         let (req_tx, req_rx) = unbounded::<PathBuf>();
         let (event_tx, event_rx) = unbounded::<MetadataEvent>();
 
-        std::thread::spawn(move || {
-            while let Ok(path) = req_rx.recv() {
-                let mut metadata = TrackMetadata {
-                    title: path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or_default()
-                        .to_owned(),
-                    ..TrackMetadata::default()
-                };
+        let _ = std::thread::Builder::new()
+            .name("ferrous-metadata".to_string())
+            .spawn(move || {
+                while let Ok(path) = req_rx.recv() {
+                    let mut metadata = TrackMetadata {
+                        title: path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                        ..TrackMetadata::default()
+                    };
 
-                if let Ok(tagged) = lofty::read_from_path(&path) {
-                    let props = tagged.properties();
-                    metadata.sample_rate_hz = props.sample_rate();
-                    metadata.channels = props.channels();
-                    metadata.bit_depth = props.bit_depth();
-                    metadata.bitrate_kbps = props.audio_bitrate();
+                    if let Ok(tagged) = lofty::read_from_path(&path) {
+                        let props = tagged.properties();
+                        metadata.sample_rate_hz = props.sample_rate();
+                        metadata.channels = props.channels();
+                        metadata.bit_depth = props.bit_depth();
+                        metadata.bitrate_kbps = props.audio_bitrate();
 
-                    if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-                        metadata.title = tag.title().map_or_else(
-                            || "Unknown title".to_string(),
-                            std::borrow::Cow::into_owned,
-                        );
-                        metadata.artist = tag.artist().map_or_else(
-                            || "Unknown artist".to_string(),
-                            std::borrow::Cow::into_owned,
-                        );
-                        metadata.album = tag.album().map_or_else(
-                            || "Unknown album".to_string(),
-                            std::borrow::Cow::into_owned,
-                        );
+                        if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
+                            metadata.title = tag.title().map_or_else(
+                                || "Unknown title".to_string(),
+                                std::borrow::Cow::into_owned,
+                            );
+                            metadata.artist = tag.artist().map_or_else(
+                                || "Unknown artist".to_string(),
+                                std::borrow::Cow::into_owned,
+                            );
+                            metadata.album = tag.album().map_or_else(
+                                || "Unknown album".to_string(),
+                                std::borrow::Cow::into_owned,
+                            );
 
-                        if let Some(pic) = tag.pictures().first() {
-                            if let Ok(img) = image::load_from_memory(pic.data()) {
-                                let rgba = img.to_rgba8();
-                                metadata.cover_art_rgba = Some((
-                                    rgba.width() as usize,
-                                    rgba.height() as usize,
-                                    rgba.into_raw(),
-                                ));
+                            if let Some(pic) = tag.pictures().first() {
+                                if let Ok(img) = image::load_from_memory(pic.data()) {
+                                    let rgba = img.to_rgba8();
+                                    metadata.cover_art_rgba = Some((
+                                        rgba.width() as usize,
+                                        rgba.height() as usize,
+                                        rgba.into_raw(),
+                                    ));
+                                }
                             }
                         }
                     }
-                }
 
-                if metadata.cover_art_rgba.is_none() {
-                    metadata.cover_art_rgba = load_folder_cover_art(&path);
-                }
+                    if metadata.cover_art_rgba.is_none() {
+                        metadata.cover_art_rgba = load_folder_cover_art(&path);
+                    }
 
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                    let _ = event_tx.send(MetadataEvent::Loaded(metadata));
                 }
-                let _ = event_tx.send(MetadataEvent::Loaded(metadata));
-            }
-        });
+            });
 
         (Self { tx: req_tx }, event_rx)
     }

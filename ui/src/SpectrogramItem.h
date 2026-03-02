@@ -18,6 +18,7 @@ class SpectrogramItem : public QQuickPaintedItem {
     Q_OBJECT
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY dbRangeChanged)
     Q_PROPERTY(bool logScale READ logScale WRITE setLogScale NOTIFY logScaleChanged)
+    Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz WRITE setSampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(int maxColumns READ maxColumns WRITE setMaxColumns NOTIFY maxColumnsChanged)
 
@@ -29,6 +30,9 @@ public:
 
     bool logScale() const;
     void setLogScale(bool value);
+
+    bool showFpsOverlay() const;
+    void setShowFpsOverlay(bool value);
 
     int sampleRateHz() const;
     void setSampleRateHz(int value);
@@ -45,6 +49,7 @@ public:
 signals:
     void dbRangeChanged();
     void logScaleChanged();
+    void showFpsOverlayChanged();
     void sampleRateHzChanged();
     void maxColumnsChanged();
 
@@ -60,7 +65,6 @@ private:
     void invalidateCanvas();
     void ensureCanvas(int width, int height);
     void rebuildCanvasFromColumns();
-    void shiftCanvasLeft(int columns);
     void drawColumnAt(int x, const std::vector<quint8> &col);
     void appendColumnAndRender(std::vector<quint8> &&col);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
@@ -82,7 +86,10 @@ private:
 
     QImage m_canvas;
     bool m_canvasDirty{true};
+    int m_canvasWriteX{0};
+    int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
+    bool m_forceFpsOverlay{false};
     bool m_showFpsOverlay{false};
     bool m_fpsInitialized{false};
     int m_fpsValue{0};

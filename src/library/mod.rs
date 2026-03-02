@@ -47,44 +47,46 @@ impl LibraryService {
         let (cmd_tx, cmd_rx) = unbounded::<LibraryCommand>();
         let (event_tx, event_rx) = unbounded::<LibraryEvent>();
 
-        std::thread::spawn(move || {
-            let mut snapshot = LibrarySnapshot::default();
+        let _ = std::thread::Builder::new()
+            .name("ferrous-library".to_string())
+            .spawn(move || {
+                let mut snapshot = LibrarySnapshot::default();
 
-            match open_library_db() {
-                Ok(conn) => {
-                    if let Err(err) = init_schema(&conn) {
-                        snapshot.last_error = Some(format!("library DB init failed: {err}"));
+                match open_library_db() {
+                    Ok(conn) => {
+                        if let Err(err) = init_schema(&conn) {
+                            snapshot.last_error = Some(format!("library DB init failed: {err}"));
+                            let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
+                            return;
+                        }
+                        load_snapshot(&conn, &mut snapshot);
                         let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
-                        return;
-                    }
-                    load_snapshot(&conn, &mut snapshot);
-                    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
 
-                    while let Ok(cmd) = cmd_rx.recv() {
-                        match cmd {
-                            LibraryCommand::ScanRoot(root) => {
-                                snapshot.scan_in_progress = true;
-                                snapshot.scanned_files = 0;
-                                snapshot.last_error = None;
-                                let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
+                        while let Ok(cmd) = cmd_rx.recv() {
+                            match cmd {
+                                LibraryCommand::ScanRoot(root) => {
+                                    snapshot.scan_in_progress = true;
+                                    snapshot.scanned_files = 0;
+                                    snapshot.last_error = None;
+                                    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
 
-                                if let Err(err) = scan_root(&conn, &root, &mut snapshot) {
-                                    snapshot.last_error = Some(err);
+                                    if let Err(err) = scan_root(&conn, &root, &mut snapshot) {
+                                        snapshot.last_error = Some(err);
+                                    }
+
+                                    load_snapshot(&conn, &mut snapshot);
+                                    snapshot.scan_in_progress = false;
+                                    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
                                 }
-
-                                load_snapshot(&conn, &mut snapshot);
-                                snapshot.scan_in_progress = false;
-                                let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
                             }
                         }
                     }
+                    Err(err) => {
+                        snapshot.last_error = Some(format!("library DB open failed: {err}"));
+                        let _ = event_tx.send(LibraryEvent::Snapshot(snapshot));
+                    }
                 }
-                Err(err) => {
-                    snapshot.last_error = Some(format!("library DB open failed: {err}"));
-                    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot));
-                }
-            }
-        });
+            });
 
         (Self { tx: cmd_tx }, event_rx)
     }

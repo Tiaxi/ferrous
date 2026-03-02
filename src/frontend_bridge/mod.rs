@@ -80,6 +80,7 @@ pub enum BridgeSettingsCommand {
     SetFftSize(usize),
     SetDbRange(f32),
     SetLogScale(bool),
+    SetShowFps(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -106,15 +107,20 @@ pub struct BridgeSettings {
     pub fft_size: usize,
     pub db_range: f32,
     pub log_scale: bool,
+    pub show_fps: bool,
 }
 
 impl Default for BridgeSettings {
     fn default() -> Self {
+        let show_fps = std::env::var_os("FERROUS_UI_SHOW_FPS").is_some()
+            || std::env::var_os("FERROUS_PROFILE_UI").is_some()
+            || std::env::var_os("FERROUS_PROFILE").is_some();
         Self {
             volume: 1.0,
             fft_size: 8192,
             db_range: 90.0,
             log_scale: false,
+            show_fps,
         }
     }
 }
@@ -135,12 +141,26 @@ impl BridgeState {
         BridgeSnapshot {
             playback: self.playback.clone(),
             analysis: self.analysis.clone(),
-            metadata: self.metadata.clone(),
+            metadata: metadata_for_snapshot(&self.metadata),
             library: self.library.clone(),
             queue: self.queue.clone(),
             selected_queue_index: self.selected_queue_index,
             settings: self.settings.clone(),
         }
+    }
+}
+
+fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
+    TrackMetadata {
+        title: metadata.title.clone(),
+        artist: metadata.artist.clone(),
+        album: metadata.album.clone(),
+        sample_rate_hz: metadata.sample_rate_hz,
+        bitrate_kbps: metadata.bitrate_kbps,
+        channels: metadata.channels,
+        bit_depth: metadata.bit_depth,
+        // Large RGBA cover payload is not needed in bridge snapshots; avoid per-snapshot megabyte clones.
+        cover_art_rgba: None,
     }
 }
 
@@ -169,7 +189,9 @@ impl FrontendBridgeHandle {
         // Keep snapshot/event queue bounded so a slow UI consumer cannot grow memory unbounded.
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
 
-        std::thread::spawn(move || run_bridge_loop(cmd_rx, event_tx, options));
+        let _ = std::thread::Builder::new()
+            .name("ferrous-bridge".to_string())
+            .spawn(move || run_bridge_loop(cmd_rx, event_tx, options));
         Self {
             tx: cmd_tx,
             rx: event_rx,
@@ -209,6 +231,14 @@ fn run_bridge_loop(
     let mut settings_dirty = false;
     let mut last_settings_save = Instant::now();
     let ticker = tick(Duration::from_millis(16));
+    let playing_poll_interval_ms = std::env::var("FERROUS_PLAYBACK_POLL_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(40, |v| v.clamp(8, 500));
+    let playing_poll_interval = Duration::from_millis(playing_poll_interval_ms);
+    let mut last_playing_poll = Instant::now()
+        .checked_sub(playing_poll_interval)
+        .unwrap_or_else(Instant::now);
     let idle_poll_interval = Duration::from_millis(250);
     let mut last_idle_poll = Instant::now();
     let profile_enabled = std::env::var_os("FERROUS_PROFILE").is_some();
@@ -263,7 +293,10 @@ fn run_bridge_loop(
             }
             recv(ticker) -> _ => {
                 if state.playback.state == PlaybackState::Playing {
-                    playback.command(PlaybackCommand::Poll);
+                    if last_playing_poll.elapsed() >= playing_poll_interval {
+                        playback.command(PlaybackCommand::Poll);
+                        last_playing_poll = Instant::now();
+                    }
                 } else if last_idle_poll.elapsed() >= idle_poll_interval {
                     playback.command(PlaybackCommand::Poll);
                     last_idle_poll = Instant::now();
@@ -447,6 +480,10 @@ fn handle_bridge_command(
                 }
                 BridgeSettingsCommand::SetLogScale(v) => {
                     state.settings.log_scale = v;
+                    *context.settings_dirty = true;
+                }
+                BridgeSettingsCommand::SetShowFps(v) => {
+                    state.settings.show_fps = v;
                     *context.settings_dirty = true;
                 }
             }
@@ -914,6 +951,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.log_scale = x != 0;
                 }
             }
+            "show_fps" => {
+                if let Ok(x) = v.parse::<i32>() {
+                    settings.show_fps = x != 0;
+                }
+            }
             _ => {}
         }
     }
@@ -932,11 +974,12 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\n",
+        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\n",
         settings.volume,
         settings.fft_size,
         settings.db_range,
         i32::from(settings.log_scale),
+        i32::from(settings.show_fps),
     )
 }
 
@@ -965,6 +1008,7 @@ mod tests {
             fft_size: 2048,
             db_range: 77.5,
             log_scale: true,
+            show_fps: true,
         };
         let text = format_settings_text(&settings);
         let mut parsed = BridgeSettings::default();
@@ -973,6 +1017,7 @@ mod tests {
         assert_eq!(parsed.fft_size, 2048);
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.log_scale);
+        assert!(parsed.show_fps);
     }
 
     #[test]
@@ -980,12 +1025,13 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\n",
+            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\nshow_fps=1\n",
         );
         assert_eq!(settings.volume, 1.0);
         assert_eq!(settings.fft_size, 512);
         assert_eq!(settings.db_range, 120.0);
         assert!(!settings.log_scale);
+        assert!(settings.show_fps);
     }
 
     #[test]

@@ -74,7 +74,9 @@ impl AnalysisEngine {
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
 
         let waveform_tx = cmd_tx.clone();
-        std::thread::spawn(move || {
+        let _ = std::thread::Builder::new()
+            .name("ferrous-analysis".to_string())
+            .spawn(move || {
             let mut snapshot = AnalysisSnapshot {
                 sample_rate_hz: 48_000,
                 ..AnalysisSnapshot::default()
@@ -180,7 +182,9 @@ impl AnalysisEngine {
                                     );
                                 } else {
                                     let tx = waveform_tx.clone();
-                                    std::thread::spawn(move || {
+                                    let _ = std::thread::Builder::new()
+                                        .name("ferrous-waveform-decode".to_string())
+                                        .spawn(move || {
                                         let _ =
                                             decode_waveform_peaks_stream(&path, 1024, |peaks, done| {
                                                 let _ = tx.send(AnalysisCommand::WaveformProgress {

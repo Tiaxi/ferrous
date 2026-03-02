@@ -229,6 +229,7 @@ void BridgeClient::teardownAnalysisSocket(bool immediateDelete) {
     m_analysisSocketConnected = false;
     m_hasAnalysisFrameSeq = false;
     m_analysisBuffer.clear();
+    m_analysisBufferReadOffset = 0;
     if (socket == nullptr) {
         return;
     }
@@ -307,6 +308,10 @@ double BridgeClient::dbRange() const {
 
 bool BridgeClient::logScale() const {
     return m_logScale;
+}
+
+bool BridgeClient::showFps() const {
+    return m_showFps;
 }
 
 QStringList BridgeClient::libraryAlbums() const {
@@ -397,6 +402,14 @@ void BridgeClient::setLogScale(bool value) {
         scheduleSnapshotChanged();
     }
     sendCommand(QStringLiteral("set_log_scale"), value ? 1.0 : 0.0);
+}
+
+void BridgeClient::setShowFps(bool value) {
+    if (m_showFps != value) {
+        m_showFps = value;
+        scheduleSnapshotChanged();
+    }
+    sendCommand(QStringLiteral("set_show_fps"), value ? 1.0 : 0.0);
 }
 
 void BridgeClient::playAt(int index) {
@@ -584,6 +597,7 @@ void BridgeClient::handleAnalysisSocketConnected() {
         return;
     }
     m_analysisBuffer.clear();
+    m_analysisBufferReadOffset = 0;
     m_analysisSocketConnected = true;
     m_hasAnalysisFrameSeq = false;
     connect(m_analysisSocket, &QLocalSocket::readyRead, this, &BridgeClient::handleAnalysisSocketReady);
@@ -613,25 +627,29 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
     m_analysisBuffer += chunk;
 
     bool changed = false;
-    while (m_analysisBuffer.size() >= static_cast<qsizetype>(sizeof(quint32))) {
-        const auto *lenPtr = reinterpret_cast<const uchar *>(m_analysisBuffer.constData());
+    qsizetype readOffset = m_analysisBufferReadOffset;
+    const qsizetype totalSize = m_analysisBuffer.size();
+    const auto *base = reinterpret_cast<const uchar *>(m_analysisBuffer.constData());
+
+    while ((totalSize - readOffset) >= static_cast<qsizetype>(sizeof(quint32))) {
+        const auto *lenPtr = base + readOffset;
         const quint32 frameBytes = qFromLittleEndian<quint32>(lenPtr);
         if (frameBytes == 0 || frameBytes > kMaxAnalysisFrameBytes) {
             emit bridgeError(QStringLiteral("invalid analysis frame size: %1").arg(frameBytes));
             m_analysisBuffer.clear();
+            m_analysisBufferReadOffset = 0;
             break;
         }
         const qsizetype totalBytes = static_cast<qsizetype>(sizeof(quint32) + frameBytes);
-        if (m_analysisBuffer.size() < totalBytes) {
+        if ((totalSize - readOffset) < totalBytes) {
             break;
         }
-        QByteArray frame = m_analysisBuffer.mid(sizeof(quint32), frameBytes);
-        m_analysisBuffer.remove(0, totalBytes);
+        const auto *data = base + readOffset + sizeof(quint32);
+        readOffset += totalBytes;
 
-        if (frame.size() < 16) {
+        if (frameBytes < 16) {
             continue;
         }
-        const auto *data = reinterpret_cast<const uchar *>(frame.constData());
         if (data[0] != kAnalysisFrameMagic) {
             continue;
         }
@@ -643,7 +661,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const quint32 frameSeq = qFromLittleEndian<quint32>(data + 12);
         const qsizetype expected = 16 + static_cast<qsizetype>(waveformLen)
             + static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
-        if (frame.size() < expected) {
+        if (static_cast<qsizetype>(frameBytes) < expected) {
             continue;
         }
         if (m_hasAnalysisFrameSeq && !isNewerSeq(frameSeq, m_lastAnalysisFrameSeq)) {
@@ -702,6 +720,24 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
 
     if (changed) {
         scheduleAnalysisChanged();
+    }
+
+    if (m_analysisBuffer.isEmpty()) {
+        m_analysisBufferReadOffset = 0;
+        return;
+    }
+    if (readOffset >= m_analysisBuffer.size()) {
+        m_analysisBuffer.clear();
+        m_analysisBufferReadOffset = 0;
+        return;
+    }
+
+    // Avoid front-removing on every frame; compact periodically.
+    if (readOffset > (64 * 1024) || readOffset > (m_analysisBuffer.size() / 2)) {
+        m_analysisBuffer.remove(0, readOffset);
+        m_analysisBufferReadOffset = 0;
+    } else {
+        m_analysisBufferReadOffset = readOffset;
     }
 }
 
@@ -968,6 +1004,11 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
         const bool logScale = settings.value(QStringLiteral("log_scale")).toBool(m_logScale);
         if (m_logScale != logScale) {
             m_logScale = logScale;
+            changed = true;
+        }
+        const bool showFps = settings.value(QStringLiteral("show_fps")).toBool(m_showFps);
+        if (m_showFps != showFps) {
+            m_showFps = showFps;
             changed = true;
         }
         const bool scanInProgress = library.value(QStringLiteral("scan_in_progress")).toBool();

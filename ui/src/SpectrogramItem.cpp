@@ -9,7 +9,6 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 
 namespace {
 constexpr double kMinFreqHz = 25.0;
@@ -54,17 +53,18 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     if (!useImageTarget) {
         setRenderTarget(QQuickPaintedItem::FramebufferObject);
     }
-    m_showFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
+    m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS")
+        || qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
+        || qEnvironmentVariableIsSet("FERROUS_PROFILE");
+    m_showFpsOverlay = m_forceFpsOverlay;
     m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
     if (m_profileEnabled) {
         m_profileLast = std::chrono::steady_clock::now();
     }
     rebuildPalette();
-    if (m_showFpsOverlay) {
-        connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
-        bindWindowFpsTracking(window());
-    }
+    connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
+    bindWindowFpsTracking(window());
 }
 
 double SpectrogramItem::dbRange() const {
@@ -95,6 +95,24 @@ void SpectrogramItem::setLogScale(bool value) {
     emit logScaleChanged();
     invalidateMapping();
     invalidateCanvas();
+    update();
+}
+
+bool SpectrogramItem::showFpsOverlay() const {
+    return m_showFpsOverlay;
+}
+
+void SpectrogramItem::setShowFpsOverlay(bool value) {
+    const bool next = value || m_forceFpsOverlay;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_showFpsOverlay == next) {
+            return;
+        }
+        m_showFpsOverlay = next;
+    }
+    emit showFpsOverlayChanged();
+    bindWindowFpsTracking(window());
     update();
 }
 
@@ -219,16 +237,14 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
         update();
         return;
     }
-
-    const int shift = std::min(appended, m_canvas.width());
-    if (shift >= m_canvas.width()) {
+    if (m_canvasDirty) {
         rebuildCanvasFromColumns();
     } else {
-        shiftCanvasLeft(shift);
-        const int sourceStart = static_cast<int>(m_columns.size()) - shift;
-        const int xStart = m_canvas.width() - shift;
-        for (int i = 0; i < shift; ++i) {
-            drawColumnAt(xStart + i, m_columns[static_cast<size_t>(sourceStart + i)]);
+        const int sourceStart = static_cast<int>(m_columns.size()) - appended;
+        for (int i = 0; i < appended; ++i) {
+            drawColumnAt(m_canvasWriteX, m_columns[static_cast<size_t>(sourceStart + i)]);
+            m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
+            m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
         }
     }
     update();
@@ -244,8 +260,21 @@ void SpectrogramItem::paint(QPainter *painter) {
     if (!m_columns.empty() && m_binsPerColumn > 0) {
         ensureCanvas(w, h);
         if (!m_canvas.isNull()) {
-            const int drawX = w - m_canvas.width();
-            painter->drawImage(QPoint(drawX, 0), m_canvas);
+            const int drawCols = std::min(m_canvasFilledCols, m_canvas.width());
+            if (drawCols > 0) {
+                const int srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
+                const int drawX = w - drawCols;
+                const int firstWidth = std::min(m_canvas.width() - srcStart, drawCols);
+                const QRect targetFirst(drawX, 0, firstWidth, m_canvas.height());
+                const QRect sourceFirst(srcStart, 0, firstWidth, m_canvas.height());
+                painter->drawImage(targetFirst, m_canvas, sourceFirst);
+                const int remaining = drawCols - firstWidth;
+                if (remaining > 0) {
+                    const QRect targetSecond(drawX + firstWidth, 0, remaining, m_canvas.height());
+                    const QRect sourceSecond(0, 0, remaining, m_canvas.height());
+                    painter->drawImage(targetSecond, m_canvas, sourceSecond);
+                }
+            }
         }
     }
 
@@ -320,6 +349,8 @@ void SpectrogramItem::invalidateMapping() {
 void SpectrogramItem::invalidateCanvas() {
     m_canvas = QImage();
     m_canvasDirty = true;
+    m_canvasWriteX = 0;
+    m_canvasFilledCols = 0;
 }
 
 void SpectrogramItem::ensureMapping(int height) {
@@ -378,6 +409,8 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
         return;
     }
     m_canvas.fill(Qt::black);
+    m_canvasWriteX = 0;
+    m_canvasFilledCols = 0;
     const int cols = m_canvas.width();
     if (m_columns.empty() || cols <= 0) {
         m_canvasDirty = false;
@@ -386,31 +419,12 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
     const int available = static_cast<int>(m_columns.size());
     const int drawCols = std::min(cols, available);
     const int start = available - drawCols;
-    const int xStart = cols - drawCols;
     for (int i = 0; i < drawCols; ++i) {
-        drawColumnAt(xStart + i, m_columns[static_cast<size_t>(start + i)]);
+        drawColumnAt(m_canvasWriteX, m_columns[static_cast<size_t>(start + i)]);
+        m_canvasWriteX = (m_canvasWriteX + 1) % cols;
+        m_canvasFilledCols = std::min(cols, m_canvasFilledCols + 1);
     }
     m_canvasDirty = false;
-}
-
-void SpectrogramItem::shiftCanvasLeft(int columns) {
-    if (m_canvas.isNull() || columns <= 0) {
-        return;
-    }
-    const int cols = m_canvas.width();
-    if (columns >= cols) {
-        m_canvas.fill(Qt::black);
-        return;
-    }
-
-    const int bytesPerPixel = static_cast<int>(sizeof(QRgb));
-    const int movePixels = cols - columns;
-    const int moveBytes = movePixels * bytesPerPixel;
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        auto *line = reinterpret_cast<QRgb *>(m_canvas.scanLine(y));
-        std::memmove(line, line + columns, static_cast<size_t>(moveBytes));
-        std::fill(line + movePixels, line + cols, qRgb(0, 0, 0));
-    }
 }
 
 void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
@@ -505,8 +519,9 @@ void SpectrogramItem::appendColumnAndRender(std::vector<quint8> &&col) {
     if (m_canvas.isNull()) {
         return;
     }
-    shiftCanvasLeft(1);
-    drawColumnAt(m_canvas.width() - 1, m_columns.back());
+    drawColumnAt(m_canvasWriteX, m_columns.back());
+    m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
+    m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
 }
 
 std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) const {
@@ -542,9 +557,10 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     m_fpsValue = 0;
     m_fpsAccumFrames = 0;
     m_fpsAccumSeconds = 0.0;
+    const bool overlayEnabled = m_showFpsOverlay;
     lock.unlock();
 
-    if (window == nullptr) {
+    if (window == nullptr || !overlayEnabled) {
         return;
     }
     m_frameSwapConnection = connect(

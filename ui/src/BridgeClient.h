@@ -34,6 +34,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
+    Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
     Q_PROPERTY(QVariantList libraryTree READ libraryTree NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY snapshotChanged)
@@ -63,6 +64,7 @@ public:
     int sampleRateHz() const;
     double dbRange() const;
     bool logScale() const;
+    bool showFps() const;
     QStringList libraryAlbums() const;
     QVariantList libraryTree() const;
     int libraryVersion() const;
@@ -80,6 +82,7 @@ public:
     Q_INVOKABLE void setVolume(double value);
     Q_INVOKABLE void setDbRange(double value);
     Q_INVOKABLE void setLogScale(bool value);
+    Q_INVOKABLE void setShowFps(bool value);
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
@@ -148,6 +151,7 @@ private:
     int m_sampleRateHz{48000};
     double m_dbRange{90.0};
     bool m_logScale{false};
+    bool m_showFps{false};
     QStringList m_libraryAlbums;
     QVariantList m_libraryTree;
     int m_libraryVersion{0};
@@ -174,6 +178,7 @@ private:
     QLocalServer m_analysisServer;
     QLocalSocket *m_analysisSocket{nullptr};
     QByteArray m_analysisBuffer;
+    qsizetype m_analysisBufferReadOffset{0};
     QString m_analysisSocketName;
     bool m_analysisSocketConnected{false};
     bool m_hasAnalysisFrameSeq{false};

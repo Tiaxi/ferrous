@@ -47,6 +47,7 @@ Kirigami.ApplicationWindow {
         property bool spectrogramReset: false
         property real dbRange: 90
         property bool logScale: false
+        property bool showFps: false
         property int sampleRateHz: 48000
         property var libraryAlbums: []
         property var libraryTree: []
@@ -67,6 +68,7 @@ Kirigami.ApplicationWindow {
         function setVolume(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
+        function setShowFps(value) {}
         function playAt(index) {}
         function selectQueueIndex(index) {}
         function removeAt(index) {}
@@ -248,6 +250,13 @@ Kirigami.ApplicationWindow {
         onTriggered: spectrogramItem.reset()
     }
     Action {
+        id: showFpsOverlayAction
+        text: "Show Spectrogram FPS"
+        checkable: true
+        checked: uiBridge.showFps
+        onTriggered: uiBridge.setShowFps(checked)
+    }
+    Action {
         id: aboutAction
         text: "About Ferrous"
         onTriggered: aboutDialog.open()
@@ -351,6 +360,7 @@ Kirigami.ApplicationWindow {
             MenuSeparator {}
             MenuItem { action: autoCenterSelectionAction }
             MenuItem { action: resetSpectrogramAction }
+            MenuItem { action: showFpsOverlayAction }
         }
         Menu {
             title: "Playback"
@@ -1010,6 +1020,7 @@ Kirigami.ApplicationWindow {
                         maxColumns: Math.max(640, Math.floor(width))
                         dbRange: uiBridge.dbRange
                         logScale: uiBridge.logScale
+                        showFpsOverlay: uiBridge.showFps
                         sampleRateHz: uiBridge.sampleRateHz
                     }
                 }

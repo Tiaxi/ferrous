@@ -121,6 +121,13 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
                 )),
                 Err(_) => eprintln!("invalid log value, expected 0 or 1"),
             }
+        } else if let Some(rest) = line.strip_prefix("fps ") {
+            match rest.parse::<i32>() {
+                Ok(value) => bridge.command(BridgeCommand::Settings(
+                    BridgeSettingsCommand::SetShowFps(value != 0),
+                )),
+                Err(_) => eprintln!("invalid fps value, expected 0 or 1"),
+            }
         } else if line == "snap" {
             bridge.command(BridgeCommand::RequestSnapshot);
         } else {
@@ -452,6 +459,17 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 return Err("set_log_scale value must be a finite number".to_string());
             }
             Some(BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(
+                value != 0.0,
+            )))
+        }
+        "set_show_fps" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_show_fps requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_show_fps value must be a finite number".to_string());
+            }
+            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(
                 value != 0.0,
             )))
         }
@@ -874,6 +892,7 @@ fn encode_snapshot_payload(
             "fft_size": s.settings.fft_size,
             "db_range": s.settings.db_range,
             "log_scale": s.settings.log_scale,
+            "show_fps": s.settings.show_fps,
         }
     })
 }

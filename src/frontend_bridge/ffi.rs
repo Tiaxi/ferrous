@@ -373,6 +373,17 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 value != 0.0,
             )))
         }
+        "set_show_fps" => {
+            let value = parsed
+                .value
+                .ok_or_else(|| "set_show_fps requires numeric field 'value'".to_string())?;
+            if !value.is_finite() {
+                return Err("set_show_fps value must be a finite number".to_string());
+            }
+            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(
+                value != 0.0,
+            )))
+        }
         "seek" => {
             let value = parsed
                 .value
@@ -761,6 +772,7 @@ fn encode_snapshot_payload(
             "fft_size": s.settings.fft_size,
             "db_range": s.settings.db_range,
             "log_scale": s.settings.log_scale,
+            "show_fps": s.settings.show_fps,
         }
     })
 }
@@ -957,6 +969,16 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+
+        let cmd = parse_json_command(r#"{"cmd":"set_show_fps","value":1}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(v)) => {
+                assert!(v);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -1052,6 +1074,7 @@ mod tests {
                 fft_size: 2048,
                 db_range: 90.0,
                 log_scale: false,
+                show_fps: false,
             },
         }
     }
