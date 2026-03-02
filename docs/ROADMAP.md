@@ -166,7 +166,7 @@ Acceptance criteria:
 
 ## Milestone F: Cutover and Cleanup
 
-- [ ] Make Kirigami frontend the default build/run path.
+- [x] Make Kirigami frontend the default build/run path.
 - [ ] Remove or archive egui-specific UI modules after migration sign-off.
 - [ ] Update CI to test native frontend build and backend integration.
 - [ ] Write migration notes/changelog for users.

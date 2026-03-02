@@ -13,7 +13,7 @@ Build a Kirigami frontend on top of the existing Rust backend (playback, analysi
 - `native_frontend` supports:
   - interactive CLI mode
   - JSON bridge mode (`--json-bridge`) for external UI clients.
-- A Kirigami shell scaffold exists in `native_ui/` and talks to the JSON bridge.
+- A Kirigami shell exists in `native_ui/` and uses the in-process Rust FFI bridge by default.
 - Existing egui frontend (`src/main.rs`) remains buildable.
 
 ## Engineering Plans
@@ -95,7 +95,7 @@ are delta-style payloads and may be `null` when unchanged.
 cd native_ui
 cmake -B build -G Ninja
 cmake --build build
-FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge' ./build/ferrous_kirigami_shell
+./build/ferrous_kirigami_shell
 ```
 
 One-command dev path from repo root:
@@ -105,11 +105,12 @@ One-command dev path from repo root:
 ```
 
 The script still builds `target/release/native_frontend` for CLI/debug tooling.
-In default in-process mode, the UI no longer launches a long-lived bridge subprocess.
+In default in-process mode, the UI does not launch a long-lived bridge subprocess.
 
 Process bridge fallback:
 
 - Set `FERROUS_BRIDGE_MODE=process` to force legacy process/stdout bridge mode.
+- Or run `./scripts/run-native-ui.sh --process-bridge`.
 
 Build-only check:
 
@@ -119,5 +120,5 @@ Build-only check:
 
 Notes:
 
-- The shell is currently Milestone A scaffolding (layout + control wiring + status/footer).
-- Playlist/library/spectrogram widgets in QML are placeholders pending Milestones C-E.
+- The native shell now runs against the in-process Rust bridge by default.
+- Process bridge mode remains available for fallback/debugging only.

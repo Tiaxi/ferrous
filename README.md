@@ -6,7 +6,7 @@ A high-performance Linux audio player prototype in Rust, inspired by Foobar2000/
 
 This is a runnable architecture scaffold with:
 
-- `eframe/egui` desktop UI shell
+- KDE-native Qt6/QML (Kirigami) frontend (`native_ui/`) as the primary UI path
 - playback worker thread with queue/state/seek commands
 - metadata worker using `lofty` (title/artist/album + embedded cover art extraction)
 - analysis worker with live waveform accumulation + STFT spectrogram
@@ -30,7 +30,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-Install GTK/file-dialog runtime dependencies as needed for your distro (for `eframe`/`rfd`).
+Install Qt6 + Kirigami/KF6 development/runtime packages for your distro (primary native UI path).
+Install GTK/file-dialog runtime dependencies as needed for the legacy `eframe` frontend.
 
 When enabling real playback with GStreamer later, install:
 
@@ -39,21 +40,22 @@ When enabling real playback with GStreamer later, install:
 
 ## Commands
 
+Primary app run path (Kirigami UI + in-process Rust backend):
+
 ```bash
-source "$HOME/.cargo/env"
-cargo run
+./scripts/run-native-ui.sh
 ```
 
-If you implement and gate GStreamer code behind the feature:
+Legacy egui frontend (kept buildable during cutover):
 
 ```bash
 cargo run --features gst
 ```
 
-Native KDE frontend (Qt6/QML + Kirigami) dev launcher:
+Force legacy process bridge mode for debugging:
 
 ```bash
-./scripts/run-native-ui.sh
+./scripts/run-native-ui.sh --process-bridge
 ```
 
 Run project tests (Rust + native UI smoke test):
@@ -95,9 +97,10 @@ Roadmap and engineering plans live under `docs/`:
 
 ## Project layout
 
-- `src/main.rs`: app entrypoint
+- `native_ui/`: Qt6/QML + Kirigami frontend (primary UI path)
+- `src/main.rs`: legacy egui app entrypoint
 - `src/app/`: app coordinator and event loop wiring
 - `src/playback/`: playback engine command/event model (`gst` + stub backends)
 - `src/analysis/`: waveform/spectrogram worker
 - `src/metadata/`: track metadata + cover art extraction
-- `src/ui/`: `egui` panels and visual rendering
+- `src/ui/`: legacy `egui` panels and visual rendering

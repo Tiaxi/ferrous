@@ -12,6 +12,7 @@ DEFAULT_BRIDGE_BIN="${REPO_ROOT}/target/release/native_frontend"
 DO_CONFIGURE=1
 DO_BUILD=1
 DO_RUN=1
+FORCE_PROCESS_BRIDGE=0
 APP_ARGS=()
 
 usage() {
@@ -22,10 +23,12 @@ Options:
   --no-configure    Skip cmake configure step
   --no-build        Skip cmake build step
   --no-run          Only configure/build; do not launch UI
+  --process-bridge  Force legacy process/stdout bridge (default: in-process FFI bridge)
   -h, --help        Show this help
 
 Environment:
   FERROUS_BRIDGE_CMD       Override bridge command (default: ${DEFAULT_BRIDGE_CMD})
+  FERROUS_BRIDGE_MODE      Set to 'process' to force legacy process bridge
   FERROUS_NATIVE_BUILD_DIR Override build dir (default: ${NATIVE_UI_DIR}/build)
   CMAKE_GENERATOR          Override generator (default: Ninja)
 USAGE
@@ -41,6 +44,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-run)
             DO_RUN=0
+            ;;
+        --process-bridge)
+            FORCE_PROCESS_BRIDGE=1
             ;;
         -h|--help)
             usage
@@ -72,22 +78,41 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-BRIDGE_CMD="${FERROUS_BRIDGE_CMD:-$DEFAULT_BRIDGE_CMD}"
+BRIDGE_MODE_RAW="${FERROUS_BRIDGE_MODE:-}"
+if [[ ${FORCE_PROCESS_BRIDGE} -eq 1 ]]; then
+    BRIDGE_MODE_RAW="process"
+fi
+BRIDGE_MODE="$(printf '%s' "${BRIDGE_MODE_RAW}" | tr '[:upper:]' '[:lower:]')"
+USE_PROCESS_BRIDGE=0
+if [[ "${BRIDGE_MODE}" == "process" ]]; then
+    USE_PROCESS_BRIDGE=1
+fi
 
 if [[ ${DO_CONFIGURE} -eq 1 ]]; then
     cmake -S "${NATIVE_UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}"
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then
-    cargo build --release --bin native_frontend --features gst
+    if [[ ${USE_PROCESS_BRIDGE} -eq 1 ]]; then
+        cargo build --release --bin native_frontend --features gst
+    fi
     cmake --build "${BUILD_DIR}" -j
 fi
 
-if [[ -z "${FERROUS_BRIDGE_CMD:-}" ]]; then
-    BRIDGE_CMD="${DEFAULT_BRIDGE_BIN} --json-bridge"
-fi
-
 if [[ ${DO_RUN} -eq 1 ]]; then
-    export FERROUS_BRIDGE_CMD="${BRIDGE_CMD:-$DEFAULT_BRIDGE_CMD}"
+    if [[ ${USE_PROCESS_BRIDGE} -eq 1 ]]; then
+        BRIDGE_CMD="${FERROUS_BRIDGE_CMD:-}"
+        if [[ -z "${BRIDGE_CMD}" ]]; then
+            if [[ -x "${DEFAULT_BRIDGE_BIN}" ]]; then
+                BRIDGE_CMD="${DEFAULT_BRIDGE_BIN} --json-bridge"
+            else
+                BRIDGE_CMD="${DEFAULT_BRIDGE_CMD}"
+            fi
+        fi
+        export FERROUS_BRIDGE_MODE=process
+        export FERROUS_BRIDGE_CMD="${BRIDGE_CMD}"
+    else
+        export FERROUS_BRIDGE_MODE=in-process
+    fi
     exec "${BUILD_DIR}/ferrous_kirigami_shell" "${APP_ARGS[@]}"
 fi
