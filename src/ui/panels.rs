@@ -330,8 +330,7 @@ pub fn draw_center_panel(
                                                 ellipsize(&root.display().to_string(), max_chars);
                                             let selected = selected_library_root
                                                 .as_ref()
-                                                .map(|p| p == root)
-                                                .unwrap_or(false);
+                                                .is_some_and(|p| p == root);
                                             let resp = full_row_text_button(
                                                 ui, row_w, 20.0, &root_text, selected, 0.0,
                                             );
@@ -426,7 +425,7 @@ pub fn draw_center_panel(
                                                     artist.to_lowercase()
                                                 );
                                                 let artist_count: usize =
-                                                    albums.values().map(|v| v.len()).sum();
+                                                    albums.values().map(std::vec::Vec::len).sum();
                                                 let artist_open = expanded_library_groups
                                                     .get(&artist_key)
                                                     .copied()
@@ -583,8 +582,10 @@ pub fn draw_center_panel(
                                                         let title = ellipsize(&title, track_chars);
                                                         let duration = track
                                                             .duration_secs
-                                                            .map(format_seconds)
-                                                            .unwrap_or_else(|| "--:--".to_string());
+                                                            .map_or_else(
+                                                                || "--:--".to_string(),
+                                                                format_seconds,
+                                                            );
                                                         let row_text = format!(
                                                             "    {:02}  {}  {}",
                                                             track.track_no.unwrap_or(
@@ -595,8 +596,7 @@ pub fn draw_center_panel(
                                                         );
                                                         let is_selected = selected_library_track
                                                             .as_ref()
-                                                            .map(|p| p == &track.path)
-                                                            .unwrap_or(false);
+                                                            .is_some_and(|p| p == &track.path);
                                                         let resp = full_row_text_button(
                                                             ui,
                                                             row_w,
@@ -674,16 +674,15 @@ pub fn draw_center_panel(
                                                     let mut hovered_idx: Option<usize> = None;
                                                     for (idx, path) in queue.iter().enumerate() {
                                                         let is_current = current
-                                                            .map(|p| p == path)
-                                                            .unwrap_or(false);
+                                                            .is_some_and(|p| p == path);
                                                         let is_selected =
                                                             selected_queue_index == Some(idx);
                                                         let duration =
                                                             duration_for_path(library, path)
-                                                                .map(format_seconds)
-                                                                .unwrap_or_else(|| {
-                                                                    "--:--".to_string()
-                                                                });
+                                                                .map_or_else(
+                                                                    || "--:--".to_string(),
+                                                                    format_seconds,
+                                                                );
                                                         let mut text = track_label(path);
                                                         if is_current {
                                                             text.push_str("  ▶");
@@ -1047,17 +1046,17 @@ fn draw_cover_art(
 }
 
 fn cover_art_key(w: usize, h: usize, rgba: &[u8]) -> u64 {
-    let mut hash = 1469598103934665603u64;
+    let mut hash = 1_469_598_103_934_665_603_u64;
     hash ^= w as u64;
-    hash = hash.wrapping_mul(1099511628211);
+    hash = hash.wrapping_mul(1_099_511_628_211);
     hash ^= h as u64;
-    hash = hash.wrapping_mul(1099511628211);
+    hash = hash.wrapping_mul(1_099_511_628_211);
     hash ^= rgba.len() as u64;
-    hash = hash.wrapping_mul(1099511628211);
+    hash = hash.wrapping_mul(1_099_511_628_211);
     let step = (rgba.len() / 128).max(1);
     for b in rgba.iter().step_by(step).take(128) {
         hash ^= *b as u64;
-        hash = hash.wrapping_mul(1099511628211);
+        hash = hash.wrapping_mul(1_099_511_628_211);
     }
     hash
 }
@@ -1179,10 +1178,10 @@ fn load_album_thumb_from_folder(
 }
 
 fn hash_str(s: &str) -> u64 {
-    let mut hash = 1469598103934665603u64;
+    let mut hash = 1_469_598_103_934_665_603_u64;
     for &b in s.as_bytes() {
         hash ^= b as u64;
-        hash = hash.wrapping_mul(1099511628211);
+        hash = hash.wrapping_mul(1_099_511_628_211);
     }
     hash
 }

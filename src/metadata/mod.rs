@@ -47,18 +47,18 @@ impl MetadataService {
                     metadata.bitrate_kbps = props.audio_bitrate();
 
                     if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-                        metadata.title = tag
-                            .title()
-                            .map(|v| v.into_owned())
-                            .unwrap_or_else(|| "Unknown title".to_string());
-                        metadata.artist = tag
-                            .artist()
-                            .map(|v| v.into_owned())
-                            .unwrap_or_else(|| "Unknown artist".to_string());
-                        metadata.album = tag
-                            .album()
-                            .map(|v| v.into_owned())
-                            .unwrap_or_else(|| "Unknown album".to_string());
+                        metadata.title = tag.title().map_or_else(
+                            || "Unknown title".to_string(),
+                            std::borrow::Cow::into_owned,
+                        );
+                        metadata.artist = tag.artist().map_or_else(
+                            || "Unknown artist".to_string(),
+                            std::borrow::Cow::into_owned,
+                        );
+                        metadata.album = tag.album().map_or_else(
+                            || "Unknown album".to_string(),
+                            std::borrow::Cow::into_owned,
+                        );
 
                         if let Some(pic) = tag.pictures().first() {
                             if let Ok(img) = image::load_from_memory(pic.data()) {

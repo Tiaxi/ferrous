@@ -666,8 +666,7 @@ mod backend {
                             let path_changed = snapshot
                                 .current
                                 .as_ref()
-                                .map(|p| p != &current_path)
-                                .unwrap_or(true);
+                                .map_or(true, |p| p != &current_path);
                             let at_track_start = snapshot.position <= Duration::from_secs(2);
                             if path_changed && at_track_start {
                                 snapshot.current = Some(current_path.clone());
@@ -747,7 +746,7 @@ mod backend {
             gst::MessageView::Error(err) => {
                 tracing::error!(
                     "gstreamer error from {:?}: {} ({:?})",
-                    err.src().map(|s| s.path_string()),
+                    err.src().map(gstreamer::prelude::GstObjectExt::path_string),
                     err.error(),
                     err.debug()
                 );

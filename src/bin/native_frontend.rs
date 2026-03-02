@@ -15,16 +15,13 @@
     clippy::manual_div_ceil,
     clippy::manual_is_multiple_of,
     clippy::manual_let_else,
-    clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_safety_doc,
     clippy::must_use_candidate,
     clippy::needless_pass_by_value,
     clippy::needless_range_loop,
-    clippy::needless_raw_string_hashes,
     clippy::ptr_arg,
     clippy::question_mark,
-    clippy::redundant_closure_for_method_calls,
     clippy::result_large_err,
     clippy::semicolon_if_nothing_returned,
     clippy::similar_names,
@@ -34,8 +31,7 @@
     clippy::too_many_lines,
     clippy::type_complexity,
     clippy::uninlined_format_args,
-    clippy::unnecessary_cast,
-    clippy::unreadable_literal
+    clippy::unnecessary_cast
 )]
 
 use std::collections::BTreeMap;
@@ -703,8 +699,7 @@ fn encode_snapshot_payload(
     let albums_changed = emit_state
         .last_library_digest
         .as_ref()
-        .map(|d| d != &library_digest)
-        .unwrap_or(true);
+        .map_or(true, |d| d != &library_digest);
     let should_emit_albums =
         albums_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
     emit_state.last_library_digest = Some(library_digest);
@@ -723,11 +718,10 @@ fn encode_snapshot_payload(
                 track.artist.clone()
             };
             let title = if track.title.trim().is_empty() {
-                track
-                    .path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| track.path.to_string_lossy().to_string())
+                track.path.file_stem().map_or_else(
+                    || track.path.to_string_lossy().to_string(),
+                    |s| s.to_string_lossy().into_owned(),
+                )
             } else {
                 track.title.clone()
             };
@@ -798,18 +792,17 @@ fn encode_snapshot_payload(
     let queue_changed = emit_state
         .last_queue_digest
         .as_ref()
-        .map(|d| d != &queue_digest)
-        .unwrap_or(true);
+        .map_or(true, |d| d != &queue_digest);
     let queue_tracks = if queue_changed {
         emit_state.last_queue_digest = Some(queue_digest);
         serde_json::Value::Array(
             s.queue
                 .iter()
                 .map(|path| {
-                    let title = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                    let title = path.file_name().map_or_else(
+                        || path.to_string_lossy().into_owned(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
                     json!({
                         "path": path.to_string_lossy().to_string(),
                         "title": title,
@@ -964,8 +957,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     let bin_count = delta
         .spectrogram_rows_u8
         .first()
-        .map(|r| r.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     let has_spectrogram = row_count > 0 && bin_count > 0;
 
     let mut flags = 0u8;

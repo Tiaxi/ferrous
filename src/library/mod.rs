@@ -120,7 +120,7 @@ fn library_db_path() -> anyhow::Result<PathBuf> {
 
 fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS roots (
             path TEXT PRIMARY KEY,
             added_at INTEGER NOT NULL
@@ -141,7 +141,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
         CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
         CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
-        "#,
+        ",
     )?;
     // Migration for existing DBs created before track_no support.
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN track_no INTEGER", []);
@@ -161,7 +161,7 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
     }
 
     if let Ok(mut stmt) = conn.prepare(
-        r#"
+        r"
         SELECT path, title, artist, album, track_no, duration_secs
         FROM tracks
         ORDER BY
@@ -171,7 +171,7 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
             CASE WHEN track_no IS NULL THEN 1 ELSE 0 END,
             track_no ASC,
             path COLLATE NOCASE
-        "#,
+        ",
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
             Ok(LibraryTrack {
@@ -235,7 +235,7 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
     for entry in WalkDir::new(&root)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         if !entry.file_type().is_file() {
             continue;
@@ -254,22 +254,22 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos() as i64);
 
         let path_string = path.to_string_lossy().to_string();
         seen_paths.insert(path_string.clone());
 
         let needs_update = existing
             .get(&path_string)
-            .map(|(old_mtime, old_size)| *old_mtime != mtime_ns || *old_size != size_bytes)
-            .unwrap_or(true);
+            .map_or(true, |(old_mtime, old_size)| {
+                *old_mtime != mtime_ns || *old_size != size_bytes
+            });
 
         if needs_update {
             let indexed = read_track_info(path);
             if tx
                 .execute(
-                    r#"
+                    r"
                     INSERT INTO tracks(path, title, artist, album, track_no, duration_secs, mtime_ns, size_bytes, indexed_at)
                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                     ON CONFLICT(path) DO UPDATE SET
@@ -281,7 +281,7 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
                         mtime_ns=excluded.mtime_ns,
                         size_bytes=excluded.size_bytes,
                         indexed_at=excluded.indexed_at
-                    "#,
+                    ",
                     params![
                         path_string,
                         indexed.title,

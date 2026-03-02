@@ -437,7 +437,7 @@ fn waveform_db_path() -> anyhow::Result<PathBuf> {
 
 fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS waveform_cache (
             path TEXT PRIMARY KEY,
             size_bytes INTEGER NOT NULL,
@@ -450,7 +450,7 @@ fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_waveform_cache_updated_at
             ON waveform_cache(updated_at);
-        "#,
+        ",
     )?;
     Ok(())
 }
@@ -463,14 +463,14 @@ fn load_waveform_from_db(
     let path = path.to_string_lossy().to_string();
     let row: (i64, i64, Vec<u8>) = conn
         .query_row(
-            r#"
+            r"
             SELECT format_version, peak_count, peaks_blob
             FROM waveform_cache
             WHERE path=?1
               AND size_bytes=?2
               AND modified_secs=?3
               AND modified_nanos=?4
-            "#,
+            ",
             params![
                 path,
                 stamp.size_bytes as i64,
@@ -502,7 +502,7 @@ fn persist_waveform_to_db(
     let blob = encode_peaks_blob(peaks);
     let now = unix_ts_i64();
     conn.execute(
-        r#"
+        r"
         INSERT INTO waveform_cache(
             path, size_bytes, modified_secs, modified_nanos,
             format_version, peak_count, peaks_blob, updated_at
@@ -516,7 +516,7 @@ fn persist_waveform_to_db(
             peak_count=excluded.peak_count,
             peaks_blob=excluded.peaks_blob,
             updated_at=excluded.updated_at
-        "#,
+        ",
         params![
             path.to_string_lossy().to_string(),
             stamp.size_bytes as i64,
@@ -533,7 +533,7 @@ fn persist_waveform_to_db(
 
 fn prune_persistent_waveform_cache(conn: &Connection, max_rows: usize) -> rusqlite::Result<()> {
     conn.execute(
-        r#"
+        r"
         DELETE FROM waveform_cache
         WHERE path IN (
             SELECT path
@@ -541,7 +541,7 @@ fn prune_persistent_waveform_cache(conn: &Connection, max_rows: usize) -> rusqli
             ORDER BY updated_at DESC
             LIMIT -1 OFFSET ?1
         )
-        "#,
+        ",
         params![max_rows as i64],
     )?;
     Ok(())
@@ -684,7 +684,11 @@ impl StftComputer {
                 .process(&mut self.fft_in, &mut self.fft_out)
                 .is_ok()
             {
-                let row: Vec<f32> = self.fft_out.iter().map(|bin| bin.norm_sqr()).collect();
+                let row: Vec<f32> = self
+                    .fft_out
+                    .iter()
+                    .map(realfft::num_complex::Complex::norm_sqr)
+                    .collect();
                 rows.push(row);
             }
 

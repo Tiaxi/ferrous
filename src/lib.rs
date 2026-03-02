@@ -15,16 +15,13 @@
     clippy::manual_div_ceil,
     clippy::manual_is_multiple_of,
     clippy::manual_let_else,
-    clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_safety_doc,
     clippy::must_use_candidate,
     clippy::needless_pass_by_value,
     clippy::needless_range_loop,
-    clippy::needless_raw_string_hashes,
     clippy::ptr_arg,
     clippy::question_mark,
-    clippy::redundant_closure_for_method_calls,
     clippy::result_large_err,
     clippy::semicolon_if_nothing_returned,
     clippy::similar_names,
@@ -34,8 +31,7 @@
     clippy::too_many_lines,
     clippy::type_complexity,
     clippy::uninlined_format_args,
-    clippy::unnecessary_cast,
-    clippy::unreadable_literal
+    clippy::unnecessary_cast
 )]
 
 pub mod analysis;

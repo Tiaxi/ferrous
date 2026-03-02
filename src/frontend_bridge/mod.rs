@@ -265,8 +265,7 @@ fn run_bridge_loop(cmd_rx: Receiver<BridgeCommand>, event_tx: Sender<BridgeEvent
                 .analysis
                 .spectrogram_rows
                 .first()
-                .map(|r| r.len())
-                .unwrap_or(0);
+                .map_or(0, std::vec::Vec::len);
             eprintln!(
                 "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} spectro_rows={} spectro_bins={} sent_snap/s={} drop_snap/s={}",
                 rss_kb,
