@@ -218,7 +218,7 @@ fn run_bridge_loop(
     let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SNAPSHOT_MS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
-        .map_or(100, |v| v.clamp(16, 1000));
+        .map_or(16, |v| v.clamp(8, 1000));
     let snapshot_interval = Duration::from_millis(snapshot_interval_ms);
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;

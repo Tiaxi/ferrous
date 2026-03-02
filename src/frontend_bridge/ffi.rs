@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, c_uchar, CStr, CString};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::json;
@@ -11,6 +11,7 @@ use super::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSettingsCommand, BridgeSnapshot, FrontendBridgeHandle,
 };
+use crate::playback::PlaybackState;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
@@ -59,9 +60,26 @@ struct QueueDigest {
     last: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JsonSnapshotSummary {
+    playback_state: PlaybackState,
+    playback_current: Option<PathBuf>,
+    queue_len: usize,
+    queue_selected: Option<usize>,
+    queue_first: Option<PathBuf>,
+    queue_last: Option<PathBuf>,
+    library_roots: usize,
+    library_tracks: usize,
+    library_scan_in_progress: bool,
+}
+
 struct FfiRuntime {
     bridge: FrontendBridgeHandle,
     emit_state: JsonEmitState,
+    json_snapshot_interval: Duration,
+    last_json_snapshot_emit: Instant,
+    last_json_summary: Option<JsonSnapshotSummary>,
+    force_json_snapshot_emit: bool,
     pending_json_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
     stopped: bool,
@@ -70,9 +88,20 @@ struct FfiRuntime {
 impl FfiRuntime {
     fn new() -> Self {
         let bridge = FrontendBridgeHandle::spawn();
+        let json_snapshot_interval_ms = std::env::var("FERROUS_FFI_JSON_SNAPSHOT_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map_or(100, |v| v.clamp(16, 1000));
+        let json_snapshot_interval = Duration::from_millis(json_snapshot_interval_ms);
+        let now = Instant::now();
+        let last_json_snapshot_emit = now.checked_sub(json_snapshot_interval).unwrap_or(now);
         let mut runtime = Self {
             bridge,
             emit_state: JsonEmitState::default(),
+            json_snapshot_interval,
+            last_json_snapshot_emit,
+            last_json_summary: None,
+            force_json_snapshot_emit: true,
             pending_json_events: VecDeque::with_capacity(MAX_PENDING_JSON_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
             stopped: false,
@@ -106,6 +135,7 @@ impl FfiRuntime {
         let cmd = parse_json_command(line)?;
         if let Some(cmd) = cmd {
             self.bridge.command(cmd);
+            self.force_json_snapshot_emit = true;
         }
         Ok(())
     }
@@ -137,9 +167,21 @@ impl FfiRuntime {
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.emit_state);
             let analysis_frame = encode_analysis_frame(&analysis_delta);
             self.push_analysis_frame(analysis_frame);
-            let payload =
-                encode_snapshot_payload(&snapshot, &analysis_delta, &mut self.emit_state, false);
-            self.push_json_event(payload);
+            let summary = snapshot_summary(&snapshot);
+            let summary_changed = self.last_json_summary.as_ref() != Some(&summary);
+            let emit_due = self.last_json_snapshot_emit.elapsed() >= self.json_snapshot_interval;
+            if self.force_json_snapshot_emit || summary_changed || emit_due {
+                let payload = encode_snapshot_payload(
+                    &snapshot,
+                    &analysis_delta,
+                    &mut self.emit_state,
+                    false,
+                );
+                self.push_json_event(payload);
+                self.last_json_snapshot_emit = Instant::now();
+                self.last_json_summary = Some(summary);
+                self.force_json_snapshot_emit = false;
+            }
         }
     }
 
@@ -771,6 +813,20 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut JsonEmitState) ->
         waveform_changed,
         waveform_peaks_u8,
         spectrogram_rows_u8,
+    }
+}
+
+fn snapshot_summary(s: &BridgeSnapshot) -> JsonSnapshotSummary {
+    JsonSnapshotSummary {
+        playback_state: s.playback.state,
+        playback_current: s.playback.current.clone(),
+        queue_len: s.queue.len(),
+        queue_selected: s.selected_queue_index,
+        queue_first: s.queue.first().cloned(),
+        queue_last: s.queue.last().cloned(),
+        library_roots: s.library.roots.len(),
+        library_tracks: s.library.tracks.len(),
+        library_scan_in_progress: s.library.scan_in_progress,
     }
 }
 

@@ -90,8 +90,9 @@ cargo install cargo-llvm-cov
 
 Optional runtime tuning:
 
-- `FERROUS_BRIDGE_SNAPSHOT_MS`: controls non-analysis snapshot cadence (default `100`, range `16..1000`).
-  - Lower values update playback/library state more frequently with higher JSON/UI overhead.
+- `FERROUS_BRIDGE_SNAPSHOT_MS`: controls bridge snapshot cadence (default `16`, range `8..1000`).
+- `FERROUS_FFI_JSON_SNAPSHOT_MS`: throttles JSON snapshot delivery to the Qt side in in-process mode (default `100`, range `16..1000`).
+  - Lower values update playback/library text state more frequently with higher JSON/UI overhead.
 
 Roadmap and engineering plans live under `docs/`:
 

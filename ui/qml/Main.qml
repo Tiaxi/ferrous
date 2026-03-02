@@ -23,6 +23,7 @@ Kirigami.ApplicationWindow {
     property int lastAppliedLibraryVersion: -1
     property int lastCenteredQueueIndex: -2
     property bool autoCenterQueueSelection: true
+    property real displayedPositionSeconds: 0
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -90,6 +91,23 @@ Kirigami.ApplicationWindow {
             uiBridge.pause()
         } else {
             uiBridge.play()
+        }
+    }
+
+    Timer {
+        id: positionSmoothingTimer
+        interval: 16
+        repeat: true
+        running: !seekSlider.pressed && uiBridge.playbackState === "Playing" && root.visualFeedsEnabled
+        onTriggered: {
+            const duration = Math.max(uiBridge.durationSeconds, 0)
+            if (duration <= 0) {
+                root.displayedPositionSeconds = 0
+                return
+            }
+            root.displayedPositionSeconds = Math.min(
+                duration,
+                root.displayedPositionSeconds + interval / 1000.0)
         }
     }
 
@@ -414,6 +432,7 @@ Kirigami.ApplicationWindow {
                     stepSize: 0
                     onPressedChanged: {
                         if (!pressed) {
+                            root.displayedPositionSeconds = value
                             uiBridge.seek(value)
                         }
                     }
@@ -434,7 +453,7 @@ Kirigami.ApplicationWindow {
                             anchors.fill: parent
                             anchors.margins: 1
                             peaksData: uiBridge.waveformPeaksPacked
-                            positionSeconds: uiBridge.positionSeconds
+                            positionSeconds: root.displayedPositionSeconds
                             durationSeconds: uiBridge.durationSeconds
                         }
                     }
@@ -453,7 +472,7 @@ Kirigami.ApplicationWindow {
                 Binding {
                     target: seekSlider
                     property: "value"
-                    value: uiBridge.positionSeconds
+                    value: root.displayedPositionSeconds
                     when: !seekSlider.pressed
                 }
 
@@ -996,6 +1015,11 @@ Kirigami.ApplicationWindow {
             }
         }
         function onSnapshotChanged() {
+            const incomingPosition = uiBridge.positionSeconds
+            if (uiBridge.playbackState !== "Playing"
+                    || Math.abs(root.displayedPositionSeconds - incomingPosition) > 0.35) {
+                root.displayedPositionSeconds = incomingPosition
+            }
             if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
                 const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
                 libraryModel.setLibraryTree(uiBridge.libraryTree || [])
@@ -1032,5 +1056,6 @@ Kirigami.ApplicationWindow {
         libraryModel.setLibraryTree(uiBridge.libraryTree || [])
         libraryModel.setSearchText(librarySearchField.text || "")
         root.lastAppliedLibraryVersion = uiBridge.libraryVersion
+        root.displayedPositionSeconds = uiBridge.positionSeconds
     }
 }
