@@ -359,14 +359,16 @@ impl AnalysisEngine {
 
                         if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
                             eprintln!(
-                                "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_samples={}",
+                                "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_samples={} fft={} hop={}",
                                 prof_ticks,
                                 prof_pcm,
                                 prof_in_samples,
                                 prof_out_samples,
                                 prof_rows,
                                 stft.pending_len(),
-                                pcm_fifo.len()
+                                pcm_fifo.len(),
+                                stft.fft_size(),
+                                stft.hop_size()
                             );
                             prof_last = std::time::Instant::now();
                             prof_pcm = 0;
@@ -634,6 +636,7 @@ struct StftComputer {
     fft_in: Vec<f32>,
     fft_out: Vec<Complex32>,
     pending: Vec<f32>,
+    pending_start: usize,
     window: Vec<f32>,
     fft_size: usize,
     hop_size: usize,
@@ -653,6 +656,7 @@ impl StftComputer {
             fft_in,
             fft_out,
             pending: Vec::with_capacity(fft_size * 2),
+            pending_start: 0,
             window,
             fft_size,
             hop_size,
@@ -661,24 +665,28 @@ impl StftComputer {
 
     fn reset_full(&mut self) {
         self.pending.clear();
+        self.pending_start = 0;
     }
 
     fn enqueue_samples(&mut self, samples: &[f32], sample_rate_hz: u32) {
+        self.compact_pending_if_needed();
         self.pending.extend_from_slice(samples);
         // Keep pending bounded to avoid latency creep: max ~0.5s audio.
         let max_pending = (sample_rate_hz as usize / 2).max(self.fft_size * 4);
-        if self.pending.len() > max_pending {
-            let drop = self.pending.len() - max_pending;
-            self.pending.drain(0..drop);
+        let available = self.pending_available();
+        if available > max_pending {
+            let drop = available - max_pending;
+            self.pending_start = self.pending_start.saturating_add(drop);
+            self.compact_pending_if_needed();
         }
     }
 
     fn take_rows(&mut self, max_rows: usize) -> Vec<Vec<f32>> {
         let mut rows = Vec::new();
 
-        while self.pending.len() >= self.fft_size && rows.len() < max_rows {
+        while self.pending_available() >= self.fft_size && rows.len() < max_rows {
             for i in 0..self.fft_size {
-                self.fft_in[i] = self.pending[i] * self.window[i];
+                self.fft_in[i] = self.pending[self.pending_start + i] * self.window[i];
             }
 
             if self
@@ -694,22 +702,48 @@ impl StftComputer {
                 rows.push(row);
             }
 
-            let drain = self.hop_size.min(self.pending.len());
-            self.pending.drain(0..drain);
+            let advance = self.hop_size.min(self.pending_available());
+            self.pending_start = self.pending_start.saturating_add(advance);
         }
 
         // If producer is outrunning us, drop backlog to keep spectrogram in real-time sync.
         let max_backlog = self.fft_size * 4;
-        if self.pending.len() > max_backlog {
-            let keep_from = self.pending.len() - max_backlog;
-            self.pending.drain(0..keep_from);
+        let available = self.pending_available();
+        if available > max_backlog {
+            let drop = available - max_backlog;
+            self.pending_start = self.pending_start.saturating_add(drop);
         }
+        self.compact_pending_if_needed();
 
         rows
     }
 
     fn pending_len(&self) -> usize {
-        self.pending.len()
+        self.pending_available()
+    }
+
+    fn fft_size(&self) -> usize {
+        self.fft_size
+    }
+
+    fn hop_size(&self) -> usize {
+        self.hop_size
+    }
+
+    fn pending_available(&self) -> usize {
+        self.pending.len().saturating_sub(self.pending_start)
+    }
+
+    fn compact_pending_if_needed(&mut self) {
+        if self.pending_start == 0 {
+            return;
+        }
+        let should_compact = self.pending_start >= self.fft_size * 8
+            || self.pending_start >= self.pending.len().saturating_div(2);
+        if should_compact {
+            self.pending.drain(0..self.pending_start);
+            self.pending_start = 0;
+        }
     }
 }
 
@@ -966,6 +1000,22 @@ mod tests {
         let rows = stft.take_rows(4);
         assert!(!rows.is_empty());
         assert_eq!(rows[0].len(), 257);
+    }
+
+    #[test]
+    fn stft_computer_keeps_row_count_with_chunked_input() {
+        let mut stft = StftComputer::new(8, 4);
+        let input: Vec<f32> = (0..24).map(|v| v as f32).collect();
+        let mut rows = 0usize;
+
+        for chunk in input.chunks(3) {
+            stft.enqueue_samples(chunk, 48_000);
+            rows += stft.take_rows(1).len();
+        }
+        rows += stft.take_rows(64).len();
+
+        assert_eq!(rows, 5);
+        assert_eq!(stft.pending_len(), 4);
     }
 
     #[test]
