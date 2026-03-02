@@ -80,8 +80,7 @@ private:
     bool m_canvasDirty{true};
     std::deque<std::vector<quint8>> m_columns;
     bool m_fpsInitialized{false};
-    int m_fpsFrameCount{0};
-    double m_fpsValue{0.0};
-    std::chrono::steady_clock::time_point m_fpsWindowStart{};
+    int m_fpsValue{0};
+    std::chrono::steady_clock::time_point m_lastFrameTime{};
     mutable QMutex m_stateMutex;
 };

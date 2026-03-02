@@ -502,31 +502,22 @@ void SpectrogramItem::updateFpsEstimate() {
     const auto now = Clock::now();
     if (!m_fpsInitialized) {
         m_fpsInitialized = true;
-        m_fpsWindowStart = now;
-        m_fpsFrameCount = 0;
-        m_fpsValue = 0.0;
+        m_lastFrameTime = now;
+        m_fpsValue = 0;
         return;
     }
 
-    m_fpsFrameCount++;
-    const double elapsed = std::chrono::duration<double>(now - m_fpsWindowStart).count();
-    if (elapsed < 0.5) {
+    const double elapsed = std::chrono::duration<double>(now - m_lastFrameTime).count();
+    m_lastFrameTime = now;
+    if (elapsed <= 0.0) {
         return;
     }
 
-    const double instantFps = static_cast<double>(m_fpsFrameCount) / elapsed;
-    if (m_fpsValue <= 0.0) {
-        m_fpsValue = instantFps;
-    } else {
-        // Light smoothing keeps the value stable while still reflecting spikes/drops.
-        m_fpsValue = (m_fpsValue * 0.8) + (instantFps * 0.2);
-    }
-    m_fpsFrameCount = 0;
-    m_fpsWindowStart = now;
+    m_fpsValue = std::clamp(static_cast<int>(std::lround(1.0 / elapsed)), 0, 999);
 }
 
 void SpectrogramItem::drawFpsOverlay(QPainter *painter) const {
-    if (!painter || m_fpsValue <= 0.0) {
+    if (!painter || m_fpsValue <= 0) {
         return;
     }
 
@@ -534,5 +525,5 @@ void SpectrogramItem::drawFpsOverlay(QPainter *painter) const {
     font.setPixelSize(10);
     painter->setFont(font);
     painter->setPen(QColor(190, 190, 200, 150));
-    painter->drawText(QPointF(8.0, 14.0), QStringLiteral("%1 fps").arg(m_fpsValue, 0, 'f', 1));
+    painter->drawText(QPointF(8.0, 14.0), QStringLiteral("%1 fps").arg(m_fpsValue));
 }
