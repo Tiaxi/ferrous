@@ -206,10 +206,10 @@ Acceptance criteria:
 - [x] Add optimization planning document and prioritized backlog (`docs/OPTIMIZATION_PLAN.md`).
 - [x] Implement test plan phase 1 (backend/FFI unit tests + native UI smoke test scaffold).
 - [x] Implement test plan phase 2 (FFI integration tests + initial bridge mode parity test).
-- [ ] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior).
+- [ ] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior). In progress: expanded process-vs-FFI parity coverage for queue transition flows and invalid-seek error parity in `src/bin/native_frontend.rs`.
 - [x] Add strict lint/security verification steps (`cargo clippy -- -D clippy::pedantic`, `cargo audit`) to regular verification script.
 - [x] Burn down current strict `clippy::pedantic` backlog so regular verification passes without `--no-clippy`.
-- [ ] Burn down temporary pedantic-lint baseline allow lists in `src/lib.rs` and `src/bin/native_frontend.rs` (removed so far: `needless_raw_string_hashes`, `unreadable_literal`, `map_unwrap_or`, `redundant_closure_for_method_calls`, `bool_to_int_with_if`, `default_trait_access`, `manual_let_else`, `collapsible_if`, `manual_div_ceil`, `manual_is_multiple_of`, `field_reassign_with_default`, `implicit_hasher`, `unnecessary_cast`).
+- [x] Burn down temporary pedantic-lint baseline allow lists in `src/lib.rs` and `src/bin/native_frontend.rs` (current strict pedantic runs clean without clippy allow lists).
 - [x] Mitigate `cargo audit` warning `RUSTSEC-2024-0436` (`paste` unmaintained) via `.cargo/audit.toml` ignore policy; revisit on dependency upgrades.
 - [ ] Execute optimization backlog phase P0 from `docs/OPTIMIZATION_PLAN.md` (typed low-rate in-process path, remove internal JSON churn). Deferred until test coverage phases are complete.
 - [ ] Add integration tests for queue transitions, gapless handoff, seek behavior.

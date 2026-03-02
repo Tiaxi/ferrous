@@ -38,8 +38,11 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Phase 2 implemented:
     - End-to-end tests now drive exported `ferrous_ffi_bridge_*` functions for snapshot/error/stopped flow.
   - Phase 3 implemented:
-    - `src/bin/native_frontend.rs` parity test confirms process-style command parsing path and in-process FFI path produce matching queue snapshot outcomes for album replacement.
-  - Future: broaden parity checks to seek/selection/reorder/error paths.
+    - `src/bin/native_frontend.rs` parity tests confirm process-style command parsing path and in-process FFI path produce matching outcomes for:
+      - queue replacement via album paths
+      - queue transition sequence (`select_queue`, `move_queue`, `remove_at`) including resulting queue order
+      - invalid seek command error payload parity
+  - Future: broaden parity checks to successful seek/playback-state transitions.
 
 ### Layer 3: Native UI Smoke Tests (Qt)
 
@@ -76,7 +79,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 ## Next Coverage Steps
 
-1. Expand process-vs-in-process parity tests beyond queue replacement (seek/select/move/remove/error flows).
+1. Expand process-vs-in-process parity tests to successful seek/playback-state transitions (not just parser error parity).
 2. Add deterministic integration tests for queue transitions and playback edge cases.
 3. Add no-early-next-track metadata/waveform regression tests.
 4. Add performance regression harness for bridge/event throughput and UI frame pacing.

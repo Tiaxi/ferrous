@@ -1106,6 +1106,90 @@ mod tests {
         last
     }
 
+    fn wait_bridge_snapshot_matching<F>(
+        bridge: &FrontendBridgeHandle,
+        timeout: Duration,
+        predicate: F,
+    ) -> Option<BridgeSnapshot>
+    where
+        F: Fn(&BridgeSnapshot) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
+                if let BridgeEvent::Snapshot(snapshot) = event {
+                    if predicate(&snapshot) {
+                        return Some(snapshot);
+                    }
+                    last = Some(snapshot);
+                }
+            }
+        }
+        last
+    }
+
+    unsafe fn wait_ffi_json_event_matching<F>(
+        handle: *mut ferrous::frontend_bridge::ffi::FerrousFfiBridge,
+        timeout: Duration,
+        predicate: F,
+    ) -> Option<serde_json::Value>
+    where
+        F: Fn(&serde_json::Value) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            unsafe { ferrous_ffi_bridge_poll(handle, 64) };
+            loop {
+                let ptr = unsafe { ferrous_ffi_bridge_pop_json_event(handle) };
+                if ptr.is_null() {
+                    break;
+                }
+                let text = unsafe { CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { ferrous_ffi_bridge_free_json_event(ptr) };
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if predicate(&value) {
+                        return Some(value);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    fn snapshot_queue_len(snapshot: &serde_json::Value) -> u64 {
+        snapshot
+            .get("queue")
+            .and_then(|v| v.get("len"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    }
+
+    fn snapshot_selected_index(snapshot: &serde_json::Value) -> i64 {
+        snapshot
+            .get("queue")
+            .and_then(|v| v.get("selected_index"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1)
+    }
+
+    fn snapshot_tracks(snapshot: &serde_json::Value) -> Vec<String> {
+        snapshot
+            .get("queue")
+            .and_then(|v| v.get("tracks"))
+            .and_then(serde_json::Value::as_array)
+            .map_or_else(Vec::new, |tracks| {
+                tracks
+                    .iter()
+                    .filter_map(|item| item.get("path").and_then(serde_json::Value::as_str))
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+    }
+
     unsafe fn wait_ffi_snapshot_json(
         handle: *mut ferrous::frontend_bridge::ffi::FerrousFfiBridge,
         timeout: Duration,
@@ -1114,31 +1198,113 @@ mod tests {
         let deadline = Instant::now() + timeout;
         let mut latest = None;
         while Instant::now() < deadline {
-            ferrous_ffi_bridge_poll(handle, 64);
-            loop {
-                let ptr = ferrous_ffi_bridge_pop_json_event(handle);
-                if ptr.is_null() {
-                    break;
+            let candidate = unsafe {
+                wait_ffi_json_event_matching(handle, Duration::from_millis(50), |value| {
+                    value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
+                        && snapshot_queue_len(value) == expected_queue_len
+                })
+            };
+            if let Some(value) = candidate {
+                if value.get("event").and_then(|v| v.as_str()) == Some("snapshot") {
+                    return Some(value);
                 }
-                let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-                ferrous_ffi_bridge_free_json_event(ptr);
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if value.get("event").and_then(|v| v.as_str()) == Some("snapshot") {
-                        let queue_len = value
-                            .get("queue")
-                            .and_then(|v| v.get("len"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        latest = Some(value.clone());
-                        if queue_len == expected_queue_len {
-                            return Some(value);
-                        }
-                    }
-                }
+                latest = Some(value);
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
         latest
+    }
+
+    fn direct_snapshot_track_paths(snapshot: &BridgeSnapshot) -> Vec<String> {
+        snapshot
+            .queue
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn process_parser_and_ffi_path_match_queue_transition_sequence() {
+        let commands = [
+            r#"{"cmd":"replace_album","paths":["/tmp/a.flac","/tmp/b.flac","/tmp/c.flac"]}"#,
+            r#"{"cmd":"select_queue","value":2}"#,
+            r#"{"cmd":"move_queue","from":2,"to":0}"#,
+            r#"{"cmd":"remove_at","value":1}"#,
+            r#"{"cmd":"select_queue","value":-1}"#,
+            r#"{"cmd":"select_queue","value":0}"#,
+        ];
+
+        let direct_bridge = FrontendBridgeHandle::spawn();
+        for line in &commands {
+            let cmd = parse_json_command(line).expect("parse").expect("cmd");
+            direct_bridge.command(cmd);
+        }
+        direct_bridge.command(BridgeCommand::RequestSnapshot);
+        let direct_snapshot =
+            wait_bridge_snapshot_matching(&direct_bridge, Duration::from_secs(4), |snapshot| {
+                snapshot.queue.len() == 2 && snapshot.selected_queue_index == Some(0)
+            })
+            .expect("direct snapshot");
+
+        let ffi_handle = ferrous_ffi_bridge_create();
+        assert!(!ffi_handle.is_null());
+        for line in &commands {
+            let cmd = CString::new(*line).expect("cstring");
+            assert!(unsafe { ferrous_ffi_bridge_send_json(ffi_handle, cmd.as_ptr()) });
+        }
+
+        let ffi_snapshot = unsafe {
+            wait_ffi_json_event_matching(ffi_handle, Duration::from_secs(4), |value| {
+                value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
+                    && snapshot_queue_len(value) == 2
+                    && snapshot_selected_index(value) == 0
+                    && !snapshot_tracks(value).is_empty()
+            })
+        }
+        .expect("ffi snapshot");
+
+        let direct_tracks = direct_snapshot_track_paths(&direct_snapshot);
+        let ffi_tracks = snapshot_tracks(&ffi_snapshot);
+
+        assert_eq!(
+            direct_snapshot.queue.len() as u64,
+            snapshot_queue_len(&ffi_snapshot)
+        );
+        assert_eq!(
+            direct_snapshot
+                .selected_queue_index
+                .map_or(-1, |idx| idx as i64),
+            snapshot_selected_index(&ffi_snapshot)
+        );
+        assert_eq!(direct_tracks, ffi_tracks);
+
+        direct_bridge.command(BridgeCommand::Shutdown);
+        unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
+    }
+
+    #[test]
+    fn process_parser_and_ffi_path_match_invalid_seek_error() {
+        let expected = parse_json_command(r#"{"cmd":"seek","value":-1}"#).unwrap_err();
+
+        let ffi_handle = ferrous_ffi_bridge_create();
+        assert!(!ffi_handle.is_null());
+        let bad = CString::new(r#"{"cmd":"seek","value":-1}"#).expect("cstring");
+        assert!(!unsafe { ferrous_ffi_bridge_send_json(ffi_handle, bad.as_ptr()) });
+
+        let error_event = unsafe {
+            wait_ffi_json_event_matching(ffi_handle, Duration::from_secs(3), |value| {
+                value.get("event").and_then(|v| v.as_str()) == Some("error")
+            })
+        }
+        .expect("error event");
+        let message = error_event
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        assert_eq!(message, expected);
+
+        unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
     }
 
     #[test]
