@@ -29,6 +29,14 @@ Build-only (no GUI launch):
 ./scripts/run-native-ui.sh --no-run
 ```
 
+## Tests
+
+```bash
+cmake -S native_ui -B native_ui/build
+cmake --build native_ui/build
+ctest --test-dir native_ui/build --output-on-failure
+```
+
 ## Run (process bridge fallback)
 
 ```bash

@@ -16,6 +16,11 @@ Build a Kirigami frontend on top of the existing Rust backend (playback, analysi
 - A Kirigami shell scaffold exists in `native_ui/` and talks to the JSON bridge.
 - Existing egui frontend (`src/main.rs`) remains buildable.
 
+## Engineering Plans
+
+- Test plan: `docs/TEST_PLAN.md`
+- Optimization backlog: `docs/OPTIMIZATION_PLAN.md`
+
 ## Why this bootstrap exists
 
 Before wiring Qt/QML bindings, we need:

@@ -415,87 +415,148 @@ fn handle_queue_command(
     playback: &PlaybackEngine,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
+    let outcome = apply_queue_command_state(cmd, &mut state.queue, &mut state.selected_queue_index);
+    for op in &outcome.playback_ops {
+        match op {
+            QueuePlaybackOp::LoadQueue(tracks) => {
+                playback.command(PlaybackCommand::LoadQueue(tracks.clone()))
+            }
+            QueuePlaybackOp::AddToQueue(tracks) => {
+                playback.command(PlaybackCommand::AddToQueue(tracks.clone()))
+            }
+            QueuePlaybackOp::ClearQueue => playback.command(PlaybackCommand::ClearQueue),
+            QueuePlaybackOp::PlayAt(idx) => playback.command(PlaybackCommand::PlayAt(*idx)),
+            QueuePlaybackOp::Play => playback.command(PlaybackCommand::Play),
+        }
+    }
+    if let Some(error) = outcome.error {
+        let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+    }
+    outcome.changed
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueuePlaybackOp {
+    LoadQueue(Vec<PathBuf>),
+    AddToQueue(Vec<PathBuf>),
+    ClearQueue,
+    PlayAt(usize),
+    Play,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct QueueCommandOutcome {
+    changed: bool,
+    playback_ops: Vec<QueuePlaybackOp>,
+    error: Option<String>,
+}
+
+fn apply_queue_command_state(
+    cmd: BridgeQueueCommand,
+    queue: &mut Vec<PathBuf>,
+    selected_queue_index: &mut Option<usize>,
+) -> QueueCommandOutcome {
     match cmd {
         BridgeQueueCommand::Replace { tracks, autoplay } => {
-            state.queue = tracks;
-            state.selected_queue_index = if state.queue.is_empty() {
-                None
+            *queue = tracks;
+            *selected_queue_index = if queue.is_empty() { None } else { Some(0) };
+            let mut playback_ops = Vec::new();
+            if queue.is_empty() {
+                playback_ops.push(QueuePlaybackOp::ClearQueue);
             } else {
-                Some(0)
-            };
-            if state.queue.is_empty() {
-                playback.command(PlaybackCommand::ClearQueue);
-            } else {
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+                playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
                 if autoplay {
-                    playback.command(PlaybackCommand::PlayAt(0));
-                    playback.command(PlaybackCommand::Play);
+                    playback_ops.push(QueuePlaybackOp::PlayAt(0));
+                    playback_ops.push(QueuePlaybackOp::Play);
                 }
             }
-            true
+            QueueCommandOutcome {
+                changed: true,
+                playback_ops,
+                error: None,
+            }
         }
         BridgeQueueCommand::Append(tracks) => {
             if tracks.is_empty() {
-                return false;
+                return QueueCommandOutcome::default();
             }
-            if state.queue.is_empty() {
-                state.queue.extend(tracks);
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+            let mut playback_ops = Vec::new();
+            if queue.is_empty() {
+                queue.extend(tracks);
+                playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
             } else {
-                state.queue.extend(tracks.clone());
-                playback.command(PlaybackCommand::AddToQueue(tracks));
+                queue.extend(tracks.clone());
+                playback_ops.push(QueuePlaybackOp::AddToQueue(tracks));
             }
-            true
+            QueueCommandOutcome {
+                changed: true,
+                playback_ops,
+                error: None,
+            }
         }
         BridgeQueueCommand::PlayAt(idx) => {
-            if idx < state.queue.len() {
-                playback.command(PlaybackCommand::PlayAt(idx));
-                playback.command(PlaybackCommand::Play);
-                state.selected_queue_index = Some(idx);
-                true
+            if idx < queue.len() {
+                *selected_queue_index = Some(idx);
+                QueueCommandOutcome {
+                    changed: true,
+                    playback_ops: vec![QueuePlaybackOp::PlayAt(idx), QueuePlaybackOp::Play],
+                    error: None,
+                }
             } else {
-                let _ = try_send_event(
-                    event_tx,
-                    BridgeEvent::Error(format!("queue index {idx} out of bounds")),
-                );
-                false
+                QueueCommandOutcome {
+                    changed: false,
+                    playback_ops: Vec::new(),
+                    error: Some(format!("queue index {idx} out of bounds")),
+                }
             }
         }
         BridgeQueueCommand::Remove(idx) => {
-            if idx < state.queue.len() {
-                state.queue.remove(idx);
-                if state.queue.is_empty() {
-                    playback.command(PlaybackCommand::ClearQueue);
-                    state.selected_queue_index = None;
-                } else {
-                    playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-                    state.selected_queue_index = idx.checked_sub(1);
-                }
-                true
+            if idx >= queue.len() {
+                return QueueCommandOutcome::default();
+            }
+            queue.remove(idx);
+            let playback_ops = if queue.is_empty() {
+                *selected_queue_index = None;
+                vec![QueuePlaybackOp::ClearQueue]
             } else {
-                false
+                *selected_queue_index = idx.checked_sub(1);
+                vec![QueuePlaybackOp::LoadQueue(queue.clone())]
+            };
+            QueueCommandOutcome {
+                changed: true,
+                playback_ops,
+                error: None,
             }
         }
         BridgeQueueCommand::Move { from, to } => {
-            if from < state.queue.len() && to < state.queue.len() && from != to {
-                let item = state.queue.remove(from);
-                state.queue.insert(to, item);
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-                state.selected_queue_index = Some(to);
-                true
-            } else {
-                false
+            if from >= queue.len() || to >= queue.len() || from == to {
+                return QueueCommandOutcome::default();
+            }
+            let item = queue.remove(from);
+            queue.insert(to, item);
+            *selected_queue_index = Some(to);
+            QueueCommandOutcome {
+                changed: true,
+                playback_ops: vec![QueuePlaybackOp::LoadQueue(queue.clone())],
+                error: None,
             }
         }
         BridgeQueueCommand::Select(sel) => {
-            state.selected_queue_index = sel;
-            true
+            *selected_queue_index = sel;
+            QueueCommandOutcome {
+                changed: true,
+                playback_ops: Vec::new(),
+                error: None,
+            }
         }
         BridgeQueueCommand::Clear => {
-            state.queue.clear();
-            state.selected_queue_index = None;
-            playback.command(PlaybackCommand::ClearQueue);
-            true
+            queue.clear();
+            *selected_queue_index = None;
+            QueueCommandOutcome {
+                changed: true,
+                playback_ops: vec![QueuePlaybackOp::ClearQueue],
+                error: None,
+            }
         }
     }
 }
@@ -776,6 +837,10 @@ fn load_settings_into(settings: &mut BridgeSettings) {
     let Ok(text) = fs::read_to_string(path) else {
         return;
     };
+    parse_settings_text(settings, &text);
+}
+
+fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -813,12 +878,108 @@ fn save_settings(settings: &BridgeSettings) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let text = format!(
+    let text = format_settings_text(settings);
+    let _ = fs::write(path, text);
+}
+
+fn format_settings_text(settings: &BridgeSettings) -> String {
+    format!(
         "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\n",
         settings.volume,
         settings.fft_size,
         settings.db_range,
         if settings.log_scale { 1 } else { 0 },
-    );
-    let _ = fs::write(path, text);
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
+    #[test]
+    fn settings_roundtrip_text_format() {
+        let settings = BridgeSettings {
+            volume: 0.42,
+            fft_size: 2048,
+            db_range: 77.5,
+            log_scale: true,
+        };
+        let text = format_settings_text(&settings);
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert!((parsed.volume - 0.42).abs() < 0.0001);
+        assert_eq!(parsed.fft_size, 2048);
+        assert!((parsed.db_range - 77.5).abs() < 0.0001);
+        assert!(parsed.log_scale);
+    }
+
+    #[test]
+    fn settings_parse_clamps_invalid_ranges() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(
+            &mut settings,
+            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\n",
+        );
+        assert_eq!(settings.volume, 1.0);
+        assert_eq!(settings.fft_size, 512);
+        assert_eq!(settings.db_range, 120.0);
+        assert!(!settings.log_scale);
+    }
+
+    #[test]
+    fn queue_append_into_empty_loads_full_queue() {
+        let mut queue = Vec::new();
+        let mut selected = None;
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Append(vec![p("/a.flac"), p("/b.flac")]),
+            &mut queue,
+            &mut selected,
+        );
+        assert!(outcome.changed);
+        assert_eq!(queue, vec![p("/a.flac"), p("/b.flac")]);
+        assert_eq!(
+            outcome.playback_ops,
+            vec![QueuePlaybackOp::LoadQueue(vec![p("/a.flac"), p("/b.flac")])]
+        );
+    }
+
+    #[test]
+    fn queue_play_at_out_of_bounds_emits_error() {
+        let mut queue = vec![p("/a.flac")];
+        let mut selected = None;
+        let outcome =
+            apply_queue_command_state(BridgeQueueCommand::PlayAt(3), &mut queue, &mut selected);
+        assert!(!outcome.changed);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("queue index 3 out of bounds")
+        );
+        assert!(outcome.playback_ops.is_empty());
+    }
+
+    #[test]
+    fn queue_move_updates_selection_and_reloads() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
+        let mut selected = Some(0);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Move { from: 0, to: 2 },
+            &mut queue,
+            &mut selected,
+        );
+        assert!(outcome.changed);
+        assert_eq!(queue, vec![p("/b.flac"), p("/c.flac"), p("/a.flac")]);
+        assert_eq!(selected, Some(2));
+        assert_eq!(
+            outcome.playback_ops,
+            vec![QueuePlaybackOp::LoadQueue(vec![
+                p("/b.flac"),
+                p("/c.flac"),
+                p("/a.flac")
+            ])]
+        );
+    }
 }

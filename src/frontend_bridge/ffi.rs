@@ -872,3 +872,103 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::AnalysisSnapshot;
+    use crate::library::LibrarySnapshot;
+    use crate::playback::{PlaybackSnapshot, PlaybackState};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_json_command_supports_settings_updates() {
+        let cmd = parse_json_command(r#"{"cmd":"set_db_range","value":88}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetDbRange(v)) => {
+                assert!((v - 88.0).abs() < 0.001);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_json_command(r#"{"cmd":"set_log_scale","value":1}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(v)) => {
+                assert!(v);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_json_command_rejects_invalid_seek() {
+        let err = parse_json_command(r#"{"cmd":"seek","value":-1}"#).unwrap_err();
+        assert!(err.contains("seek value must be >= 0"));
+    }
+
+    fn sample_snapshot() -> BridgeSnapshot {
+        BridgeSnapshot {
+            playback: PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                position: Duration::from_secs(12),
+                duration: Duration::from_secs(180),
+                current: Some(PathBuf::from("/music/a.flac")),
+                volume: 0.75,
+            },
+            analysis: AnalysisSnapshot {
+                waveform_peaks: vec![0.1, 0.5, 0.9],
+                spectrogram_rows: vec![vec![0.0, 1.0], vec![2.0, 3.0]],
+                spectrogram_seq: 2,
+                sample_rate_hz: 48_000,
+            },
+            library: Arc::new(LibrarySnapshot::default()),
+            queue: vec![PathBuf::from("/music/a.flac")],
+            selected_queue_index: Some(0),
+            settings: super::super::BridgeSettings {
+                volume: 0.75,
+                fft_size: 2048,
+                db_range: 90.0,
+                log_scale: false,
+            },
+        }
+    }
+
+    #[test]
+    fn snapshot_payload_contract_has_expected_shape() {
+        let snapshot = sample_snapshot();
+        let mut emit_state = JsonEmitState::default();
+        let analysis_delta = compute_analysis_delta(&snapshot, &mut emit_state);
+        let payload = encode_snapshot_payload(&snapshot, &analysis_delta, &mut emit_state, false);
+        assert_eq!(
+            payload.get("event").and_then(|v| v.as_str()),
+            Some("snapshot")
+        );
+        assert!(payload
+            .get("playback")
+            .and_then(|v| v.as_object())
+            .is_some());
+        assert!(payload.get("queue").and_then(|v| v.as_object()).is_some());
+        assert!(payload.get("library").and_then(|v| v.as_object()).is_some());
+        assert!(payload
+            .get("settings")
+            .and_then(|v| v.as_object())
+            .is_some());
+    }
+
+    #[test]
+    fn analysis_delta_and_frame_include_changes() {
+        let snapshot = sample_snapshot();
+        let mut emit_state = JsonEmitState::default();
+        let delta = compute_analysis_delta(&snapshot, &mut emit_state);
+        assert!(delta.waveform_changed);
+        assert!(!delta.spectrogram_rows_u8.is_empty());
+        let frame = encode_analysis_frame(&delta);
+        assert!(!frame.is_empty());
+        assert_eq!(frame[4], ANALYSIS_FRAME_MAGIC);
+    }
+}

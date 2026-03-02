@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(FerrousNativeUi LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -61,3 +63,31 @@ target_link_libraries(ferrous_kirigami_shell PRIVATE
     m
     pthread
 )
+
+if(BUILD_TESTING)
+    find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+
+    qt_add_executable(ferrous_qml_smoke_tests
+        tests/tst_qml_smoke.cpp
+        src/LibraryTreeModel.cpp
+        src/SpectrogramItem.cpp
+        src/WaveformItem.cpp
+    )
+    target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
+    target_compile_definitions(ferrous_qml_smoke_tests PRIVATE
+        FERROUS_NATIVE_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(ferrous_qml_smoke_tests PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+        Qt6::Test
+        KF6::Kirigami
+    )
+    add_test(NAME ferrous_qml_smoke_tests COMMAND ferrous_qml_smoke_tests)
+    set_tests_properties(ferrous_qml_smoke_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+endif()

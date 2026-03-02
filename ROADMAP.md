@@ -29,6 +29,11 @@ Ship a Kirigami frontend that reaches current Ferrous behavior parity, then cont
 - Performance target: minimum 60 FPS rendering, and target the active display refresh rate (no hardcoded 120 Hz assumptions).
 - Performance is a hard requirement (no degraded responsiveness accepted for feature parity).
 
+## Supporting Plans
+
+- Test coverage plan: `docs/TEST_PLAN.md`
+- Optimization backlog: `docs/OPTIMIZATION_PLAN.md`
+
 ## Critical Path: Performance Architecture Rework (Started)
 
 Current issue summary:
@@ -197,6 +202,11 @@ Acceptance criteria:
 - [ ] Add waveform density/style options.
 
 ### Quality/Performance
+- [x] Add test coverage planning document and phased matrix (`docs/TEST_PLAN.md`).
+- [x] Add optimization planning document and prioritized backlog (`docs/OPTIMIZATION_PLAN.md`).
+- [x] Implement test plan phase 1 (backend/FFI unit tests + native UI smoke test scaffold).
+- [ ] Implement test plan phase 2 (FFI integration tests + bridge mode parity tests).
+- [ ] Execute optimization backlog phase P0 from `docs/OPTIMIZATION_PLAN.md` (typed low-rate in-process path, remove internal JSON churn).
 - [ ] Add integration tests for queue transitions, gapless handoff, seek behavior.
 - [ ] Add regression tests for no early next-track waveform/metadata switch.
 - [ ] Add DB migration/versioning strategy.
