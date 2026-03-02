@@ -88,7 +88,7 @@ if [[ ${RUN_RUST} -eq 1 ]]; then
     fi
     cargo test --features "${RUST_FEATURES}"
     if [[ ${RUN_AUDIT} -eq 1 ]]; then
-        if ! cargo --list | grep -qE '^[[:space:]]+audit[[:space:]]'; then
+        if ! grep -qE '^[[:space:]]+audit([[:space:]]|$)' <<<"$(cargo --list)"; then
             echo "cargo-audit is not installed. Install it with: cargo install cargo-audit" >&2
             exit 1
         fi

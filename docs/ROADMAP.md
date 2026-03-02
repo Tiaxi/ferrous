@@ -209,6 +209,8 @@ Acceptance criteria:
 - [ ] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior).
 - [x] Add strict lint/security verification steps (`cargo clippy -- -D clippy::pedantic`, `cargo audit`) to regular verification script.
 - [ ] Burn down current strict `clippy::pedantic` backlog so regular verification passes without `--no-clippy`.
+- [ ] Burn down temporary pedantic-lint baseline allow lists in `src/lib.rs` and `src/bin/native_frontend.rs`.
+- [ ] Resolve or mitigate `cargo audit` warning `RUSTSEC-2024-0436` (`paste` unmaintained) via dependency upgrades or ignore policy.
 - [ ] Execute optimization backlog phase P0 from `docs/OPTIMIZATION_PLAN.md` (typed low-rate in-process path, remove internal JSON churn). Deferred until test coverage phases are complete.
 - [ ] Add integration tests for queue transitions, gapless handoff, seek behavior.
 - [ ] Add regression tests for no early next-track waveform/metadata switch.
