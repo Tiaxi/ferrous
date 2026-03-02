@@ -1,7 +1,7 @@
 # Ferrous Roadmap
 
 This document tracks upcoming work with a KDE-first target.
-Reference baseline for UX: DeaDBeeF screenshot (`deadbeef_reference.png`).
+Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`).
 
 ## Product Direction
 
