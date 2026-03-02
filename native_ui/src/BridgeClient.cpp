@@ -1,5 +1,7 @@
 #include "BridgeClient.h"
 
+#include "FerrousBridgeFfi.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -106,11 +108,25 @@ BridgeClient::BridgeClient(QObject *parent)
             emit snapshotChanged();
         }
     });
-    setupAnalysisSocketServer();
-    startBridgeProcess();
+    m_bridgePollTimer.setInterval(8);
+    connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
+
+    const QString bridgeMode = qEnvironmentVariable("FERROUS_BRIDGE_MODE").trimmed().toLower();
+    const bool forceProcessBridge = bridgeMode == QStringLiteral("process");
+    if (!forceProcessBridge && startInProcessBridge()) {
+        m_useInProcessBridge = true;
+    } else {
+        setupAnalysisSocketServer();
+        startBridgeProcess();
+    }
 }
 
 BridgeClient::~BridgeClient() {
+    m_bridgePollTimer.stop();
+    if (m_ffiBridge != nullptr) {
+        ferrous_ffi_bridge_destroy(m_ffiBridge);
+        m_ffiBridge = nullptr;
+    }
     teardownAnalysisSocket(true);
     if (m_analysisServer.isListening()) {
         const QString serverName = m_analysisServer.fullServerName();
@@ -125,6 +141,67 @@ BridgeClient::~BridgeClient() {
             m_process.kill();
             m_process.waitForFinished(500);
         }
+    }
+}
+
+bool BridgeClient::startInProcessBridge() {
+    m_ffiBridge = ferrous_ffi_bridge_create();
+    if (m_ffiBridge == nullptr) {
+        emit bridgeError(QStringLiteral("failed to create in-process Rust bridge"));
+        return false;
+    }
+    // In-process mode always uses binary analysis frames (no JSON analysis payload).
+    m_analysisSocketConnected = true;
+    m_bridgePollTimer.start();
+    if (!m_connected) {
+        m_connected = true;
+        emit connectedChanged();
+    }
+    requestSnapshot();
+    return true;
+}
+
+void BridgeClient::pollInProcessBridge() {
+    if (m_ffiBridge == nullptr) {
+        return;
+    }
+    ferrous_ffi_bridge_poll(m_ffiBridge, 64);
+
+    bool anySnapshotChanged = false;
+    for (;;) {
+        char *linePtr = ferrous_ffi_bridge_pop_json_event(m_ffiBridge);
+        if (linePtr == nullptr) {
+            break;
+        }
+        const QByteArray line(linePtr);
+        ferrous_ffi_bridge_free_json_event(linePtr);
+        if (line.trimmed().isEmpty()) {
+            continue;
+        }
+        QJsonParseError err;
+        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
+        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+            emit bridgeError(QStringLiteral("invalid bridge json: %1").arg(QString::fromUtf8(line)));
+            continue;
+        }
+        anySnapshotChanged |= processBridgeJsonObject(doc.object());
+    }
+
+    for (;;) {
+        std::size_t len = 0;
+        std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
+        if (framePtr == nullptr || len == 0) {
+            break;
+        }
+        const QByteArray chunk(
+            reinterpret_cast<const char *>(framePtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
+        processAnalysisBytes(chunk);
+    }
+
+    if (anySnapshotChanged) {
+        scheduleSnapshotChanged();
     }
 }
 
@@ -508,6 +585,10 @@ void BridgeClient::handleAnalysisSocketReady() {
         return;
     }
     const QByteArray chunk = m_analysisSocket->readAll();
+    processAnalysisBytes(chunk);
+}
+
+void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
     if (chunk.isEmpty()) {
         return;
     }
@@ -658,12 +739,420 @@ void BridgeClient::sendCommand(const QString &cmd, double value) {
 }
 
 void BridgeClient::sendJson(const QJsonObject &obj) {
+    const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
+    if (m_useInProcessBridge && m_ffiBridge != nullptr) {
+        if (!ferrous_ffi_bridge_send_json(m_ffiBridge, payload.constData())) {
+            emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
+        }
+        return;
+    }
     if (m_process.state() != QProcess::Running) {
         emit bridgeError(QStringLiteral("bridge process is not running"));
         return;
     }
-    const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
     m_process.write(payload);
+}
+
+bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
+    const QString event = root.value(QStringLiteral("event")).toString();
+    if (event == QStringLiteral("snapshot")) {
+        const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
+        const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
+        const QJsonObject library = root.value(QStringLiteral("library")).toObject();
+        const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
+        const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
+
+        const QString nextState = playback.value(QStringLiteral("state")).toString();
+        const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
+        const double dur = playback.value(QStringLiteral("duration_secs")).toDouble();
+        const QString currentPath = playback.value(QStringLiteral("current_path")).toString();
+        int playing = playback.value(QStringLiteral("current_queue_index")).toInt(-1);
+        const int qlen = queue.value(QStringLiteral("len")).toInt();
+        const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
+        const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
+
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        bool changed = false;
+        if (m_playbackState != nextState) {
+            m_playbackState = nextState;
+            changed = true;
+        }
+        bool applyIncomingPosition = true;
+        if (m_pendingSeek) {
+            if (nowMs >= m_pendingSeekUntilMs) {
+                m_pendingSeek = false;
+            } else if (std::abs(pos - m_pendingSeekTargetSeconds) <= 0.8) {
+                m_pendingSeek = false;
+            } else {
+                applyIncomingPosition = false;
+            }
+        }
+        if (applyIncomingPosition) {
+            const QString posText = formatSeconds(pos);
+            if (m_positionText != posText) {
+                m_positionText = posText;
+                changed = true;
+            }
+            if (!qFuzzyCompare(m_positionSeconds + 1.0, pos + 1.0)) {
+                m_positionSeconds = pos;
+                changed = true;
+            }
+        }
+        const QString durText = formatSeconds(dur);
+        if (m_durationText != durText) {
+            m_durationText = durText;
+            changed = true;
+        }
+        if (!qFuzzyCompare(m_durationSeconds + 1.0, dur + 1.0)) {
+            m_durationSeconds = dur;
+            changed = true;
+        }
+        const QJsonValue settingsVolumeValue = settings.value(QStringLiteral("volume"));
+        const double uiVol = settingsVolumeValue.isDouble()
+            ? settingsVolumeValue.toDouble()
+            : m_volume;
+        if (std::abs(m_volume - uiVol) > 0.0005) {
+            m_volume = uiVol;
+            changed = true;
+        }
+        if (m_queueLength != qlen) {
+            m_queueLength = qlen;
+            changed = true;
+            if (m_pendingQueueSelection >= qlen) {
+                m_pendingQueueSelection = -1;
+                m_pendingQueueSelectionUntilMs = 0;
+            }
+        }
+        const QJsonValue queueTracksValue = queue.value(QStringLiteral("tracks"));
+        if (queueTracksValue.isArray()) {
+            const QJsonArray queueTracks = queueTracksValue.toArray();
+            QStringList items;
+            QStringList paths;
+            items.reserve(queueTracks.size());
+            paths.reserve(queueTracks.size());
+            for (const QJsonValue &track : queueTracks) {
+                const QJsonObject obj = track.toObject();
+                const QString title = obj.value(QStringLiteral("title")).toString();
+                const QString path = obj.value(QStringLiteral("path")).toString();
+                paths.push_back(path);
+                items.push_back(title.isEmpty() ? path : title);
+            }
+            if (m_queueItems != items) {
+                m_queueItems = items;
+                changed = true;
+            }
+            if (m_queuePaths != paths) {
+                m_queuePaths = paths;
+                changed = true;
+            }
+        }
+        if (m_pendingQueueSelection >= 0) {
+            if (selected == m_pendingQueueSelection) {
+                m_pendingQueueSelection = -1;
+                m_pendingQueueSelectionUntilMs = 0;
+                if (m_selectedQueueIndex != selected) {
+                    m_selectedQueueIndex = selected;
+                    changed = true;
+                }
+            } else if (nowMs >= m_pendingQueueSelectionUntilMs) {
+                m_pendingQueueSelection = -1;
+                m_pendingQueueSelectionUntilMs = 0;
+                if (m_selectedQueueIndex != selected) {
+                    m_selectedQueueIndex = selected;
+                    changed = true;
+                }
+            }
+        } else if (m_selectedQueueIndex != selected) {
+            m_selectedQueueIndex = selected;
+            changed = true;
+        }
+        if (m_currentTrackPath != currentPath) {
+            m_currentTrackPath = currentPath;
+            changed = true;
+        }
+        if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
+            playing = m_queuePaths.indexOf(currentPath);
+        }
+        if (m_playingQueueIndex != playing) {
+            m_playingQueueIndex = playing;
+            changed = true;
+        }
+        const QString currentCover = m_trackCoverByPath.value(currentPath);
+        if (m_currentTrackCoverPath != currentCover) {
+            m_currentTrackCoverPath = currentCover;
+            changed = true;
+        }
+        if (!m_analysisSocketConnected) {
+            const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
+            if (m_spectrogramReset != spectrogramReset) {
+                m_spectrogramReset = spectrogramReset;
+                changed = true;
+            }
+            const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
+            if (spectrogramRowsValue.isArray()) {
+                const QJsonArray rowsArr = spectrogramRowsValue.toArray();
+                int rowsAdded = 0;
+                int bins = m_spectrogramPackedBins;
+                for (const QJsonValue &rowValue : rowsArr) {
+                    const QJsonArray rowArr = rowValue.toArray();
+                    if (rowArr.isEmpty()) {
+                        continue;
+                    }
+                    if (bins == 0) {
+                        bins = rowArr.size();
+                        m_spectrogramPackedBins = bins;
+                    }
+                    if (rowArr.size() != bins) {
+                        continue;
+                    }
+                    QByteArray packedRow;
+                    packedRow.resize(bins);
+                    for (qsizetype i = 0; i < rowArr.size(); ++i) {
+                        const double raw = rowArr[static_cast<int>(i)].toDouble();
+                        const int u8 = std::clamp<int>(static_cast<int>(std::lround(raw)), 0, 255);
+                        packedRow[i] = static_cast<char>(u8);
+                    }
+                    m_spectrogramRowsPacked.append(packedRow);
+                    rowsAdded++;
+                }
+                if (rowsAdded > 0) {
+                    m_spectrogramPackedRows += rowsAdded;
+                    constexpr int kMaxPendingSpectrogramRows = 512;
+                    if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows
+                        && m_spectrogramPackedBins > 0) {
+                        const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;
+                        const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
+                            * static_cast<qsizetype>(m_spectrogramPackedBins);
+                        m_spectrogramRowsPacked.remove(0, dropBytes);
+                        m_spectrogramPackedRows = kMaxPendingSpectrogramRows;
+                    }
+                    changed = true;
+                }
+            }
+            if (m_sampleRateHz != sampleRate) {
+                m_sampleRateHz = sampleRate;
+                changed = true;
+            }
+        }
+        const double dbRange = settings.value(QStringLiteral("db_range")).toDouble(m_dbRange);
+        if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
+            m_dbRange = dbRange;
+            changed = true;
+        }
+        const bool logScale = settings.value(QStringLiteral("log_scale")).toBool(m_logScale);
+        if (m_logScale != logScale) {
+            m_logScale = logScale;
+            changed = true;
+        }
+        const bool scanInProgress = library.value(QStringLiteral("scan_in_progress")).toBool();
+        if (m_libraryScanInProgress != scanInProgress) {
+            m_libraryScanInProgress = scanInProgress;
+            changed = true;
+        }
+        const int roots = library.value(QStringLiteral("roots")).toInt(m_libraryRootCount);
+        if (m_libraryRootCount != roots) {
+            m_libraryRootCount = roots;
+            changed = true;
+        }
+        const int tracks = library.value(QStringLiteral("tracks")).toInt(m_libraryTrackCount);
+        if (m_libraryTrackCount != tracks) {
+            m_libraryTrackCount = tracks;
+            changed = true;
+        }
+        const QJsonValue albumsValue = library.value(QStringLiteral("albums"));
+        if (albumsValue.isArray()) {
+            const QJsonArray albums = albumsValue.toArray();
+            QStringList labels;
+            QStringList artists;
+            QStringList albumNames;
+            QStringList coverPaths;
+            QHash<QString, QString> trackCoverByPath;
+            QVariantList libraryTree;
+            QStringList artistOrder;
+            QHash<QString, int> artistToIndex;
+            QVector<QVariantList> artistAlbums;
+            bool libraryStructureChanged = false;
+            labels.reserve(albums.size());
+            artists.reserve(albums.size());
+            albumNames.reserve(albums.size());
+            coverPaths.reserve(albums.size());
+            for (qsizetype sourceIndex = 0; sourceIndex < albums.size(); ++sourceIndex) {
+                const QJsonValue &entry = albums[static_cast<int>(sourceIndex)];
+                const QJsonObject obj = entry.toObject();
+                const QString artist = obj.value(QStringLiteral("artist")).toString();
+                const QString name = obj.value(QStringLiteral("name")).toString();
+                const int count = obj.value(QStringLiteral("count")).toInt();
+                labels.push_back(QStringLiteral("%1 - %2 (%3)").arg(artist, name).arg(count));
+                artists.push_back(artist);
+                albumNames.push_back(name);
+
+                int artistIndex = artistToIndex.value(artist, -1);
+                if (artistIndex < 0) {
+                    artistIndex = artistOrder.size();
+                    artistToIndex.insert(artist, artistIndex);
+                    artistOrder.push_back(artist);
+                    artistAlbums.push_back(QVariantList{});
+                }
+
+                QVariantList trackTitles;
+                QStringList trackPaths;
+                const QJsonValue tracksValue = obj.value(QStringLiteral("tracks"));
+                if (tracksValue.isArray()) {
+                    const QJsonArray tracks = tracksValue.toArray();
+                    trackTitles.reserve(tracks.size());
+                    trackPaths.reserve(tracks.size());
+                    for (const QJsonValue &trackValue : tracks) {
+                        if (trackValue.isObject()) {
+                            const QJsonObject trackObj = trackValue.toObject();
+                            const QString title = trackObj.value(QStringLiteral("title")).toString();
+                            const QString path = trackObj.value(QStringLiteral("path")).toString();
+                            QVariantMap trackEntry;
+                            trackEntry.insert(QStringLiteral("title"), title);
+                            trackEntry.insert(QStringLiteral("path"), path);
+                            trackTitles.push_back(trackEntry);
+                            if (!path.isEmpty()) {
+                                trackPaths.push_back(path);
+                            }
+                            continue;
+                        }
+                        const QString title = trackValue.toString();
+                        if (!title.isEmpty()) {
+                            QVariantMap trackEntry;
+                            trackEntry.insert(QStringLiteral("title"), title);
+                            trackEntry.insert(QStringLiteral("path"), QString{});
+                            trackTitles.push_back(trackEntry);
+                        }
+                    }
+                } else {
+                    const QJsonValue pathsValue = obj.value(QStringLiteral("paths"));
+                    if (pathsValue.isArray()) {
+                        const QJsonArray paths = pathsValue.toArray();
+                        trackTitles.reserve(paths.size());
+                        trackPaths.reserve(paths.size());
+                        for (const QJsonValue &pathValue : paths) {
+                            const QString path = pathValue.toString();
+                            if (path.isEmpty()) {
+                                continue;
+                            }
+                            trackPaths.push_back(path);
+                            const QFileInfo info(path);
+                            QString title = info.completeBaseName();
+                            if (title.isEmpty()) {
+                                title = info.fileName();
+                            }
+                            if (!title.isEmpty()) {
+                                QVariantMap trackEntry;
+                                trackEntry.insert(QStringLiteral("title"), title);
+                                trackEntry.insert(QStringLiteral("path"), path);
+                                trackTitles.push_back(trackEntry);
+                            }
+                        }
+                    }
+                }
+                const QString coverPath = findAlbumCoverPath(trackPaths);
+                coverPaths.push_back(coverPath);
+                const QString coverUrl = coverPath.isEmpty()
+                    ? QString{}
+                    : QUrl::fromLocalFile(coverPath).toString();
+                for (const QString &trackPath : trackPaths) {
+                    if (!trackPath.isEmpty()) {
+                        trackCoverByPath.insert(trackPath, coverUrl);
+                    }
+                }
+
+                QVariantMap albumEntry;
+                albumEntry.insert(QStringLiteral("name"), name);
+                albumEntry.insert(QStringLiteral("count"), count);
+                albumEntry.insert(QStringLiteral("sourceIndex"), static_cast<int>(sourceIndex));
+                albumEntry.insert(QStringLiteral("coverPath"), coverUrl);
+                albumEntry.insert(QStringLiteral("tracks"), trackTitles);
+                artistAlbums[artistIndex].push_back(albumEntry);
+            }
+
+            for (int i = 0; i < artistOrder.size(); ++i) {
+                const QString &artist = artistOrder[i];
+                const QVariantList &albumsForArtist = artistAlbums[i];
+                int artistTrackCount = 0;
+                for (const QVariant &albumValue : albumsForArtist) {
+                    artistTrackCount += albumValue.toMap().value(QStringLiteral("count")).toInt();
+                }
+                QVariantMap artistEntry;
+                artistEntry.insert(QStringLiteral("artist"), artist);
+                artistEntry.insert(QStringLiteral("count"), artistTrackCount);
+                artistEntry.insert(QStringLiteral("albums"), albumsForArtist);
+                libraryTree.push_back(artistEntry);
+            }
+            if (m_libraryAlbums != labels) {
+                m_libraryAlbums = labels;
+                changed = true;
+                libraryStructureChanged = true;
+            }
+            if (m_libraryTree != libraryTree) {
+                m_libraryTree = libraryTree;
+                changed = true;
+                libraryStructureChanged = true;
+            }
+            if (m_libraryAlbumArtists != artists) {
+                m_libraryAlbumArtists = artists;
+                changed = true;
+                libraryStructureChanged = true;
+            }
+            if (m_libraryAlbumNames != albumNames) {
+                m_libraryAlbumNames = albumNames;
+                changed = true;
+                libraryStructureChanged = true;
+            }
+            if (m_libraryAlbumCoverPaths != coverPaths) {
+                m_libraryAlbumCoverPaths = coverPaths;
+                changed = true;
+                libraryStructureChanged = true;
+            }
+            if (m_trackCoverByPath != trackCoverByPath) {
+                m_trackCoverByPath = trackCoverByPath;
+                const QString currentCover = m_trackCoverByPath.value(m_currentTrackPath);
+                if (m_currentTrackCoverPath != currentCover) {
+                    m_currentTrackCoverPath = currentCover;
+                }
+                changed = true;
+            }
+            if (libraryStructureChanged) {
+                m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()
+                    ? m_libraryVersion + 1
+                    : 1;
+            }
+        }
+        if (!m_analysisSocketConnected) {
+            const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
+            if (waveformValue.isArray()) {
+                const QJsonArray arr = waveformValue.toArray();
+                QByteArray peaks;
+                peaks.resize(arr.size());
+                qsizetype i = 0;
+                for (const QJsonValue &v : arr) {
+                    const double f = std::clamp(v.toDouble(), 0.0, 1.0);
+                    const int u8 = std::clamp<int>(static_cast<int>(std::lround(f * 255.0)), 0, 255);
+                    peaks[i++] = static_cast<char>(u8);
+                }
+                if (m_waveformPeaksPacked != peaks) {
+                    m_waveformPeaksPacked = peaks;
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+    if (event == QStringLiteral("error")) {
+        emit bridgeError(root.value(QStringLiteral("message")).toString());
+        return false;
+    }
+    if (event == QStringLiteral("stopped")) {
+        if (m_connected) {
+            m_connected = false;
+            emit connectedChanged();
+        }
+        return false;
+    }
+    return false;
 }
 
 void BridgeClient::handleStdoutReady() {
@@ -672,404 +1161,7 @@ void BridgeClient::handleStdoutReady() {
     int processedLines = 0;
     constexpr int kMaxLinesPerPass = 256;
 
-    auto processRoot = [&](const QJsonObject &root) {
-        const QString event = root.value(QStringLiteral("event")).toString();
-        if (event == QStringLiteral("snapshot")) {
-            const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
-            const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
-            const QJsonObject library = root.value(QStringLiteral("library")).toObject();
-            const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
-            const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
-
-            const QString nextState = playback.value(QStringLiteral("state")).toString();
-            const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
-            const double dur = playback.value(QStringLiteral("duration_secs")).toDouble();
-            const QString currentPath = playback.value(QStringLiteral("current_path")).toString();
-            int playing = playback.value(QStringLiteral("current_queue_index")).toInt(-1);
-            const int qlen = queue.value(QStringLiteral("len")).toInt();
-            const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
-            const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
-
-            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-            bool changed = false;
-            if (m_playbackState != nextState) {
-                m_playbackState = nextState;
-                changed = true;
-            }
-            bool applyIncomingPosition = true;
-            if (m_pendingSeek) {
-                if (nowMs >= m_pendingSeekUntilMs) {
-                    m_pendingSeek = false;
-                } else if (std::abs(pos - m_pendingSeekTargetSeconds) <= 0.8) {
-                    m_pendingSeek = false;
-                } else {
-                    applyIncomingPosition = false;
-                }
-            }
-            if (applyIncomingPosition) {
-                const QString posText = formatSeconds(pos);
-                if (m_positionText != posText) {
-                    m_positionText = posText;
-                    changed = true;
-                }
-                if (!qFuzzyCompare(m_positionSeconds + 1.0, pos + 1.0)) {
-                    m_positionSeconds = pos;
-                    changed = true;
-                }
-            }
-            const QString durText = formatSeconds(dur);
-            if (m_durationText != durText) {
-                m_durationText = durText;
-                changed = true;
-            }
-            if (!qFuzzyCompare(m_durationSeconds + 1.0, dur + 1.0)) {
-                m_durationSeconds = dur;
-                changed = true;
-            }
-            const QJsonValue settingsVolumeValue = settings.value(QStringLiteral("volume"));
-            const double uiVol = settingsVolumeValue.isDouble()
-                ? settingsVolumeValue.toDouble()
-                : m_volume;
-            if (std::abs(m_volume - uiVol) > 0.0005) {
-                m_volume = uiVol;
-                changed = true;
-            }
-            if (m_queueLength != qlen) {
-                m_queueLength = qlen;
-                changed = true;
-                if (m_pendingQueueSelection >= qlen) {
-                    m_pendingQueueSelection = -1;
-                    m_pendingQueueSelectionUntilMs = 0;
-                }
-            }
-            const QJsonValue queueTracksValue = queue.value(QStringLiteral("tracks"));
-            if (queueTracksValue.isArray()) {
-                const QJsonArray queueTracks = queueTracksValue.toArray();
-                QStringList items;
-                QStringList paths;
-                items.reserve(queueTracks.size());
-                paths.reserve(queueTracks.size());
-                for (const QJsonValue &track : queueTracks) {
-                    const QJsonObject obj = track.toObject();
-                    const QString title = obj.value(QStringLiteral("title")).toString();
-                    const QString path = obj.value(QStringLiteral("path")).toString();
-                    paths.push_back(path);
-                    items.push_back(title.isEmpty() ? path : title);
-                }
-                if (m_queueItems != items) {
-                    m_queueItems = items;
-                    changed = true;
-                }
-                if (m_queuePaths != paths) {
-                    m_queuePaths = paths;
-                    changed = true;
-                }
-            }
-            if (m_pendingQueueSelection >= 0) {
-                if (selected == m_pendingQueueSelection) {
-                    m_pendingQueueSelection = -1;
-                    m_pendingQueueSelectionUntilMs = 0;
-                    if (m_selectedQueueIndex != selected) {
-                        m_selectedQueueIndex = selected;
-                        changed = true;
-                    }
-                } else if (nowMs >= m_pendingQueueSelectionUntilMs) {
-                    m_pendingQueueSelection = -1;
-                    m_pendingQueueSelectionUntilMs = 0;
-                    if (m_selectedQueueIndex != selected) {
-                        m_selectedQueueIndex = selected;
-                        changed = true;
-                    }
-                }
-            } else if (m_selectedQueueIndex != selected) {
-                m_selectedQueueIndex = selected;
-                changed = true;
-            }
-            if (m_currentTrackPath != currentPath) {
-                m_currentTrackPath = currentPath;
-                changed = true;
-            }
-            if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
-                playing = m_queuePaths.indexOf(currentPath);
-            }
-            if (m_playingQueueIndex != playing) {
-                m_playingQueueIndex = playing;
-                changed = true;
-            }
-            const QString currentCover = m_trackCoverByPath.value(currentPath);
-            if (m_currentTrackCoverPath != currentCover) {
-                m_currentTrackCoverPath = currentCover;
-                changed = true;
-            }
-            if (!m_analysisSocketConnected) {
-                const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
-                if (m_spectrogramReset != spectrogramReset) {
-                    m_spectrogramReset = spectrogramReset;
-                    changed = true;
-                }
-                const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
-                if (spectrogramRowsValue.isArray()) {
-                    const QJsonArray rowsArr = spectrogramRowsValue.toArray();
-                    int rowsAdded = 0;
-                    int bins = m_spectrogramPackedBins;
-                    for (const QJsonValue &rowValue : rowsArr) {
-                        const QJsonArray rowArr = rowValue.toArray();
-                        if (rowArr.isEmpty()) {
-                            continue;
-                        }
-                        if (bins == 0) {
-                            bins = rowArr.size();
-                            m_spectrogramPackedBins = bins;
-                        }
-                        if (rowArr.size() != bins) {
-                            continue;
-                        }
-                        QByteArray packedRow;
-                        packedRow.resize(bins);
-                        for (qsizetype i = 0; i < rowArr.size(); ++i) {
-                            const double raw = rowArr[static_cast<int>(i)].toDouble();
-                            const int u8 = std::clamp<int>(static_cast<int>(std::lround(raw)), 0, 255);
-                            packedRow[i] = static_cast<char>(u8);
-                        }
-                        m_spectrogramRowsPacked.append(packedRow);
-                        rowsAdded++;
-                    }
-                    if (rowsAdded > 0) {
-                        m_spectrogramPackedRows += rowsAdded;
-                        constexpr int kMaxPendingSpectrogramRows = 512;
-                        if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows
-                            && m_spectrogramPackedBins > 0) {
-                            const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;
-                            const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
-                                * static_cast<qsizetype>(m_spectrogramPackedBins);
-                            m_spectrogramRowsPacked.remove(0, dropBytes);
-                            m_spectrogramPackedRows = kMaxPendingSpectrogramRows;
-                        }
-                        changed = true;
-                    }
-                }
-                if (m_sampleRateHz != sampleRate) {
-                    m_sampleRateHz = sampleRate;
-                    changed = true;
-                }
-            }
-            const double dbRange = settings.value(QStringLiteral("db_range")).toDouble(m_dbRange);
-            if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
-                m_dbRange = dbRange;
-                changed = true;
-            }
-            const bool logScale = settings.value(QStringLiteral("log_scale")).toBool(m_logScale);
-            if (m_logScale != logScale) {
-                m_logScale = logScale;
-                changed = true;
-            }
-            const bool scanInProgress = library.value(QStringLiteral("scan_in_progress")).toBool();
-            if (m_libraryScanInProgress != scanInProgress) {
-                m_libraryScanInProgress = scanInProgress;
-                changed = true;
-            }
-            const int roots = library.value(QStringLiteral("roots")).toInt(m_libraryRootCount);
-            if (m_libraryRootCount != roots) {
-                m_libraryRootCount = roots;
-                changed = true;
-            }
-            const int tracks = library.value(QStringLiteral("tracks")).toInt(m_libraryTrackCount);
-            if (m_libraryTrackCount != tracks) {
-                m_libraryTrackCount = tracks;
-                changed = true;
-            }
-            const QJsonValue albumsValue = library.value(QStringLiteral("albums"));
-            if (albumsValue.isArray()) {
-                const QJsonArray albums = albumsValue.toArray();
-                QStringList labels;
-                QStringList artists;
-                QStringList albumNames;
-                QStringList coverPaths;
-                QHash<QString, QString> trackCoverByPath;
-                QVariantList libraryTree;
-                QStringList artistOrder;
-                QHash<QString, int> artistToIndex;
-                QVector<QVariantList> artistAlbums;
-                bool libraryStructureChanged = false;
-                labels.reserve(albums.size());
-                artists.reserve(albums.size());
-                albumNames.reserve(albums.size());
-                coverPaths.reserve(albums.size());
-                for (qsizetype sourceIndex = 0; sourceIndex < albums.size(); ++sourceIndex) {
-                    const QJsonValue &entry = albums[static_cast<int>(sourceIndex)];
-                    const QJsonObject obj = entry.toObject();
-                    const QString artist = obj.value(QStringLiteral("artist")).toString();
-                    const QString name = obj.value(QStringLiteral("name")).toString();
-                    const int count = obj.value(QStringLiteral("count")).toInt();
-                    labels.push_back(QStringLiteral("%1 - %2 (%3)").arg(artist, name).arg(count));
-                    artists.push_back(artist);
-                    albumNames.push_back(name);
-
-                    int artistIndex = artistToIndex.value(artist, -1);
-                    if (artistIndex < 0) {
-                        artistIndex = artistOrder.size();
-                        artistToIndex.insert(artist, artistIndex);
-                        artistOrder.push_back(artist);
-                        artistAlbums.push_back(QVariantList{});
-                    }
-
-                    QVariantList trackTitles;
-                    QStringList trackPaths;
-                    const QJsonValue tracksValue = obj.value(QStringLiteral("tracks"));
-                    if (tracksValue.isArray()) {
-                        const QJsonArray tracks = tracksValue.toArray();
-                        trackTitles.reserve(tracks.size());
-                        trackPaths.reserve(tracks.size());
-                        for (const QJsonValue &trackValue : tracks) {
-                            if (trackValue.isObject()) {
-                                const QJsonObject trackObj = trackValue.toObject();
-                                const QString title = trackObj.value(QStringLiteral("title")).toString();
-                                const QString path = trackObj.value(QStringLiteral("path")).toString();
-                                QVariantMap trackEntry;
-                                trackEntry.insert(QStringLiteral("title"), title);
-                                trackEntry.insert(QStringLiteral("path"), path);
-                                trackTitles.push_back(trackEntry);
-                                if (!path.isEmpty()) {
-                                    trackPaths.push_back(path);
-                                }
-                                continue;
-                            }
-                            const QString title = trackValue.toString();
-                            if (!title.isEmpty()) {
-                                QVariantMap trackEntry;
-                                trackEntry.insert(QStringLiteral("title"), title);
-                                trackEntry.insert(QStringLiteral("path"), QString{});
-                                trackTitles.push_back(trackEntry);
-                            }
-                        }
-                    } else {
-                        const QJsonValue pathsValue = obj.value(QStringLiteral("paths"));
-                        if (pathsValue.isArray()) {
-                            const QJsonArray paths = pathsValue.toArray();
-                            trackTitles.reserve(paths.size());
-                            trackPaths.reserve(paths.size());
-                            for (const QJsonValue &pathValue : paths) {
-                                const QString path = pathValue.toString();
-                                if (path.isEmpty()) {
-                                    continue;
-                                }
-                                trackPaths.push_back(path);
-                                const QFileInfo info(path);
-                                QString title = info.completeBaseName();
-                                if (title.isEmpty()) {
-                                    title = info.fileName();
-                                }
-                                if (!title.isEmpty()) {
-                                    QVariantMap trackEntry;
-                                    trackEntry.insert(QStringLiteral("title"), title);
-                                    trackEntry.insert(QStringLiteral("path"), path);
-                                    trackTitles.push_back(trackEntry);
-                                }
-                            }
-                        }
-                    }
-                    const QString coverPath = findAlbumCoverPath(trackPaths);
-                    coverPaths.push_back(coverPath);
-                    const QString coverUrl = coverPath.isEmpty()
-                        ? QString{}
-                        : QUrl::fromLocalFile(coverPath).toString();
-                    for (const QString &trackPath : trackPaths) {
-                        if (!trackPath.isEmpty()) {
-                            trackCoverByPath.insert(trackPath, coverUrl);
-                        }
-                    }
-
-                    QVariantMap albumEntry;
-                    albumEntry.insert(QStringLiteral("name"), name);
-                    albumEntry.insert(QStringLiteral("count"), count);
-                    albumEntry.insert(QStringLiteral("sourceIndex"), static_cast<int>(sourceIndex));
-                    albumEntry.insert(QStringLiteral("coverPath"), coverUrl);
-                    albumEntry.insert(QStringLiteral("tracks"), trackTitles);
-                    artistAlbums[artistIndex].push_back(albumEntry);
-                }
-
-                for (int i = 0; i < artistOrder.size(); ++i) {
-                    const QString &artist = artistOrder[i];
-                    const QVariantList &albumsForArtist = artistAlbums[i];
-                    int artistTrackCount = 0;
-                    for (const QVariant &albumValue : albumsForArtist) {
-                        artistTrackCount += albumValue.toMap().value(QStringLiteral("count")).toInt();
-                    }
-                    QVariantMap artistEntry;
-                    artistEntry.insert(QStringLiteral("artist"), artist);
-                    artistEntry.insert(QStringLiteral("count"), artistTrackCount);
-                    artistEntry.insert(QStringLiteral("albums"), albumsForArtist);
-                    libraryTree.push_back(artistEntry);
-                }
-                if (m_libraryAlbums != labels) {
-                    m_libraryAlbums = labels;
-                    changed = true;
-                    libraryStructureChanged = true;
-                }
-                if (m_libraryTree != libraryTree) {
-                    m_libraryTree = libraryTree;
-                    changed = true;
-                    libraryStructureChanged = true;
-                }
-                if (m_libraryAlbumArtists != artists) {
-                    m_libraryAlbumArtists = artists;
-                    changed = true;
-                    libraryStructureChanged = true;
-                }
-                if (m_libraryAlbumNames != albumNames) {
-                    m_libraryAlbumNames = albumNames;
-                    changed = true;
-                    libraryStructureChanged = true;
-                }
-                if (m_libraryAlbumCoverPaths != coverPaths) {
-                    m_libraryAlbumCoverPaths = coverPaths;
-                    changed = true;
-                    libraryStructureChanged = true;
-                }
-                if (m_trackCoverByPath != trackCoverByPath) {
-                    m_trackCoverByPath = trackCoverByPath;
-                    const QString currentCover = m_trackCoverByPath.value(m_currentTrackPath);
-                    if (m_currentTrackCoverPath != currentCover) {
-                        m_currentTrackCoverPath = currentCover;
-                    }
-                    changed = true;
-                }
-                if (libraryStructureChanged) {
-                    m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()
-                        ? m_libraryVersion + 1
-                        : 1;
-                }
-            }
-            if (!m_analysisSocketConnected) {
-                const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
-                if (waveformValue.isArray()) {
-                    const QJsonArray arr = waveformValue.toArray();
-                    QByteArray peaks;
-                    peaks.resize(arr.size());
-                    qsizetype i = 0;
-                    for (const QJsonValue &v : arr) {
-                        const double f = std::clamp(v.toDouble(), 0.0, 1.0);
-                        const int u8 = std::clamp<int>(static_cast<int>(std::lround(f * 255.0)), 0, 255);
-                        peaks[i++] = static_cast<char>(u8);
-                    }
-                    if (m_waveformPeaksPacked != peaks) {
-                        m_waveformPeaksPacked = peaks;
-                        changed = true;
-                    }
-                }
-            }
-            if (changed) {
-                anySnapshotChanged = true;
-            }
-        } else if (event == QStringLiteral("error")) {
-            emit bridgeError(root.value(QStringLiteral("message")).toString());
-        } else if (event == QStringLiteral("stopped")) {
-            if (m_connected) {
-                m_connected = false;
-                emit connectedChanged();
-            }
-        }
-    };
+    auto processRoot = [&](const QJsonObject &root) { anySnapshotChanged |= processBridgeJsonObject(root); };
 
     while (m_process.canReadLine() && processedLines < kMaxLinesPerPass) {
         processedLines++;

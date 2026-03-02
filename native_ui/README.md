@@ -2,6 +2,8 @@
 
 This directory contains the KDE-native frontend scaffold for Ferrous.
 
+Default runtime mode uses an in-process Rust backend via C FFI.
+
 ## Build
 
 ```bash
@@ -18,8 +20,8 @@ From repo root:
 ./scripts/run-native-ui.sh
 ```
 
-This script builds `native_frontend` first and runs the bridge as:
-`target/release/native_frontend --json-bridge` (not `cargo run`).
+This script builds Rust artifacts first, then launches the native UI.
+By default, no bridge subprocess is spawned.
 
 Build-only (no GUI launch):
 
@@ -27,13 +29,15 @@ Build-only (no GUI launch):
 ./scripts/run-native-ui.sh --no-run
 ```
 
-## Run (dev mode)
+## Run (process bridge fallback)
 
 ```bash
-FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge' ./build/ferrous_kirigami_shell
+FERROUS_BRIDGE_MODE=process \
+FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge' \
+./build/ferrous_kirigami_shell
 ```
 
-If `FERROUS_BRIDGE_CMD` is not set, the app auto-detects
+If `FERROUS_BRIDGE_MODE=process` and `FERROUS_BRIDGE_CMD` is not set, the app auto-detects
 `target/release/native_frontend --json-bridge`, then falls back to
 `cargo run --release --bin native_frontend --features gst -- --json-bridge`.
 

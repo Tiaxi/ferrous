@@ -75,7 +75,7 @@ Acceptance criteria:
 
 - [x] **Next slice**: remove analysis payload from JSON snapshots when binary analysis channel is active; keep control/state in JSON.
 - [x] **Next slice**: add dedicated high-rate binary analysis channel for spectrogram rows + waveform peaks (Unix local socket path, fallback to JSON analysis when unavailable).
-- [ ] Low-rate channel (JSON/properties): playback state, queue, library, settings.
+- [x] Low-rate channel (JSON/properties): playback state, queue, library, settings.
 - [x] High-rate channel (binary transport path): spectrogram rows + waveform peaks.
 - [x] Explicit frame sequencing and drop policy for high-rate visuals (binary frame seq + stale-frame drop + socket queue drop counters).
 - [x] Eliminate repeated parse/alloc on UI thread for high-rate analysis data (packed rows/peaks + C++ waveform/spectrogram paint path).
@@ -86,9 +86,9 @@ Acceptance criteria:
 
 ### Phase P3: In-Process Integration (Bridge Replacement)
 
-- [ ] Introduce in-process Rust backend integration for native UI (FFI boundary).
-- [ ] Remove stdout JSON process bridge from steady-state runtime for both control and analysis paths.
-- [ ] Keep CLI/debug bridge as optional developer fallback tool.
+- [x] Introduce in-process Rust backend integration for native UI (FFI boundary).
+- [x] Remove stdout JSON process bridge from steady-state runtime for both control and analysis paths.
+- [x] Keep CLI/debug bridge as optional developer fallback tool.
 
 Acceptance criteria:
 - No pipe/stdio backpressure risk in production UI path.

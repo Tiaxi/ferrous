@@ -13,6 +13,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+struct FerrousFfiBridge;
+
 class BridgeClient : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString playbackState READ playbackState NOTIFY snapshotChanged)
@@ -102,10 +104,14 @@ signals:
     void bridgeError(const QString &message);
 
 private:
+    bool startInProcessBridge();
+    void pollInProcessBridge();
     void teardownAnalysisSocket(bool immediateDelete);
     void setupAnalysisSocketServer();
     void handleAnalysisSocketConnected();
     void handleAnalysisSocketReady();
+    bool processBridgeJsonObject(const QJsonObject &root);
+    void processAnalysisBytes(const QByteArray &chunk);
     void scheduleSnapshotChanged();
     void startBridgeProcess();
     void sendJson(const QJsonObject &obj);
@@ -117,6 +123,8 @@ private:
     static QString formatSeconds(double seconds);
 
     QProcess m_process;
+    FerrousFfiBridge *m_ffiBridge{nullptr};
+    QTimer m_bridgePollTimer;
     QString m_playbackState{"Stopped"};
     QString m_positionText{"00:00"};
     QString m_durationText{"00:00"};
@@ -149,6 +157,7 @@ private:
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};
     bool m_connected{false};
+    bool m_useInProcessBridge{false};
     bool m_stdoutPumpScheduled{false};
     bool m_snapshotChangedPending{false};
     bool m_pendingSeek{false};

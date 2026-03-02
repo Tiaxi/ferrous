@@ -6,8 +6,28 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Network)
 find_package(KF6Kirigami 6.0 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
+    gstreamer-1.0
+    gstreamer-app-1.0
+    gstreamer-audio-1.0
+    gio-2.0
+)
 
 qt_standard_project_setup(REQUIRES 6.6)
+
+set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
+
+add_custom_command(
+    OUTPUT "${FERROUS_RUST_STATIC_LIB}"
+    COMMAND /bin/zsh -lc "source \"$HOME/.cargo/env\" && cargo build --release --features gst --lib"
+    WORKING_DIRECTORY "${FERROUS_ROOT_DIR}"
+    COMMENT "Building Rust static library for in-process bridge"
+    VERBATIM
+)
+
+add_custom_target(ferrous_rust_bridge ALL DEPENDS "${FERROUS_RUST_STATIC_LIB}")
 
 qt_add_executable(ferrous_kirigami_shell
     src/main.cpp
@@ -18,6 +38,7 @@ qt_add_executable(ferrous_kirigami_shell
 )
 
 target_include_directories(ferrous_kirigami_shell PRIVATE src)
+add_dependencies(ferrous_kirigami_shell ferrous_rust_bridge)
 
 qt_add_qml_module(ferrous_kirigami_shell
     URI FerrousNative
@@ -27,6 +48,8 @@ qt_add_qml_module(ferrous_kirigami_shell
 )
 
 target_link_libraries(ferrous_kirigami_shell PRIVATE
+    "${FERROUS_RUST_STATIC_LIB}"
+    PkgConfig::FERROUS_GSTREAMER
     Qt6::Core
     Qt6::Gui
     Qt6::Qml
@@ -34,4 +57,7 @@ target_link_libraries(ferrous_kirigami_shell PRIVATE
     Qt6::QuickControls2
     Qt6::Network
     KF6::Kirigami
+    dl
+    m
+    pthread
 )

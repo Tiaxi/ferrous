@@ -12,6 +12,8 @@ use crate::playback::{
     PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, TrackChangeKind,
 };
 
+pub mod ffi;
+
 #[derive(Debug, Clone)]
 pub enum BridgeCommand {
     RequestSnapshot,

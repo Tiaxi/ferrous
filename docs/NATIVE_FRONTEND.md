@@ -27,8 +27,8 @@ Before wiring Qt/QML bindings, we need:
 ## Current Qt/Kirigami integration path
 
 1. Keep `frontend_bridge` as backend orchestration layer.
-2. Use JSON bridge mode from `native_frontend` during early development.
-3. Replace transport layer with direct CXX-Qt bridge once shell behavior stabilizes.
+2. Native UI now links Rust backend in-process via C FFI bridge by default.
+3. Keep JSON bridge mode from `native_frontend --json-bridge` as optional fallback/debug path.
 
 ## KDE dev prerequisites (target environment)
 
@@ -99,8 +99,12 @@ One-command dev path from repo root:
 ./scripts/run-native-ui.sh
 ```
 
-The script builds and uses `target/release/native_frontend --json-bridge`
-to avoid `cargo run` staying as the long-lived bridge process.
+The script still builds `target/release/native_frontend` for CLI/debug tooling.
+In default in-process mode, the UI no longer launches a long-lived bridge subprocess.
+
+Process bridge fallback:
+
+- Set `FERROUS_BRIDGE_MODE=process` to force legacy process/stdout bridge mode.
 
 Build-only check:
 
