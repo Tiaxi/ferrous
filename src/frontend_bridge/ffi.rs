@@ -908,6 +908,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_json_command_supports_library_batch_commands() {
+        let cmd = parse_json_command(
+            r#"{"cmd":"replace_album","paths":["/music/a.flac","/music/b.flac"]}"#,
+        )
+        .expect("parse")
+        .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceWithAlbum(paths)) => {
+                assert_eq!(
+                    paths,
+                    vec![
+                        PathBuf::from("/music/a.flac"),
+                        PathBuf::from("/music/b.flac")
+                    ]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_json_command(r#"{"cmd":"append_album","paths":["/music/c.flac"]}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(paths)) => {
+                assert_eq!(paths, vec![PathBuf::from("/music/c.flac")]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_json_command_supports_library_track_and_scan_commands() {
+        let cmd = parse_json_command(r#"{"cmd":"play_track","path":"/music/track.flac"}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(path)) => {
+                assert_eq!(path, PathBuf::from("/music/track.flac"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_json_command(r#"{"cmd":"scan_root","path":"/home/user/Music"}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::ScanRoot(path)) => {
+                assert_eq!(path, PathBuf::from("/home/user/Music"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_json_command_rejects_invalid_seek() {
         let err = parse_json_command(r#"{"cmd":"seek","value":-1}"#).unwrap_err();
         assert!(err.contains("seek value must be >= 0"));

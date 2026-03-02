@@ -16,8 +16,13 @@ Kirigami.ApplicationWindow {
     title: "Ferrous"
     property string selectedLibrarySelectionKey: ""
     property int selectedLibrarySourceIndex: -1
+    property string selectedLibraryRowType: ""
+    property string selectedLibraryArtist: ""
+    property string selectedLibraryAlbum: ""
+    property string selectedLibraryTrackPath: ""
     property int lastAppliedLibraryVersion: -1
     property int lastCenteredQueueIndex: -2
+    property bool autoCenterQueueSelection: true
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -98,11 +103,135 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    function canPlayLibrarySelection() {
+        if (selectedLibraryRowType === "artist") {
+            return selectedLibraryArtist.length > 0
+        }
+        if (selectedLibraryRowType === "album") {
+            return selectedLibrarySourceIndex >= 0
+        }
+        if (selectedLibraryRowType === "track") {
+            return selectedLibraryTrackPath.length > 0
+        }
+        return false
+    }
+
+    function playLibrarySelection() {
+        if (selectedLibraryRowType === "artist" && selectedLibraryArtist.length > 0) {
+            uiBridge.replaceArtistByName(selectedLibraryArtist)
+        } else if (selectedLibraryRowType === "album" && selectedLibrarySourceIndex >= 0) {
+            uiBridge.replaceAlbumAt(selectedLibrarySourceIndex)
+        } else if (selectedLibraryRowType === "track" && selectedLibraryTrackPath.length > 0) {
+            uiBridge.playTrack(selectedLibraryTrackPath)
+        }
+    }
+
+    function appendLibrarySelection() {
+        if (selectedLibraryRowType === "artist" && selectedLibraryArtist.length > 0) {
+            uiBridge.appendArtistByName(selectedLibraryArtist)
+        } else if (selectedLibraryRowType === "album" && selectedLibrarySourceIndex >= 0) {
+            uiBridge.appendAlbumAt(selectedLibrarySourceIndex)
+        } else if (selectedLibraryRowType === "track" && selectedLibraryTrackPath.length > 0) {
+            uiBridge.appendTrack(selectedLibraryTrackPath)
+        }
+    }
+
+    function selectQueueRelative(delta) {
+        if (uiBridge.queueLength <= 0) {
+            return
+        }
+        const current = uiBridge.selectedQueueIndex >= 0
+            ? uiBridge.selectedQueueIndex
+            : uiBridge.playingQueueIndex
+        const base = current >= 0 ? current : 0
+        const nextIdx = Math.max(0, Math.min(uiBridge.queueLength - 1, base + delta))
+        uiBridge.selectQueueIndex(nextIdx)
+    }
+
+    function removeSelectedQueueTrack() {
+        if (uiBridge.selectedQueueIndex >= 0) {
+            uiBridge.removeAt(uiBridge.selectedQueueIndex)
+        }
+    }
+
+    function focusLibrarySearch() {
+        librarySearchField.forceActiveFocus()
+        librarySearchField.selectAll()
+    }
+
     Action {
         id: quitAction
         text: "Quit"
         shortcut: StandardKey.Quit
         onTriggered: Qt.quit()
+    }
+    Action {
+        id: playLibrarySelectionAction
+        text: "Play Library Selection"
+        enabled: root.canPlayLibrarySelection()
+        onTriggered: root.playLibrarySelection()
+    }
+    Action {
+        id: appendLibrarySelectionAction
+        text: "Append Library Selection"
+        enabled: root.canPlayLibrarySelection()
+        onTriggered: root.appendLibrarySelection()
+    }
+    Action {
+        id: scanMusicAction
+        text: "Scan Music Folder"
+        shortcut: "Ctrl+R"
+        onTriggered: uiBridge.scanDefaultMusicRoot()
+    }
+    Action {
+        id: removeSelectedTrackAction
+        text: "Remove Selected Track"
+        shortcut: "Delete"
+        enabled: uiBridge.selectedQueueIndex >= 0
+        onTriggered: root.removeSelectedQueueTrack()
+    }
+    Action {
+        id: selectPreviousTrackAction
+        text: "Select Previous Track"
+        shortcut: "Ctrl+Up"
+        enabled: uiBridge.queueLength > 0
+        onTriggered: root.selectQueueRelative(-1)
+    }
+    Action {
+        id: selectNextTrackAction
+        text: "Select Next Track"
+        shortcut: "Ctrl+Down"
+        enabled: uiBridge.queueLength > 0
+        onTriggered: root.selectQueueRelative(1)
+    }
+    Action {
+        id: focusSearchAction
+        text: "Focus Search"
+        shortcut: StandardKey.Find
+        onTriggered: root.focusLibrarySearch()
+    }
+    Action {
+        id: refreshSnapshotAction
+        text: "Refresh Snapshot"
+        shortcut: "F5"
+        onTriggered: uiBridge.requestSnapshot()
+    }
+    Action {
+        id: autoCenterSelectionAction
+        text: "Auto-center Queue Selection"
+        checkable: true
+        checked: root.autoCenterQueueSelection
+        onTriggered: root.autoCenterQueueSelection = checked
+    }
+    Action {
+        id: resetSpectrogramAction
+        text: "Reset Spectrogram View"
+        onTriggered: spectrogramItem.reset()
+    }
+    Action {
+        id: aboutAction
+        text: "About Ferrous"
+        onTriggered: aboutDialog.open()
     }
     Action {
         id: previousAction
@@ -171,23 +300,38 @@ Kirigami.ApplicationWindow {
     }
     Shortcut {
         sequence: "Delete"
-        onActivated: {
-            if (uiBridge.selectedQueueIndex >= 0) {
-                uiBridge.removeAt(uiBridge.selectedQueueIndex)
-            }
-        }
+        onActivated: removeSelectedTrackAction.trigger()
     }
 
     menuBar: MenuBar {
         Menu {
             title: "File"
+            MenuItem { action: playLibrarySelectionAction }
+            MenuItem { action: appendLibrarySelectionAction }
+            MenuSeparator {}
+            MenuItem { action: scanMusicAction }
+            MenuItem { action: refreshSnapshotAction }
+            MenuSeparator {}
             MenuItem { action: quitAction }
         }
         Menu {
             title: "Edit"
+            MenuItem { action: removeSelectedTrackAction }
+            MenuItem { action: moveTrackUpAction }
+            MenuItem { action: moveTrackDownAction }
+            MenuSeparator {}
+            MenuItem { action: selectPreviousTrackAction }
+            MenuItem { action: selectNextTrackAction }
+            MenuSeparator {}
+            MenuItem { action: clearPlaylistAction }
         }
         Menu {
             title: "View"
+            MenuItem { action: focusSearchAction }
+            MenuItem { action: refreshSnapshotAction }
+            MenuSeparator {}
+            MenuItem { action: autoCenterSelectionAction }
+            MenuItem { action: resetSpectrogramAction }
         }
         Menu {
             title: "Playback"
@@ -204,6 +348,21 @@ Kirigami.ApplicationWindow {
         }
         Menu {
             title: "Help"
+            MenuItem { action: aboutAction }
+        }
+    }
+
+    Dialog {
+        id: aboutDialog
+        modal: true
+        title: "About Ferrous"
+        standardButtons: Dialog.Ok
+        width: 420
+        contentItem: Label {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Ferrous is a KDE-first audio player prototype with a Qt/QML UI and Rust backend."
+            color: Kirigami.Theme.textColor
         }
     }
 
@@ -408,6 +567,10 @@ Kirigami.ApplicationWindow {
                                     if (!libraryModel.hasSelectionKey(root.selectedLibrarySelectionKey)) {
                                         root.selectedLibrarySelectionKey = ""
                                         root.selectedLibrarySourceIndex = -1
+                                        root.selectedLibraryRowType = ""
+                                        root.selectedLibraryArtist = ""
+                                        root.selectedLibraryAlbum = ""
+                                        root.selectedLibraryTrackPath = ""
                                     }
                                 }
                             }
@@ -533,6 +696,10 @@ Kirigami.ApplicationWindow {
                                             }
                                             root.selectedLibrarySelectionKey = selectionKey || ""
                                             root.selectedLibrarySourceIndex = (isAlbumRow || isTrackRow) ? sourceIndexResolved : -1
+                                            root.selectedLibraryRowType = rowType || ""
+                                            root.selectedLibraryArtist = artist || ""
+                                            root.selectedLibraryAlbum = name || ""
+                                            root.selectedLibraryTrackPath = trackPath || ""
                                             if (isArtistRow && mouse.button === Qt.RightButton) {
                                                 artistMenu.popup()
                                                 return
@@ -703,10 +870,68 @@ Kirigami.ApplicationWindow {
 
                                 MouseArea {
                                     anchors.fill: parent
-                                    acceptedButtons: Qt.LeftButton
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
                                     onPressed: uiBridge.selectQueueIndex(index)
-                                    onDoubleClicked: uiBridge.playAt(index)
+                                    onClicked: function(mouse) {
+                                        if (mouse.button === Qt.RightButton) {
+                                            playlistContextMenu.rowIndex = index
+                                            playlistContextMenu.popup()
+                                        }
+                                    }
+                                    onDoubleClicked: function(mouse) {
+                                        if (mouse.button === Qt.LeftButton) {
+                                            uiBridge.playAt(index)
+                                        }
+                                    }
                                 }
+                            }
+
+                            Menu {
+                                id: playlistContextMenu
+                                property int rowIndex: -1
+
+                                MenuItem {
+                                    text: "Play Track"
+                                    enabled: playlistContextMenu.rowIndex >= 0
+                                    onTriggered: {
+                                        if (playlistContextMenu.rowIndex >= 0) {
+                                            uiBridge.playAt(playlistContextMenu.rowIndex)
+                                        }
+                                    }
+                                }
+                                MenuItem {
+                                    text: "Remove Track"
+                                    enabled: playlistContextMenu.rowIndex >= 0
+                                    onTriggered: {
+                                        if (playlistContextMenu.rowIndex >= 0) {
+                                            uiBridge.removeAt(playlistContextMenu.rowIndex)
+                                        }
+                                    }
+                                }
+                                MenuSeparator {}
+                                MenuItem {
+                                    text: "Move Up"
+                                    enabled: playlistContextMenu.rowIndex > 0
+                                    onTriggered: {
+                                        const from = playlistContextMenu.rowIndex
+                                        if (from > 0) {
+                                            uiBridge.moveQueue(from, from - 1)
+                                        }
+                                    }
+                                }
+                                MenuItem {
+                                    text: "Move Down"
+                                    enabled: playlistContextMenu.rowIndex >= 0
+                                        && playlistContextMenu.rowIndex < uiBridge.queueLength - 1
+                                    onTriggered: {
+                                        const from = playlistContextMenu.rowIndex
+                                        if (from >= 0 && from < uiBridge.queueLength - 1) {
+                                            uiBridge.moveQueue(from, from + 1)
+                                        }
+                                    }
+                                }
+                                MenuSeparator {}
+                                MenuItem { action: clearPlaylistAction }
                             }
                         }
 
@@ -724,7 +949,8 @@ Kirigami.ApplicationWindow {
                             target: uiBridge
                             function onSnapshotChanged() {
                                 if (uiBridge.selectedQueueIndex >= 0
-                                        && uiBridge.selectedQueueIndex !== root.lastCenteredQueueIndex) {
+                                        && uiBridge.selectedQueueIndex !== root.lastCenteredQueueIndex
+                                        && root.autoCenterQueueSelection) {
                                     playlistView.positionViewAtIndex(uiBridge.selectedQueueIndex, ListView.Contain)
                                     root.lastCenteredQueueIndex = uiBridge.selectedQueueIndex
                                 } else if (uiBridge.selectedQueueIndex < 0) {
@@ -767,6 +993,10 @@ Kirigami.ApplicationWindow {
                 if (!libraryModel.hasSelectionKey(root.selectedLibrarySelectionKey)) {
                     root.selectedLibrarySelectionKey = ""
                     root.selectedLibrarySourceIndex = -1
+                    root.selectedLibraryRowType = ""
+                    root.selectedLibraryArtist = ""
+                    root.selectedLibraryAlbum = ""
+                    root.selectedLibraryTrackPath = ""
                 }
                 if (libraryAlbumView) {
                     const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
