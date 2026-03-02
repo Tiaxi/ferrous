@@ -1,0 +1,68 @@
+name: Native Frontend CI
+
+on: [push, pull_request]
+
+jobs:
+  rust-backend:
+    name: Rust Backend Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux deps for gst feature
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libglib2.0-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - name: Rust fmt/check/test/clippy
+        run: |
+          cargo fmt --check
+          cargo check --features gst
+          cargo test --features gst
+          cargo clippy --features gst -- -D clippy::pedantic
+
+  native-ui:
+    name: Native UI Build + Smoke Tests
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:42
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf -y update
+          dnf -y install \
+            git \
+            cmake \
+            ninja-build \
+            gcc-c++ \
+            zsh \
+            rust \
+            cargo \
+            pkgconf-pkg-config \
+            glib2-devel \
+            gstreamer1-devel \
+            gstreamer1-plugins-base-devel \
+            qt6-qtbase-devel \
+            qt6-qtdeclarative-devel \
+            qt6-qtquickcontrols2-devel \
+            kf6-kirigami-devel
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure native UI
+        run: cmake -S native_ui -B native_ui/build -G Ninja
+
+      - name: Build native UI
+        run: cmake --build native_ui/build -j2
+
+      - name: Run native UI smoke tests
+        run: ctest --test-dir native_ui/build --output-on-failure

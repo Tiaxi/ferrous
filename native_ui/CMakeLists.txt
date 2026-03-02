@@ -24,7 +24,7 @@ set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
 
 add_custom_command(
     OUTPUT "${FERROUS_RUST_STATIC_LIB}"
-    COMMAND /bin/zsh -lc "source \"$HOME/.cargo/env\" && cargo build --release --features gst --lib"
+    COMMAND /bin/zsh -lc "if [ -f \"$HOME/.cargo/env\" ]; then source \"$HOME/.cargo/env\"; fi; cargo build --release --features gst --lib"
     WORKING_DIRECTORY "${FERROUS_ROOT_DIR}"
     COMMENT "Building Rust static library for in-process bridge"
     VERBATIM
