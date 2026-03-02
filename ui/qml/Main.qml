@@ -207,21 +207,18 @@ Kirigami.ApplicationWindow {
     Action {
         id: removeSelectedTrackAction
         text: "Remove Selected Track"
-        shortcut: "Delete"
         enabled: uiBridge.selectedQueueIndex >= 0
         onTriggered: root.removeSelectedQueueTrack()
     }
     Action {
         id: selectPreviousTrackAction
         text: "Select Previous Track"
-        shortcut: "Ctrl+Up"
         enabled: uiBridge.queueLength > 0
         onTriggered: root.selectQueueRelative(-1)
     }
     Action {
         id: selectNextTrackAction
         text: "Select Next Track"
-        shortcut: "Ctrl+Down"
         enabled: uiBridge.queueLength > 0
         onTriggered: root.selectQueueRelative(1)
     }
@@ -304,13 +301,11 @@ Kirigami.ApplicationWindow {
     Action {
         id: moveTrackUpAction
         text: "Move Track Up"
-        shortcut: "Ctrl+Shift+Up"
         onTriggered: root.moveSelected(-1)
     }
     Action {
         id: moveTrackDownAction
         text: "Move Track Down"
-        shortcut: "Ctrl+Shift+Down"
         onTriggered: root.moveSelected(1)
     }
 
@@ -329,6 +324,22 @@ Kirigami.ApplicationWindow {
     Shortcut {
         sequence: "Delete"
         onActivated: removeSelectedTrackAction.trigger()
+    }
+    Shortcut {
+        sequence: "Ctrl+Up"
+        onActivated: selectPreviousTrackAction.trigger()
+    }
+    Shortcut {
+        sequence: "Ctrl+Down"
+        onActivated: selectNextTrackAction.trigger()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+Up"
+        onActivated: moveTrackUpAction.trigger()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+Down"
+        onActivated: moveTrackDownAction.trigger()
     }
 
     menuBar: MenuBar {
