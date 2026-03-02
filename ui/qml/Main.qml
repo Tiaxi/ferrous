@@ -20,6 +20,10 @@ Kirigami.ApplicationWindow {
     property string selectedLibraryArtist: ""
     property string selectedLibraryAlbum: ""
     property string selectedLibraryTrackPath: ""
+    property var selectedLibrarySelectionKeys: []
+    property int librarySelectionAnchorIndex: -1
+    property var selectedQueueIndices: []
+    property int queueSelectionAnchorIndex: -1
     property int lastAppliedLibraryVersion: -1
     property int lastCenteredQueueIndex: -2
     property bool autoCenterQueueSelection: true
@@ -207,19 +211,259 @@ Kirigami.ApplicationWindow {
     }
 
     function librarySelectionCount() {
-        return selectedLibrarySelectionKey.length > 0 ? 1 : 0
+        return selectedLibrarySelectionKeys.length
+    }
+
+    function queueSelectionCount() {
+        if (selectedQueueIndices.length > 0) {
+            return selectedQueueIndices.length
+        }
+        return uiBridge.selectedQueueIndex >= 0 ? 1 : 0
+    }
+
+    function isQueueIndexSelected(index) {
+        return selectedQueueIndices.indexOf(index) >= 0
+    }
+
+    function isLibrarySelectionKeySelected(key) {
+        return key.length > 0 && selectedLibrarySelectionKeys.indexOf(key) >= 0
+    }
+
+    function clearLibraryPrimarySelection() {
+        root.selectedLibrarySelectionKey = ""
+        root.selectedLibrarySourceIndex = -1
+        root.selectedLibraryRowType = ""
+        root.selectedLibraryArtist = ""
+        root.selectedLibraryAlbum = ""
+        root.selectedLibraryTrackPath = ""
+    }
+
+    function applyLibraryPrimaryRow(rowMap) {
+        root.selectedLibrarySelectionKey = rowMap.selectionKey || ""
+        root.selectedLibrarySourceIndex = rowMap.sourceIndex !== undefined ? rowMap.sourceIndex : -1
+        root.selectedLibraryRowType = rowMap.rowType || ""
+        root.selectedLibraryArtist = rowMap.artist || ""
+        root.selectedLibraryAlbum = rowMap.name || ""
+        root.selectedLibraryTrackPath = rowMap.trackPath || ""
+    }
+
+    function applyLibraryPrimaryFromIndex(index) {
+        const rowMap = libraryModel.rowDataForRow(index)
+        if (rowMap && rowMap.selectionKey && rowMap.selectionKey.length > 0) {
+            applyLibraryPrimaryRow(rowMap)
+            return true
+        }
+        return false
+    }
+
+    function setLibrarySingleSelection(index, rowMap) {
+        if (!rowMap.selectionKey || rowMap.selectionKey.length === 0) {
+            selectedLibrarySelectionKeys = []
+            librarySelectionAnchorIndex = -1
+            clearLibraryPrimarySelection()
+            return
+        }
+        selectedLibrarySelectionKeys = [rowMap.selectionKey]
+        librarySelectionAnchorIndex = index
+        applyLibraryPrimaryRow(rowMap)
+    }
+
+    function setLibraryRangeSelection(index) {
+        const anchor = librarySelectionAnchorIndex >= 0 ? librarySelectionAnchorIndex : index
+        const first = Math.min(anchor, index)
+        const last = Math.max(anchor, index)
+        const keys = []
+        for (let i = first; i <= last; ++i) {
+            const rowMap = libraryModel.rowDataForRow(i)
+            const key = rowMap.selectionKey || ""
+            if (key.length > 0 && keys.indexOf(key) < 0) {
+                keys.push(key)
+            }
+        }
+        selectedLibrarySelectionKeys = keys
+        librarySelectionAnchorIndex = anchor
+        applyLibraryPrimaryFromIndex(index)
+    }
+
+    function toggleLibrarySelection(index, rowMap) {
+        const key = rowMap.selectionKey || ""
+        if (key.length === 0) {
+            return
+        }
+        const keys = selectedLibrarySelectionKeys.slice()
+        const pos = keys.indexOf(key)
+        if (pos >= 0) {
+            keys.splice(pos, 1)
+        } else {
+            keys.push(key)
+        }
+        selectedLibrarySelectionKeys = keys
+        librarySelectionAnchorIndex = index
+        if (keys.length === 0) {
+            clearLibraryPrimarySelection()
+            return
+        }
+        if (keys.indexOf(selectedLibrarySelectionKey) >= 0) {
+            return
+        }
+        const fallbackKey = keys[keys.length - 1]
+        const fallbackIndex = libraryModel.indexForSelectionKey(fallbackKey)
+        if (!applyLibraryPrimaryFromIndex(fallbackIndex)) {
+            clearLibraryPrimarySelection()
+        }
+    }
+
+    function handleLibraryRowSelection(index, rowMap, button, modifiers) {
+        if (!rowMap.selectionKey || rowMap.selectionKey.length === 0) {
+            return
+        }
+        const shift = (modifiers & Qt.ShiftModifier) !== 0
+        const ctrl = (modifiers & Qt.ControlModifier) !== 0
+        if (shift) {
+            setLibraryRangeSelection(index)
+            return
+        }
+        if (ctrl) {
+            toggleLibrarySelection(index, rowMap)
+            return
+        }
+        if (button === Qt.RightButton && isLibrarySelectionKeySelected(rowMap.selectionKey)) {
+            librarySelectionAnchorIndex = index
+            applyLibraryPrimaryRow(rowMap)
+            return
+        }
+        setLibrarySingleSelection(index, rowMap)
+    }
+
+    function clearQueueSelection() {
+        selectedQueueIndices = []
+        queueSelectionAnchorIndex = -1
+        uiBridge.selectQueueIndex(-1)
+    }
+
+    function setQueueSingleSelection(index) {
+        if (index < 0 || index >= uiBridge.queueLength) {
+            clearQueueSelection()
+            return
+        }
+        selectedQueueIndices = [index]
+        queueSelectionAnchorIndex = index
+        uiBridge.selectQueueIndex(index)
+    }
+
+    function setQueueRangeSelection(index) {
+        if (index < 0 || index >= uiBridge.queueLength) {
+            return
+        }
+        const anchor = queueSelectionAnchorIndex >= 0
+            ? queueSelectionAnchorIndex
+            : (uiBridge.selectedQueueIndex >= 0 ? uiBridge.selectedQueueIndex : index)
+        const first = Math.min(anchor, index)
+        const last = Math.max(anchor, index)
+        const indices = []
+        for (let i = first; i <= last; ++i) {
+            indices.push(i)
+        }
+        selectedQueueIndices = indices
+        queueSelectionAnchorIndex = anchor
+        uiBridge.selectQueueIndex(index)
+    }
+
+    function toggleQueueSelection(index) {
+        if (index < 0 || index >= uiBridge.queueLength) {
+            return
+        }
+        const indices = selectedQueueIndices.slice()
+        const pos = indices.indexOf(index)
+        if (pos >= 0) {
+            indices.splice(pos, 1)
+        } else {
+            indices.push(index)
+            indices.sort(function(a, b) { return a - b })
+        }
+        selectedQueueIndices = indices
+        queueSelectionAnchorIndex = index
+        if (indices.length > 0) {
+            uiBridge.selectQueueIndex(index)
+        } else {
+            uiBridge.selectQueueIndex(-1)
+        }
+    }
+
+    function handleQueueRowSelection(index, button, modifiers) {
+        const shift = (modifiers & Qt.ShiftModifier) !== 0
+        const ctrl = (modifiers & Qt.ControlModifier) !== 0
+        if (shift) {
+            setQueueRangeSelection(index)
+            return
+        }
+        if (ctrl) {
+            toggleQueueSelection(index)
+            return
+        }
+        if (button === Qt.RightButton && isQueueIndexSelected(index)) {
+            queueSelectionAnchorIndex = index
+            uiBridge.selectQueueIndex(index)
+            return
+        }
+        setQueueSingleSelection(index)
+    }
+
+    function syncQueueSelectionToCurrentQueue() {
+        const valid = []
+        for (let i = 0; i < selectedQueueIndices.length; ++i) {
+            const idx = selectedQueueIndices[i]
+            if (idx >= 0 && idx < uiBridge.queueLength && valid.indexOf(idx) < 0) {
+                valid.push(idx)
+            }
+        }
+        valid.sort(function(a, b) { return a - b })
+        if (valid.length === 0 && uiBridge.selectedQueueIndex >= 0) {
+            valid.push(uiBridge.selectedQueueIndex)
+        }
+        selectedQueueIndices = valid
+        if (queueSelectionAnchorIndex < 0 || queueSelectionAnchorIndex >= uiBridge.queueLength) {
+            queueSelectionAnchorIndex = valid.length > 0 ? valid[valid.length - 1] : -1
+        }
+    }
+
+    function syncLibrarySelectionToVisibleRows() {
+        const valid = []
+        for (let i = 0; i < selectedLibrarySelectionKeys.length; ++i) {
+            const key = selectedLibrarySelectionKeys[i]
+            if (libraryModel.hasSelectionKey(key) && valid.indexOf(key) < 0) {
+                valid.push(key)
+            }
+        }
+        selectedLibrarySelectionKeys = valid
+        if (selectedLibrarySelectionKey.length > 0
+                && selectedLibrarySelectionKeys.indexOf(selectedLibrarySelectionKey) < 0) {
+            if (selectedLibrarySelectionKeys.length > 0) {
+                const fallbackIndex =
+                    libraryModel.indexForSelectionKey(selectedLibrarySelectionKeys[0])
+                if (!applyLibraryPrimaryFromIndex(fallbackIndex)) {
+                    clearLibraryPrimarySelection()
+                }
+            } else {
+                clearLibraryPrimarySelection()
+            }
+        }
+        if (librarySelectionAnchorIndex >= libraryModel.count || librarySelectionAnchorIndex < 0) {
+            librarySelectionAnchorIndex = selectedLibrarySelectionKey.length > 0
+                ? libraryModel.indexForSelectionKey(selectedLibrarySelectionKey)
+                : -1
+        }
     }
 
     function statusLineText() {
         if (!uiBridge.connected) {
             return "bridge disconnected"
         }
-        const queueSelectionCount = uiBridge.selectedQueueIndex >= 0 ? 1 : 0
         return uiBridge.playbackState.toLowerCase()
             + " | " + uiBridge.positionText + "/" + uiBridge.durationText
             + " | tracks " + uiBridge.queueLength
             + " | qdur " + uiBridge.queueDurationText
-            + " | sel q:" + queueSelectionCount + " l:" + librarySelectionCount()
+            + " | sel q:" + queueSelectionCount() + " l:" + librarySelectionCount()
             + " | " + librarySelectionStatusText()
             + " | " + repeatModeText(uiBridge.repeatMode)
             + " | " + (uiBridge.shuffleEnabled ? "shuffle-on" : "shuffle-off")
@@ -234,10 +478,20 @@ Kirigami.ApplicationWindow {
             : uiBridge.playingQueueIndex
         const base = current >= 0 ? current : 0
         const nextIdx = Math.max(0, Math.min(uiBridge.queueLength - 1, base + delta))
-        uiBridge.selectQueueIndex(nextIdx)
+        setQueueSingleSelection(nextIdx)
     }
 
     function removeSelectedQueueTrack() {
+        if (selectedQueueIndices.length > 0) {
+            const indices = selectedQueueIndices.slice()
+            indices.sort(function(a, b) { return b - a })
+            for (let i = 0; i < indices.length; ++i) {
+                uiBridge.removeAt(indices[i])
+            }
+            selectedQueueIndices = []
+            queueSelectionAnchorIndex = -1
+            return
+        }
         if (uiBridge.selectedQueueIndex >= 0) {
             uiBridge.removeAt(uiBridge.selectedQueueIndex)
         }
@@ -276,7 +530,7 @@ Kirigami.ApplicationWindow {
         id: removeSelectedTrackAction
         text: "Remove Selected Track"
         shortcut: "Delete"
-        enabled: uiBridge.selectedQueueIndex >= 0
+        enabled: root.queueSelectionCount() > 0
         onTriggered: root.removeSelectedQueueTrack()
     }
     Action {
@@ -741,14 +995,7 @@ Kirigami.ApplicationWindow {
                                 placeholderText: "Search"
                                 onTextChanged: {
                                     libraryModel.setSearchText(text)
-                                    if (!libraryModel.hasSelectionKey(root.selectedLibrarySelectionKey)) {
-                                        root.selectedLibrarySelectionKey = ""
-                                        root.selectedLibrarySourceIndex = -1
-                                        root.selectedLibraryRowType = ""
-                                        root.selectedLibraryArtist = ""
-                                        root.selectedLibraryAlbum = ""
-                                        root.selectedLibraryTrackPath = ""
-                                    }
+                                    root.syncLibrarySelectionToVisibleRows()
                                 }
                             }
 
@@ -790,7 +1037,7 @@ Kirigami.ApplicationWindow {
                                     readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
                                     width: ListView.view.width
                                     height: 24
-                                    color: selectionKey === root.selectedLibrarySelectionKey
+                                    color: root.isLibrarySelectionKeySelected(selectionKey || "")
                                         ? Kirigami.Theme.highlightColor
                                         : (index % 2 === 0
                                             ? Kirigami.Theme.backgroundColor
@@ -818,7 +1065,7 @@ Kirigami.ApplicationWindow {
                                                 : ""
                                             font.pixelSize: 20
                                             font.bold: true
-                                            color: selectionKey === root.selectedLibrarySelectionKey
+                                            color: root.isLibrarySelectionKeySelected(selectionKey || "")
                                                 ? Kirigami.Theme.highlightedTextColor
                                                 : Kirigami.Theme.disabledTextColor
                                         }
@@ -853,7 +1100,7 @@ Kirigami.ApplicationWindow {
                                                     ? (name + " (" + count + ")")
                                                     : (trackNumber.toString().padStart(2, "0")
                                                        + "  " + title))
-                                            color: selectionKey === root.selectedLibrarySelectionKey
+                                            color: root.isLibrarySelectionKeySelected(selectionKey || "")
                                                 ? Kirigami.Theme.highlightedTextColor
                                                 : Kirigami.Theme.textColor
                                         }
@@ -893,12 +1140,19 @@ Kirigami.ApplicationWindow {
                                                 }
                                                 return
                                             }
-                                            root.selectedLibrarySelectionKey = selectionKey || ""
-                                            root.selectedLibrarySourceIndex = (isAlbumRow || isTrackRow) ? sourceIndexResolved : -1
-                                            root.selectedLibraryRowType = rowType || ""
-                                            root.selectedLibraryArtist = artist || ""
-                                            root.selectedLibraryAlbum = name || ""
-                                            root.selectedLibraryTrackPath = trackPath || ""
+                                            const rowMap = {
+                                                selectionKey: selectionKey || "",
+                                                sourceIndex: (isAlbumRow || isTrackRow) ? sourceIndexResolved : -1,
+                                                rowType: rowType || "",
+                                                artist: artist || "",
+                                                name: name || "",
+                                                trackPath: trackPath || ""
+                                            }
+                                            root.handleLibraryRowSelection(
+                                                index,
+                                                rowMap,
+                                                mouse.button,
+                                                mouse.modifiers || Qt.NoModifier)
                                             if (isArtistRow && mouse.button === Qt.RightButton) {
                                                 artistMenu.popup()
                                                 return
@@ -1032,7 +1286,7 @@ Kirigami.ApplicationWindow {
                             delegate: Rectangle {
                                 width: ListView.view.width
                                 height: 24
-                                color: index === uiBridge.selectedQueueIndex
+                                color: root.isQueueIndexSelected(index)
                                     ? Kirigami.Theme.highlightColor
                                     : (index % 2 === 0 ? Kirigami.Theme.backgroundColor
                                                         : Kirigami.Theme.alternateBackgroundColor)
@@ -1047,7 +1301,7 @@ Kirigami.ApplicationWindow {
                                             : (index + 1).toString().padStart(2, "0")
                                         Layout.preferredWidth: 24
                                         font.bold: index === uiBridge.playingQueueIndex
-                                        color: index === uiBridge.selectedQueueIndex
+                                        color: root.isQueueIndexSelected(index)
                                             ? Kirigami.Theme.highlightedTextColor
                                             : (index === uiBridge.playingQueueIndex
                                                 ? Kirigami.Theme.positiveTextColor
@@ -1057,7 +1311,7 @@ Kirigami.ApplicationWindow {
                                         text: modelData
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
-                                        color: index === uiBridge.selectedQueueIndex
+                                        color: root.isQueueIndexSelected(index)
                                             ? Kirigami.Theme.highlightedTextColor
                                             : Kirigami.Theme.textColor
                                     }
@@ -1065,7 +1319,7 @@ Kirigami.ApplicationWindow {
                                         text: ""
                                         Layout.preferredWidth: 72
                                         horizontalAlignment: Text.AlignRight
-                                        color: index === uiBridge.selectedQueueIndex
+                                        color: root.isQueueIndexSelected(index)
                                             ? Kirigami.Theme.highlightedTextColor
                                             : Kirigami.Theme.textColor
                                     }
@@ -1074,7 +1328,12 @@ Kirigami.ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                    onPressed: uiBridge.selectQueueIndex(index)
+                                    onPressed: {
+                                        root.handleQueueRowSelection(
+                                            index,
+                                            mouse.button,
+                                            mouse.modifiers || Qt.NoModifier)
+                                    }
                                     onClicked: function(mouse) {
                                         if (mouse.button === Qt.RightButton) {
                                             playlistContextMenu.rowIndex = index
@@ -1106,7 +1365,13 @@ Kirigami.ApplicationWindow {
                                     text: "Remove Track"
                                     enabled: playlistContextMenu.rowIndex >= 0
                                     onTriggered: {
-                                        if (playlistContextMenu.rowIndex >= 0) {
+                                        if (playlistContextMenu.rowIndex < 0) {
+                                            return
+                                        }
+                                        if (root.isQueueIndexSelected(playlistContextMenu.rowIndex)
+                                                && root.selectedQueueIndices.length > 1) {
+                                            root.removeSelectedQueueTrack()
+                                        } else {
                                             uiBridge.removeAt(playlistContextMenu.rowIndex)
                                         }
                                     }
@@ -1244,19 +1509,13 @@ Kirigami.ApplicationWindow {
                 const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
                 libraryModel.setLibraryTree(uiBridge.libraryTree || [])
                 root.lastAppliedLibraryVersion = uiBridge.libraryVersion
-                if (!libraryModel.hasSelectionKey(root.selectedLibrarySelectionKey)) {
-                    root.selectedLibrarySelectionKey = ""
-                    root.selectedLibrarySourceIndex = -1
-                    root.selectedLibraryRowType = ""
-                    root.selectedLibraryArtist = ""
-                    root.selectedLibraryAlbum = ""
-                    root.selectedLibraryTrackPath = ""
-                }
+                root.syncLibrarySelectionToVisibleRows()
                 if (libraryAlbumView) {
                     const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
                     libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
                 }
             }
+            root.syncQueueSelectionToCurrentQueue()
         }
         function onAnalysisChanged() {
             applyAnalysisDelta()
@@ -1277,5 +1536,7 @@ Kirigami.ApplicationWindow {
         libraryModel.setSearchText(librarySearchField.text || "")
         root.lastAppliedLibraryVersion = uiBridge.libraryVersion
         root.displayedPositionSeconds = uiBridge.positionSeconds
+        root.syncQueueSelectionToCurrentQueue()
+        root.syncLibrarySelectionToVisibleRows()
     }
 }

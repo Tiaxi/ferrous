@@ -303,6 +303,38 @@ int LibraryTreeModel::sourceIndexForRow(int row) const {
     return m_rows[static_cast<size_t>(row)].sourceIndex;
 }
 
+QString LibraryTreeModel::selectionKeyForRow(int row) const {
+    if (row < 0 || row >= static_cast<int>(m_rows.size())) {
+        return {};
+    }
+    return m_rows[static_cast<size_t>(row)].selectionKey;
+}
+
+QVariantMap LibraryTreeModel::rowDataForRow(int row) const {
+    QVariantMap out;
+    if (row < 0 || row >= static_cast<int>(m_rows.size())) {
+        return out;
+    }
+    const FlatRow &item = m_rows[static_cast<size_t>(row)];
+    out.insert(QStringLiteral("selectionKey"), item.selectionKey);
+    out.insert(QStringLiteral("sourceIndex"), item.sourceIndex);
+    out.insert(QStringLiteral("artist"), item.artist);
+    out.insert(QStringLiteral("name"), item.name);
+    out.insert(QStringLiteral("trackPath"), item.trackPath);
+    switch (item.type) {
+    case RowType::Artist:
+        out.insert(QStringLiteral("rowType"), QStringLiteral("artist"));
+        break;
+    case RowType::Album:
+        out.insert(QStringLiteral("rowType"), QStringLiteral("album"));
+        break;
+    case RowType::Track:
+        out.insert(QStringLiteral("rowType"), QStringLiteral("track"));
+        break;
+    }
+    return out;
+}
+
 bool LibraryTreeModel::isArtistExpanded(const QString &artist, bool autoExpand) const {
     if (autoExpand) {
         return true;

@@ -41,6 +41,8 @@ public:
     Q_INVOKABLE bool hasSelectionKey(const QString &selectionKey) const;
     Q_INVOKABLE int indexForSelectionKey(const QString &selectionKey) const;
     Q_INVOKABLE int sourceIndexForRow(int row) const;
+    Q_INVOKABLE QString selectionKeyForRow(int row) const;
+    Q_INVOKABLE QVariantMap rowDataForRow(int row) const;
 
 signals:
     void countChanged();
