@@ -110,7 +110,7 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_process, &QProcess::started, this, &BridgeClient::handleProcessStarted);
     connect(&m_process, &QProcess::finished, this, &BridgeClient::handleProcessFinished);
     m_snapshotNotifyTimer.setSingleShot(true);
-    m_snapshotNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_SNAPSHOT_NOTIFY_MS", 16));
+    m_snapshotNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_SNAPSHOT_NOTIFY_MS", 100));
     connect(&m_snapshotNotifyTimer, &QTimer::timeout, this, [this]() {
         if (m_snapshotChangedPending) {
             m_snapshotChangedPending = false;

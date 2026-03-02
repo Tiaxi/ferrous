@@ -88,6 +88,11 @@ rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
 ```
 
+Optional runtime tuning:
+
+- `FERROUS_BRIDGE_SNAPSHOT_MS`: controls non-analysis snapshot cadence (default `100`, range `16..1000`).
+  - Lower values update playback/library state more frequently with higher JSON/UI overhead.
+
 Roadmap and engineering plans live under `docs/`:
 
 - `docs/ROADMAP.md`
