@@ -82,12 +82,14 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - `cargo test --features gst`
   - `cargo clippy --features gst -- -D clippy::pedantic`
   - `cargo audit`
+  - `cargo llvm-cov --features gst --workspace --all-targets --summary-only --fail-under-lines <min>`
 - Native UI smoke tests:
   - `cmake -S native_ui -B native_ui/build`
   - `cmake --build native_ui/build`
   - `ctest --test-dir native_ui/build --output-on-failure`
 - One-shot verification script:
   - `./scripts/run-tests.sh`
+  - Coverage gate enabled: `./scripts/run-tests.sh --coverage`
 
 ## Next Coverage Steps
 

@@ -75,6 +75,18 @@ cargo install cargo-audit
 
 Use `./scripts/run-tests.sh --no-clippy --no-audit` to temporarily skip them.
 
+Optional coverage gate (line coverage threshold via `cargo llvm-cov`):
+
+- enable in script: `./scripts/run-tests.sh --coverage`
+- configure threshold: `FERROUS_COVERAGE_MIN=35 ./scripts/run-tests.sh --rust-only --coverage`
+
+Install coverage tooling once:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+```
+
 Roadmap and engineering plans live under `docs/`:
 
 - `docs/ROADMAP.md`
