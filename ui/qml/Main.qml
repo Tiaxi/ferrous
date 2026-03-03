@@ -1741,10 +1741,27 @@ Kirigami.ApplicationWindow {
             root.albumArtPanX = Math.max(-limitX, Math.min(limitX, root.albumArtPanX))
             root.albumArtPanY = Math.max(-limitY, Math.min(limitY, root.albumArtPanY))
         }
+        function isPointOnImage(item, x, y) {
+            const p = albumArtImageFull.mapFromItem(item, x, y)
+            const xOff = (albumArtImageFull.width - albumArtImageFull.paintedWidth) / 2
+            const yOff = (albumArtImageFull.height - albumArtImageFull.paintedHeight) / 2
+            return p.x >= xOff
+                && p.y >= yOff
+                && p.x <= xOff + albumArtImageFull.paintedWidth
+                && p.y <= yOff + albumArtImageFull.paintedHeight
+        }
         onOpened: {
             root.albumArtZoom = 1.0
             root.albumArtPanX = 0.0
             root.albumArtPanY = 0.0
+        }
+
+        MouseArea {
+            id: albumArtDismissArea
+            z: 0
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            onClicked: albumArtViewer.close()
         }
 
         Rectangle {
@@ -1802,6 +1819,10 @@ Kirigami.ApplicationWindow {
                 property real lastY: 0
                 cursorShape: root.albumArtZoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
                 onPressed: function(mouse) {
+                    if (!albumArtViewer.isPointOnImage(albumArtPanArea, mouse.x, mouse.y)) {
+                        albumArtViewer.close()
+                        return
+                    }
                     lastX = mouse.x
                     lastY = mouse.y
                     cursorShape = Qt.ClosedHandCursor
