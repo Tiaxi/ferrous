@@ -332,7 +332,15 @@ impl AnalysisEngine {
                         // Enforce configured visual delay by consuming only from samples older
                         // than the delay horizon.
                         let available = pcm_fifo.len().saturating_sub(visual_delay_samples);
-                        let to_feed = target_samples.min(available);
+
+                        // Closed-loop backlog control: steer FIFO depth toward configured delay
+                        // so offset remains effective even when producer/consumer drift.
+                        let backlog_error = pcm_fifo.len() as isize - visual_delay_samples as isize;
+                        let correction = (backlog_error / 8).clamp(-512, 512);
+                        let adjusted_target =
+                            (target_samples as isize + correction).clamp(0, 4096) as usize;
+
+                        let to_feed = adjusted_target.min(available);
                         if to_feed > 0 {
                             let mut feed = Vec::with_capacity(to_feed);
                             for _ in 0..to_feed {
