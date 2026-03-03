@@ -1568,6 +1568,14 @@ mod tests {
                     && snapshot.playback.state == ferrous::playback::PlaybackState::Playing
             })
             .expect("direct playback-state snapshot");
+        let direct_current_path = direct_snapshot
+            .playback
+            .current
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let direct_state = format!("{:?}", direct_snapshot.playback.state);
+        direct_bridge.command(BridgeCommand::Shutdown);
+        std::thread::sleep(Duration::from_millis(30));
 
         let ffi_handle = ferrous_ffi_bridge_create();
         assert!(!ffi_handle.is_null());
@@ -1582,16 +1590,10 @@ mod tests {
                 value.get("event").and_then(|v| v.as_str()) == Some("snapshot")
                     && snapshot_queue_len(value) == 3
                     && snapshot_playback_current_path(value).is_some()
-                    && snapshot_playback_state(value).as_deref() == Some("Playing")
+                    && snapshot_playback_state(value).as_deref() == Some(direct_state.as_str())
             })
         }
         .expect("ffi playback-state snapshot");
-
-        let direct_current_path = direct_snapshot
-            .playback
-            .current
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
 
         assert_eq!(
             direct_snapshot.queue.len() as u64,
@@ -1607,12 +1609,8 @@ mod tests {
             direct_current_path,
             snapshot_playback_current_path(&ffi_snapshot)
         );
-        assert_eq!(
-            Some(format!("{:?}", direct_snapshot.playback.state)),
-            snapshot_playback_state(&ffi_snapshot)
-        );
+        assert_eq!(Some(direct_state), snapshot_playback_state(&ffi_snapshot));
 
-        direct_bridge.command(BridgeCommand::Shutdown);
         unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
     }
 
@@ -1640,6 +1638,8 @@ mod tests {
             })
             .expect("direct stop/restart snapshot");
         let direct_state = format!("{:?}", direct_snapshot.playback.state);
+        direct_bridge.command(BridgeCommand::Shutdown);
+        std::thread::sleep(Duration::from_millis(30));
 
         let ffi_handle = ferrous_ffi_bridge_create();
         assert!(!ffi_handle.is_null());
@@ -1664,7 +1664,6 @@ mod tests {
         );
         assert_eq!(Some(direct_state), snapshot_playback_state(&ffi_snapshot));
 
-        direct_bridge.command(BridgeCommand::Shutdown);
         unsafe { ferrous_ffi_bridge_destroy(ffi_handle) };
     }
 

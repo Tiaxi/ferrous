@@ -149,14 +149,14 @@ impl FfiRuntime {
             return;
         }
 
-        let mut latest_snapshot: Option<BridgeSnapshot> = None;
+        let mut snapshots: Vec<BridgeSnapshot> = Vec::new();
         for _ in 0..max_events.max(1) {
             let event = self.bridge.try_recv();
             let Some(event) = event else {
                 break;
             };
             match event {
-                BridgeEvent::Snapshot(snapshot) => latest_snapshot = Some(*snapshot),
+                BridgeEvent::Snapshot(snapshot) => snapshots.push(*snapshot),
                 BridgeEvent::Error(message) => {
                     self.push_json_event(json!({ "event": "error", "message": message }));
                 }
@@ -167,7 +167,7 @@ impl FfiRuntime {
             }
         }
 
-        if let Some(snapshot) = latest_snapshot {
+        for snapshot in snapshots {
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.emit_state);
             let analysis_frame = encode_analysis_frame(&analysis_delta);
             self.push_analysis_frame(analysis_frame);

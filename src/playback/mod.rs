@@ -1026,7 +1026,9 @@ mod backend {
                     snapshot.shuffle_enabled = state.shuffle_enabled;
                     snapshot.current_queue_index = state.current_index();
                     if let Some(path) = next_current {
-                        if old_current.as_ref() != Some(&path) {
+                        if old_current.as_ref() == Some(&path) {
+                            snapshot.current = Some(path);
+                        } else {
                             if let Some(uri) = file_uri(&path) {
                                 switch_track(
                                     playbin,
@@ -1042,8 +1044,6 @@ mod backend {
                                 queue_index: snapshot.current_queue_index.unwrap_or(0),
                                 kind: TrackChangeKind::Manual,
                             });
-                        } else {
-                            snapshot.current = Some(path);
                         }
                     } else {
                         soft_mute(playbin, applied_volume);
@@ -1054,6 +1054,7 @@ mod backend {
                         snapshot.position = Duration::ZERO;
                         snapshot.duration = Duration::ZERO;
                     }
+                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
                 }
             }
             PlaybackCommand::MoveQueue { from, to } => {

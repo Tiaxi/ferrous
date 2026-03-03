@@ -642,14 +642,10 @@ fn apply_queue_command_state(
                 *selected_queue_index = None;
                 vec![QueuePlaybackOp::ClearQueue]
             } else {
-                *selected_queue_index = selected_queue_index.and_then(|sel| {
-                    if sel == idx {
-                        Some(sel.min(queue.len().saturating_sub(1)))
-                    } else if sel > idx {
-                        Some(sel - 1)
-                    } else {
-                        Some(sel)
-                    }
+                *selected_queue_index = selected_queue_index.and_then(|sel| match sel.cmp(&idx) {
+                    std::cmp::Ordering::Equal => Some(sel.min(queue.len().saturating_sub(1))),
+                    std::cmp::Ordering::Greater => Some(sel - 1),
+                    std::cmp::Ordering::Less => Some(sel),
                 });
                 vec![QueuePlaybackOp::RemoveAt(idx)]
             };
