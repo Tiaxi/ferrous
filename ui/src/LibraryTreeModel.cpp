@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include <QMetaObject>
 #include <QVariantMap>
 
 LibraryTreeModel::LibraryTreeModel(QObject *parent)
@@ -136,14 +137,7 @@ void LibraryTreeModel::toggleArtist(const QString &artist) {
         return;
     }
 
-    int artistRowIndex = -1;
-    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
-        const FlatRow &row = m_rows[static_cast<size_t>(i)];
-        if (row.type == RowType::Artist && row.artist == artist) {
-            artistRowIndex = i;
-            break;
-        }
-    }
+    int artistRowIndex = findArtistRowIndex(artist);
     if (artistRowIndex < 0) {
         return;
     }
@@ -176,17 +170,30 @@ void LibraryTreeModel::toggleArtist(const QString &artist) {
             return;
         }
 
+        const QString artistName = artistRow.artist;
+        clearPendingArtistInsert(artistName);
         const int insertAt = artistRowIndex + 1;
-        const int last = insertAt + rowsToInsert.size() - 1;
+        const int batchSize = std::min<int>(kArtistExpandInsertBatchSize, rowsToInsert.size());
+        const int last = insertAt + batchSize - 1;
         beginInsertRows(QModelIndex(), insertAt, last);
-        for (int i = 0; i < rowsToInsert.size(); ++i) {
+        for (int i = 0; i < batchSize; ++i) {
             m_rows.insert(insertAt + i, std::move(rowsToInsert[i]));
         }
         endInsertRows();
         emit countChanged();
+
+        if (batchSize < rowsToInsert.size()) {
+            PendingArtistInsert pending;
+            pending.artist = artistName;
+            pending.rows = std::move(rowsToInsert);
+            pending.inserted = batchSize;
+            m_pendingArtistInserts.push_back(std::move(pending));
+            schedulePendingArtistInsert();
+        }
         return;
     }
 
+    clearPendingArtistInsert(artistRow.artist);
     const int removeFirst = artistRowIndex + 1;
     int removeLast = removeFirst - 1;
     for (int i = removeFirst; i < static_cast<int>(m_rows.size()); ++i) {
@@ -407,6 +414,7 @@ LibraryTreeModel::FlatRow LibraryTreeModel::makeTrackRow(
 
 void LibraryTreeModel::rebuildRows() {
     const int oldCount = count();
+    clearPendingArtistInsert();
     beginResetModel();
     m_rows.clear();
 
@@ -507,4 +515,88 @@ QString LibraryTreeModel::selectionKeyForTrack(int sourceIndex, int trackNumber,
         return QStringLiteral("track|%1").arg(trackPath);
     }
     return QStringLiteral("track|%1|%2").arg(sourceIndex).arg(trackNumber);
+}
+
+int LibraryTreeModel::findArtistRowIndex(const QString &artist) const {
+    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
+        const FlatRow &row = m_rows[static_cast<size_t>(i)];
+        if (row.type == RowType::Artist && row.artist == artist) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void LibraryTreeModel::clearPendingArtistInsert(const QString &artist) {
+    if (artist.isEmpty()) {
+        m_pendingArtistInserts.clear();
+        m_pendingArtistInsertScheduled = false;
+        return;
+    }
+
+    auto eraseIt = std::remove_if(
+        m_pendingArtistInserts.begin(),
+        m_pendingArtistInserts.end(),
+        [&artist](const PendingArtistInsert &pending) { return pending.artist == artist; });
+    if (eraseIt == m_pendingArtistInserts.end()) {
+        return;
+    }
+    m_pendingArtistInserts.erase(eraseIt, m_pendingArtistInserts.end());
+    if (m_pendingArtistInserts.isEmpty()) {
+        m_pendingArtistInsertScheduled = false;
+    }
+}
+
+void LibraryTreeModel::processPendingArtistInsert() {
+    m_pendingArtistInsertScheduled = false;
+
+    while (!m_pendingArtistInserts.isEmpty()) {
+        PendingArtistInsert &pending = m_pendingArtistInserts.front();
+        const int artistRowIndex = findArtistRowIndex(pending.artist);
+        if (artistRowIndex < 0) {
+            m_pendingArtistInserts.removeFirst();
+            continue;
+        }
+        const FlatRow &artistRow = m_rows[static_cast<size_t>(artistRowIndex)];
+        if (!artistRow.expanded) {
+            m_pendingArtistInserts.removeFirst();
+            continue;
+        }
+
+        const int remaining = pending.rows.size() - pending.inserted;
+        if (remaining <= 0) {
+            m_pendingArtistInserts.removeFirst();
+            continue;
+        }
+
+        const int batchSize = std::min(kArtistExpandInsertBatchSize, remaining);
+        const int insertAt = artistRowIndex + 1 + pending.inserted;
+        beginInsertRows(QModelIndex(), insertAt, insertAt + batchSize - 1);
+        for (int i = 0; i < batchSize; ++i) {
+            m_rows.insert(insertAt + i, std::move(pending.rows[pending.inserted + i]));
+        }
+        endInsertRows();
+        pending.inserted += batchSize;
+        emit countChanged();
+
+        if (pending.inserted >= pending.rows.size()) {
+            m_pendingArtistInserts.removeFirst();
+        }
+        break;
+    }
+
+    schedulePendingArtistInsert();
+}
+
+void LibraryTreeModel::schedulePendingArtistInsert() {
+    if (m_pendingArtistInserts.isEmpty() || m_pendingArtistInsertScheduled) {
+        return;
+    }
+    m_pendingArtistInsertScheduled = true;
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            processPendingArtistInsert();
+        },
+        Qt::QueuedConnection);
 }

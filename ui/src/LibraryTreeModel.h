@@ -100,10 +100,23 @@ private:
     static QString selectionKeyForArtist(const QString &artist);
     static QString selectionKeyForAlbum(int sourceIndex);
     static QString selectionKeyForTrack(int sourceIndex, int trackNumber, const QString &trackPath);
+    int findArtistRowIndex(const QString &artist) const;
+    void clearPendingArtistInsert(const QString &artist = QString());
+    void processPendingArtistInsert();
+    void schedulePendingArtistInsert();
 
     QVector<ArtistNode> m_tree;
     QVector<FlatRow> m_rows;
     QHash<QString, bool> m_expandedArtists;
     QHash<QString, bool> m_expandedAlbums;
     QString m_searchLower;
+
+    struct PendingArtistInsert {
+        QString artist;
+        QVector<FlatRow> rows;
+        int inserted{0};
+    };
+    static constexpr int kArtistExpandInsertBatchSize = 24;
+    QVector<PendingArtistInsert> m_pendingArtistInserts;
+    bool m_pendingArtistInsertScheduled{false};
 };

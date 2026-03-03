@@ -14,6 +14,7 @@ class QmlSmokeTest : public QObject {
 private slots:
     void loadsMainQmlWithFallbackBridge();
     void libraryTreeStartsCollapsedByDefault();
+    void artistExpansionPopulatesInBatches();
 };
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -56,6 +57,41 @@ void QmlSmokeTest::libraryTreeStartsCollapsedByDefault() {
     // By default only artist rows should be visible until explicitly expanded.
     QCOMPARE(model.rowCount(), 1);
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("artist"));
+}
+
+void QmlSmokeTest::artistExpansionPopulatesInBatches() {
+    LibraryTreeModel model;
+
+    QVariantList albums;
+    albums.reserve(80);
+    for (int i = 0; i < 80; ++i) {
+        const QVariantMap track{
+            {QStringLiteral("title"), QStringLiteral("Track %1").arg(i + 1)},
+            {QStringLiteral("path"), QStringLiteral("/music/artist/album%1/track.flac").arg(i + 1)},
+        };
+        albums.push_back(QVariantMap{
+            {QStringLiteral("name"), QStringLiteral("Album %1").arg(i + 1)},
+            {QStringLiteral("count"), 1},
+            {QStringLiteral("sourceIndex"), i},
+            {QStringLiteral("coverPath"), QStringLiteral("/music/artist/album%1/cover.jpg").arg(i + 1)},
+            {QStringLiteral("tracks"), QVariantList{track}},
+        });
+    }
+
+    const QVariantMap artist{
+        {QStringLiteral("artist"), QStringLiteral("Artist A")},
+        {QStringLiteral("albums"), albums},
+    };
+    model.setLibraryTree(QVariantList{artist});
+    QCOMPARE(model.rowCount(), 1);
+
+    model.toggleArtist(QStringLiteral("Artist A"));
+
+    // Expansion should render incrementally, not block for the full subtree.
+    QVERIFY(model.rowCount() > 1);
+    QVERIFY(model.rowCount() < 81);
+
+    QTRY_COMPARE(model.rowCount(), 81);
 }
 
 QTEST_MAIN(QmlSmokeTest)
