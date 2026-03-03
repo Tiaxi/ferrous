@@ -15,6 +15,30 @@ use crate::playback::{
 };
 
 pub mod ffi;
+pub mod library_tree;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibrarySortMode {
+    #[default]
+    Year,
+    Title,
+}
+
+impl LibrarySortMode {
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            1 => Self::Title,
+            _ => Self::Year,
+        }
+    }
+
+    pub fn to_i32(self) -> i32 {
+        match self {
+            Self::Year => 0,
+            Self::Title => 1,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum BridgeCommand {
@@ -60,6 +84,10 @@ pub enum BridgeQueueCommand {
 #[derive(Debug, Clone)]
 pub enum BridgeLibraryCommand {
     ScanRoot(PathBuf),
+    AddRoot(PathBuf),
+    RemoveRoot(PathBuf),
+    RescanRoot(PathBuf),
+    RescanAll,
     AddTrack(PathBuf),
     PlayTrack(PathBuf),
     ReplaceWithAlbum(Vec<PathBuf>),
@@ -84,6 +112,7 @@ pub enum BridgeSettingsCommand {
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
+    SetLibrarySortMode(LibrarySortMode),
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +140,7 @@ pub struct BridgeSettings {
     pub db_range: f32,
     pub log_scale: bool,
     pub show_fps: bool,
+    pub library_sort_mode: LibrarySortMode,
 }
 
 impl Default for BridgeSettings {
@@ -124,6 +154,7 @@ impl Default for BridgeSettings {
             db_range: 90.0,
             log_scale: false,
             show_fps,
+            library_sort_mode: LibrarySortMode::Year,
         }
     }
 }
@@ -519,6 +550,10 @@ fn handle_bridge_command(
                     state.settings.show_fps = v;
                     *context.settings_dirty = true;
                 }
+                BridgeSettingsCommand::SetLibrarySortMode(mode) => {
+                    state.settings.library_sort_mode = mode;
+                    *context.settings_dirty = true;
+                }
             }
             true
         }
@@ -707,6 +742,22 @@ fn handle_library_command(
     match cmd {
         BridgeLibraryCommand::ScanRoot(path) => {
             library.command(LibraryCommand::ScanRoot(path));
+            false
+        }
+        BridgeLibraryCommand::AddRoot(path) => {
+            library.command(LibraryCommand::AddRoot(path));
+            false
+        }
+        BridgeLibraryCommand::RemoveRoot(path) => {
+            library.command(LibraryCommand::RemoveRoot(path));
+            false
+        }
+        BridgeLibraryCommand::RescanRoot(path) => {
+            library.command(LibraryCommand::RescanRoot(path));
+            false
+        }
+        BridgeLibraryCommand::RescanAll => {
+            library.command(LibraryCommand::RescanAll);
             false
         }
         BridgeLibraryCommand::AddTrack(path) => {
@@ -1117,6 +1168,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.show_fps = x != 0;
                 }
             }
+            "library_sort_mode" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.library_sort_mode = LibrarySortMode::from_i32(x);
+                }
+            }
             _ => {}
         }
     }
@@ -1135,12 +1191,13 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\n",
+        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nlibrary_sort_mode={}\n",
         settings.volume,
         settings.fft_size,
         settings.db_range,
         i32::from(settings.log_scale),
         i32::from(settings.show_fps),
+        settings.library_sort_mode.to_i32(),
     )
 }
 
@@ -1170,6 +1227,7 @@ mod tests {
             db_range: 77.5,
             log_scale: true,
             show_fps: true,
+            library_sort_mode: LibrarySortMode::Title,
         };
         let text = format_settings_text(&settings);
         let mut parsed = BridgeSettings::default();
@@ -1179,6 +1237,7 @@ mod tests {
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.log_scale);
         assert!(parsed.show_fps);
+        assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
     }
 
     #[test]
@@ -1186,13 +1245,14 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\nshow_fps=1\n",
+            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\nshow_fps=1\nlibrary_sort_mode=0\n",
         );
         assert_eq!(settings.volume, 1.0);
         assert_eq!(settings.fft_size, 512);
         assert_eq!(settings.db_range, 120.0);
         assert!(!settings.log_scale);
         assert!(settings.show_fps);
+        assert_eq!(settings.library_sort_mode, LibrarySortMode::Year);
     }
 
     #[test]

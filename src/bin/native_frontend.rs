@@ -25,7 +25,7 @@
     clippy::uninlined_format_args
 )]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -36,8 +36,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, unbounded, Sender, TrySendError};
 use ferrous::frontend_bridge::{
-    BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSettingsCommand, BridgeSnapshot, FrontendBridgeHandle,
+    library_tree::build_library_tree_json, BridgeCommand, BridgeEvent, BridgeLibraryCommand,
+    BridgePlaybackCommand, BridgeQueueCommand, BridgeSettingsCommand, BridgeSnapshot,
+    FrontendBridgeHandle, LibrarySortMode,
 };
 use ferrous::playback::RepeatMode;
 use serde::Deserialize;
@@ -403,6 +404,7 @@ struct LibraryDigest {
     roots_len: usize,
     tracks_len: usize,
     scan_in_progress: bool,
+    sort_mode: i32,
     first_root: Option<String>,
     last_root: Option<String>,
     first_track: Option<String>,
@@ -415,24 +417,6 @@ struct QueueDigest {
     selected: Option<usize>,
     first: Option<String>,
     last: Option<String>,
-}
-
-fn leading_track_number(input: &str) -> Option<u32> {
-    let mut n: u32 = 0;
-    let mut saw_digit = false;
-    for ch in input.chars() {
-        if let Some(d) = ch.to_digit(10) {
-            saw_digit = true;
-            n = n.saturating_mul(10).saturating_add(d);
-        } else {
-            break;
-        }
-    }
-    if saw_digit {
-        Some(n)
-    } else {
-        None
-    }
 }
 
 fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
@@ -549,6 +533,21 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             Some(BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(
                 value != 0.0,
             )))
+        }
+        "set_library_sort_mode" => {
+            let value = parsed.value.ok_or_else(|| {
+                "set_library_sort_mode requires numeric field 'value'".to_string()
+            })?;
+            if !value.is_finite() {
+                return Err("set_library_sort_mode value must be a finite number".to_string());
+            }
+            let mode = match value as i32 {
+                1 => LibrarySortMode::Title,
+                _ => LibrarySortMode::Year,
+            };
+            Some(BridgeCommand::Settings(
+                BridgeSettingsCommand::SetLibrarySortMode(mode),
+            ))
         }
         "play_at" => {
             let value = parsed
@@ -679,10 +678,35 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             let path = parsed
                 .path
                 .ok_or_else(|| "scan_root requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(BridgeLibraryCommand::ScanRoot(
+            Some(BridgeCommand::Library(BridgeLibraryCommand::AddRoot(
                 PathBuf::from(path),
             )))
         }
+        "add_root" => {
+            let path = parsed
+                .path
+                .ok_or_else(|| "add_root requires string field 'path'".to_string())?;
+            Some(BridgeCommand::Library(BridgeLibraryCommand::AddRoot(
+                PathBuf::from(path),
+            )))
+        }
+        "remove_root" => {
+            let path = parsed
+                .path
+                .ok_or_else(|| "remove_root requires string field 'path'".to_string())?;
+            Some(BridgeCommand::Library(BridgeLibraryCommand::RemoveRoot(
+                PathBuf::from(path),
+            )))
+        }
+        "rescan_root" => {
+            let path = parsed
+                .path
+                .ok_or_else(|| "rescan_root requires string field 'path'".to_string())?;
+            Some(BridgeCommand::Library(BridgeLibraryCommand::RescanRoot(
+                PathBuf::from(path),
+            )))
+        }
+        "rescan_all" => Some(BridgeCommand::Library(BridgeLibraryCommand::RescanAll)),
         "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),
         "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
         "shutdown" => Some(BridgeCommand::Shutdown),
@@ -757,10 +781,12 @@ fn encode_snapshot_payload(
     emit_state: &mut JsonEmitState,
     include_analysis_payload: bool,
 ) -> serde_json::Value {
+    let sort_mode_value = s.settings.library_sort_mode.to_i32();
     let library_digest = LibraryDigest {
         roots_len: s.library.roots.len(),
         tracks_len: s.library.tracks.len(),
         scan_in_progress: s.library.scan_in_progress,
+        sort_mode: sort_mode_value,
         first_root: s
             .library
             .roots
@@ -782,86 +808,12 @@ fn encode_snapshot_payload(
             .last()
             .map(|t| t.path.to_string_lossy().to_string()),
     };
-    let albums_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
-    let should_emit_albums =
-        albums_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
+    let tree_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
+    let should_emit_tree =
+        tree_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
     emit_state.last_library_digest = Some(library_digest);
-    let library_albums = if should_emit_albums {
-        let mut grouped: BTreeMap<(String, String), Vec<(u8, u32, String, String)>> =
-            BTreeMap::new();
-        for track in &s.library.tracks {
-            let album = if track.album.trim().is_empty() {
-                String::from("Unknown Album")
-            } else {
-                track.album.clone()
-            };
-            let artist = if track.artist.trim().is_empty() {
-                String::from("Unknown Artist")
-            } else {
-                track.artist.clone()
-            };
-            let title = if track.title.trim().is_empty() {
-                track.path.file_stem().map_or_else(
-                    || track.path.to_string_lossy().to_string(),
-                    |s| s.to_string_lossy().into_owned(),
-                )
-            } else {
-                track.title.clone()
-            };
-            let fallback_number = leading_track_number(title.trim_start()).or_else(|| {
-                track
-                    .path
-                    .file_stem()
-                    .and_then(|s| leading_track_number(&s.to_string_lossy()))
-            });
-            let rank = if track.track_no.is_some() {
-                0
-            } else if fallback_number.is_some() {
-                1
-            } else {
-                2
-            };
-            let sort_number = track.track_no.or(fallback_number).unwrap_or(u32::MAX);
-            let path_string = track.path.to_string_lossy().to_string();
-            grouped.entry((artist, album)).or_default().push((
-                rank,
-                sort_number,
-                title,
-                path_string,
-            ));
-        }
-        serde_json::Value::Array(
-            grouped
-                .into_iter()
-                .map(|((artist, album), mut tracks)| {
-                    tracks.sort_by(
-                        |(a_rank, a_no, a_title, a_path), (b_rank, b_no, b_title, b_path)| {
-                            a_rank
-                                .cmp(b_rank)
-                                .then_with(|| a_no.cmp(b_no))
-                                .then_with(|| a_path.cmp(b_path))
-                                .then_with(|| a_title.cmp(b_title))
-                        },
-                    );
-                    let count = tracks.len();
-                    let track_items: Vec<serde_json::Value> = tracks
-                        .into_iter()
-                        .map(|(_, _, title, path)| {
-                            json!({
-                                "title": title,
-                                "path": path,
-                            })
-                        })
-                        .collect();
-                    json!({
-                        "artist": artist,
-                        "name": album,
-                        "count": count,
-                        "tracks": track_items,
-                    })
-                })
-                .collect(),
-        )
+    let library_tree = if should_emit_tree {
+        build_library_tree_json(&s.library, s.settings.library_sort_mode)
     } else {
         serde_json::Value::Null
     };
@@ -893,18 +845,18 @@ fn encode_snapshot_payload(
     } else {
         serde_json::Value::Null
     };
-    let (queue_total_duration_secs, queue_unknown_duration_count) =
-        if queue_changed || albums_changed {
-            let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(s);
-            emit_state.last_queue_total_duration_secs = total_duration_secs;
-            emit_state.last_queue_unknown_duration_count = unknown_duration_count;
-            (total_duration_secs, unknown_duration_count)
-        } else {
-            (
-                emit_state.last_queue_total_duration_secs,
-                emit_state.last_queue_unknown_duration_count,
-            )
-        };
+    let (queue_total_duration_secs, queue_unknown_duration_count) = if queue_changed || tree_changed
+    {
+        let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(s);
+        emit_state.last_queue_total_duration_secs = total_duration_secs;
+        emit_state.last_queue_unknown_duration_count = unknown_duration_count;
+        (total_duration_secs, unknown_duration_count)
+    } else {
+        (
+            emit_state.last_queue_total_duration_secs,
+            emit_state.last_queue_unknown_duration_count,
+        )
+    };
 
     let waveform_peaks = if include_analysis_payload && analysis_delta.waveform_changed {
         serde_json::Value::Array(
@@ -960,10 +912,51 @@ fn encode_snapshot_payload(
         },
         "library": {
             "roots": s.library.roots.len(),
+            "root_paths": s.library.roots.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
             "tracks": s.library.tracks.len(),
             "scan_in_progress": s.library.scan_in_progress,
-            "albums_changed": should_emit_albums,
-            "albums": library_albums,
+            "tree_changed": should_emit_tree,
+            "tree": library_tree,
+            "sort_mode": sort_mode_value,
+            "last_error": s.library.last_error.clone(),
+            "progress": {
+                "current_root": s
+                    .library
+                    .scan_progress
+                    .as_ref()
+                    .and_then(|p| p.current_root.as_ref())
+                    .map(|p| p.to_string_lossy().to_string()),
+                "roots_completed": s
+                    .library
+                    .scan_progress
+                    .as_ref()
+                    .map_or(0, |p| p.roots_completed),
+                "roots_total": s
+                    .library
+                    .scan_progress
+                    .as_ref()
+                    .map_or(0, |p| p.roots_total),
+                "supported_files_discovered": s
+                    .library
+                    .scan_progress
+                    .as_ref()
+                    .map_or(0, |p| p.supported_files_discovered),
+                "supported_files_processed": s
+                    .library
+                    .scan_progress
+                    .as_ref()
+                    .map_or(0, |p| p.supported_files_processed),
+                "files_per_second": s
+                    .library
+                    .scan_progress
+                    .as_ref()
+                    .and_then(|p| p.files_per_second),
+                "eta_seconds": s
+                    .library
+                    .scan_progress
+                    .as_ref()
+                    .and_then(|p| p.eta_seconds),
+            },
         },
         "metadata": {
             "title": s.metadata.title.clone(),
@@ -989,6 +982,7 @@ fn encode_snapshot_payload(
             "db_range": s.settings.db_range,
             "log_scale": s.settings.log_scale,
             "show_fps": s.settings.show_fps,
+            "library_sort_mode": sort_mode_value,
         }
     })
 }

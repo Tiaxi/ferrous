@@ -44,6 +44,15 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY snapshotChanged)
+    Q_PROPERTY(QStringList libraryRoots READ libraryRoots NOTIFY snapshotChanged)
+    Q_PROPERTY(int librarySortMode READ librarySortMode NOTIFY snapshotChanged)
+    Q_PROPERTY(QString fileBrowserName READ fileBrowserName NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryScanRootsCompleted READ libraryScanRootsCompleted NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryScanRootsTotal READ libraryScanRootsTotal NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryScanDiscovered READ libraryScanDiscovered NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryScanProcessed READ libraryScanProcessed NOTIFY snapshotChanged)
+    Q_PROPERTY(double libraryScanFilesPerSecond READ libraryScanFilesPerSecond NOTIFY snapshotChanged)
+    Q_PROPERTY(double libraryScanEtaSeconds READ libraryScanEtaSeconds NOTIFY snapshotChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
 
 public:
@@ -77,6 +86,15 @@ public:
     bool libraryScanInProgress() const;
     int libraryRootCount() const;
     int libraryTrackCount() const;
+    QStringList libraryRoots() const;
+    int librarySortMode() const;
+    QString fileBrowserName() const;
+    int libraryScanRootsCompleted() const;
+    int libraryScanRootsTotal() const;
+    int libraryScanDiscovered() const;
+    int libraryScanProcessed() const;
+    double libraryScanFilesPerSecond() const;
+    double libraryScanEtaSeconds() const;
     bool connected() const;
 
     Q_INVOKABLE void play();
@@ -102,8 +120,18 @@ public:
     Q_INVOKABLE void appendTrack(const QString &path);
     Q_INVOKABLE void replaceArtistByName(const QString &artist);
     Q_INVOKABLE void appendArtistByName(const QString &artist);
+    Q_INVOKABLE void replaceWithPaths(const QStringList &paths);
+    Q_INVOKABLE void appendPaths(const QStringList &paths);
     Q_INVOKABLE QString libraryAlbumCoverAt(int index) const;
     Q_INVOKABLE QString libraryThumbnailSource(const QString &path) const;
+    Q_INVOKABLE QString queuePathAt(int index) const;
+    Q_INVOKABLE void addLibraryRoot(const QString &path);
+    Q_INVOKABLE void removeLibraryRoot(const QString &path);
+    Q_INVOKABLE void rescanLibraryRoot(const QString &path);
+    Q_INVOKABLE void rescanAllLibraryRoots();
+    Q_INVOKABLE void setLibrarySortMode(int mode);
+    Q_INVOKABLE void openInFileBrowser(const QString &path);
+    Q_INVOKABLE void openContainingFolder(const QString &path);
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
     Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();
@@ -127,6 +155,8 @@ private:
     void processAnalysisBytes(const QByteArray &chunk);
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
+    static QString detectFileBrowserName();
+    bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     void startBridgeProcess();
     void sendJson(const QJsonObject &obj);
     void sendCommand(const QString &cmd);
@@ -171,11 +201,21 @@ private:
     QStringList m_libraryAlbumArtists;
     QStringList m_libraryAlbumNames;
     QStringList m_libraryAlbumCoverPaths;
+    QList<QStringList> m_libraryAlbumTrackPaths;
     QHash<QString, QString> m_trackCoverByPath;
     mutable QHash<QString, QString> m_libraryThumbnailSourceCache;
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};
+    QStringList m_libraryRoots;
+    int m_librarySortMode{0};
+    QString m_fileBrowserName{QStringLiteral("File Manager")};
+    int m_libraryScanRootsCompleted{0};
+    int m_libraryScanRootsTotal{0};
+    int m_libraryScanDiscovered{0};
+    int m_libraryScanProcessed{0};
+    double m_libraryScanFilesPerSecond{0.0};
+    double m_libraryScanEtaSeconds{-1.0};
     bool m_connected{false};
     bool m_useInProcessBridge{false};
     bool m_stdoutPumpScheduled{false};

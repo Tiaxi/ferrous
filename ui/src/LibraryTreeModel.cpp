@@ -1,8 +1,5 @@
 #include "LibraryTreeModel.h"
 
-#include <algorithm>
-
-#include <QMetaObject>
 #include <QVariantMap>
 
 LibraryTreeModel::LibraryTreeModel(QObject *parent)
@@ -23,43 +20,54 @@ QVariant LibraryTreeModel::data(const QModelIndex &index, int role) const {
     if (row < 0 || row >= static_cast<int>(m_rows.size())) {
         return {};
     }
+
     const FlatRow &item = m_rows[static_cast<size_t>(row)];
-    switch (role) {
-    case RowTypeRole:
-        switch (item.type) {
-        case RowType::Artist:
-            return QStringLiteral("artist");
-        case RowType::Album:
-            return QStringLiteral("album");
-        case RowType::Track:
-            return QStringLiteral("track");
-        }
-        return {};
-    case ArtistRole:
-        return item.artist;
-    case NameRole:
-        return item.name;
-    case TitleRole:
-        return item.title;
-    case CountRole:
-        return item.count;
-    case ExpandedRole:
-        return item.expanded;
-    case SourceIndexRole:
-        return item.sourceIndex;
-    case KeyRole:
-        return item.key;
-    case TrackNumberRole:
-        return item.trackNumber;
-    case TrackPathRole:
-        return item.trackPath;
-    case CoverPathRole:
-        return item.coverPath;
-    case SelectionKeyRole:
-        return item.selectionKey;
-    default:
-        return {};
+    if (role == RowTypeRole) {
+        return item.rowType;
     }
+    if (role == ArtistRole) {
+        return item.artist;
+    }
+    if (role == NameRole) {
+        return item.name;
+    }
+    if (role == TitleRole) {
+        return item.title;
+    }
+    if (role == CountRole) {
+        return item.count;
+    }
+    if (role == ExpandedRole) {
+        return item.expanded;
+    }
+    if (role == SourceIndexRole) {
+        return item.sourceIndex;
+    }
+    if (role == KeyRole) {
+        return item.key;
+    }
+    if (role == TrackNumberRole) {
+        return item.trackNumber;
+    }
+    if (role == TrackPathRole) {
+        return item.trackPath;
+    }
+    if (role == CoverPathRole) {
+        return item.coverPath;
+    }
+    if (role == SelectionKeyRole) {
+        return item.selectionKey;
+    }
+    if (role == DepthRole) {
+        return item.depth;
+    }
+    if (role == OpenPathRole) {
+        return item.openPath;
+    }
+    if (role == PlayPathsRole) {
+        return item.playPaths;
+    }
+    return {};
 }
 
 QHash<int, QByteArray> LibraryTreeModel::roleNames() const {
@@ -76,6 +84,9 @@ QHash<int, QByteArray> LibraryTreeModel::roleNames() const {
         {TrackPathRole, "trackPath"},
         {CoverPathRole, "coverPath"},
         {SelectionKeyRole, "selectionKey"},
+        {DepthRole, "depth"},
+        {OpenPathRole, "openPath"},
+        {PlayPathsRole, "playPaths"},
     };
 }
 
@@ -84,199 +95,44 @@ int LibraryTreeModel::count() const {
 }
 
 void LibraryTreeModel::setLibraryTree(const QVariantList &tree) {
-    QVector<ArtistNode> parsed;
-    parsed.reserve(tree.size());
-    for (const QVariant &artistVar : tree) {
-        const QVariantMap artistMap = artistVar.toMap();
-        ArtistNode artistNode;
-        artistNode.artist = artistMap.value(QStringLiteral("artist")).toString();
-        const QVariantList albums = artistMap.value(QStringLiteral("albums")).toList();
-        artistNode.albums.reserve(albums.size());
-        for (const QVariant &albumVar : albums) {
-            const QVariantMap albumMap = albumVar.toMap();
-            AlbumNode albumNode;
-            albumNode.artist = artistNode.artist;
-            albumNode.name = albumMap.value(QStringLiteral("name")).toString();
-            albumNode.count = albumMap.value(QStringLiteral("count")).toInt();
-            const QVariant sourceIndexVar = albumMap.value(QStringLiteral("sourceIndex"));
-            albumNode.sourceIndex = sourceIndexVar.isValid() ? sourceIndexVar.toInt() : -1;
-            albumNode.coverPath = albumMap.value(QStringLiteral("coverPath")).toString();
-            albumNode.key =
-                QStringLiteral("%1|%2|%3").arg(albumNode.artist).arg(albumNode.sourceIndex).arg(albumNode.name);
-
-            const QVariantList tracks = albumMap.value(QStringLiteral("tracks")).toList();
-            albumNode.tracks.reserve(tracks.size());
-            for (const QVariant &trackVar : tracks) {
-                const QVariantMap trackMap = trackVar.toMap();
-                TrackNode trackNode;
-                trackNode.title = trackMap.value(QStringLiteral("title")).toString();
-                trackNode.path = trackMap.value(QStringLiteral("path")).toString();
-                if (!trackNode.title.isEmpty() || !trackNode.path.isEmpty()) {
-                    albumNode.tracks.push_back(std::move(trackNode));
-                }
-            }
-            artistNode.albums.push_back(std::move(albumNode));
-        }
-        parsed.push_back(std::move(artistNode));
-    }
-    m_tree = std::move(parsed);
+    m_tree = parseTreeNodes(tree);
     rebuildRows();
 }
 
 void LibraryTreeModel::setSearchText(const QString &text) {
     const QString next = toLower(text.trimmed());
-    if (m_searchLower == next) {
+    if (next == m_searchLower) {
         return;
     }
     m_searchLower = next;
     rebuildRows();
 }
 
+void LibraryTreeModel::toggleKey(const QString &key) {
+    if (key.isEmpty() || !m_searchLower.isEmpty()) {
+        return;
+    }
+
+    for (const FlatRow &row : m_rows) {
+        if (row.key == key && row.hasChildren) {
+            m_expandedByKey.insert(key, !row.expanded);
+            rebuildRows();
+            return;
+        }
+    }
+}
+
 void LibraryTreeModel::toggleArtist(const QString &artist) {
-    if (!m_searchLower.isEmpty()) {
-        return;
-    }
-
-    int artistRowIndex = findArtistRowIndex(artist);
-    if (artistRowIndex < 0) {
-        return;
-    }
-
-    FlatRow &artistRow = m_rows[static_cast<size_t>(artistRowIndex)];
-    const bool nextExpanded = !artistRow.expanded;
-    m_expandedArtists.insert(artistRow.artist, nextExpanded);
-    artistRow.expanded = nextExpanded;
-    emit dataChanged(index(artistRowIndex), index(artistRowIndex), {ExpandedRole});
-
-    if (nextExpanded) {
-        const ArtistNode *artistNode = findArtistNode(artistRow.artist);
-        if (!artistNode) {
+    for (const FlatRow &row : m_rows) {
+        if (row.rowType == QStringLiteral("artist") && row.artist == artist) {
+            toggleKey(row.key);
             return;
         }
-
-        QVector<FlatRow> rowsToInsert;
-        for (const AlbumNode &album : artistNode->albums) {
-            FlatRow albumRow = makeAlbumRow(artistNode->artist, album);
-            const bool albumExpanded = albumRow.expanded;
-            rowsToInsert.push_back(std::move(albumRow));
-            if (albumExpanded) {
-                int trackNumber = 1;
-                for (const TrackNode &track : album.tracks) {
-                    rowsToInsert.push_back(makeTrackRow(album, trackNumber++, track));
-                }
-            }
-        }
-        if (rowsToInsert.isEmpty()) {
-            return;
-        }
-
-        const QString artistName = artistRow.artist;
-        clearPendingArtistInsert(artistName);
-        const int insertAt = artistRowIndex + 1;
-        const int batchSize = std::min<int>(kArtistExpandInsertBatchSize, rowsToInsert.size());
-        const int last = insertAt + batchSize - 1;
-        beginInsertRows(QModelIndex(), insertAt, last);
-        for (int i = 0; i < batchSize; ++i) {
-            m_rows.insert(insertAt + i, std::move(rowsToInsert[i]));
-        }
-        endInsertRows();
-        emit countChanged();
-
-        if (batchSize < rowsToInsert.size()) {
-            PendingArtistInsert pending;
-            pending.artist = artistName;
-            pending.rows = std::move(rowsToInsert);
-            pending.inserted = batchSize;
-            m_pendingArtistInserts.push_back(std::move(pending));
-            schedulePendingArtistInsert();
-        }
-        return;
     }
-
-    clearPendingArtistInsert(artistRow.artist);
-    const int removeFirst = artistRowIndex + 1;
-    int removeLast = removeFirst - 1;
-    for (int i = removeFirst; i < static_cast<int>(m_rows.size()); ++i) {
-        if (m_rows[static_cast<size_t>(i)].type == RowType::Artist) {
-            break;
-        }
-        removeLast = i;
-    }
-    if (removeLast < removeFirst) {
-        return;
-    }
-    beginRemoveRows(QModelIndex(), removeFirst, removeLast);
-    for (int i = removeLast; i >= removeFirst; --i) {
-        m_rows.removeAt(i);
-    }
-    endRemoveRows();
-    emit countChanged();
 }
 
 void LibraryTreeModel::toggleAlbum(const QString &albumKey) {
-    if (!m_searchLower.isEmpty()) {
-        return;
-    }
-
-    int albumRowIndex = -1;
-    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
-        const FlatRow &row = m_rows[static_cast<size_t>(i)];
-        if (row.type == RowType::Album && row.key == albumKey) {
-            albumRowIndex = i;
-            break;
-        }
-    }
-    if (albumRowIndex < 0) {
-        return;
-    }
-
-    FlatRow &albumRow = m_rows[static_cast<size_t>(albumRowIndex)];
-    const bool nextExpanded = !albumRow.expanded;
-    m_expandedAlbums.insert(albumRow.key, nextExpanded);
-    albumRow.expanded = nextExpanded;
-    emit dataChanged(index(albumRowIndex), index(albumRowIndex), {ExpandedRole});
-
-    if (nextExpanded) {
-        const AlbumNode *albumNode = findAlbumNode(albumKey);
-        if (!albumNode || albumNode->tracks.isEmpty()) {
-            return;
-        }
-
-        QVector<FlatRow> rowsToInsert;
-        rowsToInsert.reserve(albumNode->tracks.size());
-        int trackNumber = 1;
-        for (const TrackNode &track : albumNode->tracks) {
-            rowsToInsert.push_back(makeTrackRow(*albumNode, trackNumber++, track));
-        }
-
-        const int insertAt = albumRowIndex + 1;
-        const int last = insertAt + rowsToInsert.size() - 1;
-        beginInsertRows(QModelIndex(), insertAt, last);
-        for (int i = 0; i < rowsToInsert.size(); ++i) {
-            m_rows.insert(insertAt + i, std::move(rowsToInsert[i]));
-        }
-        endInsertRows();
-        emit countChanged();
-        return;
-    }
-
-    const int removeFirst = albumRowIndex + 1;
-    int removeLast = removeFirst - 1;
-    for (int i = removeFirst; i < static_cast<int>(m_rows.size()); ++i) {
-        if (m_rows[static_cast<size_t>(i)].type != RowType::Track) {
-            break;
-        }
-        removeLast = i;
-    }
-    if (removeLast < removeFirst) {
-        return;
-    }
-    beginRemoveRows(QModelIndex(), removeFirst, removeLast);
-    for (int i = removeLast; i >= removeFirst; --i) {
-        m_rows.removeAt(i);
-    }
-    endRemoveRows();
-    emit countChanged();
+    toggleKey(albumKey);
 }
 
 bool LibraryTreeModel::hasSelectionKey(const QString &selectionKey) const {
@@ -322,281 +178,249 @@ QVariantMap LibraryTreeModel::rowDataForRow(int row) const {
     if (row < 0 || row >= static_cast<int>(m_rows.size())) {
         return out;
     }
+
     const FlatRow &item = m_rows[static_cast<size_t>(row)];
+    out.insert(QStringLiteral("rowType"), item.rowType);
     out.insert(QStringLiteral("selectionKey"), item.selectionKey);
     out.insert(QStringLiteral("sourceIndex"), item.sourceIndex);
     out.insert(QStringLiteral("artist"), item.artist);
     out.insert(QStringLiteral("name"), item.name);
+    out.insert(QStringLiteral("title"), item.title);
     out.insert(QStringLiteral("trackPath"), item.trackPath);
-    switch (item.type) {
-    case RowType::Artist:
-        out.insert(QStringLiteral("rowType"), QStringLiteral("artist"));
-        break;
-    case RowType::Album:
-        out.insert(QStringLiteral("rowType"), QStringLiteral("album"));
-        break;
-    case RowType::Track:
-        out.insert(QStringLiteral("rowType"), QStringLiteral("track"));
-        break;
-    }
+    out.insert(QStringLiteral("openPath"), item.openPath);
+    out.insert(QStringLiteral("playPaths"), item.playPaths);
+    out.insert(QStringLiteral("key"), item.key);
+    out.insert(QStringLiteral("depth"), item.depth);
+    out.insert(QStringLiteral("count"), item.count);
     return out;
-}
-
-bool LibraryTreeModel::isArtistExpanded(const QString &artist, bool autoExpand) const {
-    if (autoExpand) {
-        return true;
-    }
-    const auto it = m_expandedArtists.constFind(artist);
-    if (it == m_expandedArtists.constEnd()) {
-        return false;
-    }
-    return it.value();
-}
-
-bool LibraryTreeModel::isAlbumExpanded(const QString &albumKey, bool autoExpand) const {
-    if (autoExpand) {
-        return true;
-    }
-    const auto it = m_expandedAlbums.constFind(albumKey);
-    if (it == m_expandedAlbums.constEnd()) {
-        return false;
-    }
-    return it.value();
-}
-
-const LibraryTreeModel::ArtistNode *LibraryTreeModel::findArtistNode(const QString &artist) const {
-    for (const ArtistNode &artistNode : m_tree) {
-        if (artistNode.artist == artist) {
-            return &artistNode;
-        }
-    }
-    return nullptr;
-}
-
-const LibraryTreeModel::AlbumNode *LibraryTreeModel::findAlbumNode(const QString &albumKey) const {
-    for (const ArtistNode &artistNode : m_tree) {
-        for (const AlbumNode &albumNode : artistNode.albums) {
-            if (albumNode.key == albumKey) {
-                return &albumNode;
-            }
-        }
-    }
-    return nullptr;
-}
-
-LibraryTreeModel::FlatRow LibraryTreeModel::makeAlbumRow(const QString &artistName, const AlbumNode &album) const {
-    FlatRow row;
-    row.type = RowType::Album;
-    row.artist = artistName;
-    row.name = album.name;
-    row.count = album.count;
-    row.expanded = isAlbumExpanded(album.key, false);
-    row.sourceIndex = album.sourceIndex;
-    row.key = album.key;
-    row.coverPath = album.coverPath;
-    row.selectionKey = selectionKeyForAlbum(album.sourceIndex);
-    return row;
-}
-
-LibraryTreeModel::FlatRow LibraryTreeModel::makeTrackRow(
-    const AlbumNode &album,
-    int trackNumber,
-    const TrackNode &track) const {
-    FlatRow row;
-    row.type = RowType::Track;
-    row.sourceIndex = album.sourceIndex;
-    row.trackNumber = trackNumber;
-    row.title = track.title;
-    row.trackPath = track.path;
-    row.selectionKey = selectionKeyForTrack(album.sourceIndex, row.trackNumber, row.trackPath);
-    return row;
-}
-
-void LibraryTreeModel::rebuildRows() {
-    const int oldCount = count();
-    clearPendingArtistInsert();
-    beginResetModel();
-    m_rows.clear();
-
-    const bool hasSearch = !m_searchLower.isEmpty();
-    const bool autoExpand = hasSearch;
-
-    for (const ArtistNode &artistNode : m_tree) {
-        const QString artistName = artistNode.artist;
-        const QString artistLower = toLower(artistName);
-        const bool artistMatch = !hasSearch || artistLower.contains(m_searchLower);
-
-        struct FilteredAlbum {
-            const AlbumNode *album{nullptr};
-            QVector<const TrackNode *> tracks;
-        };
-        QVector<FilteredAlbum> filteredAlbums;
-        filteredAlbums.reserve(artistNode.albums.size());
-
-        for (const AlbumNode &albumNode : artistNode.albums) {
-            const QString albumLower = toLower(albumNode.name);
-            const bool albumMatch = !hasSearch || albumLower.contains(m_searchLower);
-            FilteredAlbum filtered;
-            filtered.album = &albumNode;
-            filtered.tracks.reserve(albumNode.tracks.size());
-
-            for (const TrackNode &trackNode : albumNode.tracks) {
-                const QString titleLower = toLower(trackNode.title);
-                const QString pathLower = toLower(trackNode.path);
-                const bool trackMatch = titleLower.contains(m_searchLower) || pathLower.contains(m_searchLower);
-                if (!hasSearch || artistMatch || albumMatch || trackMatch) {
-                    filtered.tracks.push_back(&trackNode);
-                }
-            }
-
-            if (!hasSearch || artistMatch || albumMatch || !filtered.tracks.isEmpty()) {
-                filteredAlbums.push_back(std::move(filtered));
-            }
-        }
-
-        if (filteredAlbums.isEmpty()) {
-            continue;
-        }
-
-        int artistTrackCount = 0;
-        for (const FilteredAlbum &filtered : filteredAlbums) {
-            artistTrackCount += filtered.album->count;
-        }
-
-        FlatRow artistRow;
-        artistRow.type = RowType::Artist;
-        artistRow.artist = artistName;
-        artistRow.count = artistTrackCount;
-        artistRow.expanded = isArtistExpanded(artistName, autoExpand);
-        artistRow.selectionKey = selectionKeyForArtist(artistName);
-        m_rows.push_back(std::move(artistRow));
-
-        if (!m_rows.back().expanded) {
-            continue;
-        }
-
-        for (const FilteredAlbum &filtered : filteredAlbums) {
-            const AlbumNode &album = *filtered.album;
-            FlatRow albumRow = makeAlbumRow(artistName, album);
-            albumRow.expanded = isAlbumExpanded(album.key, autoExpand);
-            m_rows.push_back(std::move(albumRow));
-
-            if (!m_rows.back().expanded) {
-                continue;
-            }
-
-            int trackNo = 1;
-            for (const TrackNode *track : filtered.tracks) {
-                m_rows.push_back(makeTrackRow(album, trackNo++, *track));
-            }
-        }
-    }
-
-    endResetModel();
-    if (oldCount != count()) {
-        emit countChanged();
-    }
 }
 
 QString LibraryTreeModel::toLower(const QString &text) {
     return text.toLower();
 }
 
-QString LibraryTreeModel::selectionKeyForArtist(const QString &artist) {
-    return QStringLiteral("artist|%1").arg(artist);
-}
-
-QString LibraryTreeModel::selectionKeyForAlbum(int sourceIndex) {
-    return QStringLiteral("album|%1").arg(sourceIndex);
-}
-
-QString LibraryTreeModel::selectionKeyForTrack(int sourceIndex, int trackNumber, const QString &trackPath) {
-    if (!trackPath.isEmpty()) {
-        return QStringLiteral("track|%1").arg(trackPath);
-    }
-    return QStringLiteral("track|%1|%2").arg(sourceIndex).arg(trackNumber);
-}
-
-int LibraryTreeModel::findArtistRowIndex(const QString &artist) const {
-    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
-        const FlatRow &row = m_rows[static_cast<size_t>(i)];
-        if (row.type == RowType::Artist && row.artist == artist) {
-            return i;
+QStringList LibraryTreeModel::toStringList(const QVariantList &values) {
+    QStringList out;
+    out.reserve(values.size());
+    for (const QVariant &value : values) {
+        const QString text = value.toString();
+        if (!text.isEmpty()) {
+            out.push_back(text);
         }
     }
-    return -1;
+    return out;
 }
 
-void LibraryTreeModel::clearPendingArtistInsert(const QString &artist) {
-    if (artist.isEmpty()) {
-        m_pendingArtistInserts.clear();
-        m_pendingArtistInsertScheduled = false;
-        return;
-    }
-
-    auto eraseIt = std::remove_if(
-        m_pendingArtistInserts.begin(),
-        m_pendingArtistInserts.end(),
-        [&artist](const PendingArtistInsert &pending) { return pending.artist == artist; });
-    if (eraseIt == m_pendingArtistInserts.end()) {
-        return;
-    }
-    m_pendingArtistInserts.erase(eraseIt, m_pendingArtistInserts.end());
-    if (m_pendingArtistInserts.isEmpty()) {
-        m_pendingArtistInsertScheduled = false;
-    }
+QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseTreeNodes(const QVariantList &rows) {
+    return parseNodes(rows);
 }
 
-void LibraryTreeModel::processPendingArtistInsert() {
-    m_pendingArtistInsertScheduled = false;
+QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseLegacyArtistTree(const QVariantList &rows) {
+    QVector<TreeNode> artists;
+    artists.reserve(rows.size());
 
-    while (!m_pendingArtistInserts.isEmpty()) {
-        PendingArtistInsert &pending = m_pendingArtistInserts.front();
-        const int artistRowIndex = findArtistRowIndex(pending.artist);
-        if (artistRowIndex < 0) {
-            m_pendingArtistInserts.removeFirst();
+    for (int artistIndex = 0; artistIndex < rows.size(); ++artistIndex) {
+        const QVariantMap artistMap = rows[artistIndex].toMap();
+        const QString artistName = artistMap.value(QStringLiteral("artist")).toString();
+        const QVariantList albums = artistMap.value(QStringLiteral("albums")).toList();
+
+        TreeNode artist;
+        artist.rowType = QStringLiteral("artist");
+        artist.artist = artistName;
+        artist.title = artistName;
+        artist.name = artistName;
+        artist.key = QStringLiteral("artist|%1").arg(artistName);
+        artist.selectionKey = artist.key;
+        artist.count = albums.size();
+
+        for (int albumIndex = 0; albumIndex < albums.size(); ++albumIndex) {
+            const QVariantMap albumMap = albums[albumIndex].toMap();
+            TreeNode album;
+            album.rowType = QStringLiteral("album");
+            album.artist = artistName;
+            album.name = albumMap.value(QStringLiteral("name")).toString();
+            album.title = album.name;
+            album.count = albumMap.value(QStringLiteral("count")).toInt(0);
+            if (albumMap.contains(QStringLiteral("sourceIndex"))) {
+                album.sourceIndex = albumMap.value(QStringLiteral("sourceIndex")).toInt();
+            } else {
+                album.sourceIndex = -1;
+            }
+            album.coverPath = albumMap.value(QStringLiteral("coverPath")).toString();
+            album.key = QStringLiteral("album|%1|%2").arg(artistName).arg(albumIndex);
+            album.selectionKey = album.key;
+
+            const QVariantList tracks = albumMap.value(QStringLiteral("tracks")).toList();
+            QStringList albumPaths;
+            int trackNo = 0;
+            for (const QVariant &trackVar : tracks) {
+                const QVariantMap trackMap = trackVar.toMap();
+                const QString path = trackMap.value(QStringLiteral("path")).toString();
+                TreeNode track;
+                track.rowType = QStringLiteral("track");
+                track.trackPath = path;
+                track.openPath = path;
+                track.trackNumber = ++trackNo;
+                track.title = trackMap.value(QStringLiteral("title")).toString();
+                track.name = track.title;
+                track.key = path.isEmpty()
+                    ? QStringLiteral("track|%1|%2").arg(album.key).arg(trackNo)
+                    : QStringLiteral("track|%1").arg(path);
+                track.selectionKey = track.key;
+                if (!path.isEmpty()) {
+                    track.playPaths.push_back(path);
+                    albumPaths.push_back(path);
+                }
+                album.children.push_back(std::move(track));
+            }
+            album.playPaths = albumPaths;
+            artist.playPaths.append(albumPaths);
+            artist.children.push_back(std::move(album));
+        }
+
+        artists.push_back(std::move(artist));
+    }
+
+    return artists;
+}
+
+QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseNodes(const QVariantList &rows) {
+    QVector<TreeNode> nodes;
+    nodes.reserve(rows.size());
+
+    bool hasRowType = false;
+    for (const QVariant &rowValue : rows) {
+        if (!rowValue.toMap().value(QStringLiteral("rowType")).toString().isEmpty()) {
+            hasRowType = true;
+            break;
+        }
+    }
+    if (!hasRowType) {
+        return parseLegacyArtistTree(rows);
+    }
+
+    for (int index = 0; index < rows.size(); ++index) {
+        const QVariantMap row = rows[index].toMap();
+        TreeNode node;
+        node.rowType = row.value(QStringLiteral("rowType")).toString();
+        node.key = row.value(QStringLiteral("key")).toString();
+        node.selectionKey = node.key;
+        node.artist = row.value(QStringLiteral("artist")).toString();
+        node.name = row.value(QStringLiteral("name")).toString();
+        node.title = row.value(QStringLiteral("title")).toString();
+        node.count = row.value(QStringLiteral("count")).toInt(0);
+        if (row.contains(QStringLiteral("sourceIndex"))) {
+            node.sourceIndex = row.value(QStringLiteral("sourceIndex")).toInt();
+        } else {
+            node.sourceIndex = -1;
+        }
+        node.trackNumber = row.value(QStringLiteral("trackNumber")).toInt(0);
+        node.trackPath = row.value(QStringLiteral("trackPath")).toString();
+        node.openPath = row.value(QStringLiteral("path")).toString();
+        node.coverPath = row.value(QStringLiteral("coverPath")).toString();
+        node.playPaths = toStringList(row.value(QStringLiteral("playPaths")).toList());
+
+        if (node.rowType == QStringLiteral("track") && node.trackPath.isEmpty()) {
+            node.trackPath = node.openPath;
+        }
+        if (node.playPaths.isEmpty() && !node.trackPath.isEmpty()) {
+            node.playPaths.push_back(node.trackPath);
+        }
+        if (node.name.isEmpty()) {
+            node.name = node.title;
+        }
+        if (node.title.isEmpty()) {
+            node.title = node.name;
+        }
+        if (node.key.isEmpty()) {
+            const QString basis = !node.trackPath.isEmpty() ? node.trackPath : node.openPath;
+            node.key = basis.isEmpty()
+                ? QStringLiteral("%1|%2").arg(node.rowType).arg(index)
+                : QStringLiteral("%1|%2").arg(node.rowType, basis);
+            node.selectionKey = node.key;
+        }
+
+        node.children = parseNodes(row.value(QStringLiteral("children")).toList());
+        nodes.push_back(std::move(node));
+    }
+
+    return nodes;
+}
+
+bool LibraryTreeModel::nodeMatchesSearch(const TreeNode &node, const QString &searchLower) {
+    if (searchLower.isEmpty()) {
+        return true;
+    }
+
+    const QString title = toLower(node.title);
+    const QString name = toLower(node.name);
+    const QString artist = toLower(node.artist);
+    const QString trackPath = toLower(node.trackPath);
+    const QString openPath = toLower(node.openPath);
+    if (title.contains(searchLower) || name.contains(searchLower) || artist.contains(searchLower)
+        || trackPath.contains(searchLower) || openPath.contains(searchLower))
+    {
+        return true;
+    }
+
+    for (const TreeNode &child : node.children) {
+        if (nodeMatchesSearch(child, searchLower)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool LibraryTreeModel::isExpanded(const TreeNode &node, bool autoExpand) const {
+    if (node.children.isEmpty()) {
+        return false;
+    }
+    if (autoExpand) {
+        return true;
+    }
+    return m_expandedByKey.value(node.key, false);
+}
+
+void LibraryTreeModel::appendFlatRows(const QVector<TreeNode> &nodes, int depth, bool autoExpand) {
+    for (const TreeNode &node : nodes) {
+        if (!nodeMatchesSearch(node, m_searchLower)) {
             continue;
         }
-        const FlatRow &artistRow = m_rows[static_cast<size_t>(artistRowIndex)];
-        if (!artistRow.expanded) {
-            m_pendingArtistInserts.removeFirst();
-            continue;
-        }
 
-        const int remaining = pending.rows.size() - pending.inserted;
-        if (remaining <= 0) {
-            m_pendingArtistInserts.removeFirst();
-            continue;
-        }
+        FlatRow row;
+        row.rowType = node.rowType;
+        row.key = node.key;
+        row.selectionKey = node.selectionKey;
+        row.artist = node.artist;
+        row.name = node.name;
+        row.title = node.title;
+        row.count = node.count;
+        row.sourceIndex = node.sourceIndex;
+        row.trackNumber = node.trackNumber;
+        row.trackPath = node.trackPath;
+        row.openPath = node.openPath;
+        row.coverPath = node.coverPath;
+        row.playPaths = node.playPaths;
+        row.depth = depth;
+        row.hasChildren = !node.children.isEmpty();
+        row.expanded = isExpanded(node, autoExpand);
+        m_rows.push_back(std::move(row));
 
-        const int batchSize = std::min(kArtistExpandInsertBatchSize, remaining);
-        const int insertAt = artistRowIndex + 1 + pending.inserted;
-        beginInsertRows(QModelIndex(), insertAt, insertAt + batchSize - 1);
-        for (int i = 0; i < batchSize; ++i) {
-            m_rows.insert(insertAt + i, std::move(pending.rows[pending.inserted + i]));
+        if (!node.children.isEmpty() && m_rows.back().expanded) {
+            appendFlatRows(node.children, depth + 1, autoExpand);
         }
-        endInsertRows();
-        pending.inserted += batchSize;
+    }
+}
+
+void LibraryTreeModel::rebuildRows() {
+    const int oldCount = count();
+    beginResetModel();
+    m_rows.clear();
+    const bool autoExpand = !m_searchLower.isEmpty();
+    appendFlatRows(m_tree, 0, autoExpand);
+    endResetModel();
+    if (oldCount != count()) {
         emit countChanged();
-
-        if (pending.inserted >= pending.rows.size()) {
-            m_pendingArtistInserts.removeFirst();
-        }
-        break;
     }
-
-    schedulePendingArtistInsert();
-}
-
-void LibraryTreeModel::schedulePendingArtistInsert() {
-    if (m_pendingArtistInserts.isEmpty() || m_pendingArtistInsertScheduled) {
-        return;
-    }
-    m_pendingArtistInsertScheduled = true;
-    QMetaObject::invokeMethod(
-        this,
-        [this]() {
-            processPendingArtistInsert();
-        },
-        Qt::QueuedConnection);
 }

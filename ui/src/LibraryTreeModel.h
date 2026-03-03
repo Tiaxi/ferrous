@@ -3,6 +3,7 @@
 #include <QAbstractListModel>
 #include <QHash>
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 #include <QVector>
 
@@ -24,6 +25,9 @@ public:
         TrackPathRole,
         CoverPathRole,
         SelectionKeyRole,
+        DepthRole,
+        OpenPathRole,
+        PlayPathsRole,
     };
 
     explicit LibraryTreeModel(QObject *parent = nullptr);
@@ -36,6 +40,7 @@ public:
 
     Q_INVOKABLE void setLibraryTree(const QVariantList &tree);
     Q_INVOKABLE void setSearchText(const QString &text);
+    Q_INVOKABLE void toggleKey(const QString &key);
     Q_INVOKABLE void toggleArtist(const QString &artist);
     Q_INVOKABLE void toggleAlbum(const QString &albumKey);
     Q_INVOKABLE bool hasSelectionKey(const QString &selectionKey) const;
@@ -48,75 +53,54 @@ signals:
     void countChanged();
 
 private:
-    struct TrackNode {
-        QString title;
-        QString path;
-    };
-
-    struct AlbumNode {
+    struct TreeNode {
+        QString rowType;
+        QString key;
+        QString selectionKey;
         QString artist;
         QString name;
+        QString title;
         int count{0};
         int sourceIndex{-1};
+        int trackNumber{0};
+        QString trackPath;
+        QString openPath;
         QString coverPath;
-        QString key;
-        QVector<TrackNode> tracks;
-    };
-
-    struct ArtistNode {
-        QString artist;
-        QVector<AlbumNode> albums;
-    };
-
-    enum class RowType {
-        Artist,
-        Album,
-        Track,
+        QStringList playPaths;
+        QVector<TreeNode> children;
     };
 
     struct FlatRow {
-        RowType type{RowType::Artist};
+        QString rowType;
+        QString key;
+        QString selectionKey;
         QString artist;
         QString name;
         QString title;
         int count{0};
         bool expanded{false};
         int sourceIndex{-1};
-        QString key;
         int trackNumber{0};
         QString trackPath;
+        QString openPath;
         QString coverPath;
-        QString selectionKey;
+        QStringList playPaths;
+        int depth{0};
+        bool hasChildren{false};
     };
 
-    bool isArtistExpanded(const QString &artist, bool autoExpand) const;
-    bool isAlbumExpanded(const QString &albumKey, bool autoExpand) const;
-    const ArtistNode *findArtistNode(const QString &artist) const;
-    const AlbumNode *findAlbumNode(const QString &albumKey) const;
-    FlatRow makeAlbumRow(const QString &artistName, const AlbumNode &album) const;
-    FlatRow makeTrackRow(const AlbumNode &album, int trackNumber, const TrackNode &track) const;
-    void rebuildRows();
     static QString toLower(const QString &text);
-    static QString selectionKeyForArtist(const QString &artist);
-    static QString selectionKeyForAlbum(int sourceIndex);
-    static QString selectionKeyForTrack(int sourceIndex, int trackNumber, const QString &trackPath);
-    int findArtistRowIndex(const QString &artist) const;
-    void clearPendingArtistInsert(const QString &artist = QString());
-    void processPendingArtistInsert();
-    void schedulePendingArtistInsert();
+    static QStringList toStringList(const QVariantList &values);
+    static QVector<TreeNode> parseTreeNodes(const QVariantList &rows);
+    static QVector<TreeNode> parseLegacyArtistTree(const QVariantList &rows);
+    static QVector<TreeNode> parseNodes(const QVariantList &rows);
+    static bool nodeMatchesSearch(const TreeNode &node, const QString &searchLower);
+    bool isExpanded(const TreeNode &node, bool autoExpand) const;
+    void appendFlatRows(const QVector<TreeNode> &nodes, int depth, bool autoExpand);
+    void rebuildRows();
 
-    QVector<ArtistNode> m_tree;
+    QVector<TreeNode> m_tree;
     QVector<FlatRow> m_rows;
-    QHash<QString, bool> m_expandedArtists;
-    QHash<QString, bool> m_expandedAlbums;
+    QHash<QString, bool> m_expandedByKey;
     QString m_searchLower;
-
-    struct PendingArtistInsert {
-        QString artist;
-        QVector<FlatRow> rows;
-        int inserted{0};
-    };
-    static constexpr int kArtistExpandInsertBatchSize = 24;
-    QVector<PendingArtistInsert> m_pendingArtistInserts;
-    bool m_pendingArtistInsertScheduled{false};
 };

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -12,11 +12,24 @@ use walkdir::WalkDir;
 #[derive(Debug, Clone, Default)]
 pub struct LibraryTrack {
     pub path: PathBuf,
+    pub root_path: PathBuf,
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub year: Option<i32>,
     pub track_no: Option<u32>,
     pub duration_secs: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LibraryScanProgress {
+    pub current_root: Option<PathBuf>,
+    pub roots_completed: usize,
+    pub roots_total: usize,
+    pub supported_files_discovered: usize,
+    pub supported_files_processed: usize,
+    pub files_per_second: Option<f32>,
+    pub eta_seconds: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -24,13 +37,17 @@ pub struct LibrarySnapshot {
     pub roots: Vec<PathBuf>,
     pub tracks: Vec<LibraryTrack>,
     pub scan_in_progress: bool,
-    pub scanned_files: usize,
+    pub scan_progress: Option<LibraryScanProgress>,
     pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum LibraryCommand {
     ScanRoot(PathBuf),
+    AddRoot(PathBuf),
+    RemoveRoot(PathBuf),
+    RescanRoot(PathBuf),
+    RescanAll,
 }
 
 #[derive(Debug, Clone)]
@@ -56,34 +73,42 @@ impl LibraryService {
                     Ok(conn) => {
                         if let Err(err) = init_schema(&conn) {
                             snapshot.last_error = Some(format!("library DB init failed: {err}"));
-                            let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
+                            emit_snapshot(&event_tx, &snapshot);
                             return;
                         }
                         load_snapshot(&conn, &mut snapshot);
-                        let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
+                        emit_snapshot(&event_tx, &snapshot);
 
                         while let Ok(cmd) = cmd_rx.recv() {
-                            match cmd {
-                                LibraryCommand::ScanRoot(root) => {
-                                    snapshot.scan_in_progress = true;
-                                    snapshot.scanned_files = 0;
-                                    snapshot.last_error = None;
-                                    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
-
-                                    if let Err(err) = scan_root(&conn, &root, &mut snapshot) {
-                                        snapshot.last_error = Some(err);
-                                    }
-
-                                    load_snapshot(&conn, &mut snapshot);
-                                    snapshot.scan_in_progress = false;
-                                    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
+                            snapshot.last_error = None;
+                            let result = match cmd {
+                                LibraryCommand::ScanRoot(root) | LibraryCommand::AddRoot(root) => {
+                                    handle_add_root(&conn, &root, &mut snapshot, &event_tx)
                                 }
+                                LibraryCommand::RemoveRoot(root) => {
+                                    remove_root_and_purge(&conn, &root)
+                                }
+                                LibraryCommand::RescanRoot(root) => {
+                                    handle_rescan_root(&conn, &root, &mut snapshot, &event_tx)
+                                }
+                                LibraryCommand::RescanAll => {
+                                    handle_rescan_all(&conn, &mut snapshot, &event_tx)
+                                }
+                            };
+
+                            if let Err(err) = result {
+                                snapshot.last_error = Some(err);
                             }
+
+                            load_snapshot(&conn, &mut snapshot);
+                            snapshot.scan_in_progress = false;
+                            snapshot.scan_progress = None;
+                            emit_snapshot(&event_tx, &snapshot);
                         }
                     }
                     Err(err) => {
                         snapshot.last_error = Some(format!("library DB open failed: {err}"));
-                        let _ = event_tx.send(LibraryEvent::Snapshot(snapshot));
+                        emit_snapshot(&event_tx, &snapshot);
                     }
                 }
             });
@@ -94,6 +119,108 @@ impl LibraryService {
     pub fn command(&self, cmd: LibraryCommand) {
         let _ = self.tx.send(cmd);
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RootScanProgress {
+    discovered: usize,
+    processed: usize,
+    files_per_second: Option<f32>,
+    eta_seconds: Option<f32>,
+}
+
+fn emit_snapshot(event_tx: &Sender<LibraryEvent>, snapshot: &LibrarySnapshot) {
+    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
+}
+
+fn handle_add_root(
+    conn: &Connection,
+    root: &Path,
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+) -> Result<(), String> {
+    let root = canonicalize_root(root)?;
+    insert_root(conn, &root)?;
+    run_scans(conn, &[root], snapshot, event_tx)
+}
+
+fn handle_rescan_root(
+    conn: &Connection,
+    root: &Path,
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+) -> Result<(), String> {
+    let root = if root.exists() {
+        root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    } else {
+        root.to_path_buf()
+    };
+    let roots = load_roots(conn)
+        .into_iter()
+        .filter(|known| known == &root)
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Err(format!("root '{}' is not configured", root.display()));
+    }
+    run_scans(conn, &roots, snapshot, event_tx)
+}
+
+fn handle_rescan_all(
+    conn: &Connection,
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+) -> Result<(), String> {
+    let roots = load_roots(conn);
+    if roots.is_empty() {
+        return Ok(());
+    }
+    run_scans(conn, &roots, snapshot, event_tx)
+}
+
+fn run_scans(
+    conn: &Connection,
+    roots: &[PathBuf],
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+) -> Result<(), String> {
+    if roots.is_empty() {
+        return Ok(());
+    }
+
+    let roots_total = roots.len();
+    for (idx, root) in roots.iter().enumerate() {
+        let mut final_progress = RootScanProgress::default();
+        let mut on_progress = |progress: RootScanProgress| {
+            final_progress = progress.clone();
+            snapshot.scan_in_progress = true;
+            snapshot.scan_progress = Some(LibraryScanProgress {
+                current_root: Some(root.clone()),
+                roots_completed: idx,
+                roots_total,
+                supported_files_discovered: progress.discovered,
+                supported_files_processed: progress.processed,
+                files_per_second: progress.files_per_second,
+                eta_seconds: progress.eta_seconds,
+            });
+            emit_snapshot(event_tx, snapshot);
+        };
+
+        scan_root(conn, root, &mut on_progress)?;
+
+        snapshot.scan_in_progress = true;
+        snapshot.scan_progress = Some(LibraryScanProgress {
+            current_root: Some(root.clone()),
+            roots_completed: idx + 1,
+            roots_total,
+            supported_files_discovered: final_progress.discovered,
+            supported_files_processed: final_progress.processed,
+            files_per_second: final_progress.files_per_second,
+            eta_seconds: None,
+        });
+        emit_snapshot(event_tx, snapshot);
+    }
+
+    Ok(())
 }
 
 fn open_library_db() -> anyhow::Result<Connection> {
@@ -130,9 +257,11 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
 
         CREATE TABLE IF NOT EXISTS tracks (
             path TEXT PRIMARY KEY,
+            root_path TEXT NOT NULL,
             title TEXT NOT NULL,
             artist TEXT NOT NULL,
             album TEXT NOT NULL,
+            year INTEGER,
             track_no INTEGER,
             duration_secs REAL,
             mtime_ns INTEGER NOT NULL,
@@ -140,51 +269,63 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             indexed_at INTEGER NOT NULL
         );
 
+        CREATE INDEX IF NOT EXISTS idx_tracks_root_path ON tracks(root_path);
         CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
         CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
         CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
         ",
     )?;
-    // Migration for existing DBs created before track_no support.
+
+    // Migrations for existing DBs created before metadata expansion.
+    let _ = conn.execute(
+        "ALTER TABLE tracks ADD COLUMN root_path TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN track_no INTEGER", []);
+
     Ok(())
 }
 
-fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
-    snapshot.roots.clear();
-    snapshot.tracks.clear();
-
-    if let Ok(mut stmt) = conn.prepare("SELECT path FROM roots ORDER BY path") {
+fn load_roots(conn: &Connection) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT path FROM roots ORDER BY path COLLATE NOCASE") {
         if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
             for row in rows.flatten() {
-                snapshot.roots.push(PathBuf::from(row));
+                roots.push(PathBuf::from(row));
             }
         }
     }
+    roots
+}
+
+fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
+    snapshot.roots = load_roots(conn);
+    snapshot.tracks.clear();
 
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, title, artist, album, track_no, duration_secs
+        SELECT path, root_path, title, artist, album, year, track_no, duration_secs
         FROM tracks
         ORDER BY
-            CASE WHEN artist = '' THEN 1 ELSE 0 END,
-            artist COLLATE NOCASE,
-            album COLLATE NOCASE,
-            CASE WHEN track_no IS NULL THEN 1 ELSE 0 END,
-            track_no ASC,
+            root_path COLLATE NOCASE,
             path COLLATE NOCASE
         ",
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
             Ok(LibraryTrack {
                 path: PathBuf::from(row.get::<_, String>(0)?),
-                title: row.get::<_, String>(1)?,
-                artist: row.get::<_, String>(2)?,
-                album: row.get::<_, String>(3)?,
+                root_path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get::<_, String>(2)?,
+                artist: row.get::<_, String>(3)?,
+                album: row.get::<_, String>(4)?,
+                year: row
+                    .get::<_, Option<i64>>(5)?
+                    .and_then(|v| i32::try_from(v).ok()),
                 track_no: row
-                    .get::<_, Option<i64>>(4)?
+                    .get::<_, Option<i64>>(6)?
                     .and_then(|v| u32::try_from(v).ok()),
-                duration_secs: row.get::<_, Option<f32>>(5)?,
+                duration_secs: row.get::<_, Option<f32>>(7)?,
             })
         }) {
             for row in rows.flatten() {
@@ -194,27 +335,77 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
     }
 }
 
-fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> Result<(), String> {
+fn canonicalize_root(root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
         .map_err(|e| format!("failed to access '{}': {e}", root.display()))?;
     if !root.is_dir() {
         return Err(format!("'{}' is not a directory", root.display()));
     }
+    Ok(root)
+}
 
-    let root_str = root.to_string_lossy().to_string();
+fn insert_root(conn: &Connection, root: &Path) -> Result<(), String> {
     let now = unix_ts_i64();
+    let root_str = root.to_string_lossy().to_string();
     conn.execute(
         "INSERT OR IGNORE INTO roots(path, added_at) VALUES (?1, ?2)",
         params![root_str, now],
     )
     .map_err(|e| format!("failed to save root '{}': {e}", root.display()))?;
+    Ok(())
+}
 
+fn remove_root_and_purge(conn: &Connection, root: &Path) -> Result<(), String> {
+    let root = if root.exists() {
+        root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    } else {
+        root.to_path_buf()
+    };
+    let root_str = root.to_string_lossy().to_string();
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("failed to begin remove transaction: {e}"))?;
+
+    tx.execute("DELETE FROM roots WHERE path=?1", params![root_str.clone()])
+        .map_err(|e| format!("failed to remove root '{}': {e}", root.display()))?;
+
+    tx.execute(
+        r"
+        DELETE FROM tracks
+        WHERE root_path = ?1
+           OR path = ?1
+           OR path LIKE ?1 || '/%'
+        ",
+        params![root_str],
+    )
+    .map_err(|e| format!("failed to purge root tracks '{}': {e}", root.display()))?;
+
+    tx.commit()
+        .map_err(|e| format!("failed to finalize root removal '{}': {e}", root.display()))?;
+
+    Ok(())
+}
+
+fn scan_root<F>(conn: &Connection, root: &Path, on_progress: &mut F) -> Result<(), String>
+where
+    F: FnMut(RootScanProgress),
+{
+    let root = canonicalize_root(root)?;
+    insert_root(conn, &root)?;
+
+    let root_str = root.to_string_lossy().to_string();
     let mut existing: HashMap<String, (i64, i64)> = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT path, mtime_ns, size_bytes FROM tracks WHERE path LIKE ?1 || '/%' OR path = ?1",
+        r"
+        SELECT path, mtime_ns, size_bytes
+        FROM tracks
+        WHERE root_path = ?1
+           OR (root_path = '' AND (path = ?1 OR path LIKE ?1 || '/%'))
+        ",
     ) {
-        let mapped = stmt.query_map(params![root.to_string_lossy().to_string()], |row| {
+        let mapped = stmt.query_map(params![root_str.clone()], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -228,12 +419,62 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
         }
     }
 
+    let previous_index_count = existing.len();
     let mut seen_paths: HashSet<String> = HashSet::new();
     let tx = match conn.unchecked_transaction() {
         Ok(tx) => tx,
         Err(e) => return Err(format!("failed to begin transaction: {e}")),
     };
 
+    let mut discovered = 0usize;
+    let mut processed = 0usize;
+    let mut smoothed_rate = None::<f32>;
+    let start = Instant::now();
+    let mut last_emit = Instant::now()
+        .checked_sub(Duration::from_millis(500))
+        .unwrap_or_else(Instant::now);
+
+    let mut emit_progress = |force: bool, discovered: usize, processed: usize| {
+        if !force && last_emit.elapsed() < Duration::from_millis(180) {
+            return;
+        }
+
+        let elapsed = start.elapsed().as_secs_f32();
+        let files_per_second = if processed >= 4 && elapsed >= 0.8 {
+            let instant_rate = processed as f32 / elapsed.max(0.001);
+            let next = match smoothed_rate {
+                Some(prev) => prev * 0.75 + instant_rate * 0.25,
+                None => instant_rate,
+            };
+            smoothed_rate = Some(next);
+            Some(next)
+        } else {
+            None
+        };
+
+        let estimated_total = discovered.max(previous_index_count);
+        let eta_seconds = if let Some(rate) = files_per_second {
+            if rate >= 0.5 && processed < estimated_total {
+                Some((estimated_total - processed) as f32 / rate)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        on_progress(RootScanProgress {
+            discovered,
+            processed,
+            files_per_second,
+            eta_seconds,
+        });
+        last_emit = Instant::now();
+    };
+
+    emit_progress(true, discovered, processed);
+
+    let now = unix_ts_i64();
     for entry in WalkDir::new(&root)
         .follow_links(false)
         .into_iter()
@@ -247,7 +488,11 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
             continue;
         }
 
+        discovered = discovered.saturating_add(1);
+
         let Ok(metadata) = fs::metadata(path) else {
+            processed = processed.saturating_add(1);
+            emit_progress(false, discovered, processed);
             continue;
         };
         let size_bytes = metadata.len() as i64;
@@ -270,12 +515,26 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
             if tx
                 .execute(
                     r"
-                    INSERT INTO tracks(path, title, artist, album, track_no, duration_secs, mtime_ns, size_bytes, indexed_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    INSERT INTO tracks(
+                        path,
+                        root_path,
+                        title,
+                        artist,
+                        album,
+                        year,
+                        track_no,
+                        duration_secs,
+                        mtime_ns,
+                        size_bytes,
+                        indexed_at
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                     ON CONFLICT(path) DO UPDATE SET
+                        root_path=excluded.root_path,
                         title=excluded.title,
                         artist=excluded.artist,
                         album=excluded.album,
+                        year=excluded.year,
                         track_no=excluded.track_no,
                         duration_secs=excluded.duration_secs,
                         mtime_ns=excluded.mtime_ns,
@@ -284,23 +543,28 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
                     ",
                     params![
                         path_string,
+                        root_str.as_str(),
                         indexed.title,
                         indexed.artist,
                         indexed.album,
+                        indexed.year.map(i64::from),
                         indexed.track_no.map(i64::from),
                         indexed.duration_secs,
                         mtime_ns,
                         size_bytes,
-                        now
+                        now,
                     ],
                 )
                 .is_err()
             {
+                processed = processed.saturating_add(1);
+                emit_progress(false, discovered, processed);
                 continue;
             }
         }
 
-        snapshot.scanned_files = snapshot.scanned_files.saturating_add(1);
+        processed = processed.saturating_add(1);
+        emit_progress(false, discovered, processed);
     }
 
     let stale: Vec<String> = existing
@@ -314,6 +578,7 @@ fn scan_root(conn: &Connection, root: &Path, snapshot: &mut LibrarySnapshot) -> 
     tx.commit()
         .map_err(|e| format!("failed to finalize scan transaction: {e}"))?;
 
+    emit_progress(true, discovered, processed);
     Ok(())
 }
 
@@ -321,13 +586,17 @@ fn is_supported_audio(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
-    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac")
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mp3" | "flac" | "m4a" | "aac" | "ogg" | "opus" | "wav"
+    )
 }
 
 struct IndexedTrack {
     title: String,
     artist: String,
     album: String,
+    year: Option<i32>,
     track_no: Option<u32>,
     duration_secs: Option<f32>,
 }
@@ -341,6 +610,7 @@ fn read_track_info(path: &Path) -> IndexedTrack {
             .to_owned(),
         artist: String::new(),
         album: String::new(),
+        year: None,
         track_no: None,
         duration_secs: None,
     };
@@ -356,6 +626,7 @@ fn read_track_info(path: &Path) -> IndexedTrack {
             if let Some(album) = tag.album() {
                 out.album = album.into_owned();
             }
+            out.year = tag.date().map(|v| i32::from(v.year));
             out.track_no = tag.track();
         }
         out.duration_secs = Some(tagged.properties().duration().as_secs_f32());
@@ -388,11 +659,22 @@ mod tests {
         p
     }
 
+    fn write_stub(path: &Path, bytes: &[u8]) {
+        fs::File::create(path)
+            .and_then(|mut f| f.write_all(bytes))
+            .expect("write file");
+    }
+
     #[test]
     fn supported_audio_extensions_are_detected() {
         assert!(is_supported_audio(Path::new("a.mp3")));
         assert!(is_supported_audio(Path::new("a.flac")));
-        assert!(!is_supported_audio(Path::new("a.wav")));
+        assert!(is_supported_audio(Path::new("a.m4a")));
+        assert!(is_supported_audio(Path::new("a.aac")));
+        assert!(is_supported_audio(Path::new("a.ogg")));
+        assert!(is_supported_audio(Path::new("a.opus")));
+        assert!(is_supported_audio(Path::new("a.wav")));
+        assert!(!is_supported_audio(Path::new("a.txt")));
         assert!(!is_supported_audio(Path::new("a")));
     }
 
@@ -406,25 +688,29 @@ mod tests {
 
         let mp3 = root.join("song1.mp3");
         let flac = root.join("song2.flac");
+        let m4a = root.join("song3.m4a");
         let txt = root.join("notes.txt");
-        fs::File::create(&mp3)
-            .and_then(|mut f| f.write_all(b"not-real-mp3"))
-            .expect("create mp3");
-        fs::File::create(&flac)
-            .and_then(|mut f| f.write_all(b"not-real-flac"))
-            .expect("create flac");
-        fs::File::create(&txt)
-            .and_then(|mut f| f.write_all(b"ignore me"))
-            .expect("create txt");
+        write_stub(&mp3, b"not-real-mp3");
+        write_stub(&flac, b"not-real-flac");
+        write_stub(&m4a, b"not-real-m4a");
+        write_stub(&txt, b"ignore me");
+
+        let mut last = RootScanProgress::default();
+        scan_root(&conn, &root, &mut |progress| {
+            last = progress;
+        })
+        .expect("scan");
 
         let mut snapshot = LibrarySnapshot::default();
-        scan_root(&conn, &root, &mut snapshot).expect("scan");
         load_snapshot(&conn, &mut snapshot);
 
         let paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
         assert!(paths.iter().any(|p| p.ends_with("song1.mp3")));
         assert!(paths.iter().any(|p| p.ends_with("song2.flac")));
+        assert!(paths.iter().any(|p| p.ends_with("song3.m4a")));
         assert!(!paths.iter().any(|p| p.ends_with("notes.txt")));
+        assert_eq!(last.discovered, 3);
+        assert_eq!(last.processed, 3);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -437,20 +723,57 @@ mod tests {
         let root = test_dir("stale");
         fs::create_dir_all(&root).expect("mkdir");
         let mp3 = root.join("song1.mp3");
-        fs::File::create(&mp3)
-            .and_then(|mut f| f.write_all(b"not-real-mp3"))
-            .expect("create mp3");
+        write_stub(&mp3, b"not-real-mp3");
+
+        scan_root(&conn, &root, &mut |_| {}).expect("initial scan");
 
         let mut snapshot = LibrarySnapshot::default();
-        scan_root(&conn, &root, &mut snapshot).expect("initial scan");
         load_snapshot(&conn, &mut snapshot);
         assert_eq!(snapshot.tracks.len(), 1);
 
         fs::remove_file(&mp3).expect("remove mp3");
-        scan_root(&conn, &root, &mut snapshot).expect("rescan");
+        scan_root(&conn, &root, &mut |_| {}).expect("rescan");
         load_snapshot(&conn, &mut snapshot);
         assert!(snapshot.tracks.is_empty());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_root_purges_only_target_root_tracks() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+
+        let root_a = test_dir("remove-a");
+        let root_b = test_dir("remove-b");
+        fs::create_dir_all(&root_a).expect("mkdir a");
+        fs::create_dir_all(&root_b).expect("mkdir b");
+
+        let a_track = root_a.join("a.mp3");
+        let b_track = root_b.join("b.mp3");
+        write_stub(&a_track, b"a");
+        write_stub(&b_track, b"b");
+
+        scan_root(&conn, &root_a, &mut |_| {}).expect("scan a");
+        scan_root(&conn, &root_b, &mut |_| {}).expect("scan b");
+
+        let root_a_canon = root_a.canonicalize().expect("canon a");
+        remove_root_and_purge(&conn, &root_a_canon).expect("remove root a");
+
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+
+        assert_eq!(
+            snapshot.roots,
+            vec![root_b.canonicalize().expect("canon b")]
+        );
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert!(snapshot
+            .tracks
+            .iter()
+            .all(|t| t.path.starts_with(root_b.canonicalize().expect("canon b"))));
+
+        let _ = fs::remove_dir_all(root_a);
+        let _ = fs::remove_dir_all(root_b);
     }
 }

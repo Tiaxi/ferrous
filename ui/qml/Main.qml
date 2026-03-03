@@ -21,6 +21,8 @@ Kirigami.ApplicationWindow {
     property string selectedLibraryArtist: ""
     property string selectedLibraryAlbum: ""
     property string selectedLibraryTrackPath: ""
+    property string selectedLibraryOpenPath: ""
+    property var selectedLibraryPlayPaths: []
     property var selectedLibrarySelectionKeys: []
     property int librarySelectionAnchorIndex: -1
     property var selectedQueueIndices: []
@@ -70,6 +72,15 @@ Kirigami.ApplicationWindow {
         property bool libraryScanInProgress: false
         property int libraryRootCount: 0
         property int libraryTrackCount: 0
+        property var libraryRoots: []
+        property int librarySortMode: 0
+        property string fileBrowserName: "File Manager"
+        property int libraryScanRootsCompleted: 0
+        property int libraryScanRootsTotal: 0
+        property int libraryScanDiscovered: 0
+        property int libraryScanProcessed: 0
+        property real libraryScanFilesPerSecond: 0
+        property real libraryScanEtaSeconds: -1
         property bool connected: false
         signal snapshotChanged()
         signal analysisChanged()
@@ -97,7 +108,17 @@ Kirigami.ApplicationWindow {
         function appendTrack(path) {}
         function replaceArtistByName(artist) {}
         function appendArtistByName(artist) {}
+        function replaceWithPaths(paths) {}
+        function appendPaths(paths) {}
         function libraryAlbumCoverAt(index) { return "" }
+        function queuePathAt(index) { return "" }
+        function addLibraryRoot(path) {}
+        function removeLibraryRoot(path) {}
+        function rescanLibraryRoot(path) {}
+        function rescanAllLibraryRoots() {}
+        function setLibrarySortMode(mode) {}
+        function openInFileBrowser(path) {}
+        function openContainingFolder(path) {}
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
@@ -172,54 +193,24 @@ Kirigami.ApplicationWindow {
         if (!rowMap) {
             return false
         }
-        if (rowMap.rowType === "artist") {
-            return (rowMap.artist || "").length > 0
-        }
-        if (rowMap.rowType === "album") {
-            return (rowMap.sourceIndex !== undefined ? rowMap.sourceIndex : -1) >= 0
-        }
-        if (rowMap.rowType === "track") {
-            return (rowMap.trackPath || "").length > 0
-        }
-        return false
+        const paths = rowMap.playPaths || []
+        return paths.length > 0
     }
 
     function appendLibraryRow(rowMap) {
         if (!isActionableLibraryRow(rowMap)) {
             return false
         }
-        if (rowMap.rowType === "artist") {
-            uiBridge.appendArtistByName(rowMap.artist || "")
-            return true
-        }
-        if (rowMap.rowType === "album") {
-            uiBridge.appendAlbumAt(rowMap.sourceIndex)
-            return true
-        }
-        if (rowMap.rowType === "track") {
-            uiBridge.appendTrack(rowMap.trackPath || "")
-            return true
-        }
-        return false
+        uiBridge.appendPaths(rowMap.playPaths || [])
+        return true
     }
 
     function replaceWithLibraryRow(rowMap) {
         if (!isActionableLibraryRow(rowMap)) {
             return false
         }
-        if (rowMap.rowType === "artist") {
-            uiBridge.replaceArtistByName(rowMap.artist || "")
-            return true
-        }
-        if (rowMap.rowType === "album") {
-            uiBridge.replaceAlbumAt(rowMap.sourceIndex)
-            return true
-        }
-        if (rowMap.rowType === "track") {
-            uiBridge.playTrack(rowMap.trackPath || "")
-            return true
-        }
-        return false
+        uiBridge.replaceWithPaths(rowMap.playPaths || [])
+        return true
     }
 
     function selectedLibraryRowsSorted() {
@@ -263,7 +254,8 @@ Kirigami.ApplicationWindow {
             rowType: selectedLibraryRowType,
             artist: selectedLibraryArtist,
             sourceIndex: selectedLibrarySourceIndex,
-            trackPath: selectedLibraryTrackPath
+            trackPath: selectedLibraryTrackPath,
+            playPaths: selectedLibraryPlayPaths
         })
     }
 
@@ -298,7 +290,8 @@ Kirigami.ApplicationWindow {
             rowType: selectedLibraryRowType,
             artist: selectedLibraryArtist,
             sourceIndex: selectedLibrarySourceIndex,
-            trackPath: selectedLibraryTrackPath
+            trackPath: selectedLibraryTrackPath,
+            playPaths: selectedLibraryPlayPaths
         }])
     }
 
@@ -312,7 +305,8 @@ Kirigami.ApplicationWindow {
             rowType: selectedLibraryRowType,
             artist: selectedLibraryArtist,
             sourceIndex: selectedLibrarySourceIndex,
-            trackPath: selectedLibraryTrackPath
+            trackPath: selectedLibraryTrackPath,
+            playPaths: selectedLibraryPlayPaths
         }])
     }
 
@@ -327,11 +321,17 @@ Kirigami.ApplicationWindow {
     }
 
     function librarySelectionStatusText() {
+        if (selectedLibraryRowType === "root" && selectedLibraryAlbum.length > 0) {
+            return "root: " + selectedLibraryAlbum
+        }
         if (selectedLibraryRowType === "artist" && selectedLibraryArtist.length > 0) {
             return "artist: " + selectedLibraryArtist
         }
         if (selectedLibraryRowType === "album" && selectedLibraryAlbum.length > 0) {
             return "album: " + selectedLibraryAlbum
+        }
+        if (selectedLibraryRowType === "section" && selectedLibraryAlbum.length > 0) {
+            return "section: " + selectedLibraryAlbum
         }
         if (selectedLibraryRowType === "track" && selectedLibraryTrackPath.length > 0) {
             const parts = selectedLibraryTrackPath.split("/")
@@ -366,6 +366,8 @@ Kirigami.ApplicationWindow {
         root.selectedLibraryArtist = ""
         root.selectedLibraryAlbum = ""
         root.selectedLibraryTrackPath = ""
+        root.selectedLibraryOpenPath = ""
+        root.selectedLibraryPlayPaths = []
     }
 
     function applyLibraryPrimaryRow(rowMap) {
@@ -375,6 +377,8 @@ Kirigami.ApplicationWindow {
         root.selectedLibraryArtist = rowMap.artist || ""
         root.selectedLibraryAlbum = rowMap.name || ""
         root.selectedLibraryTrackPath = rowMap.trackPath || ""
+        root.selectedLibraryOpenPath = rowMap.openPath || ""
+        root.selectedLibraryPlayPaths = rowMap.playPaths || []
     }
 
     function applyLibraryPrimaryFromIndex(index) {
@@ -1158,18 +1162,24 @@ Kirigami.ApplicationWindow {
 
                             RowLayout {
                                 Layout.fillWidth: true
+                                Label { text: "Sort:" }
                                 ComboBox {
-                                    model: ["Folders"]
-                                    Layout.fillWidth: true
+                                    id: librarySortModeCombo
+                                    model: ["Year", "Title"]
+                                    Layout.preferredWidth: 120
+                                    currentIndex: Math.max(0, Math.min(1, uiBridge.librarySortMode))
+                                    onActivated: uiBridge.setLibrarySortMode(currentIndex)
                                 }
                                 ToolButton {
                                     icon.name: "document-edit"
                                     display: AbstractButton.IconOnly
                                     onClicked: scanFolderAction.trigger()
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: "Add root"
                                 }
                                 Button {
-                                    text: "Scan Music"
-                                    onClicked: uiBridge.scanDefaultMusicRoot()
+                                    text: "Rescan All"
+                                    onClicked: uiBridge.rescanAllLibraryRoots()
                                 }
                             }
 
@@ -1183,11 +1193,51 @@ Kirigami.ApplicationWindow {
                                 }
                             }
 
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: Math.min(140, 28 * Math.max(1, uiBridge.libraryRoots.length))
+                                color: Qt.rgba(0, 0, 0, 0.03)
+                                border.color: Qt.rgba(0, 0, 0, 0.08)
+                                visible: uiBridge.libraryRoots.length > 0
+
+                                ListView {
+                                    anchors.fill: parent
+                                    clip: true
+                                    model: uiBridge.libraryRoots
+                                    delegate: RowLayout {
+                                        width: ListView.view.width
+                                        spacing: 6
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: modelData
+                                            elide: Text.ElideMiddle
+                                        }
+                                        ToolButton {
+                                            text: "Rescan"
+                                            onClicked: uiBridge.rescanLibraryRoot(modelData)
+                                        }
+                                        ToolButton {
+                                            text: "Remove"
+                                            onClicked: uiBridge.removeLibraryRoot(modelData)
+                                        }
+                                    }
+                                }
+                            }
+
                             Label {
                                 Layout.fillWidth: true
                                 text: "Indexed tracks: " + uiBridge.libraryTrackCount
                                       + " | roots: " + uiBridge.libraryRootCount
-                                      + (uiBridge.libraryScanInProgress ? " | scanning..." : "")
+                                      + (uiBridge.libraryScanInProgress
+                                          ? (" | scanning " + uiBridge.libraryScanProcessed
+                                             + "/" + Math.max(uiBridge.libraryScanDiscovered, uiBridge.libraryScanProcessed)
+                                             + (uiBridge.libraryScanFilesPerSecond > 0
+                                                 ? (" @ " + uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
+                                                 : "")
+                                             + (uiBridge.libraryScanEtaSeconds >= 0
+                                                 ? (" ETA " + Math.ceil(uiBridge.libraryScanEtaSeconds) + "s")
+                                                 : ""))
+                                          : "")
                                 color: Kirigami.Theme.disabledTextColor
                                 elide: Text.ElideRight
                             }
@@ -1209,20 +1259,21 @@ Kirigami.ApplicationWindow {
 
                                 delegate: Rectangle {
                                     id: libraryRow
-                                    readonly property bool isArtistRow: rowType === "artist"
-                                    readonly property bool isAlbumRow: rowType === "album"
-                                    readonly property bool isTrackRow: rowType === "track"
-                                    readonly property string artistName: artist !== undefined ? artist : ""
-                                    readonly property string albumName: name !== undefined ? name : ""
-                                    readonly property string trackPathResolved: trackPath !== undefined ? trackPath : ""
-                                    readonly property string selectionKeyResolved: selectionKey !== undefined ? selectionKey : ""
-                                    readonly property bool draggableLibraryItem: isArtistRow
-                                        || isAlbumRow
-                                        || (isTrackRow && trackPathResolved.length > 0)
+                                    readonly property string rowTypeResolved: rowType || ""
+                                    readonly property bool isAlbumRow: rowTypeResolved === "album"
+                                    readonly property bool isTrackRow: rowTypeResolved === "track"
+                                    readonly property bool hasChildren: !isTrackRow && (key || "").length > 0
+                                    readonly property string selectionKeyResolved: selectionKey || ""
+                                    readonly property string trackPathResolved: trackPath || ""
+                                    readonly property string openPathResolved: openPath || ""
+                                    readonly property var playPathsResolved: playPaths || []
+                                    readonly property bool draggableLibraryItem: playPathsResolved.length > 0
+                                    readonly property string rowTitle: title || name || artist || ""
                                     readonly property bool albumCoverInViewport: isAlbumRow
                                         && (y + height >= libraryAlbumView.contentY - 48)
                                         && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
                                     readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
+                                    readonly property int depthResolved: depth !== undefined ? depth : 0
                                     width: ListView.view.width
                                     height: 24
                                     color: root.isLibrarySelectionKeySelected(selectionKey || "")
@@ -1238,7 +1289,7 @@ Kirigami.ApplicationWindow {
                                         spacing: 3
 
                                         Item {
-                                            Layout.preferredWidth: isArtistRow ? 0 : (isAlbumRow ? 14 : 28)
+                                            Layout.preferredWidth: Math.max(0, depthResolved * 18)
                                         }
 
                                         Label {
@@ -1248,9 +1299,7 @@ Kirigami.ApplicationWindow {
                                             Layout.alignment: Qt.AlignVCenter
                                             horizontalAlignment: Text.AlignHCenter
                                             verticalAlignment: Text.AlignVCenter
-                                            text: (isArtistRow || isAlbumRow)
-                                                ? (expanded ? "▾" : "▸")
-                                                : ""
+                                            text: hasChildren ? (expanded ? "▾" : "▸") : ""
                                             font.pixelSize: 20
                                             font.bold: true
                                             color: root.isLibrarySelectionKeySelected(selectionKey || "")
@@ -1284,12 +1333,7 @@ Kirigami.ApplicationWindow {
                                             Layout.alignment: Qt.AlignVCenter
                                             elide: Text.ElideRight
                                             verticalAlignment: Text.AlignVCenter
-                                            text: isArtistRow
-                                                ? (artist + " (" + count + ")")
-                                                : (isAlbumRow
-                                                    ? (name + " (" + count + ")")
-                                                    : (trackNumber.toString().padStart(2, "0")
-                                                       + "  " + title))
+                                            text: rowTitle
                                             color: root.isLibrarySelectionKeySelected(selectionKey || "")
                                                 ? Kirigami.Theme.highlightedTextColor
                                                 : Kirigami.Theme.textColor
@@ -1320,171 +1364,92 @@ Kirigami.ApplicationWindow {
                                             libraryDragProxy.y = 0
                                         }
                                         onClicked: function(mouse) {
-                                            if (mouse.button === Qt.LeftButton
-                                                    && (isArtistRow || isAlbumRow)
-                                                    && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                                                if (isArtistRow) {
-                                                    libraryModel.toggleArtist(artist)
-                                                } else {
-                                                    libraryModel.toggleAlbum(key)
-                                                }
-                                                return
-                                            }
                                             const rowMap = {
                                                 selectionKey: selectionKeyResolved,
-                                                sourceIndex: (isAlbumRow || isTrackRow) ? sourceIndexResolved : -1,
-                                                rowType: rowType || "",
+                                                sourceIndex: sourceIndexResolved,
+                                                rowType: rowTypeResolved,
                                                 artist: artist || "",
                                                 name: name || "",
-                                                trackPath: trackPath || ""
+                                                title: rowTitle,
+                                                trackPath: trackPathResolved,
+                                                openPath: openPathResolved,
+                                                playPaths: playPathsResolved
+                                            }
+                                            if (mouse.button === Qt.LeftButton
+                                                    && hasChildren
+                                                    && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
+                                                libraryModel.toggleKey(key)
+                                                return
                                             }
                                             root.handleLibraryRowSelection(
                                                 index,
                                                 rowMap,
                                                 mouse.button,
                                                 mouse.modifiers || Qt.NoModifier)
-                                            if (isArtistRow && mouse.button === Qt.RightButton) {
-                                                artistMenu.popup()
-                                                return
-                                            }
-                                            if (isAlbumRow) {
-                                                if (mouse.button === Qt.RightButton) {
-                                                    albumMenu.popup()
-                                                }
-                                            } else if (isTrackRow) {
-                                                if (mouse.button === Qt.RightButton) {
-                                                    trackMenu.popup()
-                                                }
+                                            if (mouse.button === Qt.RightButton) {
+                                                libraryContextMenu.rowMap = rowMap
+                                                libraryContextMenu.popup()
                                             }
                                         }
                                         onDoubleClicked: function(mouse) {
-                                            if ((isArtistRow || isAlbumRow)
+                                            const rowMap = {
+                                                selectionKey: selectionKeyResolved,
+                                                sourceIndex: sourceIndexResolved,
+                                                rowType: rowTypeResolved,
+                                                artist: artist || "",
+                                                name: name || "",
+                                                title: rowTitle,
+                                                trackPath: trackPathResolved,
+                                                openPath: openPathResolved,
+                                                playPaths: playPathsResolved
+                                            }
+                                            if (hasChildren
                                                     && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                                                if (isArtistRow) {
-                                                    libraryModel.toggleArtist(artist)
-                                                } else {
-                                                    libraryModel.toggleAlbum(key)
-                                                }
+                                                libraryModel.toggleKey(key)
                                                 return
                                             }
-                                            if (isArtistRow) {
-                                                uiBridge.replaceArtistByName(artist)
-                                            } else
-                                            if (isAlbumRow && sourceIndexResolved >= 0) {
-                                                uiBridge.replaceAlbumAt(sourceIndexResolved)
-                                            } else if (isTrackRow && trackPath && trackPath.length > 0) {
-                                                uiBridge.playTrack(trackPath)
+                                            const rows = root.rowsForLibraryAction(rowMap)
+                                            if (rows.length > 0) {
+                                                root.playLibraryRows(rows)
                                             }
                                         }
                                     }
 
                                     Menu {
-                                        id: albumMenu
+                                        id: libraryContextMenu
+                                        property var rowMap: ({})
+
                                         MenuItem {
-                                            text: "Play Album"
+                                            text: "Play"
+                                            enabled: root.isActionableLibraryRow(libraryContextMenu.rowMap)
                                             onTriggered: {
-                                                const rows = root.rowsForLibraryAction({
-                                                    selectionKey: selectionKeyResolved,
-                                                    sourceIndex: sourceIndexResolved,
-                                                    rowType: "album",
-                                                    artist: artistName,
-                                                    name: albumName,
-                                                    trackPath: ""
-                                                })
+                                                const rows = root.rowsForLibraryAction(libraryContextMenu.rowMap)
                                                 if (rows.length > 0) {
                                                     root.playLibraryRows(rows)
                                                 }
                                             }
                                         }
                                         MenuItem {
-                                            text: "Append Album"
+                                            text: "Append"
+                                            enabled: root.isActionableLibraryRow(libraryContextMenu.rowMap)
                                             onTriggered: {
-                                                const rows = root.rowsForLibraryAction({
-                                                    selectionKey: selectionKeyResolved,
-                                                    sourceIndex: sourceIndexResolved,
-                                                    rowType: "album",
-                                                    artist: artistName,
-                                                    name: albumName,
-                                                    trackPath: ""
-                                                })
+                                                const rows = root.rowsForLibraryAction(libraryContextMenu.rowMap)
                                                 if (rows.length > 0) {
                                                     root.appendLibraryRows(rows)
                                                 }
                                             }
                                         }
-                                    }
-
-                                    Menu {
-                                        id: artistMenu
+                                        MenuSeparator {}
                                         MenuItem {
-                                            text: "Play Artist"
-                                            onTriggered: {
-                                                const rows = root.rowsForLibraryAction({
-                                                    selectionKey: selectionKeyResolved,
-                                                    sourceIndex: -1,
-                                                    rowType: "artist",
-                                                    artist: artistName,
-                                                    name: "",
-                                                    trackPath: ""
-                                                })
-                                                if (rows.length > 0) {
-                                                    root.playLibraryRows(rows)
-                                                }
-                                            }
+                                            text: "Open in " + uiBridge.fileBrowserName
+                                            enabled: (libraryContextMenu.rowMap.openPath || "").length > 0
+                                            onTriggered: uiBridge.openInFileBrowser(libraryContextMenu.rowMap.openPath || "")
                                         }
                                         MenuItem {
-                                            text: "Append Artist"
-                                            onTriggered: {
-                                                const rows = root.rowsForLibraryAction({
-                                                    selectionKey: selectionKeyResolved,
-                                                    sourceIndex: -1,
-                                                    rowType: "artist",
-                                                    artist: artistName,
-                                                    name: "",
-                                                    trackPath: ""
-                                                })
-                                                if (rows.length > 0) {
-                                                    root.appendLibraryRows(rows)
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    Menu {
-                                        id: trackMenu
-                                        MenuItem {
-                                            text: "Play Track"
-                                            enabled: !!(trackPath && trackPath.length > 0)
-                                            onTriggered: {
-                                                const rows = root.rowsForLibraryAction({
-                                                    selectionKey: selectionKeyResolved,
-                                                    sourceIndex: sourceIndexResolved,
-                                                    rowType: "track",
-                                                    artist: artistName,
-                                                    name: albumName,
-                                                    trackPath: trackPathResolved
-                                                })
-                                                if (rows.length > 0) {
-                                                    root.playLibraryRows(rows)
-                                                }
-                                            }
-                                        }
-                                        MenuItem {
-                                            text: "Append Track"
-                                            enabled: !!(trackPath && trackPath.length > 0)
-                                            onTriggered: {
-                                                const rows = root.rowsForLibraryAction({
-                                                    selectionKey: selectionKeyResolved,
-                                                    sourceIndex: sourceIndexResolved,
-                                                    rowType: "track",
-                                                    artist: artistName,
-                                                    name: albumName,
-                                                    trackPath: trackPathResolved
-                                                })
-                                                if (rows.length > 0) {
-                                                    root.appendLibraryRows(rows)
-                                                }
-                                            }
+                                            text: "Open containing folder"
+                                            visible: libraryContextMenu.rowMap.rowType === "track"
+                                            enabled: (libraryContextMenu.rowMap.trackPath || "").length > 0
+                                            onTriggered: uiBridge.openContainingFolder(libraryContextMenu.rowMap.trackPath || "")
                                         }
                                     }
                                 }
@@ -1492,8 +1457,8 @@ Kirigami.ApplicationWindow {
 
                             Label {
                                 visible: libraryAlbumView.count === 0
-                                text: uiBridge.libraryAlbums.length === 0
-                                    ? (uiBridge.libraryScanInProgress ? "Scanning library..." : "No albums indexed")
+                                text: uiBridge.libraryTree.length === 0
+                                    ? (uiBridge.libraryScanInProgress ? "Scanning library..." : "No library rows indexed")
                                     : "No results"
                                 color: Kirigami.Theme.disabledTextColor
                                 Layout.fillWidth: true
@@ -1624,6 +1589,16 @@ Kirigami.ApplicationWindow {
                                     }
                                 }
                                 MenuItem {
+                                    text: "Open containing folder"
+                                    enabled: playlistContextMenu.rowIndex >= 0
+                                    onTriggered: {
+                                        const path = uiBridge.queuePathAt(playlistContextMenu.rowIndex)
+                                        if (path && path.length > 0) {
+                                            uiBridge.openContainingFolder(path)
+                                        }
+                                    }
+                                }
+                                MenuItem {
                                     text: "Remove Track"
                                     enabled: playlistContextMenu.rowIndex >= 0
                                     onTriggered: {
@@ -1702,10 +1677,13 @@ Kirigami.ApplicationWindow {
                             const rowMap = {
                                 selectionKey: src.selectionKeyResolved || "",
                                 sourceIndex: src.sourceIndexResolved !== undefined ? src.sourceIndexResolved : -1,
-                                rowType: src.isArtistRow ? "artist" : (src.isAlbumRow ? "album" : "track"),
-                                artist: src.artistName || "",
-                                name: src.albumName || "",
-                                trackPath: src.trackPathResolved || ""
+                                rowType: src.rowTypeResolved || "",
+                                artist: src.artist || "",
+                                name: src.name || "",
+                                title: src.rowTitle || "",
+                                trackPath: src.trackPathResolved || "",
+                                openPath: src.openPathResolved || "",
+                                playPaths: src.playPathsResolved || []
                             }
                             const rows = root.rowsForLibraryAction(rowMap)
                             if (rows.length > 0) {

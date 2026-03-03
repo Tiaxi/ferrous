@@ -1462,8 +1462,7 @@ mod backend {
         let analysis_sync = std::env::var("FERROUS_GST_ANALYSIS_SYNC")
             .ok()
             .and_then(|raw| raw.parse::<i32>().ok())
-            .map(|v| v != 0)
-            .unwrap_or(true);
+            != Some(0);
 
         let appsink = gst_app::AppSink::builder()
             .caps(&caps)
