@@ -81,8 +81,6 @@ pub enum BridgeSettingsCommand {
     SaveToDisk,
     SetVolume(f32),
     SetFftSize(usize),
-    SetSpectrogramOffsetMs(i32),
-    SetSpectrogramLookaheadMs(i32),
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
@@ -110,8 +108,6 @@ pub struct BridgeSnapshot {
 pub struct BridgeSettings {
     pub volume: f32,
     pub fft_size: usize,
-    pub spectrogram_offset_ms: i32,
-    pub spectrogram_lookahead_ms: i32,
     pub db_range: f32,
     pub log_scale: bool,
     pub show_fps: bool,
@@ -125,26 +121,11 @@ impl Default for BridgeSettings {
         Self {
             volume: 1.0,
             fft_size: 8192,
-            spectrogram_offset_ms: 0,
-            spectrogram_lookahead_ms: 0,
             db_range: 90.0,
             log_scale: false,
             show_fps,
         }
     }
-}
-
-const MIN_SPECTROGRAM_OFFSET_MS: i32 = -120;
-const MAX_SPECTROGRAM_OFFSET_MS: i32 = 240;
-const MIN_SPECTROGRAM_LOOKAHEAD_MS: i32 = 0;
-const MAX_SPECTROGRAM_LOOKAHEAD_MS: i32 = 240;
-
-fn clamp_spectrogram_offset_ms(value: i32) -> i32 {
-    value.clamp(MIN_SPECTROGRAM_OFFSET_MS, MAX_SPECTROGRAM_OFFSET_MS)
-}
-
-fn clamp_spectrogram_lookahead_ms(value: i32) -> i32 {
-    value.clamp(MIN_SPECTROGRAM_LOOKAHEAD_MS, MAX_SPECTROGRAM_LOOKAHEAD_MS)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -255,12 +236,6 @@ fn run_bridge_loop(
     state.playback.volume = state.settings.volume;
     playback.command(PlaybackCommand::SetVolume(state.settings.volume));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
-    analysis.command(AnalysisCommand::SetSpectrogramOffsetMs(
-        state.settings.spectrogram_offset_ms,
-    ));
-    analysis.command(AnalysisCommand::SetSpectrogramLookaheadMs(
-        state.settings.spectrogram_lookahead_ms,
-    ));
     apply_session_restore(&mut state, &playback, load_session_snapshot().as_ref());
 
     let mut running = true;
@@ -515,16 +490,6 @@ fn handle_bridge_command(
                     context
                         .analysis
                         .command(AnalysisCommand::SetFftSize(state.settings.fft_size));
-                    context
-                        .analysis
-                        .command(AnalysisCommand::SetSpectrogramOffsetMs(
-                            state.settings.spectrogram_offset_ms,
-                        ));
-                    context
-                        .analysis
-                        .command(AnalysisCommand::SetSpectrogramLookaheadMs(
-                            state.settings.spectrogram_lookahead_ms,
-                        ));
                 }
                 BridgeSettingsCommand::SaveToDisk => {
                     save_settings(&state.settings);
@@ -540,22 +505,6 @@ fn handle_bridge_command(
                     let fft = size.clamp(512, 8192).next_power_of_two();
                     state.settings.fft_size = fft;
                     context.analysis.command(AnalysisCommand::SetFftSize(fft));
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetSpectrogramOffsetMs(value) => {
-                    let clamped = clamp_spectrogram_offset_ms(value);
-                    state.settings.spectrogram_offset_ms = clamped;
-                    context
-                        .analysis
-                        .command(AnalysisCommand::SetSpectrogramOffsetMs(clamped));
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetSpectrogramLookaheadMs(value) => {
-                    let clamped = clamp_spectrogram_lookahead_ms(value);
-                    state.settings.spectrogram_lookahead_ms = clamped;
-                    context
-                        .analysis
-                        .command(AnalysisCommand::SetSpectrogramLookaheadMs(clamped));
                     *context.settings_dirty = true;
                 }
                 BridgeSettingsCommand::SetDbRange(v) => {
@@ -1153,16 +1102,6 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.fft_size = x.clamp(512, 8192).next_power_of_two();
                 }
             }
-            "spectrogram_offset_ms" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.spectrogram_offset_ms = clamp_spectrogram_offset_ms(x);
-                }
-            }
-            "spectrogram_lookahead_ms" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.spectrogram_lookahead_ms = clamp_spectrogram_lookahead_ms(x);
-                }
-            }
             "db_range" => {
                 if let Ok(x) = value.parse::<f32>() {
                     settings.db_range = x.clamp(50.0, 120.0);
@@ -1196,11 +1135,9 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_offset_ms={}\nspectrogram_lookahead_ms={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\n",
+        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\n",
         settings.volume,
         settings.fft_size,
-        settings.spectrogram_offset_ms,
-        settings.spectrogram_lookahead_ms,
         settings.db_range,
         i32::from(settings.log_scale),
         i32::from(settings.show_fps),
@@ -1230,8 +1167,6 @@ mod tests {
         let settings = BridgeSettings {
             volume: 0.42,
             fft_size: 2048,
-            spectrogram_offset_ms: -35,
-            spectrogram_lookahead_ms: 48,
             db_range: 77.5,
             log_scale: true,
             show_fps: true,
@@ -1241,8 +1176,6 @@ mod tests {
         parse_settings_text(&mut parsed, &text);
         assert!((parsed.volume - 0.42).abs() < 0.0001);
         assert_eq!(parsed.fft_size, 2048);
-        assert_eq!(parsed.spectrogram_offset_ms, -35);
-        assert_eq!(parsed.spectrogram_lookahead_ms, 48);
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.log_scale);
         assert!(parsed.show_fps);
@@ -1253,15 +1186,10 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=2.5\nfft_size=111\nspectrogram_offset_ms=-999\nspectrogram_lookahead_ms=999\ndb_range=500\nlog_scale=0\nshow_fps=1\n",
+            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\nshow_fps=1\n",
         );
         assert_eq!(settings.volume, 1.0);
         assert_eq!(settings.fft_size, 512);
-        assert_eq!(settings.spectrogram_offset_ms, MIN_SPECTROGRAM_OFFSET_MS);
-        assert_eq!(
-            settings.spectrogram_lookahead_ms,
-            MAX_SPECTROGRAM_LOOKAHEAD_MS
-        );
         assert_eq!(settings.db_range, 120.0);
         assert!(!settings.log_scale);
         assert!(settings.show_fps);

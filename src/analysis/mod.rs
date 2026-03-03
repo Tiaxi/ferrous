@@ -23,8 +23,6 @@ pub enum AnalysisCommand {
     },
     SetSampleRate(u32),
     SetFftSize(usize),
-    SetSpectrogramOffsetMs(i32),
-    SetSpectrogramLookaheadMs(i32),
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -54,11 +52,8 @@ const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
-const BASE_VISUAL_DELAY_MS: i32 = 40;
-const MIN_SPECTROGRAM_OFFSET_MS: i32 = -120;
-const MAX_SPECTROGRAM_OFFSET_MS: i32 = 240;
-const MIN_SPECTROGRAM_LOOKAHEAD_MS: i32 = 0;
-const MAX_SPECTROGRAM_LOOKAHEAD_MS: i32 = 240;
+const BASE_VISUAL_DELAY_MS: i32 = 0;
+const REFERENCE_HOP: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WaveformSourceStamp {
@@ -93,7 +88,7 @@ impl AnalysisEngine {
             let mut last_emit = std::time::Instant::now();
 
             let mut stft = StftComputer::new(8192, 1024);
-            let mut decimator = SpectrogramDecimator::new(1);
+            let mut decimator = SpectrogramDecimator::new(decimation_factor_for_hop(1024));
             let mut active_track_token = 0u64;
             let mut active_track_path: Option<PathBuf> = None;
             let mut active_track_stamp: Option<WaveformSourceStamp> = None;
@@ -113,8 +108,6 @@ impl AnalysisEngine {
             let mut prof_in_samples = 0usize;
             let mut prof_out_samples = 0usize;
             let mut ticks_without_row = 0usize;
-            let mut spectrogram_offset_ms = 0_i32;
-            let mut spectrogram_lookahead_ms = 0_i32;
 
             loop {
                 select! {
@@ -222,7 +215,7 @@ impl AnalysisEngine {
                                 let fft = size.clamp(512, 8192).next_power_of_two();
                                 let hop = (fft / 8).max(64);
                                 stft = StftComputer::new(fft, hop);
-                                decimator.reset();
+                                decimator = SpectrogramDecimator::new(decimation_factor_for_hop(hop));
                                 pending_rows.clear();
                                 snapshot.spectrogram_seq = 0;
                                 drain_pcm_queue(&pcm_rx);
@@ -237,14 +230,6 @@ impl AnalysisEngine {
                                     &mut last_emit,
                                     true,
                                 );
-                            }
-                            AnalysisCommand::SetSpectrogramOffsetMs(offset_ms) => {
-                                spectrogram_offset_ms =
-                                    offset_ms.clamp(MIN_SPECTROGRAM_OFFSET_MS, MAX_SPECTROGRAM_OFFSET_MS);
-                            }
-                            AnalysisCommand::SetSpectrogramLookaheadMs(lookahead_ms) => {
-                                spectrogram_lookahead_ms = lookahead_ms
-                                    .clamp(MIN_SPECTROGRAM_LOOKAHEAD_MS, MAX_SPECTROGRAM_LOOKAHEAD_MS);
                             }
                             AnalysisCommand::WaveformProgress {
                                 track_token,
@@ -332,21 +317,15 @@ impl AnalysisEngine {
                         target_samples = target_samples.clamp(256, 2048);
 
                         // Keep visuals slightly behind output to compensate sink/device buffering.
-                        let visual_delay_ms =
-                            (BASE_VISUAL_DELAY_MS + spectrogram_offset_ms).clamp(0, MAX_SPECTROGRAM_OFFSET_MS)
-                                as usize;
-                        let lookahead_samples = (snapshot.sample_rate_hz as usize)
-                            * (spectrogram_lookahead_ms as usize)
-                            / 1000;
-                        let visual_delay_samples = (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
+                        let visual_delay_ms = BASE_VISUAL_DELAY_MS as usize;
                         let effective_delay_samples =
-                            visual_delay_samples.saturating_sub(lookahead_samples);
+                            (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
                         // Enforce configured visual delay by consuming only from samples older
                         // than the delay horizon.
                         let available = pcm_fifo.len().saturating_sub(effective_delay_samples);
 
                         // Closed-loop backlog control: steer FIFO depth toward configured delay
-                        // so offset remains effective even when producer/consumer drift.
+                        // to limit drift when producer/consumer pacing differs.
                         let backlog_error =
                             pcm_fifo.len() as isize - effective_delay_samples as isize;
                         let correction = (backlog_error / 8).clamp(-512, 512);
@@ -426,6 +405,13 @@ impl AnalysisEngine {
     pub fn pcm_sender(&self) -> Sender<Vec<f32>> {
         self.pcm_tx.clone()
     }
+}
+
+fn decimation_factor_for_hop(hop: usize) -> usize {
+    if hop == 0 {
+        return 1;
+    }
+    (REFERENCE_HOP / hop).max(1)
 }
 
 fn drain_pcm_queue(pcm_rx: &Receiver<Vec<f32>>) {
