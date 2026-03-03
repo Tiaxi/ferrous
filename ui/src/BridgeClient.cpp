@@ -124,14 +124,14 @@ BridgeClient::BridgeClient(QObject *parent)
         }
     });
     m_analysisNotifyTimer.setSingleShot(true);
-    m_analysisNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_ANALYSIS_NOTIFY_MS", 8));
+    m_analysisNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_ANALYSIS_NOTIFY_MS", 16));
     connect(&m_analysisNotifyTimer, &QTimer::timeout, this, [this]() {
         if (m_analysisChangedPending) {
             m_analysisChangedPending = false;
             emit analysisChanged();
         }
     });
-    m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 8));
+    m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
     const QString bridgeMode = qEnvironmentVariable("FERROUS_BRIDGE_MODE").trimmed().toLower();
@@ -859,7 +859,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
                 const qsizetype bytes = static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
                 m_spectrogramRowsPacked.append(reinterpret_cast<const char *>(cursor), bytes);
                 m_spectrogramPackedRows += rowCount;
-                constexpr int kMaxPendingSpectrogramRows = 128;
+                constexpr int kMaxPendingSpectrogramRows = 512;
                 if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows && m_spectrogramPackedBins > 0) {
                     const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;
                     const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
@@ -1168,7 +1168,7 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                 }
                 if (rowsAdded > 0) {
                     m_spectrogramPackedRows += rowsAdded;
-                    constexpr int kMaxPendingSpectrogramRows = 128;
+                    constexpr int kMaxPendingSpectrogramRows = 512;
                     if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows
                         && m_spectrogramPackedBins > 0) {
                         const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;

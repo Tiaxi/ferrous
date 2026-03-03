@@ -23,6 +23,7 @@ pub enum AnalysisCommand {
     },
     SetSampleRate(u32),
     SetFftSize(usize),
+    SetSpectrogramOffsetMs(i32),
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -52,6 +53,9 @@ const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
+const BASE_VISUAL_DELAY_MS: i32 = 40;
+const MIN_SPECTROGRAM_OFFSET_MS: i32 = -120;
+const MAX_SPECTROGRAM_OFFSET_MS: i32 = 240;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WaveformSourceStamp {
@@ -106,10 +110,7 @@ impl AnalysisEngine {
             let mut prof_in_samples = 0usize;
             let mut prof_out_samples = 0usize;
             let mut ticks_without_row = 0usize;
-            let visual_delay_ms = std::env::var("FERROUS_ANALYSIS_VISUAL_DELAY_MS")
-                .ok()
-                .and_then(|raw| raw.parse::<u32>().ok())
-                .map_or(0_u32, |v| v.clamp(0, 80));
+            let mut spectrogram_offset_ms = 0_i32;
 
             loop {
                 select! {
@@ -233,6 +234,10 @@ impl AnalysisEngine {
                                     true,
                                 );
                             }
+                            AnalysisCommand::SetSpectrogramOffsetMs(offset_ms) => {
+                                spectrogram_offset_ms =
+                                    offset_ms.clamp(MIN_SPECTROGRAM_OFFSET_MS, MAX_SPECTROGRAM_OFFSET_MS);
+                            }
                             AnalysisCommand::WaveformProgress {
                                 track_token,
                                 peaks,
@@ -303,8 +308,8 @@ impl AnalysisEngine {
                             pcm_fifo.extend(samples);
                         }
 
-                        // Keep FIFO bounded so visuals cannot accumulate large latency under transient load.
-                        let fifo_max = ((snapshot.sample_rate_hz as usize) * 100 / 1000).max(4096);
+                        // Keep FIFO bounded to roughly 0.5s to avoid visual lead/lag buildup.
+                        let fifo_max = (snapshot.sample_rate_hz as usize / 2).max(4096);
                         while pcm_fifo.len() > fifo_max {
                             let _ = pcm_fifo.pop_front();
                         }
@@ -316,11 +321,14 @@ impl AnalysisEngine {
                         sample_credit += dt * snapshot.sample_rate_hz as f64;
                         let mut target_samples = sample_credit.floor() as usize;
                         sample_credit -= target_samples as f64;
-                        target_samples = target_samples.clamp(128, 2048);
+                        target_samples = target_samples.clamp(256, 2048);
 
-                        // Keep visuals just slightly behind output to compensate sink/device buffering.
+                        // Keep visuals slightly behind output to compensate sink/device buffering.
+                        let visual_delay_ms =
+                            (BASE_VISUAL_DELAY_MS + spectrogram_offset_ms).clamp(0, MAX_SPECTROGRAM_OFFSET_MS)
+                                as usize;
                         let visual_delay_samples =
-                            ((snapshot.sample_rate_hz as usize) * (visual_delay_ms as usize) / 1000).max(64);
+                            (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
                         let mut available = if pcm_fifo.len() > visual_delay_samples {
                             pcm_fifo.len().saturating_sub(visual_delay_samples)
                         } else {
@@ -679,8 +687,8 @@ impl StftComputer {
     fn enqueue_samples(&mut self, samples: &[f32], sample_rate_hz: u32) {
         self.compact_pending_if_needed();
         self.pending.extend_from_slice(samples);
-        // Keep pending bounded to avoid latency creep under temporary load spikes.
-        let max_pending = (sample_rate_hz as usize / 4).max(self.fft_size * 2);
+        // Keep pending bounded to avoid latency creep: max ~0.5s audio.
+        let max_pending = (sample_rate_hz as usize / 2).max(self.fft_size * 4);
         let available = self.pending_available();
         if available > max_pending {
             let drop = available - max_pending;
@@ -715,7 +723,7 @@ impl StftComputer {
         }
 
         // If producer is outrunning us, drop backlog to keep spectrogram in real-time sync.
-        let max_backlog = self.fft_size * 2;
+        let max_backlog = self.fft_size * 4;
         let available = self.pending_available();
         if available > max_backlog {
             let drop = available - max_backlog;

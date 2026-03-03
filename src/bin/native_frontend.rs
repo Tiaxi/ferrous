@@ -150,6 +150,13 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
                 )),
                 Err(_) => eprintln!("invalid fps value, expected 0 or 1"),
             }
+        } else if let Some(rest) = line.strip_prefix("spectro_offset ") {
+            match rest.parse::<i32>() {
+                Ok(value) => bridge.command(BridgeCommand::Settings(
+                    BridgeSettingsCommand::SetSpectrogramOffsetMs(value),
+                )),
+                Err(_) => eprintln!("invalid spectro_offset value, expected integer milliseconds"),
+            }
         } else if line == "snap" {
             bridge.command(BridgeCommand::RequestSnapshot);
         } else {
@@ -549,6 +556,17 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             Some(BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(
                 value != 0.0,
             )))
+        }
+        "set_spectrogram_offset_ms" => {
+            let value = parsed.value.ok_or_else(|| {
+                "set_spectrogram_offset_ms requires numeric field 'value'".to_string()
+            })?;
+            if !value.is_finite() {
+                return Err("set_spectrogram_offset_ms value must be a finite number".to_string());
+            }
+            Some(BridgeCommand::Settings(
+                BridgeSettingsCommand::SetSpectrogramOffsetMs(value.round() as i32),
+            ))
         }
         "play_at" => {
             let value = parsed
@@ -986,6 +1004,7 @@ fn encode_snapshot_payload(
         "settings": {
             "volume": s.settings.volume,
             "fft_size": s.settings.fft_size,
+            "spectrogram_offset_ms": s.settings.spectrogram_offset_ms,
             "db_range": s.settings.db_range,
             "log_scale": s.settings.log_scale,
             "show_fps": s.settings.show_fps,
