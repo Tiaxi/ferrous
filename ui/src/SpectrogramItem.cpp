@@ -12,7 +12,7 @@
 
 namespace {
 constexpr double kMinFreqHz = 25.0;
-constexpr int kMaxPendingColumns = 96;
+constexpr int kMaxPendingColumns = 128;
 constexpr int kPendingBacklogTarget = 1;
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
     {{65535, 65535, 65535}},
@@ -577,7 +577,7 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     m_pendingPhase += rowsPerSecond * dt;
     const int backlog = static_cast<int>(m_pendingColumns.size());
     if (backlog > kPendingBacklogTarget) {
-        m_pendingPhase += static_cast<double>(backlog - kPendingBacklogTarget) * 1.5;
+        m_pendingPhase += static_cast<double>(backlog - kPendingBacklogTarget) * 1.2;
     }
 
     bool consumed = false;

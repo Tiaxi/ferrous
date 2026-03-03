@@ -1434,7 +1434,7 @@ mod backend {
             .build()
             .map_err(|_| anyhow!("missing queue element"))?;
         queue_tap.set_property_from_str("leaky", "downstream");
-        queue_tap.set_property("max-size-buffers", 64u32);
+        queue_tap.set_property("max-size-buffers", 24u32);
         queue_tap.set_property("max-size-bytes", 0u32);
         queue_tap.set_property("max-size-time", 0u64);
         let conv = gst::ElementFactory::make("audioconvert")
@@ -1455,12 +1455,20 @@ mod backend {
             .field("rate", 44_100i32)
             .build();
         capsfilter.set_property("caps", &caps);
+        let analysis_sync = std::env::var("FERROUS_GST_ANALYSIS_SYNC")
+            .ok()
+            .is_some_and(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
 
         let appsink = gst_app::AppSink::builder()
             .caps(&caps)
             .drop(true)
-            .max_buffers(8)
-            .sync(true)
+            .max_buffers(5)
+            .sync(analysis_sync)
             .build();
 
         let tap_chunk_samples = std::env::var("FERROUS_GST_TAP_CHUNK_SAMPLES")
