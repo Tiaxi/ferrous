@@ -42,7 +42,7 @@ ctest --test-dir ui/build --output-on-failure
 ```bash
 FERROUS_BRIDGE_MODE=process \
 FERROUS_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge' \
-./build/ferrous_kirigami_shell
+./build/ferrous
 ```
 
 If `FERROUS_BRIDGE_MODE=process` and `FERROUS_BRIDGE_CMD` is not set, the app auto-detects

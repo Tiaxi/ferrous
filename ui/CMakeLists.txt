@@ -34,7 +34,7 @@ add_custom_target(ferrous_rust_bridge ALL
     VERBATIM
 )
 
-qt_add_executable(ferrous_kirigami_shell
+qt_add_executable(ferrous
     src/main.cpp
     src/BridgeClient.cpp
     src/LibraryTreeModel.cpp
@@ -42,10 +42,10 @@ qt_add_executable(ferrous_kirigami_shell
     src/WaveformItem.cpp
 )
 
-target_include_directories(ferrous_kirigami_shell PRIVATE src)
-add_dependencies(ferrous_kirigami_shell ferrous_rust_bridge)
+target_include_directories(ferrous PRIVATE src)
+add_dependencies(ferrous ferrous_rust_bridge)
 
-qt_add_qml_module(ferrous_kirigami_shell
+qt_add_qml_module(ferrous
     URI FerrousNative
     VERSION 1.0
     NO_IMPORT_SCAN
@@ -53,7 +53,7 @@ qt_add_qml_module(ferrous_kirigami_shell
         qml/Main.qml
 )
 
-target_link_libraries(ferrous_kirigami_shell PRIVATE
+target_link_libraries(ferrous PRIVATE
     "${FERROUS_RUST_STATIC_LIB}"
     PkgConfig::FERROUS_GSTREAMER
     Qt6::Core

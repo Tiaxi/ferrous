@@ -94,7 +94,7 @@ are delta-style payloads and may be `null` when unchanged.
 cd ui
 cmake -B build -G Ninja
 cmake --build build
-./build/ferrous_kirigami_shell
+./build/ferrous
 ```
 
 One-command dev path from repo root:

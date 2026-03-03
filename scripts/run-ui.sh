@@ -131,5 +131,5 @@ if [[ ${DO_RUN} -eq 1 ]]; then
     else
         export FERROUS_BRIDGE_MODE=in-process
     fi
-    exec "${BUILD_DIR}/ferrous_kirigami_shell" "${APP_ARGS[@]}"
+    exec "${BUILD_DIR}/ferrous" "${APP_ARGS[@]}"
 fi

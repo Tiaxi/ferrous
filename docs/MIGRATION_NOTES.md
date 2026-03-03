@@ -19,7 +19,7 @@ Use the UI launcher script from repository root:
 
 By default this launches:
 
-- `ferrous_kirigami_shell` (Qt/Kirigami UI)
+- `ferrous` (Qt/Kirigami UI)
 - in-process Rust backend bridge (`ferrous_ffi_bridge_*`)
 
 No long-lived `native_frontend --json-bridge` subprocess is started in this default mode.
