@@ -1115,34 +1115,36 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
-        match k {
+        let key = k.trim();
+        let value = v.trim();
+        match key {
             "volume" => {
-                if let Ok(x) = v.parse::<f32>() {
+                if let Ok(x) = value.parse::<f32>() {
                     settings.volume = x.clamp(0.0, 1.0);
                 }
             }
             "fft_size" => {
-                if let Ok(x) = v.parse::<usize>() {
+                if let Ok(x) = value.parse::<usize>() {
                     settings.fft_size = x.clamp(512, 8192).next_power_of_two();
                 }
             }
             "spectrogram_offset_ms" => {
-                if let Ok(x) = v.parse::<i32>() {
+                if let Ok(x) = value.parse::<i32>() {
                     settings.spectrogram_offset_ms = clamp_spectrogram_offset_ms(x);
                 }
             }
             "db_range" => {
-                if let Ok(x) = v.parse::<f32>() {
+                if let Ok(x) = value.parse::<f32>() {
                     settings.db_range = x.clamp(50.0, 120.0);
                 }
             }
             "log_scale" => {
-                if let Ok(x) = v.parse::<i32>() {
+                if let Ok(x) = value.parse::<i32>() {
                     settings.log_scale = x != 0;
                 }
             }
             "show_fps" => {
-                if let Ok(x) = v.parse::<i32>() {
+                if let Ok(x) = value.parse::<i32>() {
                     settings.show_fps = x != 0;
                 }
             }

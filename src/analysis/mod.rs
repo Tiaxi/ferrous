@@ -329,16 +329,9 @@ impl AnalysisEngine {
                                 as usize;
                         let visual_delay_samples =
                             (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
-                        let mut available = if pcm_fifo.len() > visual_delay_samples {
-                            pcm_fifo.len().saturating_sub(visual_delay_samples)
-                        } else {
-                            // Never fully stall visuals when backlog is small.
-                            pcm_fifo.len()
-                        };
-                        if ticks_without_row > 24 {
-                            // Recovery mode: if visuals are stalled, consume directly to kick-start rows.
-                            available = pcm_fifo.len();
-                        }
+                        // Enforce configured visual delay by consuming only from samples older
+                        // than the delay horizon.
+                        let available = pcm_fifo.len().saturating_sub(visual_delay_samples);
                         let to_feed = target_samples.min(available);
                         if to_feed > 0 {
                             let mut feed = Vec::with_capacity(to_feed);

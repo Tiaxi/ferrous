@@ -129,7 +129,8 @@ private:
     void scheduleAnalysisChanged();
     void startBridgeProcess();
     void sendJson(const QJsonObject &obj);
-    void sendCommand(const QString &cmd, double value = -1.0);
+    void sendCommand(const QString &cmd);
+    void sendCommand(const QString &cmd, double value);
     void handleStdoutReady();
     void handleStderrReady();
     void handleProcessStarted();

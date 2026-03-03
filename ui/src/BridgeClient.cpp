@@ -945,13 +945,16 @@ void BridgeClient::startBridgeProcess() {
     m_process.start(shell, args);
 }
 
+void BridgeClient::sendCommand(const QString &cmd) {
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), cmd);
+    sendJson(obj);
+}
+
 void BridgeClient::sendCommand(const QString &cmd, double value) {
     QJsonObject obj;
     obj.insert(QStringLiteral("cmd"), cmd);
-    if (value >= 0.0) {
-        obj.insert(QStringLiteral("value"), value);
-    }
-
+    obj.insert(QStringLiteral("value"), value);
     sendJson(obj);
 }
 
