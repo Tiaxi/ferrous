@@ -38,6 +38,7 @@ Kirigami.ApplicationWindow {
     property real albumArtZoom: 1.0
     property real albumArtPanX: 0.0
     property real albumArtPanY: 0.0
+    property string pendingFolderDialogContext: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -644,6 +645,25 @@ Kirigami.ApplicationWindow {
         return value
     }
 
+    function folderDialogPath(dialogObj) {
+        if (!dialogObj) {
+            return ""
+        }
+        const candidates = [dialogObj.folder, dialogObj.currentFolder, dialogObj.selectedFolder]
+        for (let i = 0; i < candidates.length; ++i) {
+            const path = root.urlToLocalPath(candidates[i])
+            if (path.length > 0) {
+                return path
+            }
+        }
+        return ""
+    }
+
+    function promptAddLibraryRoot(contextValue) {
+        pendingFolderDialogContext = contextValue || ""
+        scanFolderDialog.open()
+    }
+
     function openAlbumArtViewer() {
         if (!uiBridge.currentTrackCoverPath || uiBridge.currentTrackCoverPath.length === 0) {
             return
@@ -681,7 +701,13 @@ Kirigami.ApplicationWindow {
     Action {
         id: scanFolderAction
         text: "Scan Folder..."
-        onTriggered: scanFolderDialog.open()
+        onTriggered: root.promptAddLibraryRoot("file_menu")
+    }
+    Action {
+        id: preferencesAction
+        text: "Preferences..."
+        shortcut: StandardKey.Preferences
+        onTriggered: preferencesDialog.open()
     }
     Action {
         id: removeSelectedTrackAction
@@ -861,7 +887,8 @@ Kirigami.ApplicationWindow {
                 { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut) },
                 { label: selectPreviousTrackAction.text, shortcut: String(selectPreviousTrackAction.shortcut) },
                 { label: selectNextTrackAction.text, shortcut: String(selectNextTrackAction.shortcut) },
-                { label: clearPlaylistAction.text, shortcut: "" }
+                { label: clearPlaylistAction.text, shortcut: "" },
+                { label: preferencesAction.text, shortcut: String(preferencesAction.shortcut) }
             ])
             MenuItem { action: removeSelectedTrackAction }
             MenuItem { action: moveTrackUpAction }
@@ -871,6 +898,8 @@ Kirigami.ApplicationWindow {
             MenuItem { action: selectNextTrackAction }
             MenuSeparator {}
             MenuItem { action: clearPlaylistAction }
+            MenuSeparator {}
+            MenuItem { action: preferencesAction }
         }
         Menu {
             title: "View"
@@ -943,15 +972,177 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: preferencesDialog
+        modal: true
+        title: "Preferences"
+        standardButtons: Dialog.Close
+        width: Math.min(760, root.width - 80)
+        height: Math.min(620, root.height - 80)
+
+        contentItem: ScrollView {
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+            ColumnLayout {
+                width: preferencesDialog.availableWidth
+                spacing: 12
+
+                GroupBox {
+                    title: "Library"
+                    Layout.fillWidth: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Button {
+                                text: "Add Root..."
+                                onClicked: root.promptAddLibraryRoot("preferences")
+                            }
+                            Button {
+                                text: "Rescan All"
+                                onClicked: uiBridge.rescanAllLibraryRoots()
+                            }
+                            Button {
+                                text: "Add ~/Music"
+                                onClicked: uiBridge.scanDefaultMusicRoot()
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Label { text: "Album Sort:" }
+                            ComboBox {
+                                model: ["Year", "Title"]
+                                currentIndex: Math.max(0, Math.min(1, uiBridge.librarySortMode))
+                                onActivated: uiBridge.setLibrarySortMode(currentIndex)
+                                Layout.preferredWidth: 160
+                            }
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: uiBridge.libraryRoots.length === 0
+                                ? "No library roots configured."
+                                : "Configured roots:"
+                            color: Kirigami.Theme.disabledTextColor
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(180, 30 * Math.max(1, uiBridge.libraryRoots.length))
+                            color: Qt.rgba(0, 0, 0, 0.03)
+                            border.color: Qt.rgba(0, 0, 0, 0.08)
+                            visible: uiBridge.libraryRoots.length > 0
+
+                            ListView {
+                                anchors.fill: parent
+                                clip: true
+                                model: uiBridge.libraryRoots
+                                delegate: RowLayout {
+                                    width: ListView.view.width
+                                    spacing: 6
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: modelData
+                                        elide: Text.ElideMiddle
+                                    }
+                                    ToolButton {
+                                        text: "Open"
+                                        onClicked: uiBridge.openInFileBrowser(modelData)
+                                    }
+                                    ToolButton {
+                                        text: "Rescan"
+                                        onClicked: uiBridge.rescanLibraryRoot(modelData)
+                                    }
+                                    ToolButton {
+                                        text: "Remove"
+                                        onClicked: uiBridge.removeLibraryRoot(modelData)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "Visualization"
+                    Layout.fillWidth: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Label { text: "dB Range:" }
+                            Slider {
+                                id: prefsDbRangeSlider
+                                Layout.fillWidth: true
+                                from: 50
+                                to: 120
+                                stepSize: 1
+                                value: uiBridge.dbRange
+                                onMoved: uiBridge.setDbRange(value)
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        uiBridge.setDbRange(value)
+                                    }
+                                }
+                            }
+                            Label {
+                                text: Math.round(prefsDbRangeSlider.value).toString()
+                                Layout.preferredWidth: 32
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Log Scale Spectrogram"
+                            checked: uiBridge.logScale
+                            onToggled: uiBridge.setLogScale(checked)
+                        }
+                        CheckBox {
+                            text: "Show Spectrogram FPS Overlay"
+                            checked: uiBridge.showFps
+                            onToggled: uiBridge.setShowFps(checked)
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "Interface"
+                    Layout.fillWidth: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        CheckBox {
+                            text: "Auto-center Queue Selection"
+                            checked: root.autoCenterQueueSelection
+                            onToggled: root.autoCenterQueueSelection = checked
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Platform.FolderDialog {
         id: scanFolderDialog
         title: "Select Music Folder to Scan"
         onAccepted: {
-            const localPath = root.urlToLocalPath(folder)
+            const localPath = root.folderDialogPath(scanFolderDialog)
             if (localPath.length > 0) {
-                uiBridge.scanRoot(localPath)
+                uiBridge.addLibraryRoot(localPath)
             }
+            pendingFolderDialogContext = ""
         }
+        onRejected: pendingFolderDialogContext = ""
     }
 
     footer: ToolBar {
