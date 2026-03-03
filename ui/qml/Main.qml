@@ -30,6 +30,7 @@ Kirigami.ApplicationWindow {
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
     property bool positionSmoothingPrimed: false
+    property real positionSmoothingAnchorSeconds: 0
     property real positionSmoothingLastMs: 0
     property string positionSmoothingTrackPath: ""
     property real albumArtZoom: 1.0
@@ -141,21 +142,18 @@ Kirigami.ApplicationWindow {
             && root.visualFeedsEnabled
             && root.positionSmoothingPrimed
         onTriggered: {
-            const duration = Math.max(uiBridge.durationSeconds, 0)
-            if (duration <= 0) {
-                root.displayedPositionSeconds = 0
-                root.positionSmoothingLastMs = Date.now()
-                return
-            }
             const nowMs = Date.now()
             if (root.positionSmoothingLastMs <= 0) {
                 root.positionSmoothingLastMs = nowMs
             }
-            const dt = Math.max(0.0, Math.min(0.08, (nowMs - root.positionSmoothingLastMs) / 1000.0))
-            root.positionSmoothingLastMs = nowMs
-            root.displayedPositionSeconds = Math.min(
-                duration,
-                root.displayedPositionSeconds + dt)
+            const elapsed = Math.max(0.0, Math.min(1.5, (nowMs - root.positionSmoothingLastMs) / 1000.0))
+            const predicted = root.positionSmoothingAnchorSeconds + elapsed
+            const duration = Math.max(uiBridge.durationSeconds, 0)
+            if (duration > 0) {
+                root.displayedPositionSeconds = Math.min(duration, predicted)
+            } else {
+                root.displayedPositionSeconds = Math.max(0.0, predicted)
+            }
         }
     }
 
@@ -992,11 +990,14 @@ Kirigami.ApplicationWindow {
                     Layout.fillWidth: true
                     from: 0
                     to: Math.max(uiBridge.durationSeconds, 1.0)
+                    readonly property bool durationKnown: uiBridge.durationSeconds > 1.0
+                    readonly property real stableVisualPosition: durationKnown ? visualPosition : 0.0
                     stepSize: 0
                     onPressedChanged: {
                         if (!pressed) {
                             root.displayedPositionSeconds = value
                             root.positionSmoothingPrimed = true
+                            root.positionSmoothingAnchorSeconds = value
                             root.positionSmoothingLastMs = Date.now()
                             uiBridge.seek(value)
                         }
@@ -1026,7 +1027,7 @@ Kirigami.ApplicationWindow {
                             anchors.left: parent.left
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
-                            width: Math.round(parent.width * seekSlider.visualPosition)
+                            width: Math.round(parent.width * seekSlider.stableVisualPosition)
                             color: Qt.rgba(120 / 255, 190 / 255, 1.0, 0.26)
                         }
 
@@ -1034,13 +1035,13 @@ Kirigami.ApplicationWindow {
                             width: 1
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
-                            x: Math.round(seekSlider.visualPosition * (parent.width - 1))
+                            x: Math.round(seekSlider.stableVisualPosition * (parent.width - 1))
                             color: "#2f7cd6"
                         }
                     }
 
                     handle: Rectangle {
-                        x: seekSlider.leftPadding + seekSlider.visualPosition * (seekSlider.availableWidth - width)
+                        x: seekSlider.leftPadding + seekSlider.stableVisualPosition * (seekSlider.availableWidth - width)
                         y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
                         implicitWidth: 3
                         implicitHeight: seekSlider.height - 4
@@ -1053,7 +1054,7 @@ Kirigami.ApplicationWindow {
                 Binding {
                     target: seekSlider
                     property: "value"
-                    value: root.displayedPositionSeconds
+                    value: seekSlider.durationKnown ? root.displayedPositionSeconds : 0
                     when: !seekSlider.pressed
                 }
 
@@ -1934,17 +1935,36 @@ Kirigami.ApplicationWindow {
         function onSnapshotChanged() {
             const incomingPosition = uiBridge.positionSeconds
             const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath
+            const nowMs = Date.now()
             if (uiBridge.playbackState !== "Playing") {
                 root.displayedPositionSeconds = incomingPosition
                 root.positionSmoothingPrimed = false
-                root.positionSmoothingLastMs = Date.now()
+                root.positionSmoothingAnchorSeconds = incomingPosition
+                root.positionSmoothingLastMs = nowMs
                 root.positionSmoothingTrackPath = uiBridge.currentTrackPath
-            } else if (!root.positionSmoothingPrimed
-                    || trackChanged
-                    || Math.abs(root.displayedPositionSeconds - incomingPosition) > 0.35) {
+            } else if (!root.positionSmoothingPrimed || trackChanged) {
                 root.displayedPositionSeconds = incomingPosition
                 root.positionSmoothingPrimed = true
-                root.positionSmoothingLastMs = Date.now()
+                root.positionSmoothingAnchorSeconds = incomingPosition
+                root.positionSmoothingLastMs = nowMs
+                root.positionSmoothingTrackPath = uiBridge.currentTrackPath
+            } else {
+                const elapsed = Math.max(0.0, Math.min(1.5, (nowMs - root.positionSmoothingLastMs) / 1000.0))
+                const predicted = root.positionSmoothingAnchorSeconds + elapsed
+                const drift = incomingPosition - predicted
+                if (Math.abs(drift) > 0.20) {
+                    root.displayedPositionSeconds = incomingPosition
+                } else {
+                    const corrected = predicted + drift * 0.20
+                    const duration = Math.max(uiBridge.durationSeconds, 0)
+                    if (duration > 0) {
+                        root.displayedPositionSeconds = Math.min(duration, Math.max(0.0, corrected))
+                    } else {
+                        root.displayedPositionSeconds = Math.max(0.0, corrected)
+                    }
+                }
+                root.positionSmoothingAnchorSeconds = incomingPosition
+                root.positionSmoothingLastMs = nowMs
                 root.positionSmoothingTrackPath = uiBridge.currentTrackPath
             }
             if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
@@ -1979,6 +1999,7 @@ Kirigami.ApplicationWindow {
         root.lastAppliedLibraryVersion = uiBridge.libraryVersion
         root.displayedPositionSeconds = uiBridge.positionSeconds
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
+        root.positionSmoothingAnchorSeconds = uiBridge.positionSeconds
         root.positionSmoothingLastMs = Date.now()
         root.positionSmoothingTrackPath = uiBridge.currentTrackPath
         root.syncQueueSelectionToCurrentQueue()
