@@ -1730,8 +1730,27 @@ Kirigami.ApplicationWindow {
         focus: true
         padding: 0
         closePolicy: Popup.CloseOnEscape
+        enter: Transition {
+            NumberAnimation {
+                property: "opacity"
+                from: 0.0
+                to: 1.0
+                duration: 140
+                easing.type: Easing.OutCubic
+            }
+        }
+        exit: Transition {
+            NumberAnimation {
+                property: "opacity"
+                from: 1.0
+                to: 0.0
+                duration: 120
+                easing.type: Easing.InCubic
+            }
+        }
         background: Rectangle {
-            color: "#dd000000"
+            color: "#000000"
+            opacity: 0.87
         }
         function clampPan() {
             const scaledW = albumArtTransform.width * root.albumArtZoom
