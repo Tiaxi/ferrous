@@ -426,6 +426,19 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
                 BridgeSettingsCommand::SetSpectrogramOffsetMs(value.round() as i32),
             ))
         }
+        "set_spectrogram_lookahead_ms" => {
+            let value = parsed.value.ok_or_else(|| {
+                "set_spectrogram_lookahead_ms requires numeric field 'value'".to_string()
+            })?;
+            if !value.is_finite() {
+                return Err(
+                    "set_spectrogram_lookahead_ms value must be a finite number".to_string()
+                );
+            }
+            Some(BridgeCommand::Settings(
+                BridgeSettingsCommand::SetSpectrogramLookaheadMs(value.round() as i32),
+            ))
+        }
         "seek" => {
             let value = parsed
                 .value
@@ -858,6 +871,7 @@ fn encode_snapshot_payload(
             "volume": s.settings.volume,
             "fft_size": s.settings.fft_size,
             "spectrogram_offset_ms": s.settings.spectrogram_offset_ms,
+            "spectrogram_lookahead_ms": s.settings.spectrogram_lookahead_ms,
             "db_range": s.settings.db_range,
             "log_scale": s.settings.log_scale,
             "show_fps": s.settings.show_fps,
@@ -1080,6 +1094,16 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
+        let cmd = parse_json_command(r#"{"cmd":"set_spectrogram_lookahead_ms","value":52}"#)
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetSpectrogramLookaheadMs(v)) => {
+                assert_eq!(v, 52);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
         let cmd = parse_json_command(r#"{"cmd":"set_repeat_mode","value":2}"#)
             .expect("parse")
             .expect("command");
@@ -1206,6 +1230,7 @@ mod tests {
                 volume: 0.75,
                 fft_size: 2048,
                 spectrogram_offset_ms: 0,
+                spectrogram_lookahead_ms: 0,
                 db_range: 90.0,
                 log_scale: false,
                 show_fps: false,

@@ -24,6 +24,7 @@ pub enum AnalysisCommand {
     SetSampleRate(u32),
     SetFftSize(usize),
     SetSpectrogramOffsetMs(i32),
+    SetSpectrogramLookaheadMs(i32),
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -56,6 +57,8 @@ const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
 const BASE_VISUAL_DELAY_MS: i32 = 40;
 const MIN_SPECTROGRAM_OFFSET_MS: i32 = -120;
 const MAX_SPECTROGRAM_OFFSET_MS: i32 = 240;
+const MIN_SPECTROGRAM_LOOKAHEAD_MS: i32 = 0;
+const MAX_SPECTROGRAM_LOOKAHEAD_MS: i32 = 240;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WaveformSourceStamp {
@@ -111,6 +114,7 @@ impl AnalysisEngine {
             let mut prof_out_samples = 0usize;
             let mut ticks_without_row = 0usize;
             let mut spectrogram_offset_ms = 0_i32;
+            let mut spectrogram_lookahead_ms = 0_i32;
 
             loop {
                 select! {
@@ -238,6 +242,10 @@ impl AnalysisEngine {
                                 spectrogram_offset_ms =
                                     offset_ms.clamp(MIN_SPECTROGRAM_OFFSET_MS, MAX_SPECTROGRAM_OFFSET_MS);
                             }
+                            AnalysisCommand::SetSpectrogramLookaheadMs(lookahead_ms) => {
+                                spectrogram_lookahead_ms = lookahead_ms
+                                    .clamp(MIN_SPECTROGRAM_LOOKAHEAD_MS, MAX_SPECTROGRAM_LOOKAHEAD_MS);
+                            }
                             AnalysisCommand::WaveformProgress {
                                 track_token,
                                 peaks,
@@ -327,15 +335,20 @@ impl AnalysisEngine {
                         let visual_delay_ms =
                             (BASE_VISUAL_DELAY_MS + spectrogram_offset_ms).clamp(0, MAX_SPECTROGRAM_OFFSET_MS)
                                 as usize;
-                        let visual_delay_samples =
-                            (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
+                        let lookahead_samples = (snapshot.sample_rate_hz as usize)
+                            * (spectrogram_lookahead_ms as usize)
+                            / 1000;
+                        let visual_delay_samples = (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
+                        let effective_delay_samples =
+                            visual_delay_samples.saturating_sub(lookahead_samples);
                         // Enforce configured visual delay by consuming only from samples older
                         // than the delay horizon.
-                        let available = pcm_fifo.len().saturating_sub(visual_delay_samples);
+                        let available = pcm_fifo.len().saturating_sub(effective_delay_samples);
 
                         // Closed-loop backlog control: steer FIFO depth toward configured delay
                         // so offset remains effective even when producer/consumer drift.
-                        let backlog_error = pcm_fifo.len() as isize - visual_delay_samples as isize;
+                        let backlog_error =
+                            pcm_fifo.len() as isize - effective_delay_samples as isize;
                         let correction = (backlog_error / 8).clamp(-512, 512);
                         let adjusted_target =
                             (target_samples as isize + correction).clamp(0, 4096) as usize;

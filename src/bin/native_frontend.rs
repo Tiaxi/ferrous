@@ -157,6 +157,15 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
                 )),
                 Err(_) => eprintln!("invalid spectro_offset value, expected integer milliseconds"),
             }
+        } else if let Some(rest) = line.strip_prefix("spectro_lookahead ") {
+            match rest.parse::<i32>() {
+                Ok(value) => bridge.command(BridgeCommand::Settings(
+                    BridgeSettingsCommand::SetSpectrogramLookaheadMs(value),
+                )),
+                Err(_) => {
+                    eprintln!("invalid spectro_lookahead value, expected integer milliseconds")
+                }
+            }
         } else if line == "snap" {
             bridge.command(BridgeCommand::RequestSnapshot);
         } else {
@@ -566,6 +575,19 @@ fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
             }
             Some(BridgeCommand::Settings(
                 BridgeSettingsCommand::SetSpectrogramOffsetMs(value.round() as i32),
+            ))
+        }
+        "set_spectrogram_lookahead_ms" => {
+            let value = parsed.value.ok_or_else(|| {
+                "set_spectrogram_lookahead_ms requires numeric field 'value'".to_string()
+            })?;
+            if !value.is_finite() {
+                return Err(
+                    "set_spectrogram_lookahead_ms value must be a finite number".to_string()
+                );
+            }
+            Some(BridgeCommand::Settings(
+                BridgeSettingsCommand::SetSpectrogramLookaheadMs(value.round() as i32),
             ))
         }
         "play_at" => {
@@ -1005,6 +1027,7 @@ fn encode_snapshot_payload(
             "volume": s.settings.volume,
             "fft_size": s.settings.fft_size,
             "spectrogram_offset_ms": s.settings.spectrogram_offset_ms,
+            "spectrogram_lookahead_ms": s.settings.spectrogram_lookahead_ms,
             "db_range": s.settings.db_range,
             "log_scale": s.settings.log_scale,
             "show_fps": s.settings.show_fps,
