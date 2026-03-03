@@ -1434,9 +1434,9 @@ mod backend {
             .build()
             .map_err(|_| anyhow!("missing queue element"))?;
         queue_tap.set_property_from_str("leaky", "downstream");
-        queue_tap.set_property("max-size-buffers", 16u32);
+        queue_tap.set_property("max-size-buffers", 64u32);
         queue_tap.set_property("max-size-bytes", 0u32);
-        queue_tap.set_property("max-size-time", 60_000_000u64);
+        queue_tap.set_property("max-size-time", 0u64);
         let conv = gst::ElementFactory::make("audioconvert")
             .build()
             .map_err(|_| anyhow!("missing audioconvert element"))?;
@@ -1459,7 +1459,7 @@ mod backend {
         let appsink = gst_app::AppSink::builder()
             .caps(&caps)
             .drop(true)
-            .max_buffers(3)
+            .max_buffers(8)
             .sync(true)
             .build();
 
