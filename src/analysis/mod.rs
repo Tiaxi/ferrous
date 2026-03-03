@@ -109,7 +109,7 @@ impl AnalysisEngine {
             let visual_delay_ms = std::env::var("FERROUS_ANALYSIS_VISUAL_DELAY_MS")
                 .ok()
                 .and_then(|raw| raw.parse::<u32>().ok())
-                .map_or(12_u32, |v| v.clamp(0, 80));
+                .map_or(0_u32, |v| v.clamp(0, 80));
 
             loop {
                 select! {
@@ -304,7 +304,7 @@ impl AnalysisEngine {
                         }
 
                         // Keep FIFO bounded so visuals cannot accumulate large latency under transient load.
-                        let fifo_max = ((snapshot.sample_rate_hz as usize) * 200 / 1000).max(4096);
+                        let fifo_max = ((snapshot.sample_rate_hz as usize) * 100 / 1000).max(4096);
                         while pcm_fifo.len() > fifo_max {
                             let _ = pcm_fifo.pop_front();
                         }
@@ -316,11 +316,11 @@ impl AnalysisEngine {
                         sample_credit += dt * snapshot.sample_rate_hz as f64;
                         let mut target_samples = sample_credit.floor() as usize;
                         sample_credit -= target_samples as f64;
-                        target_samples = target_samples.clamp(256, 2048);
+                        target_samples = target_samples.clamp(128, 2048);
 
                         // Keep visuals just slightly behind output to compensate sink/device buffering.
                         let visual_delay_samples =
-                            ((snapshot.sample_rate_hz as usize) * (visual_delay_ms as usize) / 1000).max(256);
+                            ((snapshot.sample_rate_hz as usize) * (visual_delay_ms as usize) / 1000).max(64);
                         let mut available = if pcm_fifo.len() > visual_delay_samples {
                             pcm_fifo.len().saturating_sub(visual_delay_samples)
                         } else {

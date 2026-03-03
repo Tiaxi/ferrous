@@ -1434,9 +1434,9 @@ mod backend {
             .build()
             .map_err(|_| anyhow!("missing queue element"))?;
         queue_tap.set_property_from_str("leaky", "downstream");
-        queue_tap.set_property("max-size-buffers", 128u32);
+        queue_tap.set_property("max-size-buffers", 16u32);
         queue_tap.set_property("max-size-bytes", 0u32);
-        queue_tap.set_property("max-size-time", 0u64);
+        queue_tap.set_property("max-size-time", 60_000_000u64);
         let conv = gst::ElementFactory::make("audioconvert")
             .build()
             .map_err(|_| anyhow!("missing audioconvert element"))?;
@@ -1459,14 +1459,14 @@ mod backend {
         let appsink = gst_app::AppSink::builder()
             .caps(&caps)
             .drop(true)
-            .max_buffers(8)
+            .max_buffers(3)
             .sync(true)
             .build();
 
         let tap_chunk_samples = std::env::var("FERROUS_GST_TAP_CHUNK_SAMPLES")
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
-            .map_or(2048, |v| v.clamp(256, 16384));
+            .map_or(1024, |v| v.clamp(128, 16384));
 
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
