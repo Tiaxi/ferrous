@@ -312,26 +312,6 @@ int BridgeClient::sampleRateHz() const {
     return m_sampleRateHz;
 }
 
-double BridgeClient::spectrogramLagEstimateMs() const {
-    return m_spectrogramLagEstimateMs;
-}
-
-double BridgeClient::spectrogramFifoDelayMs() const {
-    return m_spectrogramFifoDelayMs;
-}
-
-double BridgeClient::spectrogramStftPendingMs() const {
-    return m_spectrogramStftPendingMs;
-}
-
-double BridgeClient::spectrogramWindowCenterMs() const {
-    return m_spectrogramWindowCenterMs;
-}
-
-double BridgeClient::spectrogramTargetDelayMs() const {
-    return m_spectrogramTargetDelayMs;
-}
-
 double BridgeClient::dbRange() const {
     return m_dbRange;
 }
@@ -1017,21 +997,6 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             std::max(0, queue.value(QStringLiteral("unknown_duration_count")).toInt(0));
         const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
         const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
-        auto updateAnalysisMetric = [&](const QString &key, double &slot) {
-            const QJsonValue value = analysis.value(key);
-            if (!value.isDouble()) {
-                return false;
-            }
-            const double next = value.toDouble(slot);
-            if (!std::isfinite(next)) {
-                return false;
-            }
-            if (std::abs(slot - next) < 0.05) {
-                return false;
-            }
-            slot = next;
-            return true;
-        };
 
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         bool changed = false;
@@ -1223,16 +1188,6 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                 analysisOnlyChanged = true;
             }
         }
-        analysisOnlyChanged |= updateAnalysisMetric(
-            QStringLiteral("spectrogram_lag_estimate_ms"), m_spectrogramLagEstimateMs);
-        analysisOnlyChanged |= updateAnalysisMetric(
-            QStringLiteral("spectrogram_fifo_delay_ms"), m_spectrogramFifoDelayMs);
-        analysisOnlyChanged |= updateAnalysisMetric(
-            QStringLiteral("spectrogram_stft_pending_ms"), m_spectrogramStftPendingMs);
-        analysisOnlyChanged |= updateAnalysisMetric(
-            QStringLiteral("spectrogram_window_center_ms"), m_spectrogramWindowCenterMs);
-        analysisOnlyChanged |= updateAnalysisMetric(
-            QStringLiteral("spectrogram_target_delay_ms"), m_spectrogramTargetDelayMs);
         const double dbRange = settings.value(QStringLiteral("db_range")).toDouble(m_dbRange);
         if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
             m_dbRange = dbRange;

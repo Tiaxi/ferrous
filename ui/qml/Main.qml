@@ -64,11 +64,6 @@ Kirigami.ApplicationWindow {
         property bool shuffleEnabled: false
         property bool showFps: false
         property int sampleRateHz: 48000
-        property real spectrogramLagEstimateMs: 0
-        property real spectrogramFifoDelayMs: 0
-        property real spectrogramStftPendingMs: 0
-        property real spectrogramWindowCenterMs: 0
-        property real spectrogramTargetDelayMs: 0
         property var libraryAlbums: []
         property var libraryTree: []
         property int libraryVersion: 0
@@ -594,13 +589,6 @@ Kirigami.ApplicationWindow {
         if (!uiBridge.connected) {
             return "bridge disconnected"
         }
-        const lagInfo = uiBridge.showFps
-            ? " | spec lag " + Math.round(uiBridge.spectrogramLagEstimateMs) + "ms"
-                + " (fifo " + Math.round(uiBridge.spectrogramFifoDelayMs)
-                + " stft " + Math.round(uiBridge.spectrogramStftPendingMs)
-                + " win " + Math.round(uiBridge.spectrogramWindowCenterMs)
-                + " tgt " + Math.round(uiBridge.spectrogramTargetDelayMs) + ")"
-            : ""
         return uiBridge.playbackState.toLowerCase()
             + " | " + uiBridge.positionText + "/" + uiBridge.durationText
             + " | tracks " + uiBridge.queueLength
@@ -609,7 +597,6 @@ Kirigami.ApplicationWindow {
             + " | " + librarySelectionStatusText()
             + " | " + repeatModeText(uiBridge.repeatMode)
             + " | " + (uiBridge.shuffleEnabled ? "shuffle-on" : "shuffle-off")
-            + lagInfo
     }
 
     function selectQueueRelative(delta) {

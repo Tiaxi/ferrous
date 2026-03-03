@@ -972,11 +972,6 @@ fn pump_analysis_events(analysis_rx: &Receiver<AnalysisEvent>, state: &mut Bridg
                 }
                 state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
                 state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
-                state.analysis.spectrogram_lag_estimate_ms = snapshot.spectrogram_lag_estimate_ms;
-                state.analysis.spectrogram_fifo_delay_ms = snapshot.spectrogram_fifo_delay_ms;
-                state.analysis.spectrogram_stft_pending_ms = snapshot.spectrogram_stft_pending_ms;
-                state.analysis.spectrogram_window_center_ms = snapshot.spectrogram_window_center_ms;
-                state.analysis.spectrogram_target_delay_ms = snapshot.spectrogram_target_delay_ms;
                 if !snapshot.waveform_peaks.is_empty() {
                     state.analysis.waveform_peaks = snapshot.waveform_peaks;
                 }
