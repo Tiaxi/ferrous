@@ -120,7 +120,7 @@ impl Default for BridgeSettings {
             || std::env::var_os("FERROUS_PROFILE").is_some();
         Self {
             volume: 1.0,
-            fft_size: 8192,
+            fft_size: 4096,
             db_range: 90.0,
             log_scale: false,
             show_fps,

@@ -331,13 +331,7 @@ impl AnalysisEngine {
                             // Recovery mode: if visuals are stalled, consume directly to kick-start rows.
                             available = pcm_fifo.len();
                         }
-                        let mut to_feed = target_samples.min(available);
-                        if available > to_feed {
-                            // Gradually catch up when backlog builds, without large burst steps.
-                            let backlog = available - to_feed;
-                            let catchup = backlog.min(target_samples.saturating_mul(2));
-                            to_feed = to_feed.saturating_add(catchup).min(available).min(4096);
-                        }
+                        let to_feed = target_samples.min(available);
                         if to_feed > 0 {
                             let mut feed = Vec::with_capacity(to_feed);
                             for _ in 0..to_feed {
