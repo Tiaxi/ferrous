@@ -1,8 +1,7 @@
-use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TrySendError};
 use serde_json::json;
@@ -291,15 +290,11 @@ fn run_bridge_loop(
     let snapshot_interval = Duration::from_millis(snapshot_interval_ms);
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;
-    let mut lag_csv_logger = SpectrogramLagCsvLogger::from_env();
 
     if send_snapshot_event(&event_tx, &state) {
         prof_snapshots_sent += 1;
     } else {
         prof_snapshots_dropped += 1;
-    }
-    if let Some(logger) = lag_csv_logger.as_mut() {
-        logger.maybe_log(&state);
     }
 
     while running {
@@ -392,10 +387,6 @@ fn run_bridge_loop(
             profile_last = Instant::now();
         }
 
-        if let Some(logger) = lag_csv_logger.as_mut() {
-            logger.maybe_log(&state);
-        }
-
         if settings_dirty && last_settings_save.elapsed() >= Duration::from_secs(2) {
             save_settings(&state.settings);
             settings_dirty = false;
@@ -412,9 +403,6 @@ fn run_bridge_loop(
         }
     }
 
-    if let Some(logger) = lag_csv_logger.as_mut() {
-        logger.flush();
-    }
     save_settings(&state.settings);
     save_session_snapshot(&session_snapshot_for_state(&state));
     let _ = try_send_event(&event_tx, BridgeEvent::Stopped);
@@ -449,130 +437,6 @@ fn current_rss_kb() -> usize {
         }
     }
     0
-}
-
-struct SpectrogramLagCsvLogger {
-    writer: BufWriter<std::fs::File>,
-    interval: Duration,
-    last_emit: Instant,
-    start_instant: Instant,
-    rows_since_flush: u32,
-}
-
-impl SpectrogramLagCsvLogger {
-    fn from_env() -> Option<Self> {
-        let path = std::env::var("FERROUS_SPECTROGRAM_LAG_CSV")
-            .ok()
-            .map(|raw| raw.trim().to_string())
-            .filter(|raw| !raw.is_empty())?;
-        let interval_ms = std::env::var("FERROUS_SPECTROGRAM_LAG_CSV_MS")
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .map_or(50, |v| v.clamp(16, 2000));
-
-        let file_path = PathBuf::from(path);
-        if let Some(parent) = file_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = fs::create_dir_all(parent);
-            }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .ok()?;
-        let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
-        let mut writer = BufWriter::new(file);
-        if needs_header {
-            let _ = writeln!(
-                writer,
-                "unix_ms,mono_ms,playback_state,position_ms,duration_ms,sample_rate_hz,fft_size,spectrogram_seq,spectrogram_lag_estimate_ms,spectrogram_fifo_delay_ms,spectrogram_stft_pending_ms,spectrogram_window_center_ms,spectrogram_target_delay_ms,spectrogram_offset_ms,spectrogram_lookahead_ms,current_track"
-            );
-            let _ = writer.flush();
-        }
-        eprintln!(
-            "[bridge] spectrogram lag csv enabled path={} interval_ms={}",
-            file_path.display(),
-            interval_ms
-        );
-        let interval = Duration::from_millis(interval_ms);
-        let now = Instant::now();
-        Some(Self {
-            writer,
-            interval,
-            last_emit: now.checked_sub(interval).unwrap_or(now),
-            start_instant: now,
-            rows_since_flush: 0,
-        })
-    }
-
-    fn maybe_log(&mut self, state: &BridgeState) {
-        if self.last_emit.elapsed() < self.interval {
-            return;
-        }
-        self.last_emit = Instant::now();
-        if self.write_row(state).is_ok() {
-            self.rows_since_flush = self.rows_since_flush.saturating_add(1);
-            if self.rows_since_flush >= 20 {
-                let _ = self.writer.flush();
-                self.rows_since_flush = 0;
-            }
-        }
-    }
-
-    fn flush(&mut self) {
-        let _ = self.writer.flush();
-    }
-
-    fn write_row(&mut self, state: &BridgeState) -> std::io::Result<()> {
-        let unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let mono_ms = self.start_instant.elapsed().as_millis();
-        let current_track = state
-            .playback
-            .current
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        writeln!(
-            self.writer,
-            "{},{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{}",
-            unix_ms,
-            mono_ms,
-            csv_escape(playback_state_label(state.playback.state)),
-            state.playback.position.as_millis(),
-            state.playback.duration.as_millis(),
-            state.analysis.sample_rate_hz,
-            state.settings.fft_size,
-            state.analysis.spectrogram_seq,
-            state.analysis.spectrogram_lag_estimate_ms,
-            state.analysis.spectrogram_fifo_delay_ms,
-            state.analysis.spectrogram_stft_pending_ms,
-            state.analysis.spectrogram_window_center_ms,
-            state.analysis.spectrogram_target_delay_ms,
-            state.settings.spectrogram_offset_ms,
-            state.settings.spectrogram_lookahead_ms,
-            csv_escape(&current_track),
-        )
-    }
-}
-
-fn playback_state_label(state: PlaybackState) -> &'static str {
-    match state {
-        PlaybackState::Stopped => "stopped",
-        PlaybackState::Playing => "playing",
-        PlaybackState::Paused => "paused",
-    }
-}
-
-fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
 }
 
 struct BridgeCommandContext<'a> {
@@ -1364,21 +1228,6 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    #[test]
-    fn csv_escape_quotes_when_needed() {
-        assert_eq!(csv_escape("plain"), "plain");
-        assert_eq!(csv_escape("x,y"), "\"x,y\"");
-        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
-        assert_eq!(csv_escape("line\nbreak"), "\"line\nbreak\"");
-    }
-
-    #[test]
-    fn playback_state_label_matches_json_contract() {
-        assert_eq!(playback_state_label(PlaybackState::Stopped), "stopped");
-        assert_eq!(playback_state_label(PlaybackState::Playing), "playing");
-        assert_eq!(playback_state_label(PlaybackState::Paused), "paused");
     }
 
     #[test]
