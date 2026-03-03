@@ -25,7 +25,7 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
 
-    const QString qmlPath = QStringLiteral(FERROUS_NATIVE_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml");
+    const QString qmlPath = QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml");
     QVERIFY2(QFileInfo::exists(qmlPath), qPrintable(QStringLiteral("QML file missing: %1").arg(qmlPath)));
 
     const QUrl url = QUrl::fromLocalFile(qmlPath);

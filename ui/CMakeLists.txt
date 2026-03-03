@@ -80,7 +80,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
     target_compile_definitions(ferrous_qml_smoke_tests PRIVATE
-        FERROUS_NATIVE_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_qml_smoke_tests PRIVATE
         Qt6::Core
