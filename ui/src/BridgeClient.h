@@ -171,6 +171,7 @@ private:
     QStringList m_libraryAlbumNames;
     QStringList m_libraryAlbumCoverPaths;
     QHash<QString, QString> m_trackCoverByPath;
+    mutable QHash<QString, QString> m_libraryThumbnailSourceCache;
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};

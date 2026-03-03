@@ -1256,7 +1256,7 @@ Kirigami.ApplicationWindow {
                                                 fillMode: Image.PreserveAspectFit
                                                 smooth: false
                                                 asynchronous: true
-                                                cache: false
+                                                cache: true
                                                 sourceSize.width: 32
                                                 sourceSize.height: 32
                                             }

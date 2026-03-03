@@ -8,9 +8,13 @@
 #include <limits>
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QDir>
+#include <QImage>
+#include <QImageReader>
+#include <QPainter>
 #include <QProcessEnvironment>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -19,6 +23,7 @@
 #include <QHash>
 #include <QMetaObject>
 #include <QSet>
+#include <QStandardPaths>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVector>
@@ -589,11 +594,91 @@ QString BridgeClient::libraryThumbnailSource(const QString &path) const {
         return path;
     }
 
-    QUrlQuery query(url);
+    const QString canonicalPath = info.canonicalFilePath().isEmpty()
+        ? info.absoluteFilePath()
+        : info.canonicalFilePath();
+    const qint64 mtimeMs = info.lastModified().toMSecsSinceEpoch();
+    const QString cacheKey = canonicalPath
+        + QStringLiteral("|")
+        + QString::number(mtimeMs)
+        + QStringLiteral("|32");
+    if (const auto it = m_libraryThumbnailSourceCache.constFind(cacheKey);
+        it != m_libraryThumbnailSourceCache.constEnd())
+    {
+        return it.value();
+    }
+
+    const QString cacheBase = QStandardPaths::writableLocation(QStandardPaths::CacheLocation).isEmpty()
+        ? QDir::temp().filePath(QStringLiteral("ferrous"))
+        : QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    const QDir thumbsDir(QDir(cacheBase).filePath(QStringLiteral("thumbnails/library")));
+    if (!QDir().mkpath(thumbsDir.path())) {
+        QUrlQuery query(url);
+        query.removeAllQueryItems(QStringLiteral("v"));
+        query.addQueryItem(QStringLiteral("v"), QString::number(mtimeMs));
+        url.setQuery(query);
+        const QString fallback = url.toString(QUrl::FullyEncoded);
+        m_libraryThumbnailSourceCache.insert(cacheKey, fallback);
+        return fallback;
+    }
+
+    const QByteArray id = QCryptographicHash::hash(canonicalPath.toUtf8(), QCryptographicHash::Sha1).toHex();
+    const QString thumbPath = thumbsDir.filePath(QString::fromLatin1(id) + QStringLiteral("_32.png"));
+    const QFileInfo thumbInfo(thumbPath);
+    const bool needsRefresh =
+        !thumbInfo.exists() || thumbInfo.lastModified() < info.lastModified();
+
+    if (needsRefresh) {
+        QImageReader reader(localPath);
+        reader.setAutoTransform(true);
+        const QImage source = reader.read();
+        if (!source.isNull()) {
+            const QImage scaled = source.scaled(
+                QSize(32, 32),
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation);
+            QImage canvas(32, 32, QImage::Format_ARGB32_Premultiplied);
+            canvas.fill(Qt::transparent);
+            {
+                QPainter painter(&canvas);
+                const int x = (canvas.width() - scaled.width()) / 2;
+                const int y = (canvas.height() - scaled.height()) / 2;
+                painter.drawImage(x, y, scaled);
+            }
+            const bool saved = canvas.save(thumbPath, "PNG");
+            if (!saved) {
+                QUrlQuery query(url);
+                query.removeAllQueryItems(QStringLiteral("v"));
+                query.addQueryItem(QStringLiteral("v"), QString::number(mtimeMs));
+                url.setQuery(query);
+                const QString fallback = url.toString(QUrl::FullyEncoded);
+                m_libraryThumbnailSourceCache.insert(cacheKey, fallback);
+                return fallback;
+            }
+        } else {
+            QUrlQuery query(url);
+            query.removeAllQueryItems(QStringLiteral("v"));
+            query.addQueryItem(QStringLiteral("v"), QString::number(mtimeMs));
+            url.setQuery(query);
+            const QString fallback = url.toString(QUrl::FullyEncoded);
+            m_libraryThumbnailSourceCache.insert(cacheKey, fallback);
+            return fallback;
+        }
+    }
+
+    QUrl thumbUrl = QUrl::fromLocalFile(thumbPath);
+    QUrlQuery query(thumbUrl);
     query.removeAllQueryItems(QStringLiteral("v"));
-    query.addQueryItem(QStringLiteral("v"), QString::number(info.lastModified().toMSecsSinceEpoch()));
-    url.setQuery(query);
-    return url.toString(QUrl::FullyEncoded);
+    query.addQueryItem(QStringLiteral("v"), QString::number(mtimeMs));
+    thumbUrl.setQuery(query);
+
+    const QString result = thumbUrl.toString(QUrl::FullyEncoded);
+    m_libraryThumbnailSourceCache.insert(cacheKey, result);
+    if (m_libraryThumbnailSourceCache.size() > 4096) {
+        m_libraryThumbnailSourceCache.clear();
+        m_libraryThumbnailSourceCache.insert(cacheKey, result);
+    }
+    return result;
 }
 
 void BridgeClient::scanRoot(const QString &path) {
