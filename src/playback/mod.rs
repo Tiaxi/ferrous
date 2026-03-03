@@ -1456,11 +1456,19 @@ mod backend {
             .build();
         capsfilter.set_property("caps", &caps);
 
+        // Default to unsynced appsink so analysis can run slightly ahead of
+        // wall-clock audio output; this is bounded later by analysis lookahead.
+        let analysis_sync = std::env::var("FERROUS_GST_ANALYSIS_SYNC")
+            .ok()
+            .and_then(|raw| raw.parse::<i32>().ok())
+            .map(|v| v != 0)
+            .unwrap_or(false);
+
         let appsink = gst_app::AppSink::builder()
             .caps(&caps)
             .drop(true)
             .max_buffers(8)
-            .sync(true)
+            .sync(analysis_sync)
             .build();
 
         let tap_chunk_samples = std::env::var("FERROUS_GST_TAP_CHUNK_SAMPLES")
