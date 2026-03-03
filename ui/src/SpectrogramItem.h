@@ -66,7 +66,9 @@ private:
     void ensureCanvas(int width, int height);
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
-    void appendColumnAndRender(std::vector<quint8> &&col);
+    bool consumePendingColumnsLocked(int requested);
+    bool advanceAnimationLocked(double elapsedSeconds);
+    void noteIncomingRowsLocked(int rowCount);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowFrameSwapped();
@@ -89,6 +91,13 @@ private:
     int m_canvasWriteX{0};
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
+    std::deque<std::vector<quint8>> m_pendingColumns;
+    double m_pendingPhase{0.0};
+    bool m_rowRateInitialized{false};
+    double m_estimatedRowsPerSecond{0.0};
+    std::chrono::steady_clock::time_point m_lastRowAppendTime{};
+    bool m_animationTickInitialized{false};
+    std::chrono::steady_clock::time_point m_lastAnimationTick{};
     bool m_forceFpsOverlay{false};
     bool m_showFpsOverlay{false};
     bool m_fpsInitialized{false};

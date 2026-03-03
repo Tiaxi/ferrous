@@ -12,6 +12,8 @@
 
 namespace {
 constexpr double kMinFreqHz = 25.0;
+constexpr int kMaxPendingColumns = 512;
+constexpr int kPendingBacklogTarget = 48;
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
     {{65535, 65535, 65535}},
     {{65535, 65535, 65535}},
@@ -156,6 +158,11 @@ void SpectrogramItem::setMaxColumns(int value) {
 void SpectrogramItem::reset() {
     QMutexLocker lock(&m_stateMutex);
     m_columns.clear();
+    m_pendingColumns.clear();
+    m_pendingPhase = 0.0;
+    m_rowRateInitialized = false;
+    m_estimatedRowsPerSecond = 0.0;
+    m_animationTickInitialized = false;
     m_binsPerColumn = 0;
     invalidateMapping();
     invalidateCanvas();
@@ -168,7 +175,7 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         return;
     }
 
-    bool anyAdded = false;
+    int rowsAdded = 0;
     for (const QVariant &rowVar : rows) {
         const QVariantList row = rowVar.toList();
         if (row.isEmpty()) {
@@ -185,14 +192,20 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         if (static_cast<int>(mapped.size()) != m_binsPerColumn) {
             continue;
         }
-        appendColumnAndRender(std::move(mapped));
-        anyAdded = true;
+        m_pendingColumns.emplace_back(std::move(mapped));
+        rowsAdded++;
     }
 
-    if (!anyAdded) {
+    while (static_cast<int>(m_pendingColumns.size()) > kMaxPendingColumns) {
+        m_pendingColumns.pop_front();
+    }
+    if (rowsAdded <= 0) {
         return;
     }
-
+    noteIncomingRowsLocked(rowsAdded);
+    if (m_columns.empty()) {
+        consumePendingColumnsLocked(1);
+    }
     update();
 }
 
@@ -222,31 +235,18 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
             src + static_cast<qsizetype>(r) * static_cast<qsizetype>(binsPerRow),
             binsPerRow,
             col.begin());
-        m_columns.emplace_back(std::move(col));
+        m_pendingColumns.emplace_back(std::move(col));
         appended++;
     }
-    while (static_cast<int>(m_columns.size()) > m_maxColumns) {
-        m_columns.pop_front();
+    while (static_cast<int>(m_pendingColumns.size()) > kMaxPendingColumns) {
+        m_pendingColumns.pop_front();
     }
     if (appended <= 0) {
         return;
     }
-    const int w = std::max(1, static_cast<int>(std::floor(width())));
-    const int h = std::max(1, static_cast<int>(std::floor(height())));
-    ensureCanvas(w, h);
-    if (m_canvas.isNull()) {
-        update();
-        return;
-    }
-    if (m_canvasDirty) {
-        rebuildCanvasFromColumns();
-    } else {
-        const int sourceStart = static_cast<int>(m_columns.size()) - appended;
-        for (int i = 0; i < appended; ++i) {
-            drawColumnAt(m_canvasWriteX, m_columns[static_cast<size_t>(sourceStart + i)]);
-            m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
-            m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
-        }
+    noteIncomingRowsLocked(appended);
+    if (m_columns.empty()) {
+        consumePendingColumnsLocked(1);
     }
     update();
 }
@@ -264,16 +264,31 @@ void SpectrogramItem::paint(QPainter *painter) {
             const int drawCols = std::min(m_canvasFilledCols, m_canvas.width());
             if (drawCols > 0) {
                 const int srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
-                const int drawX = w - drawCols;
+                const double scrollOffset = std::clamp(m_pendingPhase, 0.0, 0.999);
+                const double drawX = static_cast<double>(w - drawCols) - scrollOffset;
                 const int firstWidth = std::min(m_canvas.width() - srcStart, drawCols);
-                const QRect targetFirst(drawX, 0, firstWidth, m_canvas.height());
+                const QRectF targetFirst(drawX, 0.0, static_cast<double>(firstWidth), m_canvas.height());
                 const QRect sourceFirst(srcStart, 0, firstWidth, m_canvas.height());
                 painter->drawImage(targetFirst, m_canvas, sourceFirst);
                 const int remaining = drawCols - firstWidth;
                 if (remaining > 0) {
-                    const QRect targetSecond(drawX + firstWidth, 0, remaining, m_canvas.height());
+                    const QRectF targetSecond(
+                        drawX + static_cast<double>(firstWidth),
+                        0.0,
+                        static_cast<double>(remaining),
+                        m_canvas.height());
                     const QRect sourceSecond(0, 0, remaining, m_canvas.height());
                     painter->drawImage(targetSecond, m_canvas, sourceSecond);
+                }
+                if (scrollOffset > 0.0 && m_canvasFilledCols > 0) {
+                    const int latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
+                    const QRect sourceLatest(latestX, 0, 1, m_canvas.height());
+                    const QRectF targetLatest(
+                        static_cast<double>(w) - scrollOffset,
+                        0.0,
+                        scrollOffset,
+                        m_canvas.height());
+                    painter->drawImage(targetLatest, m_canvas, sourceLatest);
                 }
             }
         }
@@ -504,25 +519,112 @@ void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
     }
 }
 
-void SpectrogramItem::appendColumnAndRender(std::vector<quint8> &&col) {
-    if (static_cast<int>(col.size()) != m_binsPerColumn) {
-        return;
+bool SpectrogramItem::consumePendingColumnsLocked(int requested) {
+    if (requested <= 0 || m_pendingColumns.empty()) {
+        return false;
     }
-
-    m_columns.emplace_back(std::move(col));
-    while (static_cast<int>(m_columns.size()) > m_maxColumns) {
-        m_columns.pop_front();
+    const int toConsume = std::min(requested, static_cast<int>(m_pendingColumns.size()));
+    if (toConsume <= 0) {
+        return false;
     }
 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
     ensureCanvas(w, h);
-    if (m_canvas.isNull()) {
+    if (!m_canvas.isNull() && m_canvasDirty) {
+        rebuildCanvasFromColumns();
+    }
+
+    bool consumed = false;
+    for (int i = 0; i < toConsume; ++i) {
+        std::vector<quint8> col = std::move(m_pendingColumns.front());
+        m_pendingColumns.pop_front();
+        if (static_cast<int>(col.size()) != m_binsPerColumn) {
+            continue;
+        }
+        m_columns.emplace_back(std::move(col));
+        while (static_cast<int>(m_columns.size()) > m_maxColumns) {
+            m_columns.pop_front();
+        }
+        if (!m_canvas.isNull()) {
+            drawColumnAt(m_canvasWriteX, m_columns.back());
+            m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
+            m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
+        }
+        consumed = true;
+    }
+    return consumed;
+}
+
+bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
+    double dt = elapsedSeconds;
+    if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.25) {
+        const double fallbackFps = m_fpsValue > 0 ? static_cast<double>(m_fpsValue) : 60.0;
+        dt = 1.0 / std::max(30.0, fallbackFps);
+    }
+
+    double rowsPerSecond = m_estimatedRowsPerSecond;
+    if (!m_rowRateInitialized || !std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
+        if (m_pendingPhase > 0.0) {
+            m_pendingPhase = 0.0;
+            return true;
+        }
+        return false;
+    }
+    rowsPerSecond = std::clamp(rowsPerSecond, 30.0, 400.0);
+
+    const double prevPhase = m_pendingPhase;
+    m_pendingPhase += rowsPerSecond * dt;
+    const int backlog = static_cast<int>(m_pendingColumns.size());
+    if (backlog > kPendingBacklogTarget) {
+        m_pendingPhase += static_cast<double>(backlog - kPendingBacklogTarget) * 0.25;
+    }
+
+    bool consumed = false;
+    const int ready = static_cast<int>(std::floor(m_pendingPhase));
+    if (ready > 0 && backlog > 0) {
+        const int consume = std::min(ready, backlog);
+        consumed = consumePendingColumnsLocked(consume);
+        if (consumed) {
+            m_pendingPhase = std::max(0.0, m_pendingPhase - static_cast<double>(consume));
+        }
+    }
+
+    if (m_pendingColumns.empty()) {
+        const double idleSeconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - m_lastRowAppendTime).count();
+        if (idleSeconds > 0.30) {
+            m_pendingPhase = 0.0;
+        } else {
+            m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
+        }
+    }
+
+    const bool phaseChanged = std::abs(m_pendingPhase - prevPhase) > 0.0001;
+    return consumed || phaseChanged;
+}
+
+void SpectrogramItem::noteIncomingRowsLocked(int rowCount) {
+    if (rowCount <= 0) {
         return;
     }
-    drawColumnAt(m_canvasWriteX, m_columns.back());
-    m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
-    m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
+    const auto now = std::chrono::steady_clock::now();
+    if (m_rowRateInitialized) {
+        const double elapsed = std::chrono::duration<double>(now - m_lastRowAppendTime).count();
+        if (elapsed > 0.0005) {
+            const double instantRate = std::clamp(
+                static_cast<double>(rowCount) / elapsed,
+                1.0,
+                1200.0);
+            constexpr double alpha = 0.20;
+            m_estimatedRowsPerSecond = (alpha * instantRate) + ((1.0 - alpha) * m_estimatedRowsPerSecond);
+        }
+    } else {
+        m_estimatedRowsPerSecond = std::clamp(static_cast<double>(rowCount) * 60.0, 30.0, 400.0);
+        m_rowRateInitialized = true;
+        m_pendingPhase = std::max(0.0, m_pendingPhase);
+    }
+    m_lastRowAppendTime = now;
 }
 
 std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) const {
@@ -558,10 +660,10 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     m_fpsValue = 0;
     m_fpsAccumFrames = 0;
     m_fpsAccumSeconds = 0.0;
-    const bool overlayEnabled = m_showFpsOverlay;
+    m_animationTickInitialized = false;
     lock.unlock();
 
-    if (window == nullptr || !overlayEnabled) {
+    if (window == nullptr) {
         return;
     }
     m_frameSwapConnection = connect(
@@ -573,12 +675,29 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
 }
 
 void SpectrogramItem::handleWindowFrameSwapped() {
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+
+    bool advanced = false;
+    bool pending = false;
     QMutexLocker lock(&m_stateMutex);
+    double elapsed = 0.0;
+    if (m_animationTickInitialized) {
+        elapsed = std::chrono::duration<double>(now - m_lastAnimationTick).count();
+    }
+    m_lastAnimationTick = now;
+    m_animationTickInitialized = true;
+
     const int prev = m_fpsValue;
-    updateFpsEstimateLocked();
-    const bool changed = m_fpsValue != prev;
+    bool changed = false;
+    if (m_showFpsOverlay) {
+        updateFpsEstimateLocked();
+        changed = m_fpsValue != prev;
+    }
+    advanced = advanceAnimationLocked(elapsed);
+    pending = !m_pendingColumns.empty();
     lock.unlock();
-    if (changed) {
+    if (changed || advanced || pending) {
         update();
     }
 }
