@@ -370,7 +370,8 @@ impl AnalysisEngine {
                         if cursor_error > 0 {
                             // Catch up by dropping stale queued samples instead of temporarily
                             // overclocking feed rate, which tends to produce visible stutter.
-                            let max_skip = pcm_fifo.len().saturating_sub(256);
+                            let reserve = effective_delay_samples.saturating_add(target_samples.max(512));
+                            let max_skip = pcm_fifo.len().saturating_sub(reserve);
                             let skip = (cursor_error as usize).min(max_skip).min(2048);
                             for _ in 0..skip {
                                 let _ = pcm_fifo.pop_front();

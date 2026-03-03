@@ -1404,7 +1404,14 @@ mod backend {
             return None;
         }
         let (_live, min_latency, _max_latency) = query.result();
-        Some(Duration::from_nanos(min_latency.nseconds()))
+        if min_latency.is_none() {
+            return None;
+        }
+        let ns = min_latency.nseconds();
+        if ns == u64::MAX {
+            return None;
+        }
+        Some(Duration::from_nanos(ns.min(500_000_000)))
     }
 
     fn handle_bus_message(
