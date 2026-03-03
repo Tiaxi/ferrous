@@ -29,6 +29,9 @@ Kirigami.ApplicationWindow {
     property int lastCenteredQueueIndex: -2
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
+    property bool positionSmoothingPrimed: false
+    property real positionSmoothingLastMs: 0
+    property string positionSmoothingTrackPath: ""
     property real albumArtZoom: 1.0
     property real albumArtPanX: 0.0
     property real albumArtPanY: 0.0
@@ -133,16 +136,26 @@ Kirigami.ApplicationWindow {
         id: positionSmoothingTimer
         interval: 16
         repeat: true
-        running: !seekSlider.pressed && uiBridge.playbackState === "Playing" && root.visualFeedsEnabled
+        running: !seekSlider.pressed
+            && uiBridge.playbackState === "Playing"
+            && root.visualFeedsEnabled
+            && root.positionSmoothingPrimed
         onTriggered: {
             const duration = Math.max(uiBridge.durationSeconds, 0)
             if (duration <= 0) {
                 root.displayedPositionSeconds = 0
+                root.positionSmoothingLastMs = Date.now()
                 return
             }
+            const nowMs = Date.now()
+            if (root.positionSmoothingLastMs <= 0) {
+                root.positionSmoothingLastMs = nowMs
+            }
+            const dt = Math.max(0.0, Math.min(0.08, (nowMs - root.positionSmoothingLastMs) / 1000.0))
+            root.positionSmoothingLastMs = nowMs
             root.displayedPositionSeconds = Math.min(
                 duration,
-                root.displayedPositionSeconds + interval / 1000.0)
+                root.displayedPositionSeconds + dt)
         }
     }
 
@@ -983,6 +996,8 @@ Kirigami.ApplicationWindow {
                     onPressedChanged: {
                         if (!pressed) {
                             root.displayedPositionSeconds = value
+                            root.positionSmoothingPrimed = true
+                            root.positionSmoothingLastMs = Date.now()
                             uiBridge.seek(value)
                         }
                     }
@@ -1918,9 +1933,19 @@ Kirigami.ApplicationWindow {
         }
         function onSnapshotChanged() {
             const incomingPosition = uiBridge.positionSeconds
-            if (uiBridge.playbackState !== "Playing"
+            const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath
+            if (uiBridge.playbackState !== "Playing") {
+                root.displayedPositionSeconds = incomingPosition
+                root.positionSmoothingPrimed = false
+                root.positionSmoothingLastMs = Date.now()
+                root.positionSmoothingTrackPath = uiBridge.currentTrackPath
+            } else if (!root.positionSmoothingPrimed
+                    || trackChanged
                     || Math.abs(root.displayedPositionSeconds - incomingPosition) > 0.35) {
                 root.displayedPositionSeconds = incomingPosition
+                root.positionSmoothingPrimed = true
+                root.positionSmoothingLastMs = Date.now()
+                root.positionSmoothingTrackPath = uiBridge.currentTrackPath
             }
             if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
                 const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
@@ -1953,6 +1978,9 @@ Kirigami.ApplicationWindow {
         libraryModel.setSearchText(librarySearchField.text || "")
         root.lastAppliedLibraryVersion = uiBridge.libraryVersion
         root.displayedPositionSeconds = uiBridge.positionSeconds
+        root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
+        root.positionSmoothingLastMs = Date.now()
+        root.positionSmoothingTrackPath = uiBridge.currentTrackPath
         root.syncQueueSelectionToCurrentQueue()
         root.syncLibrarySelectionToVisibleRows()
     }

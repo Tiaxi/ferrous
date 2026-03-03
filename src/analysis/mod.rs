@@ -106,6 +106,10 @@ impl AnalysisEngine {
             let mut prof_in_samples = 0usize;
             let mut prof_out_samples = 0usize;
             let mut ticks_without_row = 0usize;
+            let visual_delay_ms = std::env::var("FERROUS_ANALYSIS_VISUAL_DELAY_MS")
+                .ok()
+                .and_then(|raw| raw.parse::<u32>().ok())
+                .map_or(12_u32, |v| v.clamp(0, 80));
 
             loop {
                 select! {
@@ -299,8 +303,8 @@ impl AnalysisEngine {
                             pcm_fifo.extend(samples);
                         }
 
-                        // Keep FIFO bounded to roughly 0.5s to avoid visual lead/lag buildup.
-                        let fifo_max = (snapshot.sample_rate_hz as usize / 2).max(4096);
+                        // Keep FIFO bounded so visuals cannot accumulate large latency under transient load.
+                        let fifo_max = ((snapshot.sample_rate_hz as usize) * 200 / 1000).max(4096);
                         while pcm_fifo.len() > fifo_max {
                             let _ = pcm_fifo.pop_front();
                         }
@@ -314,9 +318,9 @@ impl AnalysisEngine {
                         sample_credit -= target_samples as f64;
                         target_samples = target_samples.clamp(256, 2048);
 
-                        // Keep visuals slightly behind output to compensate sink/device buffering.
+                        // Keep visuals just slightly behind output to compensate sink/device buffering.
                         let visual_delay_samples =
-                            ((snapshot.sample_rate_hz as usize) * 40 / 1000).max(512);
+                            ((snapshot.sample_rate_hz as usize) * (visual_delay_ms as usize) / 1000).max(256);
                         let mut available = if pcm_fifo.len() > visual_delay_samples {
                             pcm_fifo.len().saturating_sub(visual_delay_samples)
                         } else {
@@ -675,8 +679,8 @@ impl StftComputer {
     fn enqueue_samples(&mut self, samples: &[f32], sample_rate_hz: u32) {
         self.compact_pending_if_needed();
         self.pending.extend_from_slice(samples);
-        // Keep pending bounded to avoid latency creep: max ~0.5s audio.
-        let max_pending = (sample_rate_hz as usize / 2).max(self.fft_size * 4);
+        // Keep pending bounded to avoid latency creep under temporary load spikes.
+        let max_pending = (sample_rate_hz as usize / 4).max(self.fft_size * 2);
         let available = self.pending_available();
         if available > max_pending {
             let drop = available - max_pending;
@@ -711,7 +715,7 @@ impl StftComputer {
         }
 
         // If producer is outrunning us, drop backlog to keep spectrogram in real-time sync.
-        let max_backlog = self.fft_size * 4;
+        let max_backlog = self.fft_size * 2;
         let available = self.pending_available();
         if available > max_backlog {
             let drop = available - max_backlog;

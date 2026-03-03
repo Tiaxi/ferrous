@@ -831,6 +831,14 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
             m_spectrogramReset = spectrogramReset;
             changed = true;
         }
+        if (spectrogramReset) {
+            if (m_spectrogramPackedRows > 0 || !m_spectrogramRowsPacked.isEmpty()) {
+                m_spectrogramRowsPacked.clear();
+                m_spectrogramPackedRows = 0;
+                changed = true;
+            }
+            m_spectrogramPackedBins = 0;
+        }
 
         if ((flags & kAnalysisFlagWaveform) != 0) {
             QByteArray peaks(reinterpret_cast<const char *>(cursor), waveformLen);
@@ -1010,7 +1018,7 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                 m_positionText = posText;
                 changed = true;
             }
-            if (std::abs(m_positionSeconds - pos) >= 0.10) {
+            if (std::abs(m_positionSeconds - pos) >= 0.03) {
                 m_positionSeconds = pos;
                 changed = true;
             }
@@ -1122,6 +1130,14 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             if (m_spectrogramReset != spectrogramReset) {
                 m_spectrogramReset = spectrogramReset;
                 analysisOnlyChanged = true;
+            }
+            if (spectrogramReset) {
+                if (m_spectrogramPackedRows > 0 || !m_spectrogramRowsPacked.isEmpty()) {
+                    m_spectrogramRowsPacked.clear();
+                    m_spectrogramPackedRows = 0;
+                    analysisOnlyChanged = true;
+                }
+                m_spectrogramPackedBins = 0;
             }
             const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
             if (spectrogramRowsValue.isArray()) {
