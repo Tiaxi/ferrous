@@ -23,10 +23,22 @@ From repo root:
 This script builds Rust artifacts first, then launches the UI.
 By default, no bridge subprocess is spawned.
 
+Launch from a clean Ferrous state (library DB + thumbnail cache):
+
+```bash
+./scripts/run-ui.sh --nuke-all
+```
+
 Build-only (no GUI launch):
 
 ```bash
 ./scripts/run-ui.sh --no-run
+```
+
+Cleanup-only utility mode:
+
+```bash
+./scripts/run-ui.sh --nuke-thumbnails --no-configure --no-build --no-run
 ```
 
 ## Tests

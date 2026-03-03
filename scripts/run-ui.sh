@@ -14,6 +14,8 @@ DO_CONFIGURE=1
 DO_BUILD=1
 DO_RUN=1
 FORCE_PROCESS_BRIDGE=0
+NUKE_DB=0
+NUKE_THUMBNAILS=0
 APP_ARGS=()
 
 reset_stale_cmake_cache() {
@@ -29,6 +31,64 @@ reset_stale_cmake_cache() {
     fi
 }
 
+remove_file_target() {
+    local target="$1"
+    local label="$2"
+
+    if [[ -f "${target}" ]]; then
+        echo "Removing ${label}: ${target}"
+        rm -f -- "${target}"
+    else
+        echo "No ${label} at ${target}"
+    fi
+}
+
+remove_dir_target() {
+    local target="$1"
+    local label="$2"
+
+    if [[ -d "${target}" ]]; then
+        echo "Removing ${label}: ${target}"
+        rm -rf -- "${target}"
+    else
+        echo "No ${label} at ${target}"
+    fi
+}
+
+nuke_library_db() {
+    local data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+    local db_path="${data_home}/ferrous/library.sqlite3"
+
+    remove_file_target "${db_path}" "library database"
+    remove_file_target "${db_path}-wal" "library database WAL"
+    remove_file_target "${db_path}-shm" "library database SHM"
+}
+
+nuke_thumbnail_cache() {
+    local cache_home="${XDG_CACHE_HOME:-${HOME}/.cache}"
+    local primary_path="${cache_home}/ferrous/thumbnails/library"
+    local fallback_path="/tmp/ferrous/thumbnails/library"
+
+    remove_dir_target "${primary_path}" "thumbnail cache"
+    if [[ "${fallback_path}" != "${primary_path}" ]]; then
+        remove_dir_target "${fallback_path}" "thumbnail cache fallback"
+    fi
+}
+
+run_requested_cleanup() {
+    if [[ ${NUKE_DB} -eq 0 && ${NUKE_THUMBNAILS} -eq 0 ]]; then
+        return
+    fi
+
+    echo "Running requested Ferrous cleanup..."
+    if [[ ${NUKE_DB} -eq 1 ]]; then
+        nuke_library_db
+    fi
+    if [[ ${NUKE_THUMBNAILS} -eq 1 ]]; then
+        nuke_thumbnail_cache
+    fi
+}
+
 usage() {
     cat <<USAGE
 Usage: $(basename "$0") [options] [-- <ui-args...>]
@@ -38,6 +98,9 @@ Options:
   --no-build        Skip cmake build step
   --no-run          Only configure/build; do not launch UI
   --process-bridge  Force legacy process/stdout bridge (default: in-process FFI bridge)
+  --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
+  --nuke-thumbnails Delete Ferrous library thumbnail cache (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
+  --nuke-all        Equivalent to --nuke-db --nuke-thumbnails
   -h, --help        Show this help
 
 Environment:
@@ -45,6 +108,8 @@ Environment:
   FERROUS_BRIDGE_MODE      Set to 'process' to force legacy process bridge
   FERROUS_UI_BUILD_DIR     Override build dir (default: ${UI_DIR}/build)
   FERROUS_NATIVE_BUILD_DIR Backward-compatible alias for FERROUS_UI_BUILD_DIR
+  XDG_DATA_HOME            Base path for DB cleanup target (default: \$HOME/.local/share)
+  XDG_CACHE_HOME           Base path for thumbnail cleanup target (default: \$HOME/.cache)
   CMAKE_BUILD_TYPE         Build type for single-config generators (default: RelWithDebInfo)
   CMAKE_GENERATOR          Override generator (default: Ninja)
 USAGE
@@ -64,6 +129,16 @@ while [[ $# -gt 0 ]]; do
         --process-bridge)
             FORCE_PROCESS_BRIDGE=1
             ;;
+        --nuke-db)
+            NUKE_DB=1
+            ;;
+        --nuke-thumbnails)
+            NUKE_THUMBNAILS=1
+            ;;
+        --nuke-all)
+            NUKE_DB=1
+            NUKE_THUMBNAILS=1
+            ;;
         -h|--help)
             usage
             exit 0
@@ -81,6 +156,8 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+run_requested_cleanup
 
 if ! command -v cargo >/dev/null 2>&1; then
     if [[ -f "$HOME/.cargo/env" ]]; then
