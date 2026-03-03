@@ -339,16 +339,21 @@ impl AnalysisEngine {
                             * (spectrogram_lookahead_ms as usize)
                             / 1000;
                         let visual_delay_samples = (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
+                        // Allow negative effective delay target so lookahead can still have
+                        // effect when the visual delay floor is reached.
                         let effective_delay_samples =
-                            visual_delay_samples.saturating_sub(lookahead_samples);
+                            visual_delay_samples as isize - lookahead_samples as isize;
                         // Enforce configured visual delay by consuming only from samples older
                         // than the delay horizon.
-                        let available = pcm_fifo.len().saturating_sub(effective_delay_samples);
+                        let available = if effective_delay_samples >= 0 {
+                            pcm_fifo.len().saturating_sub(effective_delay_samples as usize)
+                        } else {
+                            pcm_fifo.len().saturating_add((-effective_delay_samples) as usize)
+                        };
 
                         // Closed-loop backlog control: steer FIFO depth toward configured delay
                         // so offset remains effective even when producer/consumer drift.
-                        let backlog_error =
-                            pcm_fifo.len() as isize - effective_delay_samples as isize;
+                        let backlog_error = pcm_fifo.len() as isize - effective_delay_samples;
                         let correction = (backlog_error / 8).clamp(-512, 512);
                         let adjusted_target =
                             (target_samples as isize + correction).clamp(0, 4096) as usize;
