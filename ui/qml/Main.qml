@@ -1344,6 +1344,11 @@ Kirigami.ApplicationWindow {
                                         onDoubleClicked: function(mouse) {
                                             if ((isArtistRow || isAlbumRow)
                                                     && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
+                                                if (isArtistRow) {
+                                                    libraryModel.toggleArtist(artist)
+                                                } else {
+                                                    libraryModel.toggleAlbum(key)
+                                                }
                                                 return
                                             }
                                             if (isArtistRow) {
