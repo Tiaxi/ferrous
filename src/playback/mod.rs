@@ -1456,13 +1456,14 @@ mod backend {
             .build();
         capsfilter.set_property("caps", &caps);
 
-        // Default to unsynced appsink so analysis can run slightly ahead of
-        // wall-clock audio output; this is bounded later by analysis lookahead.
+        // Keep tap synced by default to avoid analysis racing ahead of
+        // audible playback; explicit env override is still available for
+        // controlled experiments.
         let analysis_sync = std::env::var("FERROUS_GST_ANALYSIS_SYNC")
             .ok()
             .and_then(|raw| raw.parse::<i32>().ok())
             .map(|v| v != 0)
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let appsink = gst_app::AppSink::builder()
             .caps(&caps)
