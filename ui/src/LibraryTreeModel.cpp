@@ -341,7 +341,7 @@ bool LibraryTreeModel::isArtistExpanded(const QString &artist, bool autoExpand) 
     }
     const auto it = m_expandedArtists.constFind(artist);
     if (it == m_expandedArtists.constEnd()) {
-        return true;
+        return false;
     }
     return it.value();
 }

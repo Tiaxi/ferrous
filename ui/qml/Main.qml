@@ -1203,6 +1203,9 @@ Kirigami.ApplicationWindow {
                                     readonly property bool draggableLibraryItem: isArtistRow
                                         || isAlbumRow
                                         || (isTrackRow && trackPathResolved.length > 0)
+                                    readonly property bool albumCoverInViewport: isAlbumRow
+                                        && (y + height >= libraryAlbumView.contentY - 48)
+                                        && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
                                     readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
                                     width: ListView.view.width
                                     height: 24
@@ -1247,11 +1250,11 @@ Kirigami.ApplicationWindow {
 
                                             Image {
                                                 anchors.fill: parent
-                                                source: coverPath || ""
+                                                source: albumCoverInViewport ? (coverPath || "") : ""
                                                 fillMode: Image.PreserveAspectFit
                                                 smooth: false
                                                 asynchronous: true
-                                                cache: true
+                                                cache: false
                                                 sourceSize.width: 32
                                                 sourceSize.height: 32
                                             }
