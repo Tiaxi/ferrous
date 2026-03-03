@@ -38,6 +38,11 @@ pub struct AnalysisSnapshot {
     pub spectrogram_rows: Vec<Vec<f32>>,
     pub spectrogram_seq: u64,
     pub sample_rate_hz: u32,
+    pub spectrogram_lag_estimate_ms: f32,
+    pub spectrogram_fifo_delay_ms: f32,
+    pub spectrogram_stft_pending_ms: f32,
+    pub spectrogram_window_center_ms: f32,
+    pub spectrogram_target_delay_ms: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +383,18 @@ impl AnalysisEngine {
                                 snapshot.spectrogram_seq = snapshot.spectrogram_seq.wrapping_add(1);
                             }
                         }
+                        let sample_rate_f32 = snapshot.sample_rate_hz.max(1) as f32;
+                        snapshot.spectrogram_fifo_delay_ms =
+                            (pcm_fifo.len() as f32) * 1000.0 / sample_rate_f32;
+                        snapshot.spectrogram_stft_pending_ms =
+                            (stft.pending_len() as f32) * 1000.0 / sample_rate_f32;
+                        snapshot.spectrogram_window_center_ms =
+                            (stft.fft_size() as f32) * 500.0 / sample_rate_f32;
+                        snapshot.spectrogram_target_delay_ms =
+                            (effective_delay_samples as f32) * 1000.0 / sample_rate_f32;
+                        snapshot.spectrogram_lag_estimate_ms = snapshot.spectrogram_fifo_delay_ms
+                            + snapshot.spectrogram_stft_pending_ms
+                            + snapshot.spectrogram_window_center_ms;
                         emit_snapshot(
                             &event_tx,
                             &snapshot,
@@ -389,7 +406,7 @@ impl AnalysisEngine {
 
                         if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
                             eprintln!(
-                                "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_samples={} fft={} hop={}",
+                                "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_samples={} fft={} hop={} lag_ms={:.1} fifo_ms={:.1} pending_ms={:.1} target_ms={:.1}",
                                 prof_ticks,
                                 prof_pcm,
                                 prof_in_samples,
@@ -398,7 +415,11 @@ impl AnalysisEngine {
                                 stft.pending_len(),
                                 pcm_fifo.len(),
                                 stft.fft_size(),
-                                stft.hop_size()
+                                stft.hop_size(),
+                                snapshot.spectrogram_lag_estimate_ms,
+                                snapshot.spectrogram_fifo_delay_ms,
+                                snapshot.spectrogram_stft_pending_ms,
+                                snapshot.spectrogram_target_delay_ms
                             );
                             prof_last = std::time::Instant::now();
                             prof_pcm = 0;
@@ -655,6 +676,11 @@ fn emit_snapshot(
         spectrogram_rows: std::mem::take(pending_rows),
         spectrogram_seq: snapshot.spectrogram_seq,
         sample_rate_hz: snapshot.sample_rate_hz,
+        spectrogram_lag_estimate_ms: snapshot.spectrogram_lag_estimate_ms,
+        spectrogram_fifo_delay_ms: snapshot.spectrogram_fifo_delay_ms,
+        spectrogram_stft_pending_ms: snapshot.spectrogram_stft_pending_ms,
+        spectrogram_window_center_ms: snapshot.spectrogram_window_center_ms,
+        spectrogram_target_delay_ms: snapshot.spectrogram_target_delay_ms,
     };
     let _ = event_tx.send(AnalysisEvent::Snapshot(out));
     *waveform_dirty = false;
@@ -1056,6 +1082,11 @@ mod tests {
             spectrogram_rows: Vec::new(),
             spectrogram_seq: 0,
             sample_rate_hz: 48_000,
+            spectrogram_lag_estimate_ms: 0.0,
+            spectrogram_fifo_delay_ms: 0.0,
+            spectrogram_stft_pending_ms: 0.0,
+            spectrogram_window_center_ms: 0.0,
+            spectrogram_target_delay_ms: 0.0,
         };
         let mut pending_rows = Vec::<Vec<f32>>::new();
         let mut waveform_dirty = true;

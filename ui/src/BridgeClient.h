@@ -33,6 +33,11 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
     Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY analysisChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
+    Q_PROPERTY(double spectrogramLagEstimateMs READ spectrogramLagEstimateMs NOTIFY analysisChanged)
+    Q_PROPERTY(double spectrogramFifoDelayMs READ spectrogramFifoDelayMs NOTIFY analysisChanged)
+    Q_PROPERTY(double spectrogramStftPendingMs READ spectrogramStftPendingMs NOTIFY analysisChanged)
+    Q_PROPERTY(double spectrogramWindowCenterMs READ spectrogramWindowCenterMs NOTIFY analysisChanged)
+    Q_PROPERTY(double spectrogramTargetDelayMs READ spectrogramTargetDelayMs NOTIFY analysisChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
     Q_PROPERTY(int repeatMode READ repeatMode NOTIFY snapshotChanged)
@@ -66,6 +71,11 @@ public:
     QByteArray waveformPeaksPacked() const;
     bool spectrogramReset() const;
     int sampleRateHz() const;
+    double spectrogramLagEstimateMs() const;
+    double spectrogramFifoDelayMs() const;
+    double spectrogramStftPendingMs() const;
+    double spectrogramWindowCenterMs() const;
+    double spectrogramTargetDelayMs() const;
     double dbRange() const;
     bool logScale() const;
     int repeatMode() const;
@@ -160,6 +170,11 @@ private:
     int m_spectrogramPackedBins{0};
     bool m_spectrogramReset{false};
     int m_sampleRateHz{48000};
+    double m_spectrogramLagEstimateMs{0.0};
+    double m_spectrogramFifoDelayMs{0.0};
+    double m_spectrogramStftPendingMs{0.0};
+    double m_spectrogramWindowCenterMs{0.0};
+    double m_spectrogramTargetDelayMs{0.0};
     double m_dbRange{90.0};
     bool m_logScale{false};
     int m_repeatMode{0};
