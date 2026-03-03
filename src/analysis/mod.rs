@@ -22,6 +22,8 @@ pub enum AnalysisCommand {
         reset_spectrogram: bool,
     },
     SetSampleRate(u32),
+    SetPlaybackPosition(Duration),
+    SetOutputLatency(Duration),
     SetFftSize(usize),
     SetSpectrogramOffsetMs(i32),
     SetSpectrogramLookaheadMs(i32),
@@ -115,6 +117,9 @@ impl AnalysisEngine {
             let mut ticks_without_row = 0usize;
             let mut spectrogram_offset_ms = 0_i32;
             let mut spectrogram_lookahead_ms = 0_i32;
+            let mut playback_position = Duration::ZERO;
+            let mut output_latency = Duration::ZERO;
+            let mut consumed_sample_cursor: u64 = 0;
 
             loop {
                 select! {
@@ -141,6 +146,7 @@ impl AnalysisEngine {
                                     pcm_fifo.clear();
                                     last_tick_time = std::time::Instant::now();
                                     sample_credit = 0.0;
+                                    consumed_sample_cursor = 0;
                                 }
                                 emit_snapshot(
                                     &event_tx,
@@ -218,6 +224,12 @@ impl AnalysisEngine {
                                     );
                                 }
                             }
+                            AnalysisCommand::SetPlaybackPosition(position) => {
+                                playback_position = position;
+                            }
+                            AnalysisCommand::SetOutputLatency(latency) => {
+                                output_latency = latency;
+                            }
                             AnalysisCommand::SetFftSize(size) => {
                                 let fft = size.clamp(512, 8192).next_power_of_two();
                                 let hop = (fft / 8).max(64);
@@ -229,6 +241,7 @@ impl AnalysisEngine {
                                 pcm_fifo.clear();
                                 sample_credit = 0.0;
                                 last_tick_time = std::time::Instant::now();
+                                consumed_sample_cursor = 0;
                                 emit_snapshot(
                                     &event_tx,
                                     &snapshot,
@@ -320,6 +333,7 @@ impl AnalysisEngine {
                         let fifo_max = (snapshot.sample_rate_hz as usize / 2).max(4096);
                         while pcm_fifo.len() > fifo_max {
                             let _ = pcm_fifo.pop_front();
+                            consumed_sample_cursor = consumed_sample_cursor.saturating_add(1);
                         }
 
                         // Feed STFT at real-time cadence from elapsed clock time to minimize drift.
@@ -341,19 +355,34 @@ impl AnalysisEngine {
                         let visual_delay_samples = (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
                         let effective_delay_samples =
                             visual_delay_samples.saturating_sub(lookahead_samples);
+
+                        let sr = snapshot.sample_rate_hz as f64;
+                        let playback_position_samples =
+                            (playback_position.as_secs_f64() * sr).round() as isize;
+                        let output_latency_samples =
+                            (output_latency.as_secs_f64() * sr).round() as isize;
+                        let fft_group_delay_samples = (stft.fft_size() / 2) as isize;
+                        let desired_cursor = playback_position_samples
+                            .saturating_add(output_latency_samples)
+                            .saturating_add(fft_group_delay_samples)
+                            .saturating_sub(effective_delay_samples as isize);
+                        let cursor_error = desired_cursor - consumed_sample_cursor as isize;
+                        if cursor_error > 0 {
+                            // Catch up by dropping stale queued samples instead of temporarily
+                            // overclocking feed rate, which tends to produce visible stutter.
+                            let max_skip = pcm_fifo.len().saturating_sub(256);
+                            let skip = (cursor_error as usize).min(max_skip).min(2048);
+                            for _ in 0..skip {
+                                let _ = pcm_fifo.pop_front();
+                            }
+                            consumed_sample_cursor =
+                                consumed_sample_cursor.saturating_add(skip as u64);
+                        }
                         // Enforce configured visual delay by consuming only from samples older
                         // than the delay horizon.
                         let available = pcm_fifo.len().saturating_sub(effective_delay_samples);
 
-                        // Closed-loop backlog control: steer FIFO depth toward configured delay
-                        // so offset remains effective even when producer/consumer drift.
-                        let backlog_error =
-                            pcm_fifo.len() as isize - effective_delay_samples as isize;
-                        let correction = (backlog_error / 8).clamp(-512, 512);
-                        let adjusted_target =
-                            (target_samples as isize + correction).clamp(0, 4096) as usize;
-
-                        let to_feed = adjusted_target.min(available);
+                        let to_feed = target_samples.min(available);
                         if to_feed > 0 {
                             let mut feed = Vec::with_capacity(to_feed);
                             for _ in 0..to_feed {
@@ -361,6 +390,8 @@ impl AnalysisEngine {
                                     feed.push(v);
                                 }
                             }
+                            consumed_sample_cursor =
+                                consumed_sample_cursor.saturating_add(feed.len() as u64);
                             prof_out_samples += feed.len();
                             stft.enqueue_samples(&feed, snapshot.sample_rate_hz);
                         }

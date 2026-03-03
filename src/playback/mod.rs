@@ -907,7 +907,7 @@ mod backend {
             .build()
             .map_err(|_| anyhow!("failed to create playbin"))?;
 
-        let analysis_sink = build_analysis_audio_sink(analysis_tx, pcm_tx)?;
+        let analysis_sink = build_analysis_audio_sink(analysis_tx.clone(), pcm_tx)?;
         playbin.set_property("audio-sink", &analysis_sink);
 
         let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
@@ -939,6 +939,10 @@ mod backend {
         let mut applied_volume = 1.0f64;
         let mut startup_gain_ramp = false;
         let mut seek_hold: Option<(Instant, Duration)> = None;
+        let mut cached_output_latency = Duration::ZERO;
+        let mut last_latency_query = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         playbin.set_property("volume", applied_volume);
 
         loop {
@@ -947,12 +951,15 @@ mod backend {
                     apply_command(
                         &playbin,
                         &queue_state,
+                        &analysis_tx,
                         &event_tx,
                         &mut snapshot,
                         &mut target_volume,
                         &mut applied_volume,
                         &mut startup_gain_ramp,
                         &mut seek_hold,
+                        &mut cached_output_latency,
+                        &mut last_latency_query,
                         cmd,
                     );
                 }
@@ -972,12 +979,15 @@ mod backend {
     fn apply_command(
         playbin: &gst::Element,
         queue_state: &Arc<Mutex<GaplessQueue>>,
+        analysis_tx: &Sender<AnalysisCommand>,
         event_tx: &Sender<PlaybackEvent>,
         snapshot: &mut PlaybackSnapshot,
         target_volume: &mut f64,
         applied_volume: &mut f64,
         startup_gain_ramp: &mut bool,
         seek_hold: &mut Option<(Instant, Duration)>,
+        cached_output_latency: &mut Duration,
+        last_latency_query: &mut Instant,
         cmd: PlaybackCommand,
     ) {
         match cmd {
@@ -1279,6 +1289,18 @@ mod backend {
                         }
                     }
                 }
+                if snapshot.state != PlaybackState::Stopped {
+                    let _ =
+                        analysis_tx.send(AnalysisCommand::SetPlaybackPosition(snapshot.position));
+                    if last_latency_query.elapsed() >= Duration::from_millis(250) {
+                        if let Some(latency) = query_output_latency(playbin) {
+                            *cached_output_latency = latency;
+                        }
+                        *last_latency_query = Instant::now();
+                    }
+                    let _ =
+                        analysis_tx.send(AnalysisCommand::SetOutputLatency(*cached_output_latency));
+                }
                 if snapshot.state != PlaybackState::Stopped || snapshot.duration == Duration::ZERO {
                     if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
                         let next_dur = Duration::from_nanos(dur.nseconds());
@@ -1374,6 +1396,15 @@ mod backend {
         }
         *applied_volume = 0.0;
         playbin.set_property("volume", *applied_volume);
+    }
+
+    fn query_output_latency(playbin: &gst::Element) -> Option<Duration> {
+        let mut query = gst::query::Latency::new();
+        if !playbin.query(&mut query) {
+            return None;
+        }
+        let (_live, min_latency, _max_latency) = query.result();
+        Some(Duration::from_nanos(min_latency.nseconds()))
     }
 
     fn handle_bus_message(
