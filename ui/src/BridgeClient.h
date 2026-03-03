@@ -103,6 +103,7 @@ public:
     Q_INVOKABLE void replaceArtistByName(const QString &artist);
     Q_INVOKABLE void appendArtistByName(const QString &artist);
     Q_INVOKABLE QString libraryAlbumCoverAt(int index) const;
+    Q_INVOKABLE QString libraryThumbnailSource(const QString &path) const;
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
     Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();

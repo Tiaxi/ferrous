@@ -20,6 +20,7 @@
 #include <QMetaObject>
 #include <QSet>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QVector>
 #include <QtEndian>
 
@@ -560,6 +561,39 @@ QString BridgeClient::libraryAlbumCoverAt(int index) const {
         return {};
     }
     return QUrl::fromLocalFile(path).toString();
+}
+
+QString BridgeClient::libraryThumbnailSource(const QString &path) const {
+    if (path.isEmpty()) {
+        return {};
+    }
+
+    if (path.startsWith(QStringLiteral("qrc:/")) || path.startsWith(QStringLiteral(":/"))) {
+        return path;
+    }
+
+    QUrl url(path);
+    QString localPath;
+    if (url.isValid() && url.isLocalFile()) {
+        localPath = url.toLocalFile();
+    } else if (path.startsWith(QStringLiteral("file://"))) {
+        localPath = QUrl(path).toLocalFile();
+        url = QUrl(path);
+    } else {
+        localPath = path;
+        url = QUrl::fromLocalFile(path);
+    }
+
+    const QFileInfo info(localPath);
+    if (!info.exists()) {
+        return path;
+    }
+
+    QUrlQuery query(url);
+    query.removeAllQueryItems(QStringLiteral("v"));
+    query.addQueryItem(QStringLiteral("v"), QString::number(info.lastModified().toMSecsSinceEpoch()));
+    url.setQuery(query);
+    return url.toString(QUrl::FullyEncoded);
 }
 
 void BridgeClient::scanRoot(const QString &path) {

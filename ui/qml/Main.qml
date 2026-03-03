@@ -1250,7 +1250,9 @@ Kirigami.ApplicationWindow {
 
                                             Image {
                                                 anchors.fill: parent
-                                                source: albumCoverInViewport ? (coverPath || "") : ""
+                                                source: albumCoverInViewport
+                                                    ? uiBridge.libraryThumbnailSource(coverPath || "")
+                                                    : ""
                                                 fillMode: Image.PreserveAspectFit
                                                 smooth: false
                                                 asynchronous: true
