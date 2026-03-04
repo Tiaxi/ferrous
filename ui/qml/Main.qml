@@ -52,6 +52,7 @@ Kirigami.ApplicationWindow {
     property var pendingLibraryRevealExpandKeys: []
     property int pendingLibraryRevealAttempts: 0
     property string pendingSearchOpenSelectionKey: ""
+    property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
     property var globalSearchDisplayRows: []
     property int globalSearchSelectedDisplayIndex: -1
@@ -1199,10 +1200,7 @@ Kirigami.ApplicationWindow {
         }
         pendingLibraryRevealExpandKeys = expandKeys
         pendingLibraryRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")
-        pendingLibraryRevealAttempts = 64
-        for (let i = 0; i < expandKeys.length; ++i) {
-            uiBridge.setLibraryNodeExpanded(expandKeys[i], true)
-        }
+        pendingLibraryRevealAttempts = 80
         Qt.callLater(root.applyPendingLibraryReveal)
     }
 
@@ -1227,6 +1225,31 @@ Kirigami.ApplicationWindow {
         })
     }
 
+    function ensureLibraryKeyExpanded(key) {
+        const normalized = (key || "").trim()
+        if (normalized.length === 0) {
+            return true
+        }
+        const rowIndex = libraryModel.indexForSelectionKey(normalized)
+        if (rowIndex < 0) {
+            return false
+        }
+        const rowMap = libraryModel.rowDataForRow(rowIndex)
+        if (!rowMap) {
+            return false
+        }
+        const rowType = rowMap.rowType || ""
+        const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0
+        if (!hasChildren) {
+            return true
+        }
+        if (!!rowMap.expanded) {
+            return true
+        }
+        libraryModel.toggleKey(normalized)
+        return false
+    }
+
     function applyPendingLibraryReveal() {
         if (pendingLibraryRevealSelectionKey.length === 0) {
             return
@@ -1234,7 +1257,7 @@ Kirigami.ApplicationWindow {
         for (let i = 0; i < pendingLibraryRevealExpandKeys.length; ++i) {
             const expandKey = pendingLibraryRevealExpandKeys[i] || ""
             if (expandKey.length > 0) {
-                uiBridge.setLibraryNodeExpanded(expandKey, true)
+                ensureLibraryKeyExpanded(expandKey)
             }
         }
         const index = libraryModel.indexForSelectionKey(pendingLibraryRevealSelectionKey)
@@ -1258,6 +1281,12 @@ Kirigami.ApplicationWindow {
         if (pendingSearchOpenSelectionKey.length === 0) {
             return
         }
+        for (let i = 0; i < pendingSearchOpenExpandKeys.length; ++i) {
+            const expandKey = pendingSearchOpenExpandKeys[i] || ""
+            if (expandKey.length > 0) {
+                ensureLibraryKeyExpanded(expandKey)
+            }
+        }
         const index = libraryModel.indexForSelectionKey(pendingSearchOpenSelectionKey)
         if (index >= 0) {
             const rowMap = libraryModel.rowDataForRow(index)
@@ -1266,11 +1295,13 @@ Kirigami.ApplicationWindow {
                 uiBridge.openInFileBrowser(openPath)
             }
             pendingSearchOpenSelectionKey = ""
+            pendingSearchOpenExpandKeys = []
             pendingSearchOpenAttempts = 0
             return
         }
         if (pendingSearchOpenAttempts <= 0) {
             pendingSearchOpenSelectionKey = ""
+            pendingSearchOpenExpandKeys = []
             return
         }
         pendingSearchOpenAttempts -= 1
@@ -1326,14 +1357,16 @@ Kirigami.ApplicationWindow {
         if (selectionKey.length === 0) {
             return
         }
+        const expandKeys = []
         if ((row.artistKey || "").length > 0) {
-            uiBridge.setLibraryNodeExpanded(row.artistKey, true)
+            expandKeys.push(row.artistKey)
         }
         if (rowType === "album" && (row.albumKey || "").length > 0) {
-            uiBridge.setLibraryNodeExpanded(row.albumKey, true)
+            expandKeys.push(row.albumKey)
         }
         pendingSearchOpenSelectionKey = selectionKey
-        pendingSearchOpenAttempts = 24
+        pendingSearchOpenExpandKeys = expandKeys
+        pendingSearchOpenAttempts = 80
         Qt.callLater(root.applyPendingSearchOpen)
     }
 
