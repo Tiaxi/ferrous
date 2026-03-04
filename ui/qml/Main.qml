@@ -1917,12 +1917,6 @@ Kirigami.ApplicationWindow {
         onClosed: {
             uiBridge.setGlobalSearchQuery("")
         }
-        Keys.onPressed: function(event) {
-            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                root.focusGlobalSearchQueryField(true)
-                event.accepted = true
-            }
-        }
 
         contentItem: ColumnLayout {
             spacing: 8
@@ -2470,14 +2464,53 @@ Kirigami.ApplicationWindow {
                 Layout.fillHeight: true
                 clip: true
 
-                TextArea {
-                    id: diagnosticsTextArea
-                    text: uiBridge.diagnosticsText || ""
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: TextEdit.NoWrap
-                    font.family: "Monospace"
-                    persistentSelection: true
+                Item {
+                    anchors.fill: parent
+
+                    TextArea {
+                        id: diagnosticsTextArea
+                        anchors.fill: parent
+                        text: uiBridge.diagnosticsText || ""
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.NoWrap
+                        font.family: "Monospace"
+                        persistentSelection: true
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: function(mouse) {
+                            if (mouse.button === Qt.RightButton) {
+                                diagnosticsTextArea.forceActiveFocus()
+                                diagnosticsContextMenu.popup()
+                            }
+                        }
+                    }
+
+                    Menu {
+                        id: diagnosticsContextMenu
+
+                        MenuItem {
+                            text: "Copy"
+                            enabled: (diagnosticsTextArea.selectedText || "").length > 0
+                            onTriggered: diagnosticsTextArea.copy()
+                        }
+                        MenuItem {
+                            text: "Select All"
+                            enabled: (diagnosticsTextArea.text || "").length > 0
+                            onTriggered: diagnosticsTextArea.selectAll()
+                        }
+                        MenuItem {
+                            text: "Copy All"
+                            enabled: (diagnosticsTextArea.text || "").length > 0
+                            onTriggered: {
+                                diagnosticsTextArea.selectAll()
+                                diagnosticsTextArea.copy()
+                            }
+                        }
+                    }
                 }
             }
         }
