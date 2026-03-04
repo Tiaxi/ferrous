@@ -638,7 +638,23 @@ Kirigami.ApplicationWindow {
     }
 
     function urlToLocalPath(urlValue) {
-        const value = String(urlValue || "")
+        if (urlValue === undefined || urlValue === null) {
+            return ""
+        }
+        let value = ""
+        if (typeof urlValue === "string") {
+            value = urlValue
+        } else if (urlValue.toString) {
+            value = urlValue.toString()
+        } else {
+            value = String(urlValue)
+        }
+        if (value.length === 0 || value === "undefined" || value === "null") {
+            return ""
+        }
+        if (value.startsWith("QUrl(\"") && value.endsWith("\")")) {
+            value = value.substring(6, value.length - 2)
+        }
         if (value.startsWith("file://")) {
             return decodeURIComponent(value.substring(7))
         }
@@ -649,7 +665,7 @@ Kirigami.ApplicationWindow {
         if (!dialogObj) {
             return ""
         }
-        const candidates = [dialogObj.folder, dialogObj.currentFolder, dialogObj.selectedFolder]
+        const candidates = [dialogObj.folder, dialogObj.selectedFolder, dialogObj.currentFolder]
         for (let i = 0; i < candidates.length; ++i) {
             const path = root.urlToLocalPath(candidates[i])
             if (path.length > 0) {

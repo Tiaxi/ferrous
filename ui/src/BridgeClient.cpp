@@ -42,6 +42,34 @@ bool isNewerSeq(quint32 seq, quint32 last) {
     return static_cast<qint32>(seq - last) > 0;
 }
 
+QString normalizeLocalPathArg(const QString &path) {
+    QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) {
+        return {};
+    }
+
+    if (trimmed.startsWith(QStringLiteral("QUrl(\"")) && trimmed.endsWith(QStringLiteral("\")"))) {
+        trimmed = trimmed.mid(6, trimmed.size() - 8);
+    }
+
+    const QUrl asUrl(trimmed);
+    if (asUrl.isValid() && asUrl.isLocalFile()) {
+        const QString localPath = asUrl.toLocalFile().trimmed();
+        if (!localPath.isEmpty()) {
+            return localPath;
+        }
+    }
+
+    if (trimmed.startsWith(QStringLiteral("file://"))) {
+        const QString localPath = QUrl(trimmed).toLocalFile().trimmed();
+        if (!localPath.isEmpty()) {
+            return localPath;
+        }
+    }
+
+    return trimmed;
+}
+
 int readEnvMillis(const char *key, int fallback) {
     bool ok = false;
     const int value = qEnvironmentVariableIntValue(key, &ok);
@@ -756,32 +784,35 @@ QString BridgeClient::queuePathAt(int index) const {
 }
 
 void BridgeClient::addLibraryRoot(const QString &path) {
-    if (path.trimmed().isEmpty()) {
+    const QString normalized = normalizeLocalPathArg(path);
+    if (normalized.isEmpty()) {
         return;
     }
     QJsonObject obj;
     obj.insert(QStringLiteral("cmd"), QStringLiteral("add_root"));
-    obj.insert(QStringLiteral("path"), path);
+    obj.insert(QStringLiteral("path"), normalized);
     sendJson(obj);
 }
 
 void BridgeClient::removeLibraryRoot(const QString &path) {
-    if (path.trimmed().isEmpty()) {
+    const QString normalized = normalizeLocalPathArg(path);
+    if (normalized.isEmpty()) {
         return;
     }
     QJsonObject obj;
     obj.insert(QStringLiteral("cmd"), QStringLiteral("remove_root"));
-    obj.insert(QStringLiteral("path"), path);
+    obj.insert(QStringLiteral("path"), normalized);
     sendJson(obj);
 }
 
 void BridgeClient::rescanLibraryRoot(const QString &path) {
-    if (path.trimmed().isEmpty()) {
+    const QString normalized = normalizeLocalPathArg(path);
+    if (normalized.isEmpty()) {
         return;
     }
     QJsonObject obj;
     obj.insert(QStringLiteral("cmd"), QStringLiteral("rescan_root"));
-    obj.insert(QStringLiteral("path"), path);
+    obj.insert(QStringLiteral("path"), normalized);
     sendJson(obj);
 }
 
