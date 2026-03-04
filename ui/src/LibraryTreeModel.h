@@ -11,6 +11,7 @@
 class LibraryTreeModel : public QAbstractListModel {
     Q_OBJECT
     Q_PROPERTY(int count READ count NOTIFY countChanged)
+    Q_PROPERTY(bool parsing READ parsing NOTIFY parsingChanged)
 
 public:
     enum Roles {
@@ -38,6 +39,7 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     int count() const;
+    bool parsing() const;
 
     Q_INVOKABLE void setLibraryTreeFromBinary(const QByteArray &treeBytes);
     Q_INVOKABLE void setSearchText(const QString &text);
@@ -52,6 +54,8 @@ public:
 
 signals:
     void countChanged();
+    void parsingChanged();
+    void treeApplied();
 
 private:
     struct TreeNode {

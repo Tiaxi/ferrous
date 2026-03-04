@@ -28,6 +28,10 @@ Kirigami.ApplicationWindow {
     property var selectedQueueIndices: []
     property int queueSelectionAnchorIndex: -1
     property int lastAppliedLibraryVersion: -1
+    property int pendingLibraryVersion: -1
+    property real pendingLibraryContentY: 0
+    property bool pendingLibraryContentYValid: false
+    property int lastSeenQueueVersion: -1
     property int lastCenteredQueueIndex: -2
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
@@ -54,6 +58,7 @@ Kirigami.ApplicationWindow {
         property real durationSeconds: 0
         property real volume: 1.0
         property int queueLength: 0
+        property int queueVersion: 0
         property string queueDurationText: "00:00"
         property var queueItems: []
         property int selectedQueueIndex: -1
@@ -535,6 +540,65 @@ Kirigami.ApplicationWindow {
         libraryModel.toggleKey(key)
         restoreY()
         Qt.callLater(restoreY)
+    }
+
+    function restoreLibraryViewY(preserveY) {
+        if (!libraryAlbumView) {
+            return
+        }
+        const restoreY = function() {
+            const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
+            libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
+        }
+        restoreY()
+        Qt.callLater(restoreY)
+    }
+
+    function finishPendingLibraryTreeApply() {
+        if (pendingLibraryVersion < 0 || libraryModel.parsing) {
+            return
+        }
+        lastAppliedLibraryVersion = pendingLibraryVersion
+        pendingLibraryVersion = -1
+        root.syncLibrarySelectionToVisibleRows()
+        if (pendingLibraryContentYValid) {
+            restoreLibraryViewY(pendingLibraryContentY)
+            pendingLibraryContentYValid = false
+        }
+    }
+
+    function requestLibraryTreeApply(version, treeBytes) {
+        if (version < 0 || version === pendingLibraryVersion) {
+            return
+        }
+        if (version === lastAppliedLibraryVersion && pendingLibraryVersion < 0) {
+            return
+        }
+        pendingLibraryContentY = libraryAlbumView ? libraryAlbumView.contentY : 0
+        pendingLibraryContentYValid = true
+        pendingLibraryVersion = version
+        libraryModel.setLibraryTreeFromBinary(treeBytes || "")
+        finishPendingLibraryTreeApply()
+    }
+
+    function resetQueueSelectionForUpdatedQueue() {
+        if (uiBridge.selectedQueueIndex >= 0 && uiBridge.selectedQueueIndex < uiBridge.queueLength) {
+            selectedQueueIndices = [uiBridge.selectedQueueIndex]
+            queueSelectionAnchorIndex = uiBridge.selectedQueueIndex
+        } else {
+            selectedQueueIndices = []
+            queueSelectionAnchorIndex = -1
+        }
+    }
+
+    function isLibraryTreeLoading() {
+        if (pendingLibraryVersion >= 0 || libraryModel.parsing) {
+            return true
+        }
+        if (uiBridge.libraryVersion === 0 && uiBridge.libraryRoots.length > 0) {
+            return true
+        }
+        return uiBridge.libraryScanInProgress && libraryAlbumView.count === 0
     }
 
     function clearQueueSelection() {
@@ -1510,9 +1574,13 @@ Kirigami.ApplicationWindow {
                                       + " | roots: " + uiBridge.libraryRootCount
                                       + (uiBridge.libraryScanInProgress
                                           ? (" | scanning " + uiBridge.libraryScanProcessed
-                                             + "/" + Math.max(uiBridge.libraryScanDiscovered, uiBridge.libraryScanProcessed)
                                              + (scanBacklog > 0
                                                  ? (" (+" + scanBacklog + " queued)")
+                                                 : "")
+                                             + (uiBridge.libraryScanRootsTotal > 0
+                                                 ? (" | roots "
+                                                    + uiBridge.libraryScanRootsCompleted
+                                                    + "/" + uiBridge.libraryScanRootsTotal)
                                                  : "")
                                              + (uiBridge.libraryScanFilesPerSecond > 0
                                                  ? (" @ " + uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
@@ -1743,9 +1811,12 @@ Kirigami.ApplicationWindow {
 
                             Label {
                                 visible: libraryAlbumView.count === 0
-                                text: uiBridge.libraryTreeBinary.length === 0
-                                    ? (uiBridge.libraryScanInProgress ? "Scanning library..." : "No library rows indexed")
-                                    : "No results"
+                                text: root.isLibraryTreeLoading()
+                                    ? "Loading library..."
+                                    : (((librarySearchField.text || "").trim().length > 0
+                                        || uiBridge.libraryTreeBinary.length > 0)
+                                        ? "No results"
+                                        : "No library rows indexed")
                                 color: Kirigami.Theme.disabledTextColor
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignHCenter
@@ -2231,15 +2302,13 @@ Kirigami.ApplicationWindow {
                 root.positionSmoothingLastMs = nowMs
                 root.positionSmoothingTrackPath = uiBridge.currentTrackPath
             }
-            if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
-                const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
-                libraryModel.setLibraryTreeFromBinary(uiBridge.libraryTreeBinary || "")
-                root.lastAppliedLibraryVersion = uiBridge.libraryVersion
-                root.syncLibrarySelectionToVisibleRows()
-                if (libraryAlbumView) {
-                    const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
-                    libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
-                }
+            if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion
+                    || root.pendingLibraryVersion >= 0) {
+                root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
+            }
+            if (uiBridge.queueVersion !== root.lastSeenQueueVersion) {
+                root.lastSeenQueueVersion = uiBridge.queueVersion
+                root.resetQueueSelectionForUpdatedQueue()
             }
             root.syncQueueSelectionToCurrentQueue()
         }
@@ -2259,10 +2328,17 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    Connections {
+        target: libraryModel
+        function onTreeApplied() {
+            root.finishPendingLibraryTreeApply()
+        }
+    }
+
     Component.onCompleted: {
-        libraryModel.setLibraryTreeFromBinary(uiBridge.libraryTreeBinary || "")
+        root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
         libraryModel.setSearchText(librarySearchField.text || "")
-        root.lastAppliedLibraryVersion = uiBridge.libraryVersion
+        root.lastSeenQueueVersion = uiBridge.queueVersion
         root.displayedPositionSeconds = uiBridge.positionSeconds
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
         root.positionSmoothingAnchorSeconds = uiBridge.positionSeconds

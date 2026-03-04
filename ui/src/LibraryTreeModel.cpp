@@ -187,6 +187,7 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
 LibraryTreeModel::LibraryTreeModel(QObject *parent)
     : QAbstractListModel(parent) {
     connect(&m_parseWatcher, &QFutureWatcher<QVector<TreeNode>>::finished, this, [this]() {
+        const bool wasParsing = m_parseInFlight;
         m_parseInFlight = false;
         const int finishedGeneration = m_parseWatcher.property("parseGeneration").toInt();
         if (finishedGeneration != m_parseGeneration) {
@@ -195,16 +196,30 @@ LibraryTreeModel::LibraryTreeModel(QObject *parent)
                 m_queuedTree.clear();
                 m_hasQueuedTree = false;
                 setLibraryTreeFromBinary(queued);
+                if (wasParsing && !m_parseInFlight) {
+                    emit parsingChanged();
+                }
+                return;
+            }
+            if (wasParsing) {
+                emit parsingChanged();
             }
             return;
         }
-        m_tree = m_parseWatcher.result();
-        rebuildRows();
         if (m_hasQueuedTree) {
             QByteArray queued = std::move(m_queuedTree);
             m_queuedTree.clear();
             m_hasQueuedTree = false;
             setLibraryTreeFromBinary(queued);
+            if (wasParsing && !m_parseInFlight) {
+                emit parsingChanged();
+            }
+            return;
+        }
+        m_tree = m_parseWatcher.result();
+        rebuildRows();
+        if (wasParsing) {
+            emit parsingChanged();
         }
     });
 }
@@ -298,6 +313,10 @@ int LibraryTreeModel::count() const {
     return static_cast<int>(m_rows.size());
 }
 
+bool LibraryTreeModel::parsing() const {
+    return m_parseInFlight;
+}
+
 void LibraryTreeModel::setLibraryTreeFromBinary(const QByteArray &treeBytes) {
     if (!m_parseInFlight && treeBytes.size() <= 16 * 1024) {
         ++m_parseGeneration;
@@ -316,6 +335,7 @@ void LibraryTreeModel::setLibraryTreeFromBinary(const QByteArray &treeBytes) {
     auto future = QtConcurrent::run([treeBytes]() { return parseTreeNodesFromBinary(treeBytes); });
     m_parseWatcher.setProperty("parseGeneration", generation);
     m_parseInFlight = true;
+    emit parsingChanged();
     m_parseWatcher.setFuture(future);
 }
 
@@ -578,4 +598,5 @@ void LibraryTreeModel::rebuildRows() {
     if (oldCount != count()) {
         emit countChanged();
     }
+    emit treeApplied();
 }

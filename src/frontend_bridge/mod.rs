@@ -311,13 +311,21 @@ fn run_bridge_loop(
         .and_then(|raw| raw.parse::<u64>().ok())
         .map_or(16, |v| v.clamp(8, 1000));
     let snapshot_interval = Duration::from_millis(snapshot_interval_ms);
+    let scan_snapshot_interval = scan_only_snapshot_interval();
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;
+    let mut snapshot_dirty_realtime = false;
     let mut include_tree_in_next_snapshot = true;
+    let tree_emit_interval = scan_tree_emit_interval();
+    let tree_emit_min_track_delta = scan_tree_emit_min_track_delta();
+    let mut last_tree_emit_at: Option<Instant> = None;
+    let mut last_tree_emit_track_count = 0usize;
 
     if send_snapshot_event(&event_tx, &state, include_tree_in_next_snapshot) {
         prof_snapshots_sent += 1;
         include_tree_in_next_snapshot = false;
+        last_tree_emit_at = Some(Instant::now());
+        last_tree_emit_track_count = state.library.tracks.len();
     } else {
         prof_snapshots_dropped += 1;
     }
@@ -346,6 +354,7 @@ fn run_bridge_loop(
                         }
                         if changed {
                             snapshot_dirty = true;
+                            snapshot_dirty_realtime = true;
                         }
                         if force_snapshot && running {
                             if send_snapshot_event(
@@ -354,11 +363,17 @@ fn run_bridge_loop(
                                 include_tree_in_next_snapshot,
                             ) {
                                 prof_snapshots_sent += 1;
+                                if include_tree_in_next_snapshot {
+                                    last_tree_emit_at = Some(Instant::now());
+                                    last_tree_emit_track_count = state.library.tracks.len();
+                                }
                                 include_tree_in_next_snapshot = false;
                                 snapshot_dirty = false;
+                                snapshot_dirty_realtime = false;
                             } else {
                                 prof_snapshots_dropped += 1;
                                 snapshot_dirty = true;
+                                snapshot_dirty_realtime = true;
                             }
                             last_snapshot_emit = Instant::now();
                         }
@@ -379,25 +394,50 @@ fn run_bridge_loop(
             }
         }
 
-        let mut changed = false;
-        changed |= pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
-        changed |= pump_analysis_events(&analysis_rx, &mut state);
-        changed |= pump_metadata_events(&metadata_rx, &mut state);
+        let playback_changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        let analysis_changed = pump_analysis_events(&analysis_rx, &mut state);
+        let metadata_changed = pump_metadata_events(&metadata_rx, &mut state);
         let library_changed = pump_library_events(&library_rx, &mut state);
+        let changed = playback_changed || analysis_changed || metadata_changed || library_changed;
         if library_changed {
-            state.rebuild_pre_built_tree();
-            include_tree_in_next_snapshot = true;
+            let now = Instant::now();
+            let track_delta = state
+                .library
+                .tracks
+                .len()
+                .saturating_sub(last_tree_emit_track_count);
+            let scan_emit_due = last_tree_emit_at
+                .map_or(true, |last| now.duration_since(last) >= tree_emit_interval);
+            let should_emit_tree = !state.library.scan_in_progress
+                || last_tree_emit_at.is_none()
+                || (scan_emit_due && track_delta >= tree_emit_min_track_delta);
+            if should_emit_tree {
+                state.rebuild_pre_built_tree();
+                include_tree_in_next_snapshot = true;
+            }
         }
-        changed |= library_changed;
 
         if changed {
             snapshot_dirty = true;
+            if playback_changed || analysis_changed || metadata_changed {
+                snapshot_dirty_realtime = true;
+            }
         }
-        if snapshot_dirty && last_snapshot_emit.elapsed() >= snapshot_interval {
+        let emit_interval = if state.library.scan_in_progress && !snapshot_dirty_realtime {
+            scan_snapshot_interval
+        } else {
+            snapshot_interval
+        };
+        if snapshot_dirty && last_snapshot_emit.elapsed() >= emit_interval {
             if send_snapshot_event(&event_tx, &state, include_tree_in_next_snapshot) {
                 prof_snapshots_sent += 1;
+                if include_tree_in_next_snapshot {
+                    last_tree_emit_at = Some(Instant::now());
+                    last_tree_emit_track_count = state.library.tracks.len();
+                }
                 include_tree_in_next_snapshot = false;
                 snapshot_dirty = false;
+                snapshot_dirty_realtime = false;
             } else {
                 prof_snapshots_dropped += 1;
                 snapshot_dirty = true;
@@ -473,6 +513,29 @@ fn send_snapshot_event(
         BridgeEvent::Snapshot(Box::new(state.snapshot(include_tree))),
     )
     .is_ok()
+}
+
+fn scan_only_snapshot_interval() -> Duration {
+    let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SCAN_SNAPSHOT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(120, |v| v.clamp(16, 1000));
+    Duration::from_millis(snapshot_interval_ms)
+}
+
+fn scan_tree_emit_interval() -> Duration {
+    let interval_ms = std::env::var("FERROUS_BRIDGE_SCAN_TREE_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(250, |v| v.clamp(50, 5000));
+    Duration::from_millis(interval_ms)
+}
+
+fn scan_tree_emit_min_track_delta() -> usize {
+    std::env::var("FERROUS_BRIDGE_SCAN_TREE_MIN_TRACK_DELTA")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map_or(256, |v| v.clamp(16, 50_000))
 }
 
 fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: LibrarySortMode) -> bool {

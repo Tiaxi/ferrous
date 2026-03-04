@@ -99,7 +99,9 @@ QString findAlbumCoverPath(const QStringList &trackPaths) {
         }
         scannedDirs.insert(dirPath);
 
-        const QFileInfoList files = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        const QFileInfoList files = dir.entryInfoList(
+            QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
+            QDir::Name);
         for (const QFileInfo &info : files) {
             const QString ext = info.suffix().toLower();
             if (!kImageExts.contains(ext)) {
@@ -213,8 +215,24 @@ void BridgeClient::pollInProcessBridge() {
     ferrous_ffi_bridge_poll(m_ffiBridge, 64);
 
     bool anySnapshotChanged = false;
+    int processedAnalysisFrames = 0;
+    constexpr int kMaxAnalysisFramesPerPass = 8;
+    while (processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
+        std::size_t len = 0;
+        std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
+        if (framePtr == nullptr || len == 0) {
+            break;
+        }
+        processedAnalysisFrames++;
+        const QByteArray chunk(
+            reinterpret_cast<const char *>(framePtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
+        processAnalysisBytes(chunk);
+    }
+
     int processedEvents = 0;
-    constexpr int kMaxEventsPerPass = 8;
+    constexpr int kMaxEventsPerPass = 3;
     while (processedEvents < kMaxEventsPerPass) {
         std::size_t len = 0;
         std::uint8_t *packetPtr = ferrous_ffi_bridge_pop_binary_event(m_ffiBridge, &len);
@@ -234,22 +252,6 @@ void BridgeClient::pollInProcessBridge() {
             continue;
         }
         anySnapshotChanged |= processBinarySnapshot(decoded);
-    }
-
-    int processedAnalysisFrames = 0;
-    constexpr int kMaxAnalysisFramesPerPass = 6;
-    while (processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
-        std::size_t len = 0;
-        std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
-        if (framePtr == nullptr || len == 0) {
-            break;
-        }
-        processedAnalysisFrames++;
-        const QByteArray chunk(
-            reinterpret_cast<const char *>(framePtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
-        processAnalysisBytes(chunk);
     }
 
     if (anySnapshotChanged) {
@@ -283,6 +285,10 @@ double BridgeClient::volume() const {
 
 int BridgeClient::queueLength() const {
     return m_queueLength;
+}
+
+int BridgeClient::queueVersion() const {
+    return m_queueVersion;
 }
 
 QString BridgeClient::queueDurationText() const {
@@ -1207,6 +1213,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
         if (m_queuePaths != paths) {
             m_queuePaths = paths;
+            m_queueVersion = m_queueVersion < std::numeric_limits<int>::max()
+                ? (m_queueVersion + 1)
+                : 1;
             changed = true;
         }
     }
