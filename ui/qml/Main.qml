@@ -51,6 +51,8 @@ Kirigami.ApplicationWindow {
     property string pendingLibraryRevealSelectionKey: ""
     property var pendingLibraryRevealExpandKeys: []
     property int pendingLibraryRevealAttempts: 0
+    property string pendingSearchOpenSelectionKey: ""
+    property int pendingSearchOpenAttempts: 0
     property var globalSearchDisplayRows: []
     property int globalSearchSelectedDisplayIndex: -1
     readonly property bool visualFeedsEnabled: visible
@@ -230,6 +232,13 @@ Kirigami.ApplicationWindow {
         interval: 80
         repeat: false
         onTriggered: root.applyPendingLibraryReveal()
+    }
+
+    Timer {
+        id: searchOpenRetryTimer
+        interval: 80
+        repeat: false
+        onTriggered: root.applyPendingSearchOpen()
     }
 
     function moveSelected(delta) {
@@ -1067,6 +1076,14 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    function searchFirstSelectableIndex() {
+        return nextSearchSelectableIndex(-1, 1, false)
+    }
+
+    function searchLastSelectableIndex() {
+        return nextSearchSelectableIndex(globalSearchDisplayRows.length, -1, false)
+    }
+
     function isSearchRowSelectable(index) {
         if (index < 0 || index >= globalSearchDisplayRows.length) {
             return false
@@ -1096,6 +1113,36 @@ Kirigami.ApplicationWindow {
         return -1
     }
 
+    function moveGlobalSearchSelectionByPage(direction) {
+        if (globalSearchDisplayRows.length === 0) {
+            return false
+        }
+        const stepDir = direction < 0 ? -1 : 1
+        const pageRows = Math.max(
+            1,
+            Math.floor(((globalSearchResultsView ? globalSearchResultsView.height : 240) / 24)) - 1)
+        let index = globalSearchSelectedDisplayIndex
+        if (!isSearchRowSelectable(index)) {
+            index = stepDir > 0 ? searchFirstSelectableIndex() : searchLastSelectableIndex()
+        }
+        if (index < 0) {
+            return false
+        }
+        let moved = false
+        for (let i = 0; i < pageRows; ++i) {
+            const next = nextSearchSelectableIndex(index, stepDir, false)
+            if (next < 0) {
+                break
+            }
+            index = next
+            moved = true
+        }
+        if (!moved) {
+            return false
+        }
+        return selectGlobalSearchDisplayIndex(index)
+    }
+
     function selectGlobalSearchDisplayIndex(index) {
         if (!isSearchRowSelectable(index)) {
             return false
@@ -1115,6 +1162,10 @@ Kirigami.ApplicationWindow {
     }
 
     function openGlobalSearch() {
+        if (globalSearchDialog.visible) {
+            globalSearchQueryField.forceActiveFocus()
+            return
+        }
         globalSearchDialog.open()
     }
 
@@ -1143,6 +1194,27 @@ Kirigami.ApplicationWindow {
         Qt.callLater(root.applyPendingLibraryReveal)
     }
 
+    function navigateGlobalSearchSelectionToLibrary() {
+        let row = selectedGlobalSearchRow()
+        if (!row) {
+            const first = searchFirstSelectableIndex()
+            if (first >= 0) {
+                selectGlobalSearchDisplayIndex(first)
+                row = selectedGlobalSearchRow()
+            }
+        }
+        if (!row) {
+            return
+        }
+        requestLibraryRevealForSearchRow(row)
+        globalSearchDialog.close()
+        Qt.callLater(function() {
+            if (libraryAlbumView) {
+                libraryAlbumView.forceActiveFocus()
+            }
+        })
+    }
+
     function applyPendingLibraryReveal() {
         if (pendingLibraryRevealSelectionKey.length === 0) {
             return
@@ -1164,6 +1236,29 @@ Kirigami.ApplicationWindow {
         libraryRevealRetryTimer.restart()
     }
 
+    function applyPendingSearchOpen() {
+        if (pendingSearchOpenSelectionKey.length === 0) {
+            return
+        }
+        const index = libraryModel.indexForSelectionKey(pendingSearchOpenSelectionKey)
+        if (index >= 0) {
+            const rowMap = libraryModel.rowDataForRow(index)
+            const openPath = rowMap.openPath || rowMap.trackPath || ""
+            if (openPath.length > 0) {
+                uiBridge.openInFileBrowser(openPath)
+            }
+            pendingSearchOpenSelectionKey = ""
+            pendingSearchOpenAttempts = 0
+            return
+        }
+        if (pendingSearchOpenAttempts <= 0) {
+            pendingSearchOpenSelectionKey = ""
+            return
+        }
+        pendingSearchOpenAttempts -= 1
+        searchOpenRetryTimer.restart()
+    }
+
     function activateGlobalSearchRow(row) {
         if (!row || row.kind !== "item") {
             return
@@ -1179,6 +1274,49 @@ Kirigami.ApplicationWindow {
         }
         requestLibraryRevealForSearchRow(row)
         globalSearchDialog.close()
+    }
+
+    function queueGlobalSearchRow(row) {
+        if (!row || row.kind !== "item") {
+            return
+        }
+        const rowType = row.rowType || ""
+        if (rowType === "track") {
+            uiBridge.appendTrack(row.trackPath || "")
+            return
+        }
+        if (rowType === "album") {
+            const albumName = (row.album || row.label || "").trim()
+            uiBridge.appendAlbumByKey((row.artist || "").trim(), albumName)
+            return
+        }
+        if (rowType === "artist") {
+            uiBridge.appendArtistByName((row.artist || row.label || "").trim())
+        }
+    }
+
+    function openGlobalSearchRowInFileBrowser(row) {
+        if (!row || row.kind !== "item") {
+            return
+        }
+        const rowType = row.rowType || ""
+        if (rowType === "track") {
+            uiBridge.openContainingFolder(row.trackPath || "")
+            return
+        }
+        const selectionKey = rowType === "album" ? (row.albumKey || "") : (row.artistKey || "")
+        if (selectionKey.length === 0) {
+            return
+        }
+        if ((row.artistKey || "").length > 0) {
+            uiBridge.setLibraryNodeExpanded(row.artistKey, true)
+        }
+        if (rowType === "album" && (row.albumKey || "").length > 0) {
+            uiBridge.setLibraryNodeExpanded(row.albumKey, true)
+        }
+        pendingSearchOpenSelectionKey = selectionKey
+        pendingSearchOpenAttempts = 24
+        Qt.callLater(root.applyPendingSearchOpen)
     }
 
     function activateGlobalSearchSelection() {
@@ -1255,7 +1393,7 @@ Kirigami.ApplicationWindow {
     }
     Action {
         id: appendLibrarySelectionAction
-        text: "Append Library Selection"
+        text: "Queue Library Selection"
         enabled: root.canPlayLibrarySelection()
         onTriggered: root.appendLibrarySelection()
     }
@@ -1740,16 +1878,8 @@ Kirigami.ApplicationWindow {
                     uiBridge.setGlobalSearchQuery(text)
                 }
                 Keys.onPressed: function(event) {
-                    if (event.key === Qt.Key_Tab) {
-                        const direction = (event.modifiers & Qt.ShiftModifier) ? -1 : 1
-                        const next = root.nextSearchSelectableIndex(
-                            root.globalSearchSelectedDisplayIndex,
-                            direction,
-                            true)
-                        if (next >= 0) {
-                            root.selectGlobalSearchDisplayIndex(next)
-                            globalSearchResultsView.forceActiveFocus()
-                        }
+                    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                        root.navigateGlobalSearchSelectionToLibrary()
                         event.accepted = true
                         return
                     }
@@ -1772,6 +1902,38 @@ Kirigami.ApplicationWindow {
                             true)
                         if (next >= 0) {
                             root.selectGlobalSearchDisplayIndex(next)
+                            globalSearchResultsView.forceActiveFocus()
+                        }
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_PageDown) {
+                        if (root.moveGlobalSearchSelectionByPage(1)) {
+                            globalSearchResultsView.forceActiveFocus()
+                        }
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_PageUp) {
+                        if (root.moveGlobalSearchSelectionByPage(-1)) {
+                            globalSearchResultsView.forceActiveFocus()
+                        }
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Home) {
+                        const first = root.searchFirstSelectableIndex()
+                        if (first >= 0) {
+                            root.selectGlobalSearchDisplayIndex(first)
+                            globalSearchResultsView.forceActiveFocus()
+                        }
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_End) {
+                        const last = root.searchLastSelectableIndex()
+                        if (last >= 0) {
+                            root.selectGlobalSearchDisplayIndex(last)
                             globalSearchResultsView.forceActiveFocus()
                         }
                         event.accepted = true
@@ -1805,20 +1967,17 @@ Kirigami.ApplicationWindow {
                     model: root.globalSearchDisplayRows
                     spacing: 0
                     boundsBehavior: Flickable.StopAtBounds
+                    readonly property int reservedRightPadding: (globalSearchResultsScrollBar.visible
+                        ? globalSearchResultsScrollBar.width + 8
+                        : 8)
                     ScrollBar.vertical: ScrollBar {
+                        id: globalSearchResultsScrollBar
                         policy: ScrollBar.AsNeeded
                     }
 
                     Keys.onPressed: function(event) {
-                        if (event.key === Qt.Key_Tab) {
-                            const direction = (event.modifiers & Qt.ShiftModifier) ? -1 : 1
-                            const next = root.nextSearchSelectableIndex(
-                                root.globalSearchSelectedDisplayIndex,
-                                direction,
-                                true)
-                            if (next >= 0) {
-                                root.selectGlobalSearchDisplayIndex(next)
-                            }
+                        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                            root.navigateGlobalSearchSelectionToLibrary()
                             event.accepted = true
                             return
                         }
@@ -1840,6 +1999,32 @@ Kirigami.ApplicationWindow {
                                 true)
                             if (next >= 0) {
                                 root.selectGlobalSearchDisplayIndex(next)
+                            }
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_PageDown) {
+                            root.moveGlobalSearchSelectionByPage(1)
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_PageUp) {
+                            root.moveGlobalSearchSelectionByPage(-1)
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_Home) {
+                            const first = root.searchFirstSelectableIndex()
+                            if (first >= 0) {
+                                root.selectGlobalSearchDisplayIndex(first)
+                            }
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_End) {
+                            const last = root.searchLastSelectableIndex()
+                            if (last >= 0) {
+                                root.selectGlobalSearchDisplayIndex(last)
                             }
                             event.accepted = true
                             return
@@ -1866,7 +2051,9 @@ Kirigami.ApplicationWindow {
                         readonly property var year: rowData.year
                         readonly property var trackNumber: rowData.trackNumber
                         readonly property var count: rowData.count
-                        width: ListView.view.width
+                        width: Math.max(
+                            0,
+                            ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
                         height: kind === "section" ? 30 : 24
                         color: kind === "section"
                             ? Kirigami.Theme.alternateBackgroundColor
@@ -1895,7 +2082,7 @@ Kirigami.ApplicationWindow {
                                 visible: kind === "columns" && rowType === "artist"
                                 Layout.fillWidth: true
                                 spacing: 8
-                                Label { text: "Name (albums)"; Layout.fillWidth: true; font.bold: true }
+                                Label { text: "Name"; Layout.fillWidth: true; font.bold: true }
                             }
 
                             RowLayout {
@@ -1917,9 +2104,16 @@ Kirigami.ApplicationWindow {
                                 spacing: 8
                                 Label { text: "#"; Layout.preferredWidth: 34; font.bold: true }
                                 Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
-                                Label { text: "Artist"; Layout.preferredWidth: 170; font.bold: true }
-                                Label { text: "Album"; Layout.preferredWidth: 190; font.bold: true }
-                                Label { text: "Genre"; Layout.preferredWidth: 120; font.bold: true }
+                                Label { text: "Artist"; Layout.preferredWidth: 160; font.bold: true }
+                                Label { text: ""; Layout.preferredWidth: 20; font.bold: true }
+                                Label { text: "Album"; Layout.preferredWidth: 182; font.bold: true }
+                                Label {
+                                    text: "Year"
+                                    Layout.preferredWidth: 52
+                                    font.bold: true
+                                    horizontalAlignment: Text.AlignRight
+                                }
+                                Label { text: "Genre"; Layout.preferredWidth: 112; font.bold: true }
                                 Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
                             }
 
@@ -1929,8 +2123,7 @@ Kirigami.ApplicationWindow {
                                 spacing: 8
                                 Label {
                                     Layout.fillWidth: true
-                                    text: (label || "")
-                                        + " (" + (count !== undefined ? count : 0) + ")"
+                                    text: label || ""
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
                                         ? Kirigami.Theme.highlightedTextColor
@@ -2010,7 +2203,9 @@ Kirigami.ApplicationWindow {
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Label {
-                                    text: trackNumber !== undefined && trackNumber !== null ? trackNumber : ""
+                                    text: trackNumber !== undefined && trackNumber !== null
+                                        ? String(trackNumber).padStart(2, "0")
+                                        : ""
                                     Layout.preferredWidth: 34
                                     horizontalAlignment: Text.AlignRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2027,23 +2222,44 @@ Kirigami.ApplicationWindow {
                                 }
                                 Label {
                                     text: artist || ""
-                                    Layout.preferredWidth: 170
+                                    Layout.preferredWidth: 160
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Item {
+                                    Layout.preferredWidth: 20
+                                    Layout.preferredHeight: 18
+                                    Image {
+                                        anchors.fill: parent
+                                        source: coverUrl || ""
+                                        fillMode: Image.PreserveAspectFit
+                                        asynchronous: true
+                                        cache: true
+                                        sourceSize.width: 24
+                                        sourceSize.height: 24
+                                    }
+                                }
+                                Label {
+                                    text: album || ""
+                                    Layout.preferredWidth: 182
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
                                         ? Kirigami.Theme.highlightedTextColor
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: album || ""
-                                    Layout.preferredWidth: 190
-                                    elide: Text.ElideRight
+                                    text: year !== undefined && year !== null ? year : ""
+                                    Layout.preferredWidth: 52
+                                    horizontalAlignment: Text.AlignRight
                                     color: index === root.globalSearchSelectedDisplayIndex
                                         ? Kirigami.Theme.highlightedTextColor
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
                                     text: genre || ""
-                                    Layout.preferredWidth: 120
+                                    Layout.preferredWidth: 112
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
                                         ? Kirigami.Theme.highlightedTextColor
@@ -2063,9 +2279,14 @@ Kirigami.ApplicationWindow {
                         MouseArea {
                             anchors.fill: parent
                             enabled: kind === "item"
-                            acceptedButtons: Qt.LeftButton
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
                             onClicked: function(mouse) {
                                 root.selectGlobalSearchDisplayIndex(index)
+                                if (mouse.button === Qt.RightButton) {
+                                    globalSearchContextMenu.rowData = rowData
+                                    globalSearchContextMenu.popup()
+                                    return
+                                }
                                 if (mouse.button === Qt.LeftButton) {
                                     globalSearchResultsView.forceActiveFocus()
                                 }
@@ -2075,6 +2296,35 @@ Kirigami.ApplicationWindow {
                                     root.selectGlobalSearchDisplayIndex(index)
                                     root.activateGlobalSearchSelection()
                                 }
+                            }
+                        }
+
+                        Menu {
+                            id: globalSearchContextMenu
+                            property var rowData: ({})
+
+                            MenuItem {
+                                text: "Play"
+                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                                onTriggered: root.activateGlobalSearchRow(globalSearchContextMenu.rowData)
+                            }
+                            MenuItem {
+                                text: "Queue"
+                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                                onTriggered: root.queueGlobalSearchRow(globalSearchContextMenu.rowData)
+                            }
+                            MenuSeparator {}
+                            MenuItem {
+                                text: "Open in " + uiBridge.fileBrowserName
+                                visible: (globalSearchContextMenu.rowData.rowType || "") !== "track"
+                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                                onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
+                            }
+                            MenuItem {
+                                text: "Open containing folder"
+                                visible: (globalSearchContextMenu.rowData.rowType || "") === "track"
+                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                                onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
                             }
                         }
                     }
@@ -2606,7 +2856,7 @@ Kirigami.ApplicationWindow {
                                             }
                                         }
                                         MenuItem {
-                                            text: "Append"
+                                            text: "Queue"
                                             enabled: root.isActionableLibraryRow(libraryContextMenu.rowMap)
                                             onTriggered: {
                                                 const rows = root.rowsForLibraryAction(libraryContextMenu.rowMap)

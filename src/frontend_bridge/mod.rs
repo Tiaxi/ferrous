@@ -1159,6 +1159,7 @@ struct TreePathContext {
     album_path: Option<PathBuf>,
     track_key: String,
     is_main_level_album_track: bool,
+    is_disc_section_album_track: bool,
 }
 
 fn build_search_results_frame(
@@ -1173,13 +1174,23 @@ fn build_search_results_frame(
         artist_key: String,
         year_counts: HashMap<i32, usize>,
         genre_counts: HashMap<String, usize>,
+    }
+
+    #[derive(Default)]
+    struct AlbumInventoryAcc {
         main_track_count: u32,
         main_total_length: f32,
         has_main_duration: bool,
-        cover_path: String,
     }
 
     if query.trim().is_empty() {
+        return Some(BridgeSearchResultsFrame {
+            seq,
+            rows: Vec::new(),
+        });
+    }
+    let query_terms = split_search_terms(query);
+    if query_terms.is_empty() {
         return Some(BridgeSearchResultsFrame {
             seq,
             rows: Vec::new(),
@@ -1212,8 +1223,30 @@ fn build_search_results_frame(
         });
     }
 
+    let mut album_inventory: HashMap<String, AlbumInventoryAcc> = HashMap::new();
+    for track in &library.tracks {
+        let Some(context) = derive_tree_path_context(&track.path, &roots, &track.artist) else {
+            continue;
+        };
+        let Some(album_key) = context.album_key.clone() else {
+            continue;
+        };
+        let include_in_main_album =
+            context.is_main_level_album_track || context.is_disc_section_album_track;
+        let inventory = album_inventory.entry(album_key).or_default();
+        if include_in_main_album {
+            inventory.main_track_count = inventory.main_track_count.saturating_add(1);
+            if let Some(duration) = track.duration_secs {
+                if duration.is_finite() && duration >= 0.0 {
+                    inventory.main_total_length += duration;
+                    inventory.has_main_duration = true;
+                }
+            }
+        }
+    }
+
+    let mut album_cover_paths: HashMap<String, String> = HashMap::new();
     let mut artist_groups: HashMap<String, (f32, String)> = HashMap::new();
-    let mut artist_album_sets: HashMap<String, HashSet<String>> = HashMap::new();
     let mut album_groups: HashMap<String, (f32, String)> = HashMap::new();
     let mut album_hit_stats: HashMap<String, HitAlbumAcc> = HashMap::new();
     let mut track_rows = Vec::new();
@@ -1235,60 +1268,51 @@ fn build_search_results_frame(
         } else {
             hit.album.trim().to_string()
         };
+        let album_key = context.album_key.clone();
+        let artist_query_match = query_terms_match_text(&query_terms, &context.artist_name);
 
-        let artist_entry = artist_groups
-            .entry(context.artist_key.clone())
-            .or_insert((hit.score, context.artist_name.clone()));
-        if hit.score < artist_entry.0 {
-            artist_entry.0 = hit.score;
-            artist_entry.1 = context.artist_name.clone();
+        if artist_query_match {
+            let artist_entry = artist_groups
+                .entry(context.artist_key.clone())
+                .or_insert((hit.score, context.artist_name.clone()));
+            if hit.score < artist_entry.0 {
+                artist_entry.0 = hit.score;
+                artist_entry.1 = context.artist_name.clone();
+            }
         }
 
-        if let Some(album_key) = context.album_key.clone() {
-            artist_album_sets
-                .entry(context.artist_key.clone())
-                .or_default()
-                .insert(album_key.clone());
-            let album_entry = album_groups
-                .entry(album_key.clone())
-                .or_insert((hit.score, hit_album.clone()));
-            if hit.score < album_entry.0 {
-                album_entry.0 = hit.score;
-                album_entry.1 = hit_album.clone();
-            }
-
-            let stats_entry = album_hit_stats.entry(album_key).or_default();
-            if stats_entry.artist_name.is_empty() {
-                stats_entry.artist_name = context.artist_name.clone();
-            }
-            if stats_entry.artist_key.is_empty() {
-                stats_entry.artist_key = context.artist_key.clone();
-            }
-            if stats_entry.album_title.is_empty() {
-                stats_entry.album_title = hit_album.clone();
-            }
-            if let Some(year) = hit.year {
-                *stats_entry.year_counts.entry(year).or_insert(0) += 1;
-            }
-            if !hit.genre.trim().is_empty() {
-                *stats_entry
-                    .genre_counts
-                    .entry(hit.genre.trim().to_string())
-                    .or_insert(0) += 1;
-            }
-            if context.is_main_level_album_track {
-                stats_entry.main_track_count = stats_entry.main_track_count.saturating_add(1);
-                if let Some(duration) = hit.duration_secs {
-                    if duration.is_finite() && duration >= 0.0 {
-                        stats_entry.main_total_length += duration;
-                        stats_entry.has_main_duration = true;
-                    }
+        if let Some(album_key) = album_key.clone() {
+            let album_query_match = query_terms_match_text(
+                &query_terms,
+                &format!("{} {}", context.artist_name, hit_album),
+            );
+            if album_query_match {
+                let album_entry = album_groups
+                    .entry(album_key.clone())
+                    .or_insert((hit.score, hit_album.clone()));
+                if hit.score < album_entry.0 {
+                    album_entry.0 = hit.score;
+                    album_entry.1 = hit_album.clone();
                 }
-            }
-            if stats_entry.cover_path.is_empty() {
-                if let Some(album_path) = context.album_path.clone() {
-                    stats_entry.cover_path =
-                        find_cover_path_for_album(&album_path).unwrap_or_default();
+
+                let stats_entry = album_hit_stats.entry(album_key).or_default();
+                if stats_entry.artist_name.is_empty() {
+                    stats_entry.artist_name = context.artist_name.clone();
+                }
+                if stats_entry.artist_key.is_empty() {
+                    stats_entry.artist_key = context.artist_key.clone();
+                }
+                if stats_entry.album_title.is_empty() {
+                    stats_entry.album_title = hit_album.clone();
+                }
+                if let Some(year) = hit.year {
+                    *stats_entry.year_counts.entry(year).or_insert(0) += 1;
+                }
+                if !hit.genre.trim().is_empty() {
+                    *stats_entry
+                        .genre_counts
+                        .entry(hit.genre.trim().to_string())
+                        .or_insert(0) += 1;
                 }
             }
         }
@@ -1310,9 +1334,11 @@ fn build_search_results_frame(
             artist: hit_artist,
             album: hit_album,
             genre: hit.genre.trim().to_string(),
-            cover_path: String::new(),
+            cover_path: album_key.as_ref().map_or_else(String::new, |key| {
+                cached_album_cover_path(key, context.album_path.as_ref(), &mut album_cover_paths)
+            }),
             artist_key: context.artist_key.clone(),
-            album_key: context.album_key.unwrap_or_default(),
+            album_key: album_key.unwrap_or_default(),
             track_key: context.track_key,
             track_path: hit.path.to_string_lossy().to_string(),
         });
@@ -1325,9 +1351,7 @@ fn build_search_results_frame(
             score,
             year: None,
             track_number: None,
-            count: artist_album_sets
-                .get(&artist_key)
-                .map_or(0, |albums| albums.len() as u32),
+            count: 0,
             length_seconds: None,
             label: artist_name.clone(),
             artist: artist_name,
@@ -1345,6 +1369,7 @@ fn build_search_results_frame(
         .into_iter()
         .filter_map(|(album_key, (score, fallback_title))| {
             let stats = album_hit_stats.get(&album_key)?;
+            let inventory = album_inventory.get(&album_key);
             let year = choose_most_common_year(&stats.year_counts);
             let genre = choose_most_common_genre(&stats.genre_counts);
             Some(BridgeSearchResultRow {
@@ -1352,12 +1377,9 @@ fn build_search_results_frame(
                 score,
                 year,
                 track_number: None,
-                count: stats.main_track_count,
-                length_seconds: if stats.has_main_duration {
-                    Some(stats.main_total_length)
-                } else {
-                    None
-                },
+                count: inventory.map_or(0, |value| value.main_track_count),
+                length_seconds: inventory
+                    .and_then(|value| value.has_main_duration.then_some(value.main_total_length)),
                 label: if stats.album_title.is_empty() {
                     fallback_title
                 } else {
@@ -1370,7 +1392,10 @@ fn build_search_results_frame(
                     stats.album_title.clone()
                 },
                 genre,
-                cover_path: stats.cover_path.clone(),
+                cover_path: album_cover_paths
+                    .get(&album_key)
+                    .cloned()
+                    .unwrap_or_default(),
                 artist_key: stats.artist_key.clone(),
                 album_key,
                 track_key: String::new(),
@@ -1414,11 +1439,7 @@ fn search_tracks_fallback(
     library: &LibrarySnapshot,
     limit: usize,
 ) -> Vec<LibrarySearchTrack> {
-    let terms = query
-        .split_whitespace()
-        .map(|term| term.trim().to_lowercase())
-        .filter(|term| !term.is_empty())
-        .collect::<Vec<_>>();
+    let terms = split_search_terms(query);
     if terms.is_empty() {
         return Vec::new();
     }
@@ -1504,6 +1525,22 @@ fn search_row_cmp(a: &BridgeSearchResultRow, b: &BridgeSearchResultRow) -> Order
         })
 }
 
+fn split_search_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|term| term.trim().to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>()
+}
+
+fn query_terms_match_text(terms: &[String], text: &str) -> bool {
+    if terms.is_empty() {
+        return false;
+    }
+    let text_l = text.to_lowercase();
+    terms.iter().all(|term| text_l.contains(term))
+}
+
 fn choose_most_common_year(counts: &HashMap<i32, usize>) -> Option<i32> {
     let mut best: Option<(i32, usize)> = None;
     for (&year, &count) in counts {
@@ -1562,6 +1599,56 @@ fn find_cover_path_for_album(album_path: &PathBuf) -> Option<String> {
     candidates.into_iter().next()
 }
 
+fn cached_album_cover_path(
+    album_key: &str,
+    album_path: Option<&PathBuf>,
+    cache: &mut HashMap<String, String>,
+) -> String {
+    if let Some(existing) = cache.get(album_key) {
+        return existing.clone();
+    }
+    let resolved = album_path
+        .and_then(find_cover_path_for_album)
+        .unwrap_or_default();
+    cache.insert(album_key.to_string(), resolved.clone());
+    resolved
+}
+
+fn is_main_album_disc_section(section_name: &str) -> bool {
+    let section = section_name.trim().to_ascii_lowercase();
+    if section.is_empty() {
+        return false;
+    }
+    for prefix in ["cd", "disc", "disk"] {
+        let Some(rest) = section.strip_prefix(prefix) else {
+            continue;
+        };
+        let mut saw_digit = false;
+        let mut valid = true;
+        for ch in rest.chars() {
+            if ch.is_ascii_digit() {
+                saw_digit = true;
+                continue;
+            }
+            if !saw_digit && matches!(ch, ' ' | '-' | '_' | '.') {
+                continue;
+            }
+            if saw_digit && matches!(ch, ' ' | '-' | '_' | '.' | '(' | ')' | '[' | ']') {
+                continue;
+            }
+            if saw_digit && ch.is_ascii_alphabetic() {
+                continue;
+            }
+            valid = false;
+            break;
+        }
+        if valid && saw_digit {
+            return true;
+        }
+    }
+    false
+}
+
 fn pick_root_for_path<'a>(roots: &'a [PathBuf], path: &PathBuf) -> Option<&'a PathBuf> {
     roots
         .iter()
@@ -1610,11 +1697,15 @@ fn derive_tree_path_context(
             album_path: None,
             track_key,
             is_main_level_album_track: false,
+            is_disc_section_album_track: false,
         });
     }
 
     let album_folder = components[1].clone();
     let album_key = format!("album|{root_key}|{artist_name}|{album_folder}");
+    let is_main_level_album_track = components.len() == 3;
+    let is_disc_section_album_track =
+        components.len() == 4 && is_main_album_disc_section(&components[2]);
     Some(TreePathContext {
         artist_name: artist_name.clone(),
         artist_key,
@@ -1622,7 +1713,8 @@ fn derive_tree_path_context(
         album_key: Some(album_key),
         album_path: Some(root.join(&artist_name).join(album_folder)),
         track_key,
-        is_main_level_album_track: components.len() == 3,
+        is_main_level_album_track,
+        is_disc_section_album_track,
     })
 }
 
@@ -1919,6 +2011,16 @@ mod tests {
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
+    }
+
+    #[test]
+    fn disc_section_detection_accepts_common_main_disc_names() {
+        assert!(is_main_album_disc_section("CD1"));
+        assert!(is_main_album_disc_section("CD 2"));
+        assert!(is_main_album_disc_section("disc-03"));
+        assert!(is_main_album_disc_section("Disk 4 (bonus)"));
+        assert!(!is_main_album_disc_section("Live"));
+        assert!(!is_main_album_disc_section("discography"));
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {
