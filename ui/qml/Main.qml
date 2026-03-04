@@ -1163,10 +1163,22 @@ Kirigami.ApplicationWindow {
 
     function openGlobalSearch() {
         if (globalSearchDialog.visible) {
-            globalSearchQueryField.forceActiveFocus()
+            focusGlobalSearchQueryField(true)
             return
         }
         globalSearchDialog.open()
+    }
+
+    function focusGlobalSearchQueryField(selectAll) {
+        if (!globalSearchQueryField) {
+            return
+        }
+        globalSearchQueryField.forceActiveFocus()
+        if (selectAll) {
+            globalSearchQueryField.selectAll()
+        } else {
+            globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+        }
     }
 
     function openDiagnostics() {
@@ -1187,7 +1199,7 @@ Kirigami.ApplicationWindow {
         }
         pendingLibraryRevealExpandKeys = expandKeys
         pendingLibraryRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")
-        pendingLibraryRevealAttempts = 24
+        pendingLibraryRevealAttempts = 64
         for (let i = 0; i < expandKeys.length; ++i) {
             uiBridge.setLibraryNodeExpanded(expandKeys[i], true)
         }
@@ -1218,6 +1230,12 @@ Kirigami.ApplicationWindow {
     function applyPendingLibraryReveal() {
         if (pendingLibraryRevealSelectionKey.length === 0) {
             return
+        }
+        for (let i = 0; i < pendingLibraryRevealExpandKeys.length; ++i) {
+            const expandKey = pendingLibraryRevealExpandKeys[i] || ""
+            if (expandKey.length > 0) {
+                uiBridge.setLibraryNodeExpanded(expandKey, true)
+            }
         }
         const index = libraryModel.indexForSelectionKey(pendingLibraryRevealSelectionKey)
         if (index >= 0) {
@@ -1857,7 +1875,7 @@ Kirigami.ApplicationWindow {
         height: Math.min(720, root.height - 80)
         onOpened: {
             root.rebuildGlobalSearchDisplayRows()
-            globalSearchQueryField.forceActiveFocus()
+            root.focusGlobalSearchQueryField(false)
             if ((globalSearchQueryField.text || "").length > 0) {
                 globalSearchQueryField.selectAll()
             }
@@ -1865,6 +1883,12 @@ Kirigami.ApplicationWindow {
         }
         onClosed: {
             uiBridge.setGlobalSearchQuery("")
+        }
+        Keys.onPressed: function(event) {
+            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
+                root.focusGlobalSearchQueryField(true)
+                event.accepted = true
+            }
         }
 
         contentItem: ColumnLayout {
@@ -1878,6 +1902,11 @@ Kirigami.ApplicationWindow {
                     uiBridge.setGlobalSearchQuery(text)
                 }
                 Keys.onPressed: function(event) {
+                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
+                        root.focusGlobalSearchQueryField(true)
+                        event.accepted = true
+                        return
+                    }
                     if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
                         root.navigateGlobalSearchSelectionToLibrary()
                         event.accepted = true
@@ -1976,6 +2005,11 @@ Kirigami.ApplicationWindow {
                     }
 
                     Keys.onPressed: function(event) {
+                        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
+                            root.focusGlobalSearchQueryField(true)
+                            event.accepted = true
+                            return
+                        }
                         if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
                             root.navigateGlobalSearchSelectionToLibrary()
                             event.accepted = true
