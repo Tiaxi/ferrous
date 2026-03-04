@@ -130,6 +130,7 @@ public:
     Q_INVOKABLE void removeLibraryRoot(const QString &path);
     Q_INVOKABLE void rescanLibraryRoot(const QString &path);
     Q_INVOKABLE void rescanAllLibraryRoots();
+    Q_INVOKABLE void setLibraryNodeExpanded(const QString &key, bool expanded);
     Q_INVOKABLE void setLibrarySortMode(int mode);
     Q_INVOKABLE void openInFileBrowser(const QString &path);
     Q_INVOKABLE void openContainingFolder(const QString &path);

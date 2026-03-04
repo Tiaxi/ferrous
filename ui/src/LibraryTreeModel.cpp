@@ -359,7 +359,11 @@ void LibraryTreeModel::toggleKey(const QString &key) {
 
     for (const FlatRow &row : m_rows) {
         if (row.key == key && row.hasChildren) {
-            m_expandedByKey.insert(key, !row.expanded);
+            const bool nextExpanded = !row.expanded;
+            m_expandedByKey.insert(key, nextExpanded);
+            if (row.rowType == QStringLiteral("artist") || row.rowType == QStringLiteral("album")) {
+                emit nodeExpansionRequested(key, nextExpanded);
+            }
             rebuildRows();
             return;
         }
@@ -583,7 +587,9 @@ bool LibraryTreeModel::nodeMatchesSearch(const TreeNode &node, const QString &se
 }
 
 bool LibraryTreeModel::isExpanded(const TreeNode &node, bool autoExpand) const {
-    if (node.children.isEmpty()) {
+    const bool hasChildren = !node.children.isEmpty()
+        || (node.rowType != QStringLiteral("track") && node.count > 0);
+    if (!hasChildren) {
         return false;
     }
     if (autoExpand) {
@@ -620,7 +626,8 @@ void LibraryTreeModel::appendFlatRows(
         row.coverPath = node.coverPath;
         row.playPaths = node.playPaths;
         row.depth = depth;
-        row.hasChildren = !node.children.isEmpty();
+        row.hasChildren = !node.children.isEmpty()
+            || (node.rowType != QStringLiteral("track") && node.count > 0);
         row.expanded = isExpanded(node, autoExpand);
         rows->push_back(std::move(row));
 

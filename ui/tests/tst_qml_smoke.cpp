@@ -167,6 +167,25 @@ QByteArray artistWithManyAlbumsBinary(int albumCount) {
     return encodeRows(rows);
 }
 
+QByteArray artistOnlyLazyBinary() {
+    QVector<BinaryTreeRow> rows;
+    rows.push_back(BinaryTreeRow{
+        1,
+        0,
+        -1,
+        0,
+        2,
+        QStringLiteral("Artist A (2)"),
+        QStringLiteral("artist|/music|Artist A"),
+        QStringLiteral("Artist A"),
+        QStringLiteral("/music/Artist A"),
+        {},
+        {},
+        {},
+    });
+    return encodeRows(rows);
+}
+
 } // namespace
 
 class QmlSmokeTest : public QObject {
@@ -176,6 +195,7 @@ private slots:
     void loadsMainQmlWithFallbackBridge();
     void libraryTreeStartsCollapsedByDefault();
     void artistExpansionPopulatesInBatches();
+    void lazyArtistRowRequestsBackendExpansion();
 };
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -211,6 +231,22 @@ void QmlSmokeTest::artistExpansionPopulatesInBatches() {
     model.toggleArtist(QStringLiteral("Artist A"));
 
     QTRY_COMPARE(model.rowCount(), 81);
+}
+
+void QmlSmokeTest::lazyArtistRowRequestsBackendExpansion() {
+    LibraryTreeModel model;
+    QSignalSpy spy(&model, SIGNAL(nodeExpansionRequested(QString,bool)));
+
+    model.setLibraryTreeFromBinary(artistOnlyLazyBinary());
+    QTRY_COMPARE(model.rowCount(), 1);
+    QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), false);
+
+    model.toggleArtist(QStringLiteral("Artist A"));
+    QTRY_COMPARE(spy.count(), 1);
+    const QList<QVariant> args = spy.takeFirst();
+    QCOMPARE(args.value(0).toString(), QStringLiteral("artist|/music|Artist A"));
+    QCOMPARE(args.value(1).toBool(), true);
+    QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
 }
 
 QTEST_MAIN(QmlSmokeTest)

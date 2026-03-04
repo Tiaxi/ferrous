@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -96,6 +97,7 @@ pub enum BridgeLibraryCommand {
     AppendAlbumByKey { artist: String, album: String },
     ReplaceArtistByKey { artist: String },
     AppendArtistByKey { artist: String },
+    SetNodeExpanded { key: String, expanded: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +169,7 @@ struct BridgeState {
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
     pre_built_tree_bytes: Arc<Vec<u8>>,
+    expanded_keys: HashSet<String>,
     queue: Vec<PathBuf>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
@@ -191,9 +194,11 @@ impl BridgeState {
     }
 
     fn rebuild_pre_built_tree(&mut self) {
+        library_tree::retain_valid_expanded_keys(&self.library, &mut self.expanded_keys);
         self.pre_built_tree_bytes = Arc::new(library_tree::build_library_tree_flat_binary(
             &self.library,
             self.settings.library_sort_mode,
+            Some(&self.expanded_keys),
         ));
     }
 }
@@ -522,6 +527,7 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
             *mode != current_sort_mode
         }
         BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk) => true,
+        BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { .. }) => true,
         _ => false,
     }
 }
@@ -1012,6 +1018,17 @@ fn handle_library_command(
                 playback.command(PlaybackCommand::AddToQueue(paths));
             }
             true
+        }
+        BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
+            let normalized = key.trim();
+            if normalized.is_empty() {
+                return false;
+            }
+            if expanded {
+                state.expanded_keys.insert(normalized.to_string())
+            } else {
+                state.expanded_keys.remove(normalized)
+            }
         }
     }
 }

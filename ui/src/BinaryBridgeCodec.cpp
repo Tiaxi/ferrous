@@ -396,6 +396,13 @@ QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QS
     return finalizeCommand(cmdId, payload);
 }
 
+QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag) {
+    QByteArray payload;
+    appendUtf8U16(payload, value);
+    payload.append(flag ? '\x01' : '\x00');
+    return finalizeCommand(cmdId, payload);
+}
+
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values) {
     QByteArray payload;
     const int count = std::min<int>(values.size(), std::numeric_limits<quint16>::max());

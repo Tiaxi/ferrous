@@ -587,6 +587,12 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
             reader.expect_done()?;
             BridgeCommand::Shutdown
         }
+        34 => {
+            let key = reader.read_u16_string()?;
+            let expanded = reader.read_u8()? != 0;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { key, expanded })
+        }
         _ => return Err(format!("unknown binary command id {cmd_id}")),
     };
 
@@ -1203,6 +1209,29 @@ mod tests {
                         PathBuf::from("/music/b.flac")
                     ]
                 );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_supports_set_node_expanded() {
+        let key = "artist|/music|Artist A";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(key.len() as u16).to_le_bytes());
+        payload.extend_from_slice(key.as_bytes());
+        payload.push(1);
+
+        let cmd = parse_binary_command(&encode_command(34, &payload))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded {
+                key: parsed,
+                expanded,
+            }) => {
+                assert_eq!(parsed, key);
+                assert!(expanded);
             }
             other => panic!("unexpected command: {other:?}"),
         }

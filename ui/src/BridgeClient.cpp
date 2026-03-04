@@ -785,6 +785,17 @@ void BridgeClient::rescanAllLibraryRoots() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRescanAll));
 }
 
+void BridgeClient::setLibraryNodeExpanded(const QString &key, bool expanded) {
+    const QString normalized = key.trimmed();
+    if (normalized.isEmpty()) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringBool(
+        BinaryBridgeCodec::CmdSetNodeExpanded,
+        normalized,
+        expanded));
+}
+
 void BridgeClient::setLibrarySortMode(int mode) {
     const int clamped = std::clamp(mode, 0, 1);
     if (m_librarySortMode != clamped) {

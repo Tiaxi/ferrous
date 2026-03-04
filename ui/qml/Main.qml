@@ -129,6 +129,7 @@ Kirigami.ApplicationWindow {
         function removeLibraryRoot(path) {}
         function rescanLibraryRoot(path) {}
         function rescanAllLibraryRoots() {}
+        function setLibraryNodeExpanded(key, expanded) {}
         function setLibrarySortMode(mode) {}
         function openInFileBrowser(path) {}
         function openContainingFolder(path) {}
@@ -1655,7 +1656,7 @@ Kirigami.ApplicationWindow {
                                     readonly property string rowTypeResolved: rowType || ""
                                     readonly property bool isAlbumRow: rowTypeResolved === "album"
                                     readonly property bool isTrackRow: rowTypeResolved === "track"
-                                    readonly property bool hasChildren: !isTrackRow && (key || "").length > 0
+                                    readonly property bool hasChildren: !isTrackRow && (count || 0) > 0
                                     readonly property string selectionKeyResolved: selectionKey || ""
                                     readonly property string trackPathResolved: trackPath || ""
                                     readonly property string openPathResolved: openPath || ""
@@ -2373,6 +2374,9 @@ Kirigami.ApplicationWindow {
         target: libraryModel
         function onTreeApplied() {
             root.finishPendingLibraryTreeApply()
+        }
+        function onNodeExpansionRequested(key, expanded) {
+            uiBridge.setLibraryNodeExpanded(key, expanded)
         }
     }
 

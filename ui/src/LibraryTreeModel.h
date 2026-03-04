@@ -56,6 +56,7 @@ signals:
     void countChanged();
     void parsingChanged();
     void treeApplied();
+    void nodeExpansionRequested(const QString &key, bool expanded);
 
 private:
     struct TreeNode {

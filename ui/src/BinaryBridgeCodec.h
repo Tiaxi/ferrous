@@ -54,6 +54,7 @@ enum CommandId : quint16 {
     CmdSetFftSize = 31,
     CmdRequestSnapshot = 32,
     CmdShutdown = 33,
+    CmdSetNodeExpanded = 34,
 };
 
 struct DecodedPlayback {
@@ -140,6 +141,7 @@ QByteArray encodeCommandF32(quint16 cmdId, float value);
 QByteArray encodeCommandF64(quint16 cmdId, double value);
 QByteArray encodeCommandString(quint16 cmdId, const QString &value);
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
+QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 QByteArray encodeCommandMoveQueue(quint32 from, quint32 to);
 
