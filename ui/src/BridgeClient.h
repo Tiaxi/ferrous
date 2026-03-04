@@ -142,12 +142,14 @@ public:
 signals:
     void snapshotChanged();
     void analysisChanged();
+    void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void connectedChanged();
     void bridgeError(const QString &message);
 
 private:
     bool startInProcessBridge();
     void pollInProcessBridge();
+    void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
     void processAnalysisBytes(const QByteArray &chunk);
     void scheduleSnapshotChanged();

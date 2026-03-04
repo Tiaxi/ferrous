@@ -231,6 +231,26 @@ void BridgeClient::pollInProcessBridge() {
         processAnalysisBytes(chunk);
     }
 
+    int processedTreeFrames = 0;
+    constexpr int kMaxTreeFramesPerPass = 4;
+    while (processedTreeFrames < kMaxTreeFramesPerPass) {
+        std::size_t len = 0;
+        std::uint32_t version = 0;
+        std::uint8_t *treePtr = ferrous_ffi_bridge_pop_library_tree(m_ffiBridge, &len, &version);
+        if (treePtr == nullptr || len == 0) {
+            break;
+        }
+        processedTreeFrames++;
+        const QByteArray treeBytes(
+            reinterpret_cast<const char *>(treePtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_library_tree(treePtr, len);
+        const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(version);
+        applyLibraryTreeFrame(versionInt, treeBytes);
+    }
+
     int processedEvents = 0;
     constexpr int kMaxEventsPerPass = 3;
     while (processedEvents < kMaxEventsPerPass) {
@@ -1075,6 +1095,33 @@ void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(cmdId, path));
 }
 
+void BridgeClient::applyLibraryTreeFrame(int version, const QByteArray &treeBytes) {
+    m_libraryTreeBinary = treeBytes;
+    m_libraryVersion = version;
+
+    m_libraryAlbums.clear();
+    m_libraryAlbumArtists.clear();
+    m_libraryAlbumNames.clear();
+    m_libraryAlbumCoverPaths.clear();
+    m_libraryAlbumTrackPaths.clear();
+    m_trackCoverByPath.clear();
+
+    bool coverChanged = false;
+    if (!m_currentTrackPath.isEmpty()) {
+        const QString refreshedCover = findTrackCoverUrl(m_currentTrackPath);
+        m_trackCoverByPath.insert(m_currentTrackPath, refreshedCover);
+        if (m_currentTrackCoverPath != refreshedCover) {
+            m_currentTrackCoverPath = refreshedCover;
+            coverChanged = true;
+        }
+    }
+
+    emit libraryTreeFrameReceived(version, treeBytes);
+    if (coverChanged) {
+        scheduleSnapshotChanged();
+    }
+}
+
 bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
     if (snapshot.hasStopped) {
         if (m_connected) {
@@ -1093,8 +1140,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         && !snapshot.queue.present
         && !snapshot.library.present
         && !snapshot.metadata.present
-        && !snapshot.settings.present
-        && (snapshot.sectionMask & BinaryBridgeCodec::SectionLibraryTree) == 0) {
+        && !snapshot.settings.present) {
         return false;
     }
 
@@ -1377,31 +1423,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!qFuzzyCompare(m_libraryScanEtaSeconds + 2.0, etaSeconds + 2.0)) {
         m_libraryScanEtaSeconds = etaSeconds;
         changed = true;
-    }
-
-    if ((snapshot.sectionMask & BinaryBridgeCodec::SectionLibraryTree) != 0) {
-        m_libraryTreeBinary = snapshot.libraryTreeBytes;
-        changed = true;
-
-        m_libraryAlbums.clear();
-        m_libraryAlbumArtists.clear();
-        m_libraryAlbumNames.clear();
-        m_libraryAlbumCoverPaths.clear();
-        m_libraryAlbumTrackPaths.clear();
-        m_trackCoverByPath.clear();
-
-        if (!m_currentTrackPath.isEmpty()) {
-            const QString refreshedCover = findTrackCoverUrl(m_currentTrackPath);
-            m_trackCoverByPath.insert(m_currentTrackPath, refreshedCover);
-            if (m_currentTrackCoverPath != refreshedCover) {
-                m_currentTrackCoverPath = refreshedCover;
-                changed = true;
-            }
-        }
-
-        m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()
-            ? m_libraryVersion + 1
-            : 1;
     }
 
     return changed;

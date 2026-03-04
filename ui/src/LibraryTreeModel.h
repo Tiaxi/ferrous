@@ -96,9 +96,20 @@ private:
 
     static QString toLower(const QString &text);
     static QVector<TreeNode> parseTreeNodesFromBinary(const QByteArray &treeBytes);
+    static bool rowsEqual(const FlatRow &a, const FlatRow &b);
     static bool nodeMatchesSearch(const TreeNode &node, const QString &searchLower);
+    static bool hasDuplicateSelectionKeys(const QVector<FlatRow> &rows);
     bool isExpanded(const TreeNode &node, bool autoExpand) const;
-    void appendFlatRows(const QVector<TreeNode> &nodes, int depth, bool autoExpand);
+    void appendFlatRows(
+        const QVector<TreeNode> &nodes,
+        QVector<FlatRow> *rows,
+        int depth,
+        bool autoExpand) const;
+    QVector<FlatRow> buildFlatRows() const;
+    bool hasDetectedMove(const QVector<FlatRow> &nextRows) const;
+    bool shouldUseResetForRows(const QVector<FlatRow> &nextRows) const;
+    bool applyRowsIncremental(const QVector<FlatRow> &nextRows);
+    void applyRowsReset(const QVector<FlatRow> &nextRows);
     void rebuildRows();
 
     QVector<TreeNode> m_tree;

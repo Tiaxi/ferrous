@@ -29,6 +29,7 @@ Kirigami.ApplicationWindow {
     property int queueSelectionAnchorIndex: -1
     property int lastAppliedLibraryVersion: -1
     property int pendingLibraryVersion: -1
+    property bool hasReceivedLibraryTreeFrame: false
     property string pendingLibraryAnchorKey: ""
     property real pendingLibraryAnchorOffset: 0
     property real pendingLibraryAnchorFallbackY: 0
@@ -93,6 +94,7 @@ Kirigami.ApplicationWindow {
         property bool connected: false
         signal snapshotChanged()
         signal analysisChanged()
+        signal libraryTreeFrameReceived(int version, var treeBytes)
         signal bridgeError(string message)
         function play() {}
         function pause() {}
@@ -615,6 +617,7 @@ Kirigami.ApplicationWindow {
         pendingLibraryAnchorOffset = anchor.offset || 0
         pendingLibraryAnchorFallbackY = anchor.fallbackY || 0
         pendingLibraryAnchorValid = true
+        hasReceivedLibraryTreeFrame = true
         pendingLibraryVersion = version
         libraryModel.setLibraryTreeFromBinary(treeBytes || "")
         finishPendingLibraryTreeApply()
@@ -634,7 +637,7 @@ Kirigami.ApplicationWindow {
         if (pendingLibraryVersion >= 0 || libraryModel.parsing) {
             return true
         }
-        if (uiBridge.libraryVersion === 0) {
+        if (!hasReceivedLibraryTreeFrame && lastAppliedLibraryVersion <= 0) {
             return true
         }
         return uiBridge.libraryScanInProgress && libraryAlbumView.count === 0
@@ -1853,7 +1856,7 @@ Kirigami.ApplicationWindow {
                                 text: root.isLibraryTreeLoading()
                                     ? "Loading library..."
                                     : (((librarySearchField.text || "").trim().length > 0
-                                        || uiBridge.libraryTreeBinary.length > 0)
+                                        || root.hasReceivedLibraryTreeFrame)
                                         ? "No results"
                                         : "No library rows indexed")
                                 color: Kirigami.Theme.disabledTextColor
@@ -2341,15 +2344,14 @@ Kirigami.ApplicationWindow {
                 root.positionSmoothingLastMs = nowMs
                 root.positionSmoothingTrackPath = uiBridge.currentTrackPath
             }
-            if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion
-                    || root.pendingLibraryVersion >= 0) {
-                root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
-            }
             if (uiBridge.queueVersion !== root.lastSeenQueueVersion) {
                 root.lastSeenQueueVersion = uiBridge.queueVersion
                 root.resetQueueSelectionForUpdatedQueue()
             }
             root.syncQueueSelectionToCurrentQueue()
+        }
+        function onLibraryTreeFrameReceived(version, treeBytes) {
+            root.requestLibraryTreeApply(version, treeBytes || "")
         }
         function onAnalysisChanged() {
             applyAnalysisDelta()

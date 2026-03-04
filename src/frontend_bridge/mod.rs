@@ -311,11 +311,8 @@ fn run_bridge_loop(
         .and_then(|raw| raw.parse::<u64>().ok())
         .map_or(16, |v| v.clamp(8, 1000));
     let snapshot_interval = Duration::from_millis(snapshot_interval_ms);
-    let scan_snapshot_interval = scan_only_snapshot_interval();
-    let scan_realtime_snapshot_interval = scan_realtime_snapshot_interval();
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;
-    let mut snapshot_dirty_realtime = false;
     let mut include_tree_in_next_snapshot = true;
     let tree_emit_interval = scan_tree_emit_interval();
     let tree_emit_min_track_delta = scan_tree_emit_min_track_delta();
@@ -355,7 +352,6 @@ fn run_bridge_loop(
                         }
                         if changed {
                             snapshot_dirty = true;
-                            snapshot_dirty_realtime = true;
                         }
                         if force_snapshot && running {
                             if send_snapshot_event(
@@ -370,11 +366,9 @@ fn run_bridge_loop(
                                 }
                                 include_tree_in_next_snapshot = false;
                                 snapshot_dirty = false;
-                                snapshot_dirty_realtime = false;
                             } else {
                                 prof_snapshots_dropped += 1;
                                 snapshot_dirty = true;
-                                snapshot_dirty_realtime = true;
                             }
                             last_snapshot_emit = Instant::now();
                         }
@@ -420,20 +414,8 @@ fn run_bridge_loop(
 
         if changed {
             snapshot_dirty = true;
-            if playback_changed || analysis_changed || metadata_changed {
-                snapshot_dirty_realtime = true;
-            }
         }
-        let emit_interval = if state.library.scan_in_progress {
-            if snapshot_dirty_realtime {
-                scan_realtime_snapshot_interval
-            } else {
-                scan_snapshot_interval
-            }
-        } else {
-            snapshot_interval
-        };
-        if snapshot_dirty && last_snapshot_emit.elapsed() >= emit_interval {
+        if snapshot_dirty && last_snapshot_emit.elapsed() >= snapshot_interval {
             if send_snapshot_event(&event_tx, &state, include_tree_in_next_snapshot) {
                 prof_snapshots_sent += 1;
                 if include_tree_in_next_snapshot {
@@ -442,7 +424,6 @@ fn run_bridge_loop(
                 }
                 include_tree_in_next_snapshot = false;
                 snapshot_dirty = false;
-                snapshot_dirty_realtime = false;
             } else {
                 prof_snapshots_dropped += 1;
                 snapshot_dirty = true;
@@ -518,22 +499,6 @@ fn send_snapshot_event(
         BridgeEvent::Snapshot(Box::new(state.snapshot(include_tree))),
     )
     .is_ok()
-}
-
-fn scan_only_snapshot_interval() -> Duration {
-    let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SCAN_SNAPSHOT_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map_or(120, |v| v.clamp(16, 1000));
-    Duration::from_millis(snapshot_interval_ms)
-}
-
-fn scan_realtime_snapshot_interval() -> Duration {
-    let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SCAN_REALTIME_SNAPSHOT_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map_or(50, |v| v.clamp(16, 1000));
-    Duration::from_millis(snapshot_interval_ms)
 }
 
 fn scan_tree_emit_interval() -> Duration {

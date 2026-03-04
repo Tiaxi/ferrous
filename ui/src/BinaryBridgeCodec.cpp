@@ -494,8 +494,8 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
         case SectionLibraryMeta:
             ok = decodeLibraryMetaSection(sectionPayload, &out->library);
             break;
-        case SectionLibraryTree:
-            out->libraryTreeBytes = sectionPayload;
+        case SectionReservedLibraryTree:
+            ok = true;
             break;
         case SectionMetadata:
             ok = decodeMetadataSection(sectionPayload, &out->metadata);

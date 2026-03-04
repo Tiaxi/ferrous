@@ -13,7 +13,7 @@ enum SnapshotSection : quint16 {
     SectionPlayback = 1u << 0,
     SectionQueue = 1u << 1,
     SectionLibraryMeta = 1u << 2,
-    SectionLibraryTree = 1u << 3,
+    SectionReservedLibraryTree = 1u << 3,
     SectionMetadata = 1u << 4,
     SectionSettings = 1u << 5,
     SectionError = 1u << 6,
@@ -128,7 +128,6 @@ struct DecodedSnapshot {
     DecodedPlayback playback;
     DecodedQueue queue;
     DecodedLibraryMeta library;
-    QByteArray libraryTreeBytes;
     DecodedMetadata metadata;
     DecodedSettings settings;
 };

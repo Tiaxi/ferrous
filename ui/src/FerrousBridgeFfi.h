@@ -17,4 +17,9 @@ std::uint8_t *ferrous_ffi_bridge_pop_binary_event(FerrousFfiBridge *handle, std:
 void ferrous_ffi_bridge_free_binary_event(std::uint8_t *ptr, std::size_t len);
 std::uint8_t *ferrous_ffi_bridge_pop_analysis_frame(FerrousFfiBridge *handle, std::size_t *len_out);
 void ferrous_ffi_bridge_free_analysis_frame(std::uint8_t *ptr, std::size_t len);
+std::uint8_t *ferrous_ffi_bridge_pop_library_tree(
+    FerrousFfiBridge *handle,
+    std::size_t *len_out,
+    std::uint32_t *version_out);
+void ferrous_ffi_bridge_free_library_tree(std::uint8_t *ptr, std::size_t len);
 }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::c_uchar;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
@@ -16,24 +16,17 @@ const ANALYSIS_FLAG_RESET: u8 = 0x02;
 const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
 const MAX_PENDING_BINARY_EVENTS: usize = 12;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
+const MAX_PENDING_LIBRARY_TREES: usize = 1;
 
 const SNAPSHOT_MAGIC: u32 = 0xFE55_0001;
 const SECTION_PLAYBACK: u16 = 1 << 0;
 const SECTION_QUEUE: u16 = 1 << 1;
 const SECTION_LIBRARY_META: u16 = 1 << 2;
-const SECTION_LIBRARY_TREE: u16 = 1 << 3;
+const _SECTION_LIBRARY_TREE_RESERVED: u16 = 1 << 3;
 const SECTION_METADATA: u16 = 1 << 4;
 const SECTION_SETTINGS: u16 = 1 << 5;
 const SECTION_ERROR: u16 = 1 << 6;
 const SECTION_STOPPED: u16 = 1 << 7;
-
-fn read_env_millis(key: &str, fallback: u64) -> Duration {
-    let millis = std::env::var(key)
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map_or(fallback, |v| v.clamp(8, 1000));
-    Duration::from_millis(millis)
-}
 
 #[derive(Default)]
 struct AnalysisDelta {
@@ -60,15 +53,19 @@ struct QueueDurationCache {
     unknown_duration_count: usize,
 }
 
+struct LibraryTreeFrame {
+    version: u32,
+    bytes: Vec<u8>,
+}
+
 struct FfiRuntime {
     bridge: FrontendBridgeHandle,
     analysis_state: AnalysisEmitState,
     queue_duration_cache: QueueDurationCache,
     pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
-    binary_emit_interval: Duration,
-    scan_binary_emit_interval: Duration,
-    last_binary_emit_at: Option<Instant>,
+    pending_library_trees: VecDeque<LibraryTreeFrame>,
+    next_tree_version: u32,
     stopped: bool,
 }
 
@@ -81,9 +78,8 @@ impl FfiRuntime {
             queue_duration_cache: QueueDurationCache::default(),
             pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
-            binary_emit_interval: read_env_millis("FERROUS_FFI_SNAPSHOT_MS", 24),
-            scan_binary_emit_interval: read_env_millis("FERROUS_FFI_SCAN_SNAPSHOT_MS", 80),
-            last_binary_emit_at: None,
+            pending_library_trees: VecDeque::with_capacity(MAX_PENDING_LIBRARY_TREES),
+            next_tree_version: 1,
             stopped: false,
         };
         runtime.bridge.command(BridgeCommand::RequestSnapshot);
@@ -110,6 +106,23 @@ impl FfiRuntime {
         self.pending_analysis_frames.push_back(frame);
     }
 
+    fn push_library_tree_frame(&mut self, bytes: Vec<u8>) {
+        let mut payload = bytes;
+        if payload.is_empty() {
+            payload.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let version = self.next_tree_version;
+        self.next_tree_version = self.next_tree_version.wrapping_add(1).max(1);
+        let frame = LibraryTreeFrame {
+            version,
+            bytes: payload,
+        };
+        while self.pending_library_trees.len() >= MAX_PENDING_LIBRARY_TREES {
+            self.pending_library_trees.pop_front();
+        }
+        self.pending_library_trees.push_back(frame);
+    }
+
     fn send_binary_command(&mut self, payload: &[u8]) -> Result<(), String> {
         let cmd = parse_binary_command(payload)?;
         if let Some(cmd) = cmd {
@@ -124,13 +137,19 @@ impl FfiRuntime {
         }
 
         let mut latest_snapshot: Option<BridgeSnapshot> = None;
+        let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
         for _ in 0..max_events.max(1) {
             let event = self.bridge.try_recv();
             let Some(event) = event else {
                 break;
             };
             match event {
-                BridgeEvent::Snapshot(snapshot) => latest_snapshot = Some(*snapshot),
+                BridgeEvent::Snapshot(snapshot) => {
+                    if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
+                        latest_tree_bytes = Some(tree_bytes.clone());
+                    }
+                    latest_snapshot = Some(*snapshot);
+                }
                 BridgeEvent::Error(message) => {
                     self.push_binary_event(encode_error_event(&message));
                 }
@@ -141,14 +160,14 @@ impl FfiRuntime {
             }
         }
 
+        if let Some(tree_bytes) = latest_tree_bytes {
+            self.push_library_tree_frame(tree_bytes.as_ref().clone());
+        }
         if let Some(snapshot) = latest_snapshot {
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
             self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
-            if self.binary_emit_due(&snapshot) {
-                let queue_duration = self.queue_duration_for_snapshot(&snapshot);
-                self.push_binary_event(encode_binary_snapshot(&snapshot, queue_duration));
-                self.last_binary_emit_at = Some(Instant::now());
-            }
+            let queue_duration = self.queue_duration_for_snapshot(&snapshot);
+            self.push_binary_event(encode_binary_snapshot(&snapshot, queue_duration));
         }
     }
 
@@ -160,17 +179,8 @@ impl FfiRuntime {
         self.pending_analysis_frames.pop_front()
     }
 
-    fn binary_emit_due(&self, snapshot: &BridgeSnapshot) -> bool {
-        if snapshot.pre_built_tree_bytes.is_some() {
-            return true;
-        }
-        let interval = if snapshot.library.scan_in_progress {
-            self.scan_binary_emit_interval
-        } else {
-            self.binary_emit_interval
-        };
-        self.last_binary_emit_at
-            .map_or(true, |last| last.elapsed() >= interval)
+    fn pop_library_tree_frame(&mut self) -> Option<LibraryTreeFrame> {
+        self.pending_library_trees.pop_front()
     }
 
     fn queue_duration_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> (f64, usize) {
@@ -258,7 +268,9 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
         return false;
     };
     runtime.poll(max_events as usize);
-    !runtime.pending_binary_events.is_empty() || !runtime.pending_analysis_frames.is_empty()
+    !runtime.pending_binary_events.is_empty()
+        || !runtime.pending_analysis_frames.is_empty()
+        || !runtime.pending_library_trees.is_empty()
 }
 
 #[no_mangle]
@@ -327,6 +339,49 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_analysis_frame(
 
 #[no_mangle]
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_analysis_frame(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    drop(Vec::from_raw_parts(ptr, len, len));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ferrous_ffi_bridge_pop_library_tree(
+    handle: *mut FerrousFfiBridge,
+    len_out: *mut usize,
+    version_out: *mut u32,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
+    if !version_out.is_null() {
+        *version_out = 0;
+    }
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bridge = &*handle;
+    let Ok(mut runtime) = bridge.runtime.lock() else {
+        return std::ptr::null_mut();
+    };
+    let Some(frame) = runtime.pop_library_tree_frame() else {
+        return std::ptr::null_mut();
+    };
+    let mut boxed = frame.bytes.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    let len = boxed.len();
+    std::mem::forget(boxed);
+    if !len_out.is_null() {
+        *len_out = len;
+    }
+    if !version_out.is_null() {
+        *version_out = frame.version;
+    }
+    ptr
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ferrous_ffi_bridge_free_library_tree(ptr: *mut c_uchar, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
@@ -619,9 +674,6 @@ fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_duration: (f64, usize
         encode_queue_section(snapshot, queue_duration),
     ));
     sections.push((SECTION_LIBRARY_META, encode_library_meta_section(snapshot)));
-    if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
-        sections.push((SECTION_LIBRARY_TREE, tree_bytes.as_ref().clone()));
-    }
     sections.push((SECTION_METADATA, encode_metadata_section(snapshot)));
     sections.push((SECTION_SETTINGS, encode_settings_section(snapshot)));
 
@@ -1174,7 +1226,7 @@ mod tests {
         assert_ne!(mask & SECTION_PLAYBACK, 0);
         assert_ne!(mask & SECTION_QUEUE, 0);
         assert_ne!(mask & SECTION_LIBRARY_META, 0);
-        assert_ne!(mask & SECTION_LIBRARY_TREE, 0);
+        assert_eq!(mask & _SECTION_LIBRARY_TREE_RESERVED, 0);
         assert_ne!(mask & SECTION_METADATA, 0);
         assert_ne!(mask & SECTION_SETTINGS, 0);
         assert_eq!(mask & SECTION_ERROR, 0);
@@ -1215,6 +1267,29 @@ mod tests {
         None
     }
 
+    fn ffi_next_tree(handle: *mut FerrousFfiBridge, timeout: Duration) -> Option<(u32, Vec<u8>)> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            unsafe {
+                ferrous_ffi_bridge_poll(handle, 64);
+                let mut len = 0usize;
+                let mut version = 0u32;
+                let ptr = ferrous_ffi_bridge_pop_library_tree(
+                    handle,
+                    &mut len as *mut usize,
+                    &mut version as *mut u32,
+                );
+                if !ptr.is_null() && len > 0 {
+                    let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
+                    ferrous_ffi_bridge_free_library_tree(ptr, len);
+                    return Some((version, bytes));
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
     fn ffi_wait_for_mask(
         handle: *mut FerrousFfiBridge,
         section_mask_bit: u16,
@@ -1242,11 +1317,16 @@ mod tests {
         let handle = ferrous_ffi_bridge_create();
         assert!(!handle.is_null());
 
+        let tree_evt = ffi_next_tree(handle, Duration::from_secs(4)).expect("tree frame");
+        assert!(tree_evt.0 > 0);
+        assert!(!tree_evt.1.is_empty());
+
         let snapshot_evt = ffi_wait_for_mask(handle, SECTION_PLAYBACK, Duration::from_secs(4))
             .expect("snapshot event");
         let (_, _, mask) = parse_packet_header(&snapshot_evt);
         assert_ne!(mask & SECTION_QUEUE, 0);
         assert_ne!(mask & SECTION_SETTINGS, 0);
+        assert_eq!(mask & _SECTION_LIBRARY_TREE_RESERVED, 0);
 
         assert!(ffi_send_binary(handle, &encode_command(33, &[])));
         let stopped = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));

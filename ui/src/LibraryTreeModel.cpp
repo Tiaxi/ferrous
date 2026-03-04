@@ -1,8 +1,12 @@
 #include "LibraryTreeModel.h"
 
+#include <cmath>
 #include <functional>
 
+#include <QElapsedTimer>
 #include <QFileInfo>
+#include <QHash>
+#include <QSet>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QVariantMap>
 #include <QtEndian>
@@ -439,6 +443,37 @@ QString LibraryTreeModel::toLower(const QString &text) {
     return text.toLower();
 }
 
+bool LibraryTreeModel::rowsEqual(const FlatRow &a, const FlatRow &b) {
+    return a.rowType == b.rowType
+        && a.key == b.key
+        && a.selectionKey == b.selectionKey
+        && a.artist == b.artist
+        && a.name == b.name
+        && a.title == b.title
+        && a.count == b.count
+        && a.expanded == b.expanded
+        && a.sourceIndex == b.sourceIndex
+        && a.trackNumber == b.trackNumber
+        && a.trackPath == b.trackPath
+        && a.openPath == b.openPath
+        && a.coverPath == b.coverPath
+        && a.playPaths == b.playPaths
+        && a.depth == b.depth
+        && a.hasChildren == b.hasChildren;
+}
+
+bool LibraryTreeModel::hasDuplicateSelectionKeys(const QVector<FlatRow> &rows) {
+    QSet<QString> seen;
+    seen.reserve(rows.size());
+    for (const FlatRow &row : rows) {
+        if (row.selectionKey.isEmpty() || seen.contains(row.selectionKey)) {
+            return true;
+        }
+        seen.insert(row.selectionKey);
+    }
+    return false;
+}
+
 QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseTreeNodesFromBinary(const QByteArray &treeBytes) {
     QVector<ParsedBinaryRow> parsedRows;
     if (!parseRows(treeBytes, &parsedRows) || parsedRows.isEmpty()) {
@@ -557,7 +592,14 @@ bool LibraryTreeModel::isExpanded(const TreeNode &node, bool autoExpand) const {
     return m_expandedByKey.value(node.key, false);
 }
 
-void LibraryTreeModel::appendFlatRows(const QVector<TreeNode> &nodes, int depth, bool autoExpand) {
+void LibraryTreeModel::appendFlatRows(
+    const QVector<TreeNode> &nodes,
+    QVector<FlatRow> *rows,
+    int depth,
+    bool autoExpand) const {
+    if (!rows) {
+        return;
+    }
     for (const TreeNode &node : nodes) {
         if (!nodeMatchesSearch(node, m_searchLower)) {
             continue;
@@ -580,21 +622,163 @@ void LibraryTreeModel::appendFlatRows(const QVector<TreeNode> &nodes, int depth,
         row.depth = depth;
         row.hasChildren = !node.children.isEmpty();
         row.expanded = isExpanded(node, autoExpand);
-        m_rows.push_back(std::move(row));
+        rows->push_back(std::move(row));
 
-        if (!node.children.isEmpty() && m_rows.back().expanded) {
-            appendFlatRows(node.children, depth + 1, autoExpand);
+        if (!node.children.isEmpty() && rows->back().expanded) {
+            appendFlatRows(node.children, rows, depth + 1, autoExpand);
         }
     }
 }
 
+QVector<LibraryTreeModel::FlatRow> LibraryTreeModel::buildFlatRows() const {
+    QVector<FlatRow> rows;
+    const bool autoExpand = !m_searchLower.isEmpty();
+    rows.reserve(m_rows.size());
+    appendFlatRows(m_tree, &rows, 0, autoExpand);
+    return rows;
+}
+
+bool LibraryTreeModel::hasDetectedMove(const QVector<FlatRow> &nextRows) const {
+    QHash<QString, int> oldPositions;
+    oldPositions.reserve(m_rows.size());
+    for (int i = 0; i < m_rows.size(); ++i) {
+        oldPositions.insert(m_rows[i].selectionKey, i);
+    }
+
+    int lastPos = -1;
+    for (const FlatRow &row : nextRows) {
+        const auto it = oldPositions.constFind(row.selectionKey);
+        if (it == oldPositions.constEnd()) {
+            continue;
+        }
+        const int pos = it.value();
+        if (pos < lastPos) {
+            return true;
+        }
+        lastPos = pos;
+    }
+    return false;
+}
+
+bool LibraryTreeModel::shouldUseResetForRows(const QVector<FlatRow> &nextRows) const {
+    if (m_rows.isEmpty() || nextRows.isEmpty()) {
+        return true;
+    }
+    if (hasDuplicateSelectionKeys(m_rows) || hasDuplicateSelectionKeys(nextRows)) {
+        return true;
+    }
+
+    const int oldCount = m_rows.size();
+    const int newCount = nextRows.size();
+    const int delta = std::abs(newCount - oldCount);
+    const int maxCount = std::max(oldCount, newCount);
+    if (delta > 2000) {
+        return true;
+    }
+    if (maxCount > 0 && (static_cast<double>(delta) / static_cast<double>(maxCount)) > 0.25) {
+        return true;
+    }
+    if (hasDetectedMove(nextRows)) {
+        return true;
+    }
+    return false;
+}
+
+bool LibraryTreeModel::applyRowsIncremental(const QVector<FlatRow> &nextRows) {
+    QSet<QString> oldKeys;
+    oldKeys.reserve(m_rows.size());
+    for (const FlatRow &row : m_rows) {
+        oldKeys.insert(row.selectionKey);
+    }
+
+    QSet<QString> newKeys;
+    newKeys.reserve(nextRows.size());
+    for (const FlatRow &row : nextRows) {
+        newKeys.insert(row.selectionKey);
+    }
+
+    int row = 0;
+    int nextIdx = 0;
+    while (row < m_rows.size() || nextIdx < nextRows.size()) {
+        if (row < m_rows.size()
+            && nextIdx < nextRows.size()
+            && m_rows[row].selectionKey == nextRows[nextIdx].selectionKey) {
+            if (!rowsEqual(m_rows[row], nextRows[nextIdx])) {
+                m_rows[row] = nextRows[nextIdx];
+                const QModelIndex modelIndex = index(row);
+                emit dataChanged(modelIndex, modelIndex);
+            }
+            row++;
+            nextIdx++;
+            continue;
+        }
+
+        if (row < m_rows.size() && !newKeys.contains(m_rows[row].selectionKey)) {
+            const int removeStart = row;
+            int removeCount = 0;
+            while (row + removeCount < m_rows.size()
+                && !newKeys.contains(m_rows[row + removeCount].selectionKey)) {
+                removeCount++;
+            }
+            if (removeCount <= 0) {
+                return false;
+            }
+            beginRemoveRows(QModelIndex{}, removeStart, removeStart + removeCount - 1);
+            m_rows.remove(removeStart, removeCount);
+            endRemoveRows();
+            continue;
+        }
+
+        if (nextIdx < nextRows.size() && !oldKeys.contains(nextRows[nextIdx].selectionKey)) {
+            const int insertStart = row;
+            int insertEnd = nextIdx;
+            while (insertEnd < nextRows.size()
+                && !oldKeys.contains(nextRows[insertEnd].selectionKey)) {
+                insertEnd++;
+            }
+            const int insertCount = insertEnd - nextIdx;
+            if (insertCount <= 0) {
+                return false;
+            }
+            beginInsertRows(QModelIndex{}, insertStart, insertStart + insertCount - 1);
+            for (int i = 0; i < insertCount; ++i) {
+                m_rows.insert(insertStart + i, nextRows[nextIdx + i]);
+            }
+            endInsertRows();
+            row += insertCount;
+            nextIdx += insertCount;
+            continue;
+        }
+
+        return false;
+    }
+
+    return m_rows.size() == nextRows.size();
+}
+
+void LibraryTreeModel::applyRowsReset(const QVector<FlatRow> &nextRows) {
+    beginResetModel();
+    m_rows = nextRows;
+    endResetModel();
+}
+
 void LibraryTreeModel::rebuildRows() {
     const int oldCount = count();
-    beginResetModel();
-    m_rows.clear();
-    const bool autoExpand = !m_searchLower.isEmpty();
-    appendFlatRows(m_tree, 0, autoExpand);
-    endResetModel();
+    const QVector<FlatRow> nextRows = buildFlatRows();
+
+    bool usedReset = shouldUseResetForRows(nextRows);
+    if (usedReset) {
+        applyRowsReset(nextRows);
+    } else {
+        QElapsedTimer timer;
+        timer.start();
+        if (!applyRowsIncremental(nextRows) || timer.elapsed() > 8) {
+            applyRowsReset(nextRows);
+            usedReset = true;
+        }
+    }
+
+    Q_UNUSED(usedReset);
     if (oldCount != count()) {
         emit countChanged();
     }
