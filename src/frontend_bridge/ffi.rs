@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::c_uchar;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
@@ -27,6 +27,14 @@ const SECTION_SETTINGS: u16 = 1 << 5;
 const SECTION_ERROR: u16 = 1 << 6;
 const SECTION_STOPPED: u16 = 1 << 7;
 
+fn read_env_millis(key: &str, fallback: u64) -> Duration {
+    let millis = std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(fallback, |v| v.clamp(8, 1000));
+    Duration::from_millis(millis)
+}
+
 #[derive(Default)]
 struct AnalysisDelta {
     sample_rate_hz: u32,
@@ -44,11 +52,23 @@ struct AnalysisEmitState {
     analysis_frame_seq: u32,
 }
 
+#[derive(Default)]
+struct QueueDurationCache {
+    library_ptr: usize,
+    queue_paths: Vec<PathBuf>,
+    total_duration_secs: f64,
+    unknown_duration_count: usize,
+}
+
 struct FfiRuntime {
     bridge: FrontendBridgeHandle,
     analysis_state: AnalysisEmitState,
+    queue_duration_cache: QueueDurationCache,
     pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
+    binary_emit_interval: Duration,
+    scan_binary_emit_interval: Duration,
+    last_binary_emit_at: Option<Instant>,
     stopped: bool,
 }
 
@@ -58,8 +78,12 @@ impl FfiRuntime {
         let runtime = Self {
             bridge,
             analysis_state: AnalysisEmitState::default(),
+            queue_duration_cache: QueueDurationCache::default(),
             pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
+            binary_emit_interval: read_env_millis("FERROUS_FFI_SNAPSHOT_MS", 24),
+            scan_binary_emit_interval: read_env_millis("FERROUS_FFI_SCAN_SNAPSHOT_MS", 80),
+            last_binary_emit_at: None,
             stopped: false,
         };
         runtime.bridge.command(BridgeCommand::RequestSnapshot);
@@ -120,7 +144,11 @@ impl FfiRuntime {
         if let Some(snapshot) = latest_snapshot {
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
             self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
-            self.push_binary_event(encode_binary_snapshot(&snapshot));
+            if self.binary_emit_due(&snapshot) {
+                let queue_duration = self.queue_duration_for_snapshot(&snapshot);
+                self.push_binary_event(encode_binary_snapshot(&snapshot, queue_duration));
+                self.last_binary_emit_at = Some(Instant::now());
+            }
         }
     }
 
@@ -130,6 +158,47 @@ impl FfiRuntime {
 
     fn pop_analysis_frame(&mut self) -> Option<Vec<u8>> {
         self.pending_analysis_frames.pop_front()
+    }
+
+    fn binary_emit_due(&self, snapshot: &BridgeSnapshot) -> bool {
+        if snapshot.pre_built_tree_bytes.is_some() {
+            return true;
+        }
+        let interval = if snapshot.library.scan_in_progress {
+            self.scan_binary_emit_interval
+        } else {
+            self.binary_emit_interval
+        };
+        self.last_binary_emit_at
+            .map_or(true, |last| last.elapsed() >= interval)
+    }
+
+    fn queue_duration_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> (f64, usize) {
+        if snapshot.queue.is_empty() {
+            return (0.0, 0);
+        }
+        // Queue duration lookups against a rapidly mutating scan snapshot are expensive and
+        // not essential for transport/visual responsiveness; skip until the scan settles.
+        if snapshot.library.scan_in_progress {
+            return (0.0, snapshot.queue.len());
+        }
+
+        let library_ptr = std::sync::Arc::as_ptr(&snapshot.library) as usize;
+        if self.queue_duration_cache.library_ptr == library_ptr
+            && self.queue_duration_cache.queue_paths == snapshot.queue
+        {
+            return (
+                self.queue_duration_cache.total_duration_secs,
+                self.queue_duration_cache.unknown_duration_count,
+            );
+        }
+
+        let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(snapshot);
+        self.queue_duration_cache.library_ptr = library_ptr;
+        self.queue_duration_cache.queue_paths = snapshot.queue.clone();
+        self.queue_duration_cache.total_duration_secs = total_duration_secs;
+        self.queue_duration_cache.unknown_duration_count = unknown_duration_count;
+        (total_duration_secs, unknown_duration_count)
     }
 }
 
@@ -541,11 +610,14 @@ impl<'a> BinaryReader<'a> {
     }
 }
 
-fn encode_binary_snapshot(snapshot: &BridgeSnapshot) -> Vec<u8> {
+fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_duration: (f64, usize)) -> Vec<u8> {
     let mut sections: Vec<(u16, Vec<u8>)> = Vec::new();
 
     sections.push((SECTION_PLAYBACK, encode_playback_section(snapshot)));
-    sections.push((SECTION_QUEUE, encode_queue_section(snapshot)));
+    sections.push((
+        SECTION_QUEUE,
+        encode_queue_section(snapshot, queue_duration),
+    ));
     sections.push((SECTION_LIBRARY_META, encode_library_meta_section(snapshot)));
     if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
         sections.push((SECTION_LIBRARY_TREE, tree_bytes.as_ref().clone()));
@@ -656,10 +728,10 @@ fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
     (total_duration_secs, unknown_duration_count)
 }
 
-fn encode_queue_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+fn encode_queue_section(snapshot: &BridgeSnapshot, queue_duration: (f64, usize)) -> Vec<u8> {
     let mut out = Vec::new();
     let selected_index = snapshot.selected_queue_index.map_or(-1, |idx| idx as i32);
-    let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(snapshot);
+    let (total_duration_secs, unknown_duration_count) = queue_duration;
 
     push_u32(&mut out, snapshot.queue.len() as u32);
     push_i32(&mut out, selected_index);
@@ -1095,7 +1167,7 @@ mod tests {
     #[test]
     fn snapshot_packet_contract_has_expected_shape() {
         let snapshot = sample_snapshot();
-        let packet = encode_binary_snapshot(&snapshot);
+        let packet = encode_binary_snapshot(&snapshot, compute_queue_total_duration(&snapshot));
         let (magic, total_len, mask) = parse_packet_header(&packet);
         assert_eq!(magic, SNAPSHOT_MAGIC);
         assert_eq!(total_len as usize, packet.len());

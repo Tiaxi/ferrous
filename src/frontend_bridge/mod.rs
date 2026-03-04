@@ -312,6 +312,7 @@ fn run_bridge_loop(
         .map_or(16, |v| v.clamp(8, 1000));
     let snapshot_interval = Duration::from_millis(snapshot_interval_ms);
     let scan_snapshot_interval = scan_only_snapshot_interval();
+    let scan_realtime_snapshot_interval = scan_realtime_snapshot_interval();
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;
     let mut snapshot_dirty_realtime = false;
@@ -423,8 +424,12 @@ fn run_bridge_loop(
                 snapshot_dirty_realtime = true;
             }
         }
-        let emit_interval = if state.library.scan_in_progress && !snapshot_dirty_realtime {
-            scan_snapshot_interval
+        let emit_interval = if state.library.scan_in_progress {
+            if snapshot_dirty_realtime {
+                scan_realtime_snapshot_interval
+            } else {
+                scan_snapshot_interval
+            }
         } else {
             snapshot_interval
         };
@@ -520,6 +525,14 @@ fn scan_only_snapshot_interval() -> Duration {
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .map_or(120, |v| v.clamp(16, 1000));
+    Duration::from_millis(snapshot_interval_ms)
+}
+
+fn scan_realtime_snapshot_interval() -> Duration {
+    let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SCAN_REALTIME_SNAPSHOT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(50, |v| v.clamp(16, 1000));
     Duration::from_millis(snapshot_interval_ms)
 }
 

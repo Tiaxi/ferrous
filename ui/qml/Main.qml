@@ -29,8 +29,10 @@ Kirigami.ApplicationWindow {
     property int queueSelectionAnchorIndex: -1
     property int lastAppliedLibraryVersion: -1
     property int pendingLibraryVersion: -1
-    property real pendingLibraryContentY: 0
-    property bool pendingLibraryContentYValid: false
+    property string pendingLibraryAnchorKey: ""
+    property real pendingLibraryAnchorOffset: 0
+    property real pendingLibraryAnchorFallbackY: 0
+    property bool pendingLibraryAnchorValid: false
     property int lastSeenQueueVersion: -1
     property int lastCenteredQueueIndex: -2
     property bool autoCenterQueueSelection: true
@@ -542,13 +544,40 @@ Kirigami.ApplicationWindow {
         Qt.callLater(restoreY)
     }
 
-    function restoreLibraryViewY(preserveY) {
+    function captureLibraryViewAnchor() {
+        if (!libraryAlbumView || libraryModel.count <= 0) {
+            return {
+                key: "",
+                offset: 0,
+                fallbackY: libraryAlbumView ? libraryAlbumView.contentY : 0
+            }
+        }
+        const rowHeight = 24
+        const topIndex = Math.max(0, Math.min(
+            libraryModel.count - 1,
+            Math.floor(libraryAlbumView.contentY / rowHeight)))
+        return {
+            key: libraryModel.selectionKeyForRow(topIndex) || "",
+            offset: libraryAlbumView.contentY - (topIndex * rowHeight),
+            fallbackY: libraryAlbumView.contentY
+        }
+    }
+
+    function restoreLibraryViewAnchor(anchor) {
         if (!libraryAlbumView) {
             return
         }
+        const rowHeight = 24
+        let targetY = anchor && anchor.fallbackY !== undefined ? anchor.fallbackY : 0
+        if (anchor && anchor.key && anchor.key.length > 0) {
+            const index = libraryModel.indexForSelectionKey(anchor.key)
+            if (index >= 0) {
+                targetY = (index * rowHeight) + (anchor.offset || 0)
+            }
+        }
         const restoreY = function() {
             const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
-            libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
+            libraryAlbumView.contentY = Math.max(0, Math.min(targetY, maxYNow))
         }
         restoreY()
         Qt.callLater(restoreY)
@@ -561,21 +590,31 @@ Kirigami.ApplicationWindow {
         lastAppliedLibraryVersion = pendingLibraryVersion
         pendingLibraryVersion = -1
         root.syncLibrarySelectionToVisibleRows()
-        if (pendingLibraryContentYValid) {
-            restoreLibraryViewY(pendingLibraryContentY)
-            pendingLibraryContentYValid = false
+        if (pendingLibraryAnchorValid) {
+            restoreLibraryViewAnchor({
+                key: pendingLibraryAnchorKey,
+                offset: pendingLibraryAnchorOffset,
+                fallbackY: pendingLibraryAnchorFallbackY
+            })
+            pendingLibraryAnchorValid = false
         }
     }
 
     function requestLibraryTreeApply(version, treeBytes) {
+        if (version <= 0 && (!treeBytes || treeBytes.length === 0)) {
+            return
+        }
         if (version < 0 || version === pendingLibraryVersion) {
             return
         }
         if (version === lastAppliedLibraryVersion && pendingLibraryVersion < 0) {
             return
         }
-        pendingLibraryContentY = libraryAlbumView ? libraryAlbumView.contentY : 0
-        pendingLibraryContentYValid = true
+        const anchor = captureLibraryViewAnchor()
+        pendingLibraryAnchorKey = anchor.key || ""
+        pendingLibraryAnchorOffset = anchor.offset || 0
+        pendingLibraryAnchorFallbackY = anchor.fallbackY || 0
+        pendingLibraryAnchorValid = true
         pendingLibraryVersion = version
         libraryModel.setLibraryTreeFromBinary(treeBytes || "")
         finishPendingLibraryTreeApply()
@@ -595,7 +634,7 @@ Kirigami.ApplicationWindow {
         if (pendingLibraryVersion >= 0 || libraryModel.parsing) {
             return true
         }
-        if (uiBridge.libraryVersion === 0 && uiBridge.libraryRoots.length > 0) {
+        if (uiBridge.libraryVersion === 0) {
             return true
         }
         return uiBridge.libraryScanInProgress && libraryAlbumView.count === 0
