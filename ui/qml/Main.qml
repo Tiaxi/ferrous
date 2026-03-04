@@ -1116,10 +1116,6 @@ Kirigami.ApplicationWindow {
 
     function openGlobalSearch() {
         globalSearchDialog.open()
-        globalSearchQueryField.forceActiveFocus()
-        globalSearchQueryField.selectAll()
-        uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
-        rebuildGlobalSearchDisplayRows()
     }
 
     function openDiagnostics() {
@@ -1724,7 +1720,9 @@ Kirigami.ApplicationWindow {
         onOpened: {
             root.rebuildGlobalSearchDisplayRows()
             globalSearchQueryField.forceActiveFocus()
-            globalSearchQueryField.selectAll()
+            if ((globalSearchQueryField.text || "").length > 0) {
+                globalSearchQueryField.selectAll()
+            }
             uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
         }
         onClosed: {
@@ -2142,8 +2140,10 @@ Kirigami.ApplicationWindow {
                 Button {
                     text: "Copy All"
                     onClicked: {
-                        diagnosticsTextArea.selectAll()
-                        diagnosticsTextArea.copy()
+                        if ((diagnosticsTextArea.text || "").length > 0) {
+                            diagnosticsTextArea.selectAll()
+                            diagnosticsTextArea.copy()
+                        }
                     }
                 }
             }

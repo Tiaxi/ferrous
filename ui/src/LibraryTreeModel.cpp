@@ -440,6 +440,8 @@ QVariantMap LibraryTreeModel::rowDataForRow(int row) const {
     out.insert(QStringLiteral("key"), item.key);
     out.insert(QStringLiteral("depth"), item.depth);
     out.insert(QStringLiteral("count"), item.count);
+    out.insert(QStringLiteral("expanded"), item.expanded);
+    out.insert(QStringLiteral("hasChildren"), item.hasChildren);
     return out;
 }
 

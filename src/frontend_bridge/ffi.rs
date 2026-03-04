@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use super::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSettingsCommand, BridgeSnapshot, FrontendBridgeHandle, LibrarySortMode,
+    BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
+    FrontendBridgeHandle, LibrarySortMode,
 };
 use crate::playback::{PlaybackState, RepeatMode};
 
@@ -17,6 +18,7 @@ const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
 const MAX_PENDING_BINARY_EVENTS: usize = 12;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
 const MAX_PENDING_LIBRARY_TREES: usize = 1;
+const MAX_PENDING_SEARCH_RESULTS: usize = 2;
 
 const SNAPSHOT_MAGIC: u32 = 0xFE55_0001;
 const SECTION_PLAYBACK: u16 = 1 << 0;
@@ -58,6 +60,11 @@ struct LibraryTreeFrame {
     bytes: Vec<u8>,
 }
 
+struct SearchResultsFrame {
+    seq: u32,
+    bytes: Vec<u8>,
+}
+
 struct FfiRuntime {
     bridge: FrontendBridgeHandle,
     analysis_state: AnalysisEmitState,
@@ -65,6 +72,7 @@ struct FfiRuntime {
     pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
     pending_library_trees: VecDeque<LibraryTreeFrame>,
+    pending_search_results: VecDeque<SearchResultsFrame>,
     next_tree_version: u32,
     stopped: bool,
 }
@@ -79,6 +87,7 @@ impl FfiRuntime {
             pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
             pending_library_trees: VecDeque::with_capacity(MAX_PENDING_LIBRARY_TREES),
+            pending_search_results: VecDeque::with_capacity(MAX_PENDING_SEARCH_RESULTS),
             next_tree_version: 1,
             stopped: false,
         };
@@ -123,6 +132,17 @@ impl FfiRuntime {
         self.pending_library_trees.push_back(frame);
     }
 
+    fn push_search_results_frame(&mut self, seq: u32, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        while self.pending_search_results.len() >= MAX_PENDING_SEARCH_RESULTS {
+            self.pending_search_results.pop_front();
+        }
+        self.pending_search_results
+            .push_back(SearchResultsFrame { seq, bytes });
+    }
+
     fn send_binary_command(&mut self, payload: &[u8]) -> Result<(), String> {
         let cmd = parse_binary_command(payload)?;
         if let Some(cmd) = cmd {
@@ -153,6 +173,9 @@ impl FfiRuntime {
                 BridgeEvent::Error(message) => {
                     self.push_binary_event(encode_error_event(&message));
                 }
+                BridgeEvent::SearchResults(frame) => {
+                    self.push_search_results_frame(frame.seq, encode_search_results_frame(&frame));
+                }
                 BridgeEvent::Stopped => {
                     self.stopped = true;
                     self.push_binary_event(encode_stopped_event());
@@ -181,6 +204,10 @@ impl FfiRuntime {
 
     fn pop_library_tree_frame(&mut self) -> Option<LibraryTreeFrame> {
         self.pending_library_trees.pop_front()
+    }
+
+    fn pop_search_results_frame(&mut self) -> Option<SearchResultsFrame> {
+        self.pending_search_results.pop_front()
     }
 
     fn queue_duration_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> (f64, usize) {
@@ -271,6 +298,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
     !runtime.pending_binary_events.is_empty()
         || !runtime.pending_analysis_frames.is_empty()
         || !runtime.pending_library_trees.is_empty()
+        || !runtime.pending_search_results.is_empty()
 }
 
 #[no_mangle]
@@ -382,6 +410,49 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_library_tree(
 
 #[no_mangle]
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_library_tree(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    drop(Vec::from_raw_parts(ptr, len, len));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ferrous_ffi_bridge_pop_search_results(
+    handle: *mut FerrousFfiBridge,
+    len_out: *mut usize,
+    seq_out: *mut u32,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
+    if !seq_out.is_null() {
+        *seq_out = 0;
+    }
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bridge = &*handle;
+    let Ok(mut runtime) = bridge.runtime.lock() else {
+        return std::ptr::null_mut();
+    };
+    let Some(frame) = runtime.pop_search_results_frame() else {
+        return std::ptr::null_mut();
+    };
+    let mut boxed = frame.bytes.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    let len = boxed.len();
+    std::mem::forget(boxed);
+    if !len_out.is_null() {
+        *len_out = len;
+    }
+    if !seq_out.is_null() {
+        *seq_out = frame.seq;
+    }
+    ptr
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ferrous_ffi_bridge_free_search_results(ptr: *mut c_uchar, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
@@ -593,6 +664,12 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { key, expanded })
         }
+        35 => {
+            let seq = reader.read_u32()?;
+            let query = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::SetSearchQuery { seq, query })
+        }
         _ => return Err(format!("unknown binary command id {cmd_id}")),
     };
 
@@ -694,6 +771,37 @@ fn encode_error_event(message: &str) -> Vec<u8> {
 
 fn encode_stopped_event() -> Vec<u8> {
     encode_packet(vec![(SECTION_STOPPED, Vec::new())])
+}
+
+fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + frame.rows.len() * 128);
+    push_u8(&mut out, b'S');
+    push_u8(&mut out, 1);
+    push_u16(&mut out, clamp_u16(frame.rows.len()));
+    push_u32(&mut out, frame.seq);
+    for row in &frame.rows {
+        let row_type = match row.row_type {
+            BridgeSearchResultRowType::Artist => 1u8,
+            BridgeSearchResultRowType::Album => 2u8,
+            BridgeSearchResultRowType::Track => 3u8,
+        };
+        push_u8(&mut out, row_type);
+        push_f32(&mut out, row.score);
+        push_i32(&mut out, row.year.unwrap_or(i32::MIN));
+        push_u16(&mut out, row.track_number.map_or(0, clamp_u32_to_u16));
+        push_u32(&mut out, row.count);
+        push_f32(&mut out, row.length_seconds.unwrap_or(-1.0));
+        push_u16_string(&mut out, &row.label);
+        push_u16_string(&mut out, &row.artist);
+        push_u16_string(&mut out, &row.album);
+        push_u16_string(&mut out, &row.genre);
+        push_u16_string(&mut out, &row.cover_path);
+        push_u16_string(&mut out, &row.artist_key);
+        push_u16_string(&mut out, &row.album_key);
+        push_u16_string(&mut out, &row.track_key);
+        push_u16_string(&mut out, &row.track_path);
+    }
+    out
 }
 
 fn encode_packet(sections: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
@@ -822,6 +930,8 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 
     push_u32(&mut out, snapshot.library.roots.len() as u32);
     push_u32(&mut out, snapshot.library.tracks.len() as u32);
+    push_u32(&mut out, snapshot.library_artist_count as u32);
+    push_u32(&mut out, snapshot.library_album_count as u32);
     push_u8(&mut out, u8::from(snapshot.library.scan_in_progress));
     push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
     push_u16_string(
@@ -880,6 +990,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 
 fn clamp_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
+}
+
+fn clamp_u32_to_u16(value: u32) -> u16 {
+    value.min(u16::MAX as u32) as u16
 }
 
 fn push_u8(out: &mut Vec<u8>, value: u8) {
@@ -1104,12 +1218,15 @@ mod tests {
                     title: "Sample Track".to_string(),
                     artist: "Sample Artist".to_string(),
                     album: "Sample Album".to_string(),
+                    genre: "Rock".to_string(),
                     year: Some(2020),
                     track_no: Some(1),
                     duration_secs: Some(180.0),
                 }],
                 ..LibrarySnapshot::default()
             }),
+            library_artist_count: 1,
+            library_album_count: 1,
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
             queue: vec![PathBuf::from("/music/a.flac")],
             selected_queue_index: Some(0),
@@ -1232,6 +1349,26 @@ mod tests {
             }) => {
                 assert_eq!(parsed, key);
                 assert!(expanded);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_supports_set_search_query() {
+        let query = "pink floyd";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&42u32.to_le_bytes());
+        payload.extend_from_slice(&(query.len() as u16).to_le_bytes());
+        payload.extend_from_slice(query.as_bytes());
+
+        let cmd = parse_binary_command(&encode_command(35, &payload))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::SetSearchQuery { seq, query: q }) => {
+                assert_eq!(seq, 42);
+                assert_eq!(q, query);
             }
             other => panic!("unexpected command: {other:?}"),
         }

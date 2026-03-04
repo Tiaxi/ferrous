@@ -22,4 +22,9 @@ std::uint8_t *ferrous_ffi_bridge_pop_library_tree(
     std::size_t *len_out,
     std::uint32_t *version_out);
 void ferrous_ffi_bridge_free_library_tree(std::uint8_t *ptr, std::size_t len);
+std::uint8_t *ferrous_ffi_bridge_pop_search_results(
+    FerrousFfiBridge *handle,
+    std::size_t *len_out,
+    std::uint32_t *seq_out);
+void ferrous_ffi_bridge_free_search_results(std::uint8_t *ptr, std::size_t len);
 }

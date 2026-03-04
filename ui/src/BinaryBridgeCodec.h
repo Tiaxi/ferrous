@@ -3,7 +3,9 @@
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 #include <QVector>
+#include <limits>
 
 namespace BinaryBridgeCodec {
 
@@ -55,6 +57,7 @@ enum CommandId : quint16 {
     CmdRequestSnapshot = 32,
     CmdShutdown = 33,
     CmdSetNodeExpanded = 34,
+    CmdSetSearchQuery = 35,
 };
 
 struct DecodedPlayback {
@@ -87,6 +90,8 @@ struct DecodedLibraryMeta {
     bool present{false};
     int rootCount{0};
     int trackCount{0};
+    int artistCount{0};
+    int albumCount{0};
     bool scanInProgress{false};
     int sortMode{0};
     QString lastError;
@@ -133,6 +138,35 @@ struct DecodedSnapshot {
     DecodedSettings settings;
 };
 
+enum SearchRowType : quint8 {
+    SearchRowArtist = 1,
+    SearchRowAlbum = 2,
+    SearchRowTrack = 3,
+};
+
+struct DecodedSearchRow {
+    int rowType{0};
+    float score{0.0f};
+    int year{std::numeric_limits<int>::min()};
+    int trackNumber{0};
+    int count{0};
+    float lengthSeconds{-1.0f};
+    QString label;
+    QString artist;
+    QString album;
+    QString genre;
+    QString coverPath;
+    QString artistKey;
+    QString albumKey;
+    QString trackKey;
+    QString trackPath;
+};
+
+struct DecodedSearchResults {
+    quint32 seq{0};
+    QVector<DecodedSearchRow> rows;
+};
+
 QByteArray encodeCommandNoPayload(quint16 cmdId);
 QByteArray encodeCommandU8(quint16 cmdId, quint8 value);
 QByteArray encodeCommandI32(quint16 cmdId, qint32 value);
@@ -142,9 +176,14 @@ QByteArray encodeCommandF64(quint16 cmdId, double value);
 QByteArray encodeCommandString(quint16 cmdId, const QString &value);
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
 QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag);
+QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 QByteArray encodeCommandMoveQueue(quint32 from, quint32 to);
 
 bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QString *errorMessage);
+bool decodeSearchResultsFrame(
+    const QByteArray &payload,
+    DecodedSearchResults *out,
+    QString *errorMessage);
 
 } // namespace BinaryBridgeCodec

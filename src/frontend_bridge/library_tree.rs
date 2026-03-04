@@ -135,6 +135,7 @@ impl FlatTreeRow {
         path: &str,
         cover_path: Option<&str>,
         child_count: usize,
+        play_paths: Vec<String>,
     ) -> Self {
         Self {
             row_type: ROW_TYPE_ALBUM,
@@ -148,7 +149,7 @@ impl FlatTreeRow {
             path: path.to_string(),
             cover_path: cover_path.unwrap_or_default().to_string(),
             track_path: String::new(),
-            play_paths: Vec::new(),
+            play_paths,
         }
     }
 
@@ -229,6 +230,53 @@ pub fn build_library_tree_flat_binary(
 ) -> Vec<u8> {
     let rows = build_library_tree_flat_rows(library, sort_mode, expanded_keys);
     encode_flat_rows(&rows)
+}
+
+pub fn compute_artist_album_counts(library: &LibrarySnapshot) -> (usize, usize) {
+    let roots = library.roots.clone();
+    if roots.is_empty() {
+        return (0, 0);
+    }
+
+    let mut artists = HashSet::new();
+    let mut albums = HashSet::new();
+    for track in &library.tracks {
+        let Some(root) = pick_root_for_track(&roots, track) else {
+            continue;
+        };
+        let Ok(rel) = track.path.strip_prefix(root) else {
+            continue;
+        };
+        let components = rel
+            .components()
+            .filter_map(|component| {
+                let std::path::Component::Normal(name) = component else {
+                    return None;
+                };
+                Some(name.to_string_lossy().to_string())
+            })
+            .collect::<Vec<_>>();
+
+        if components.is_empty() {
+            continue;
+        }
+
+        let root_key = root.to_string_lossy().to_string();
+        let artist_name = if components.len() >= 2 {
+            components[0].clone()
+        } else if track.artist.trim().is_empty() {
+            String::from("Unknown Artist")
+        } else {
+            track.artist.trim().to_string()
+        };
+        artists.insert(artist_row_key(&root_key, &artist_name));
+
+        if components.len() > 2 {
+            albums.insert(album_row_key(&root_key, &artist_name, &components[1]));
+        }
+    }
+
+    (artists.len(), albums.len())
 }
 
 pub fn retain_valid_expanded_keys(library: &LibrarySnapshot, expanded_keys: &mut HashSet<String>) {
@@ -487,6 +535,17 @@ fn build_artist_rows_flat(
             };
             let album_key = album_row_key(root_path, &artist.artist_name, &album.folder_name);
             let album_child_count = album.root_tracks.len() + album.sections.len();
+            let mut album_play_paths = Vec::with_capacity(
+                album.root_tracks.len() + album.sections.len().saturating_mul(8),
+            );
+            for track in &album.root_tracks {
+                album_play_paths.push(track.path.clone());
+            }
+            for section in &album.sections {
+                for track in &section.tracks {
+                    album_play_paths.push(track.path.clone());
+                }
+            }
             out.push(FlatTreeRow::album(
                 album_depth,
                 album_key.clone(),
@@ -495,6 +554,7 @@ fn build_artist_rows_flat(
                 &album_path,
                 album.cover_path.as_deref(),
                 album_child_count,
+                album_play_paths,
             ));
 
             let album_expanded = expanded_keys.map_or(true, |keys| keys.contains(&album_key));
@@ -1059,6 +1119,7 @@ mod tests {
             title: title.to_string(),
             artist: String::new(),
             album: album.to_string(),
+            genre: String::new(),
             year,
             track_no,
             duration_secs: None,
@@ -1125,6 +1186,7 @@ mod tests {
                     title: "Track A".to_string(),
                     artist: String::new(),
                     album: "Album".to_string(),
+                    genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
                     duration_secs: None,
@@ -1135,6 +1197,7 @@ mod tests {
                     title: "Track B".to_string(),
                     artist: String::new(),
                     album: "Album".to_string(),
+                    genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
                     duration_secs: None,
@@ -1163,6 +1226,7 @@ mod tests {
                     title: "Track A".to_string(),
                     artist: String::new(),
                     album: "Album A".to_string(),
+                    genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
                     duration_secs: None,
@@ -1173,6 +1237,7 @@ mod tests {
                     title: "Track B".to_string(),
                     artist: String::new(),
                     album: "Album B".to_string(),
+                    genre: String::new(),
                     year: Some(2021),
                     track_no: Some(1),
                     duration_secs: None,

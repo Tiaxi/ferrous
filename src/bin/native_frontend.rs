@@ -157,6 +157,9 @@ fn run_interactive_cli(bridge: FrontendBridgeHandle) {
                         s.playback.volume
                     );
                 }
+                BridgeEvent::SearchResults(frame) => {
+                    println!("search seq={} rows={}", frame.seq, frame.rows.len());
+                }
                 BridgeEvent::Error(err) => {
                     eprintln!("bridge error: {err}");
                 }

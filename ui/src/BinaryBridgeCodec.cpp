@@ -226,6 +226,8 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     Reader reader(payload);
     quint32 rootCount = 0;
     quint32 trackCount = 0;
+    quint32 artistCount = 0;
+    quint32 albumCount = 0;
     quint8 scanInProgress = 0;
     qint32 sortMode = 0;
     QString lastError;
@@ -239,6 +241,8 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
 
     if (!reader.readU32(&rootCount)
         || !reader.readU32(&trackCount)
+        || !reader.readU32(&artistCount)
+        || !reader.readU32(&albumCount)
         || !reader.readU8(&scanInProgress)
         || !reader.readI32(&sortMode)
         || !reader.readUtf8U16(&lastError)
@@ -268,6 +272,8 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     out->present = true;
     out->rootCount = static_cast<int>(rootCount);
     out->trackCount = static_cast<int>(trackCount);
+    out->artistCount = static_cast<int>(artistCount);
+    out->albumCount = static_cast<int>(albumCount);
     out->scanInProgress = scanInProgress != 0;
     out->sortMode = static_cast<int>(sortMode);
     out->lastError = lastError;
@@ -400,6 +406,14 @@ QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool fla
     QByteArray payload;
     appendUtf8U16(payload, value);
     payload.append(flag ? '\x01' : '\x00');
+    return finalizeCommand(cmdId, payload);
+}
+
+QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query) {
+    QByteArray payload;
+    payload.reserve(8 + query.size());
+    appendLe<quint32>(payload, seq);
+    appendUtf8U16(payload, query);
     return finalizeCommand(cmdId, payload);
 }
 
@@ -544,6 +558,125 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
         return false;
     }
 
+    return true;
+}
+
+bool decodeSearchResultsFrame(
+    const QByteArray &payload,
+    DecodedSearchResults *out,
+    QString *errorMessage) {
+    if (!out) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("output search results pointer is null");
+        }
+        return false;
+    }
+    *out = DecodedSearchResults{};
+
+    Reader reader(payload);
+    quint8 magic = 0;
+    quint8 version = 0;
+    quint16 rowCount = 0;
+    quint32 seq = 0;
+    if (!reader.readU8(&magic)
+        || !reader.readU8(&version)
+        || !reader.readU16(&rowCount)
+        || !reader.readU32(&seq)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("search frame header truncated");
+        }
+        return false;
+    }
+    if (magic != static_cast<quint8>('S')) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("invalid search frame magic");
+        }
+        return false;
+    }
+    if (version != 1) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("unsupported search frame version: %1").arg(version);
+        }
+        return false;
+    }
+
+    QVector<DecodedSearchRow> rows;
+    rows.reserve(static_cast<int>(rowCount));
+    for (quint16 i = 0; i < rowCount; ++i) {
+        quint8 rowType = 0;
+        float score = 0.0f;
+        qint32 year = std::numeric_limits<int>::min();
+        quint16 trackNumber = 0;
+        quint32 count = 0;
+        float lengthSeconds = -1.0f;
+        QString label;
+        QString artist;
+        QString album;
+        QString genre;
+        QString coverPath;
+        QString artistKey;
+        QString albumKey;
+        QString trackKey;
+        QString trackPath;
+
+        if (!reader.readU8(&rowType)
+            || !reader.readF32(&score)
+            || !reader.readI32(&year)
+            || !reader.readU16(&trackNumber)
+            || !reader.readU32(&count)
+            || !reader.readF32(&lengthSeconds)
+            || !reader.readUtf8U16(&label)
+            || !reader.readUtf8U16(&artist)
+            || !reader.readUtf8U16(&album)
+            || !reader.readUtf8U16(&genre)
+            || !reader.readUtf8U16(&coverPath)
+            || !reader.readUtf8U16(&artistKey)
+            || !reader.readUtf8U16(&albumKey)
+            || !reader.readUtf8U16(&trackKey)
+            || !reader.readUtf8U16(&trackPath)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("search frame row %1 truncated").arg(i);
+            }
+            return false;
+        }
+        if (rowType < static_cast<quint8>(SearchRowArtist)
+            || rowType > static_cast<quint8>(SearchRowTrack)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("invalid search row type at row %1").arg(i);
+            }
+            return false;
+        }
+
+        DecodedSearchRow row;
+        row.rowType = static_cast<int>(rowType);
+        row.score = score;
+        row.year = year;
+        row.trackNumber = static_cast<int>(trackNumber);
+        row.count = count > static_cast<quint32>(std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(count);
+        row.lengthSeconds = lengthSeconds;
+        row.label = label;
+        row.artist = artist;
+        row.album = album;
+        row.genre = genre;
+        row.coverPath = coverPath;
+        row.artistKey = artistKey;
+        row.albumKey = albumKey;
+        row.trackKey = trackKey;
+        row.trackPath = trackPath;
+        rows.push_back(std::move(row));
+    }
+
+    if (!reader.atEnd()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("search frame has trailing bytes");
+        }
+        return false;
+    }
+
+    out->seq = seq;
+    out->rows = std::move(rows);
     return true;
 }
 
