@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <functional>
 #include <limits>
 
 #include <QCoreApplication>
@@ -132,6 +131,17 @@ QString findAlbumCoverPath(const QStringList &trackPaths) {
         }
     }
     return bestPath;
+}
+
+QString findTrackCoverUrl(const QString &trackPath) {
+    if (trackPath.trimmed().isEmpty()) {
+        return {};
+    }
+    const QString coverPath = findAlbumCoverPath({trackPath});
+    if (coverPath.isEmpty()) {
+        return {};
+    }
+    return QUrl::fromLocalFile(coverPath).toString();
 }
 } // namespace
 
@@ -1331,7 +1341,20 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             m_playingQueueIndex = playing;
             changed = true;
         }
-        const QString currentCover = m_trackCoverByPath.value(currentPath);
+        QString currentCover;
+        if (!currentPath.isEmpty()) {
+            const auto cached = m_trackCoverByPath.constFind(currentPath);
+            if (cached != m_trackCoverByPath.constEnd()) {
+                currentCover = cached.value();
+            } else {
+                currentCover = findTrackCoverUrl(currentPath);
+                m_trackCoverByPath.insert(currentPath, currentCover);
+                if (m_trackCoverByPath.size() > 4096) {
+                    m_trackCoverByPath.clear();
+                    m_trackCoverByPath.insert(currentPath, currentCover);
+                }
+            }
+        }
         if (m_currentTrackCoverPath != currentCover) {
             m_currentTrackCoverPath = currentCover;
             changed = true;
@@ -1523,95 +1546,21 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
                 changed = true;
                 libraryStructureChanged = true;
             }
-
-            QStringList labels;
-            QStringList artists;
-            QStringList albumNames;
-            QStringList coverPaths;
-            QList<QStringList> albumTrackPaths;
-            QHash<QString, QString> trackCoverByPath;
-
-            std::function<void(const QVariantList &, const QString &, const QString &)> walkRows;
-            walkRows = [&](const QVariantList &rows, const QString &inheritedArtist, const QString &inheritedCoverUrl) {
-                for (const QVariant &rowValue : rows) {
-                    const QVariantMap row = rowValue.toMap();
-                    const QString rowType = row.value(QStringLiteral("rowType")).toString();
-                    const QString title = row.value(QStringLiteral("title")).toString();
-                    const QString rowArtist = row.value(QStringLiteral("artist")).toString();
-                    const QString artistName = rowArtist.isEmpty() ? inheritedArtist : rowArtist;
-                    const QString coverPath = row.value(QStringLiteral("coverPath")).toString();
-                    const QString coverUrl = coverPath.isEmpty()
-                        ? inheritedCoverUrl
-                        : QUrl::fromLocalFile(coverPath).toString();
-
-                    if (rowType == QStringLiteral("album")) {
-                        labels.push_back(title);
-                        artists.push_back(artistName);
-                        const QString albumName = row.value(QStringLiteral("name")).toString();
-                        albumNames.push_back(albumName.isEmpty() ? title : albumName);
-                        coverPaths.push_back(coverPath);
-                        QStringList paths;
-                        const QVariantList playPaths = row.value(QStringLiteral("playPaths")).toList();
-                        for (const QVariant &pathValue : playPaths) {
-                            const QString path = pathValue.toString();
-                            if (!path.isEmpty()) {
-                                paths.push_back(path);
-                            }
-                        }
-                        albumTrackPaths.push_back(paths);
-                    }
-
-                    if (rowType == QStringLiteral("track")) {
-                        QString trackPath = row.value(QStringLiteral("trackPath")).toString();
-                        if (trackPath.isEmpty()) {
-                            trackPath = row.value(QStringLiteral("path")).toString();
-                        }
-                        if (!trackPath.isEmpty() && !coverUrl.isEmpty()) {
-                            trackCoverByPath.insert(trackPath, coverUrl);
-                        }
-                    }
-
-                    const QVariantList children = row.value(QStringLiteral("children")).toList();
-                    if (!children.isEmpty()) {
-                        walkRows(children, artistName, coverUrl);
-                    }
-                }
-            };
-            walkRows(tree, QString{}, QString{});
-
-            if (m_libraryAlbums != labels) {
-                m_libraryAlbums = labels;
-                changed = true;
-                libraryStructureChanged = true;
-            }
-            if (m_libraryAlbumArtists != artists) {
-                m_libraryAlbumArtists = artists;
-                changed = true;
-                libraryStructureChanged = true;
-            }
-            if (m_libraryAlbumNames != albumNames) {
-                m_libraryAlbumNames = albumNames;
-                changed = true;
-                libraryStructureChanged = true;
-            }
-            if (m_libraryAlbumCoverPaths != coverPaths) {
-                m_libraryAlbumCoverPaths = coverPaths;
-                changed = true;
-                libraryStructureChanged = true;
-            }
-            if (m_libraryAlbumTrackPaths != albumTrackPaths) {
-                m_libraryAlbumTrackPaths = albumTrackPaths;
-                changed = true;
-            }
-            if (m_trackCoverByPath != trackCoverByPath) {
-                m_trackCoverByPath = trackCoverByPath;
-                const QString currentCover = m_trackCoverByPath.value(m_currentTrackPath);
-                if (m_currentTrackCoverPath != currentCover) {
-                    m_currentTrackCoverPath = currentCover;
-                }
-                changed = true;
-            }
             if (libraryStructureChanged) {
+                m_libraryAlbums.clear();
+                m_libraryAlbumArtists.clear();
+                m_libraryAlbumNames.clear();
+                m_libraryAlbumCoverPaths.clear();
+                m_libraryAlbumTrackPaths.clear();
+                m_trackCoverByPath.clear();
+                if (!m_currentTrackPath.isEmpty()) {
+                    const QString refreshedCover = findTrackCoverUrl(m_currentTrackPath);
+                    m_trackCoverByPath.insert(m_currentTrackPath, refreshedCover);
+                    if (m_currentTrackCoverPath != refreshedCover) {
+                        m_currentTrackCoverPath = refreshedCover;
+                        changed = true;
+                    }
+                }
                 m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()
                     ? m_libraryVersion + 1
                     : 1;
