@@ -189,7 +189,6 @@ pub fn build_library_tree_json(
             let root_title = root_builder.root_path.to_string_lossy().to_string();
             let root_node = json!({
                 "rowType": "root",
-                "key": format!("root|{}", root_path_string),
                 "title": root_title,
                 "path": root_path_string,
                 "children": artist_rows,
@@ -223,11 +222,8 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
         for track in &loose_tracks {
             children.push(json!({
                 "rowType": "track",
-                "key": format!("track|{}", track.path),
                 "title": track.label,
                 "trackPath": track.path,
-                "path": track.path,
-                "children": [],
             }));
         }
 
@@ -244,11 +240,8 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
             for track in &album.root_tracks {
                 album_children.push(json!({
                     "rowType": "track",
-                    "key": format!("track|{}", track.path),
                     "title": track.label,
                     "trackPath": track.path,
-                    "path": track.path,
-                    "children": [],
                 }));
             }
 
@@ -260,16 +253,12 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
                     section_paths.push(track.path.clone());
                     section_children.push(json!({
                         "rowType": "track",
-                        "key": format!("track|{}", track.path),
                         "title": track.label,
                         "trackPath": track.path,
-                        "path": track.path,
-                        "children": [],
                     }));
                 }
                 album_children.push(json!({
                     "rowType": "section",
-                    "key": format!("section|{}", section_path),
                     "title": section.name,
                     "path": section_path,
                     "playPaths": section_paths,
@@ -279,7 +268,6 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
 
             children.push(json!({
                 "rowType": "album",
-                "key": format!("album|{}", album_path),
                 "title": album_title,
                 "artist": artist.artist_name.clone(),
                 "name": album.folder_name,
@@ -291,7 +279,6 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
 
         out.push(json!({
             "rowType": "artist",
-            "key": format!("artist|{}|{}", root.root_path.to_string_lossy(), artist.artist_name),
             "title": format!("{} ({})", artist.artist_name, album_count),
             "artist": artist.artist_name,
             "path": artist.artist_path.to_string_lossy().to_string(),

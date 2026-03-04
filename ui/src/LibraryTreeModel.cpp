@@ -362,6 +362,9 @@ QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseNodes(const QVariantL
         if (node.rowType == QStringLiteral("track") && node.trackPath.isEmpty()) {
             node.trackPath = node.openPath;
         }
+        if (node.rowType == QStringLiteral("track") && node.openPath.isEmpty()) {
+            node.openPath = node.trackPath;
+        }
         if (node.name.isEmpty()) {
             node.name = node.title;
         }
