@@ -18,8 +18,8 @@ const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_RESET: u8 = 0x02;
 const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
-const MAX_PENDING_JSON_EVENTS: usize = 64;
-const MAX_PENDING_ANALYSIS_FRAMES: usize = 64;
+const MAX_PENDING_JSON_EVENTS: usize = 12;
+const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
 
 #[derive(Default)]
 struct AnalysisDelta {

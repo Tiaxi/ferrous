@@ -186,26 +186,12 @@ pub fn build_library_tree_json(
         let mut artist_rows = build_artist_rows(&root_builder, sort_mode);
         if multi_root {
             let root_path_string = root_builder.root_path.to_string_lossy().to_string();
-            let mut root_play_paths = Vec::new();
-            for artist in &artist_rows {
-                if let Some(paths) = artist
-                    .get("playPaths")
-                    .and_then(serde_json::Value::as_array)
-                {
-                    for path in paths {
-                        if let Some(path) = path.as_str() {
-                            root_play_paths.push(path.to_string());
-                        }
-                    }
-                }
-            }
             let root_title = root_builder.root_path.to_string_lossy().to_string();
             let root_node = json!({
                 "rowType": "root",
                 "key": format!("root|{}", root_path_string),
                 "title": root_title,
                 "path": root_path_string,
-                "playPaths": root_play_paths,
                 "children": artist_rows,
             });
             top_rows.push(root_node);
@@ -232,18 +218,15 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
         }
         sort_resolved_albums(&mut resolved_albums, sort_mode);
 
-        let mut artist_play_paths = Vec::new();
         let mut children = Vec::new();
 
         for track in &loose_tracks {
-            artist_play_paths.push(track.path.clone());
             children.push(json!({
                 "rowType": "track",
                 "key": format!("track|{}", track.path),
                 "title": track.label,
                 "trackPath": track.path,
                 "path": track.path,
-                "playPaths": [track.path.clone()],
                 "children": [],
             }));
         }
@@ -256,18 +239,15 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
                 album.title.clone()
             };
 
-            let mut album_paths = Vec::new();
             let mut album_children = Vec::new();
 
             for track in &album.root_tracks {
-                album_paths.push(track.path.clone());
                 album_children.push(json!({
                     "rowType": "track",
                     "key": format!("track|{}", track.path),
                     "title": track.label,
                     "trackPath": track.path,
                     "path": track.path,
-                    "playPaths": [track.path.clone()],
                     "children": [],
                 }));
             }
@@ -284,11 +264,9 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
                         "title": track.label,
                         "trackPath": track.path,
                         "path": track.path,
-                        "playPaths": [track.path.clone()],
                         "children": [],
                     }));
                 }
-                album_paths.extend(section_paths.iter().cloned());
                 album_children.push(json!({
                     "rowType": "section",
                     "key": format!("section|{}", section_path),
@@ -299,15 +277,14 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
                 }));
             }
 
-            artist_play_paths.extend(album_paths.iter().cloned());
             children.push(json!({
                 "rowType": "album",
                 "key": format!("album|{}", album_path),
                 "title": album_title,
+                "artist": artist.artist_name.clone(),
                 "name": album.folder_name,
                 "path": album_path,
                 "coverPath": album.cover_path,
-                "playPaths": album_paths,
                 "children": album_children,
             }));
         }
@@ -319,7 +296,6 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
             "artist": artist.artist_name,
             "path": artist.artist_path.to_string_lossy().to_string(),
             "count": album_count,
-            "playPaths": artist_play_paths,
             "children": children,
         }));
     }

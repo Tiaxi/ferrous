@@ -602,6 +602,28 @@ void BridgeClient::appendTrack(const QString &path) {
     sendJson(obj);
 }
 
+void BridgeClient::replaceAlbumByKey(const QString &artist, const QString &album) {
+    if (artist.trimmed().isEmpty() || album.trimmed().isEmpty()) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_album_by_key"));
+    obj.insert(QStringLiteral("artist"), artist);
+    obj.insert(QStringLiteral("album"), album);
+    sendJson(obj);
+}
+
+void BridgeClient::appendAlbumByKey(const QString &artist, const QString &album) {
+    if (artist.trimmed().isEmpty() || album.trimmed().isEmpty()) {
+        return;
+    }
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_album_by_key"));
+    obj.insert(QStringLiteral("artist"), artist);
+    obj.insert(QStringLiteral("album"), album);
+    sendJson(obj);
+}
+
 void BridgeClient::replaceArtistByName(const QString &artist) {
     if (artist.trimmed().isEmpty()) {
         return;

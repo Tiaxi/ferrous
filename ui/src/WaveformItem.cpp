@@ -12,8 +12,9 @@ WaveformItem::WaveformItem(QQuickItem *parent)
     : QQuickPaintedItem(parent) {
     setAntialiasing(false);
     setOpaquePainting(true);
-    const bool useImageTarget = qEnvironmentVariableIsSet("FERROUS_UI_PAINT_IMAGE");
-    if (!useImageTarget) {
+    // Keep Image render path by default; allow FBO only via explicit opt-in.
+    const bool useFboTarget = qEnvironmentVariableIsSet("FERROUS_UI_PAINT_FBO");
+    if (useFboTarget) {
         setRenderTarget(QQuickPaintedItem::FramebufferObject);
     }
     m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")

@@ -505,7 +505,7 @@ fn scan_snapshot_emit_interval() -> Duration {
     std::env::var("FERROUS_LIBRARY_SNAPSHOT_EMIT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .map_or(Duration::from_millis(1100), |ms| {
+        .map_or(Duration::from_millis(2500), |ms| {
             Duration::from_millis(ms.clamp(100, 10_000))
         })
 }
@@ -514,7 +514,7 @@ fn scan_snapshot_min_processed_delta() -> usize {
     std::env::var("FERROUS_LIBRARY_SNAPSHOT_MIN_DELTA")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(96, |delta| delta.clamp(8, 8192))
+        .map_or(256, |delta| delta.clamp(8, 8192))
 }
 
 fn scan_root<F, U>(

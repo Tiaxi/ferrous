@@ -108,6 +108,8 @@ Kirigami.ApplicationWindow {
         function appendAlbumAt(index) {}
         function playTrack(path) {}
         function appendTrack(path) {}
+        function replaceAlbumByKey(artist, album) {}
+        function appendAlbumByKey(artist, album) {}
         function replaceArtistByName(artist) {}
         function appendArtistByName(artist) {}
         function replaceWithPaths(paths) {}
@@ -202,6 +204,16 @@ Kirigami.ApplicationWindow {
         if (!rowMap) {
             return false
         }
+        const rowType = rowMap.rowType || ""
+        if (rowType === "track") {
+            return (rowMap.trackPath || "").length > 0
+        }
+        if (rowType === "album") {
+            return (rowMap.artist || "").length > 0 && (rowMap.name || "").length > 0
+        }
+        if (rowType === "artist") {
+            return (rowMap.artist || "").length > 0
+        }
         const paths = rowMap.playPaths || []
         return paths.length > 0
     }
@@ -210,6 +222,19 @@ Kirigami.ApplicationWindow {
         if (!isActionableLibraryRow(rowMap)) {
             return false
         }
+        const rowType = rowMap.rowType || ""
+        if (rowType === "track") {
+            uiBridge.appendTrack(rowMap.trackPath || "")
+            return true
+        }
+        if (rowType === "album") {
+            uiBridge.appendAlbumByKey(rowMap.artist || "", rowMap.name || "")
+            return true
+        }
+        if (rowType === "artist") {
+            uiBridge.appendArtistByName(rowMap.artist || "")
+            return true
+        }
         uiBridge.appendPaths(rowMap.playPaths || [])
         return true
     }
@@ -217,6 +242,19 @@ Kirigami.ApplicationWindow {
     function replaceWithLibraryRow(rowMap) {
         if (!isActionableLibraryRow(rowMap)) {
             return false
+        }
+        const rowType = rowMap.rowType || ""
+        if (rowType === "track") {
+            uiBridge.playTrack(rowMap.trackPath || "")
+            return true
+        }
+        if (rowType === "album") {
+            uiBridge.replaceAlbumByKey(rowMap.artist || "", rowMap.name || "")
+            return true
+        }
+        if (rowType === "artist") {
+            uiBridge.replaceArtistByName(rowMap.artist || "")
+            return true
         }
         uiBridge.replaceWithPaths(rowMap.playPaths || [])
         return true
@@ -262,6 +300,7 @@ Kirigami.ApplicationWindow {
         return isActionableLibraryRow({
             rowType: selectedLibraryRowType,
             artist: selectedLibraryArtist,
+            name: selectedLibraryAlbum,
             sourceIndex: selectedLibrarySourceIndex,
             trackPath: selectedLibraryTrackPath,
             playPaths: selectedLibraryPlayPaths
@@ -298,6 +337,7 @@ Kirigami.ApplicationWindow {
         playLibraryRows([{
             rowType: selectedLibraryRowType,
             artist: selectedLibraryArtist,
+            name: selectedLibraryAlbum,
             sourceIndex: selectedLibrarySourceIndex,
             trackPath: selectedLibraryTrackPath,
             playPaths: selectedLibraryPlayPaths
@@ -313,6 +353,7 @@ Kirigami.ApplicationWindow {
         appendLibraryRows([{
             rowType: selectedLibraryRowType,
             artist: selectedLibraryArtist,
+            name: selectedLibraryAlbum,
             sourceIndex: selectedLibrarySourceIndex,
             trackPath: selectedLibraryTrackPath,
             playPaths: selectedLibraryPlayPaths
@@ -1491,7 +1532,7 @@ Kirigami.ApplicationWindow {
                                 clip: true
                                 model: libraryModel
                                 reuseItems: true
-                                cacheBuffer: 480
+                                cacheBuffer: 200
                                 boundsBehavior: Flickable.StopAtBounds
                                 flickDeceleration: 2600
                                 maximumFlickVelocity: 5200
@@ -1509,7 +1550,10 @@ Kirigami.ApplicationWindow {
                                     readonly property string trackPathResolved: trackPath || ""
                                     readonly property string openPathResolved: openPath || ""
                                     readonly property var playPathsResolved: playPaths || []
-                                    readonly property bool draggableLibraryItem: playPathsResolved.length > 0
+                                    readonly property bool draggableLibraryItem: isTrackRow
+                                        || rowTypeResolved === "album"
+                                        || rowTypeResolved === "artist"
+                                        || playPathsResolved.length > 0
                                     readonly property string rowTitle: title || name || artist || ""
                                     readonly property bool albumCoverInViewport: isAlbumRow
                                         && (y + height >= libraryAlbumView.contentY - 48)

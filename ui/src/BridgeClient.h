@@ -118,6 +118,8 @@ public:
     Q_INVOKABLE void appendAlbumAt(int index);
     Q_INVOKABLE void playTrack(const QString &path);
     Q_INVOKABLE void appendTrack(const QString &path);
+    Q_INVOKABLE void replaceAlbumByKey(const QString &artist, const QString &album);
+    Q_INVOKABLE void appendAlbumByKey(const QString &artist, const QString &album);
     Q_INVOKABLE void replaceArtistByName(const QString &artist);
     Q_INVOKABLE void appendArtistByName(const QString &artist);
     Q_INVOKABLE void replaceWithPaths(const QStringList &paths);
