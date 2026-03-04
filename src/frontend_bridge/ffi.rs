@@ -1,16 +1,12 @@
 use std::collections::{HashMap, VecDeque};
-use std::ffi::{c_char, c_uchar, CStr, CString};
+use std::ffi::c_uchar;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
-
-use serde::Deserialize;
-use serde_json::json;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use super::{
-    library_tree::build_library_tree_json, BridgeCommand, BridgeEvent, BridgeLibraryCommand,
-    BridgePlaybackCommand, BridgeQueueCommand, BridgeSettingsCommand, BridgeSnapshot,
-    FrontendBridgeHandle, LibrarySortMode,
+    BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
+    BridgeSettingsCommand, BridgeSnapshot, FrontendBridgeHandle, LibrarySortMode,
 };
 use crate::playback::{PlaybackState, RepeatMode};
 
@@ -18,99 +14,40 @@ const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_RESET: u8 = 0x02;
 const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
-const MAX_PENDING_JSON_EVENTS: usize = 12;
+const MAX_PENDING_BINARY_EVENTS: usize = 12;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
+
+const SNAPSHOT_MAGIC: u32 = 0xFE55_0001;
+const SECTION_PLAYBACK: u16 = 1 << 0;
+const SECTION_QUEUE: u16 = 1 << 1;
+const SECTION_LIBRARY_META: u16 = 1 << 2;
+const SECTION_LIBRARY_TREE: u16 = 1 << 3;
+const SECTION_METADATA: u16 = 1 << 4;
+const SECTION_SETTINGS: u16 = 1 << 5;
+const SECTION_ERROR: u16 = 1 << 6;
+const SECTION_STOPPED: u16 = 1 << 7;
 
 #[derive(Default)]
 struct AnalysisDelta {
     sample_rate_hz: u32,
     frame_seq: u32,
-    spectrogram_seq: u64,
     spectrogram_reset: bool,
-    waveform_len: usize,
     waveform_changed: bool,
     waveform_peaks_u8: Vec<u8>,
     spectrogram_rows_u8: Vec<Vec<u8>>,
 }
 
 #[derive(Default)]
-struct JsonEmitState {
+struct AnalysisEmitState {
     last_waveform_peaks: Vec<f32>,
-    last_library_digest: Option<LibraryDigest>,
-    last_emitted_library_tree_digest: Option<LibraryDigest>,
-    last_library_tree_emit_at: Option<Instant>,
-    last_library_tree_tracks_len: usize,
-    last_queue_digest: Option<QueueDigest>,
-    last_queue_total_duration_secs: f64,
-    last_queue_unknown_duration_count: usize,
     last_spectrogram_seq: u64,
     analysis_frame_seq: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LibraryDigest {
-    roots_len: usize,
-    tracks_len: usize,
-    sort_mode: i32,
-    first_root: Option<String>,
-    last_root: Option<String>,
-    first_track: Option<String>,
-    last_track: Option<String>,
-}
-
-fn scan_tree_emit_interval() -> Duration {
-    static INTERVAL: OnceLock<Duration> = OnceLock::new();
-    *INTERVAL.get_or_init(|| {
-        let ms = std::env::var("FERROUS_LIBRARY_TREE_EMIT_MS")
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .map_or(5000, |v| v.clamp(250, 30_000));
-        Duration::from_millis(ms)
-    })
-}
-
-fn scan_tree_emit_min_track_delta() -> usize {
-    static MIN_DELTA: OnceLock<usize> = OnceLock::new();
-    *MIN_DELTA.get_or_init(|| {
-        std::env::var("FERROUS_LIBRARY_TREE_EMIT_MIN_TRACK_DELTA")
-            .ok()
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .map_or(512, |v| v.clamp(32, 16_384))
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct QueueDigest {
-    len: usize,
-    selected: Option<usize>,
-    first: Option<String>,
-    last: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct JsonSnapshotSummary {
-    playback_state: PlaybackState,
-    playback_current: Option<PathBuf>,
-    playback_repeat_mode: RepeatMode,
-    playback_shuffle_enabled: bool,
-    queue_len: usize,
-    queue_selected: Option<usize>,
-    queue_first: Option<PathBuf>,
-    queue_last: Option<PathBuf>,
-    library_roots: usize,
-    library_tracks: usize,
-    library_scan_in_progress: bool,
-    library_sort_mode: i32,
-}
-
 struct FfiRuntime {
     bridge: FrontendBridgeHandle,
-    emit_state: JsonEmitState,
-    json_snapshot_interval: Duration,
-    last_json_snapshot_emit: Instant,
-    last_json_summary: Option<JsonSnapshotSummary>,
-    force_json_snapshot_emit: bool,
-    pending_json_events: VecDeque<Vec<u8>>,
+    analysis_state: AnalysisEmitState,
+    pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
     stopped: bool,
 }
@@ -118,21 +55,10 @@ struct FfiRuntime {
 impl FfiRuntime {
     fn new() -> Self {
         let bridge = FrontendBridgeHandle::spawn();
-        let json_snapshot_interval_ms = std::env::var("FERROUS_FFI_JSON_SNAPSHOT_MS")
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .map_or(100, |v| v.clamp(16, 1000));
-        let json_snapshot_interval = Duration::from_millis(json_snapshot_interval_ms);
-        let now = Instant::now();
-        let last_json_snapshot_emit = now.checked_sub(json_snapshot_interval).unwrap_or(now);
         let runtime = Self {
             bridge,
-            emit_state: JsonEmitState::default(),
-            json_snapshot_interval,
-            last_json_snapshot_emit,
-            last_json_summary: None,
-            force_json_snapshot_emit: true,
-            pending_json_events: VecDeque::with_capacity(MAX_PENDING_JSON_EVENTS),
+            analysis_state: AnalysisEmitState::default(),
+            pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
             stopped: false,
         };
@@ -140,14 +66,14 @@ impl FfiRuntime {
         runtime
     }
 
-    fn push_json_event(&mut self, payload: serde_json::Value) {
-        let Ok(bytes) = serde_json::to_vec(&payload) else {
+    fn push_binary_event(&mut self, payload: Vec<u8>) {
+        if payload.is_empty() {
             return;
-        };
-        while self.pending_json_events.len() >= MAX_PENDING_JSON_EVENTS {
-            self.pending_json_events.pop_front();
         }
-        self.pending_json_events.push_back(bytes);
+        while self.pending_binary_events.len() >= MAX_PENDING_BINARY_EVENTS {
+            self.pending_binary_events.pop_front();
+        }
+        self.pending_binary_events.push_back(payload);
     }
 
     fn push_analysis_frame(&mut self, frame: Vec<u8>) {
@@ -160,11 +86,10 @@ impl FfiRuntime {
         self.pending_analysis_frames.push_back(frame);
     }
 
-    fn send_json_command_line(&mut self, line: &str) -> Result<(), String> {
-        let cmd = parse_json_command(line)?;
+    fn send_binary_command(&mut self, payload: &[u8]) -> Result<(), String> {
+        let cmd = parse_binary_command(payload)?;
         if let Some(cmd) = cmd {
             self.bridge.command(cmd);
-            self.force_json_snapshot_emit = true;
         }
         Ok(())
     }
@@ -174,48 +99,33 @@ impl FfiRuntime {
             return;
         }
 
-        let mut snapshots: Vec<BridgeSnapshot> = Vec::new();
+        let mut latest_snapshot: Option<BridgeSnapshot> = None;
         for _ in 0..max_events.max(1) {
             let event = self.bridge.try_recv();
             let Some(event) = event else {
                 break;
             };
             match event {
-                BridgeEvent::Snapshot(snapshot) => snapshots.push(*snapshot),
+                BridgeEvent::Snapshot(snapshot) => latest_snapshot = Some(*snapshot),
                 BridgeEvent::Error(message) => {
-                    self.push_json_event(json!({ "event": "error", "message": message }));
+                    self.push_binary_event(encode_error_event(&message));
                 }
                 BridgeEvent::Stopped => {
                     self.stopped = true;
-                    self.push_json_event(json!({ "event": "stopped" }));
+                    self.push_binary_event(encode_stopped_event());
                 }
             }
         }
 
-        for snapshot in snapshots {
-            let analysis_delta = compute_analysis_delta(&snapshot, &mut self.emit_state);
-            let analysis_frame = encode_analysis_frame(&analysis_delta);
-            self.push_analysis_frame(analysis_frame);
-            let summary = snapshot_summary(&snapshot);
-            let summary_changed = self.last_json_summary.as_ref() != Some(&summary);
-            let emit_due = self.last_json_snapshot_emit.elapsed() >= self.json_snapshot_interval;
-            if self.force_json_snapshot_emit || summary_changed || emit_due {
-                let payload = encode_snapshot_payload(
-                    &snapshot,
-                    &analysis_delta,
-                    &mut self.emit_state,
-                    false,
-                );
-                self.push_json_event(payload);
-                self.last_json_snapshot_emit = Instant::now();
-                self.last_json_summary = Some(summary);
-                self.force_json_snapshot_emit = false;
-            }
+        if let Some(snapshot) = latest_snapshot {
+            let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
+            self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
+            self.push_binary_event(encode_binary_snapshot(&snapshot));
         }
     }
 
-    fn pop_json_event(&mut self) -> Option<Vec<u8>> {
-        self.pending_json_events.pop_front()
+    fn pop_binary_event(&mut self) -> Option<Vec<u8>> {
+        self.pending_binary_events.pop_front()
     }
 
     fn pop_analysis_frame(&mut self) -> Option<Vec<u8>> {
@@ -244,26 +154,23 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridg
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ferrous_ffi_bridge_send_json(
+pub unsafe extern "C" fn ferrous_ffi_bridge_send_binary(
     handle: *mut FerrousFfiBridge,
-    cmd_json: *const c_char,
+    cmd_ptr: *const c_uchar,
+    cmd_len: usize,
 ) -> bool {
-    if handle.is_null() || cmd_json.is_null() {
+    if handle.is_null() || cmd_ptr.is_null() || cmd_len == 0 {
         return false;
     }
     let bridge = &*handle;
     let Ok(mut runtime) = bridge.runtime.lock() else {
         return false;
     };
-    let line = CStr::from_ptr(cmd_json).to_string_lossy();
-    let line = line.trim();
-    if line.is_empty() {
-        return true;
-    }
-    match runtime.send_json_command_line(line) {
+    let payload = std::slice::from_raw_parts(cmd_ptr, cmd_len);
+    match runtime.send_binary_command(payload) {
         Ok(()) => true,
         Err(message) => {
-            runtime.push_json_event(json!({ "event": "error", "message": message }));
+            runtime.push_binary_event(encode_error_event(&message));
             false
         }
     }
@@ -282,13 +189,17 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
         return false;
     };
     runtime.poll(max_events as usize);
-    !runtime.pending_json_events.is_empty() || !runtime.pending_analysis_frames.is_empty()
+    !runtime.pending_binary_events.is_empty() || !runtime.pending_analysis_frames.is_empty()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ferrous_ffi_bridge_pop_json_event(
+pub unsafe extern "C" fn ferrous_ffi_bridge_pop_binary_event(
     handle: *mut FerrousFfiBridge,
-) -> *mut c_char {
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
     if handle.is_null() {
         return std::ptr::null_mut();
     }
@@ -296,22 +207,25 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_json_event(
     let Ok(mut runtime) = bridge.runtime.lock() else {
         return std::ptr::null_mut();
     };
-    let Some(bytes) = runtime.pop_json_event() else {
+    let Some(bytes) = runtime.pop_binary_event() else {
         return std::ptr::null_mut();
     };
-    let sanitized: Vec<u8> = bytes.into_iter().filter(|b| *b != 0).collect();
-    let Ok(cstring) = CString::new(sanitized) else {
-        return std::ptr::null_mut();
-    };
-    cstring.into_raw()
+    let mut boxed = bytes.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    let len = boxed.len();
+    std::mem::forget(boxed);
+    if !len_out.is_null() {
+        *len_out = len;
+    }
+    ptr
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ferrous_ffi_bridge_free_json_event(ptr: *mut c_char) {
-    if ptr.is_null() {
+pub unsafe extern "C" fn ferrous_ffi_bridge_free_binary_event(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() || len == 0 {
         return;
     }
-    drop(CString::from_raw(ptr));
+    drop(Vec::from_raw_parts(ptr, len, len));
 }
 
 #[no_mangle]
@@ -350,286 +264,363 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_analysis_frame(ptr: *mut c_ucha
     drop(Vec::from_raw_parts(ptr, len, len));
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonCommand {
-    cmd: String,
-    value: Option<f64>,
-    from: Option<f64>,
-    to: Option<f64>,
-    paths: Option<Vec<String>>,
-    path: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
-}
+fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String> {
+    if payload.len() < 4 {
+        return Err("binary command payload too short".to_string());
+    }
 
-fn parse_json_command(line: &str) -> Result<Option<BridgeCommand>, String> {
-    let parsed: JsonCommand =
-        serde_json::from_str(line).map_err(|err| format!("invalid json command: {err}"))?;
+    let cmd_id = u16::from_le_bytes([payload[0], payload[1]]);
+    let declared_len = u16::from_le_bytes([payload[2], payload[3]]) as usize;
+    let actual_payload = &payload[4..];
+    if actual_payload.len() != declared_len {
+        return Err(format!(
+            "binary command payload length mismatch: header={declared_len}, actual={}",
+            actual_payload.len()
+        ));
+    }
 
-    let out = match parsed.cmd.as_str() {
-        "play" => Some(BridgeCommand::Playback(BridgePlaybackCommand::Play)),
-        "pause" => Some(BridgeCommand::Playback(BridgePlaybackCommand::Pause)),
-        "stop" => Some(BridgeCommand::Playback(BridgePlaybackCommand::Stop)),
-        "next" => Some(BridgeCommand::Playback(BridgePlaybackCommand::Next)),
-        "prev" => Some(BridgeCommand::Playback(BridgePlaybackCommand::Previous)),
-        "set_volume" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "set_volume requires numeric field 'value'".to_string())?;
-            Some(BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(
-                value as f32,
-            )))
+    let mut reader = BinaryReader::new(actual_payload);
+    let command = match cmd_id {
+        1 => {
+            reader.expect_done()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::Play)
         }
-        "set_repeat_mode" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "set_repeat_mode requires numeric field 'value'".to_string())?;
+        2 => {
+            reader.expect_done()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::Pause)
+        }
+        3 => {
+            reader.expect_done()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::Stop)
+        }
+        4 => {
+            reader.expect_done()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::Next)
+        }
+        5 => {
+            reader.expect_done()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::Previous)
+        }
+        6 => {
+            let value = reader.read_f64()?;
+            reader.expect_done()?;
             if !value.is_finite() {
-                return Err("set_repeat_mode value must be a finite number".to_string());
+                return Err("set_volume value must be finite".to_string());
             }
-            let mode = match value as i32 {
+            BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(value as f32))
+        }
+        7 => {
+            let value = reader.read_f64()?;
+            reader.expect_done()?;
+            if !value.is_finite() || value < 0.0 {
+                return Err("seek value must be finite and >= 0".to_string());
+            }
+            BridgeCommand::Playback(BridgePlaybackCommand::Seek(Duration::from_secs_f64(value)))
+        }
+        8 => {
+            let index = reader.read_u32()? as usize;
+            reader.expect_done()?;
+            BridgeCommand::Queue(BridgeQueueCommand::PlayAt(index))
+        }
+        9 => {
+            let index = reader.read_i32()?;
+            reader.expect_done()?;
+            let selected = if index < 0 {
+                None
+            } else {
+                Some(index as usize)
+            };
+            BridgeCommand::Queue(BridgeQueueCommand::Select(selected))
+        }
+        10 => {
+            let index = reader.read_u32()? as usize;
+            reader.expect_done()?;
+            BridgeCommand::Queue(BridgeQueueCommand::Remove(index))
+        }
+        11 => {
+            let from = reader.read_u32()? as usize;
+            let to = reader.read_u32()? as usize;
+            reader.expect_done()?;
+            BridgeCommand::Queue(BridgeQueueCommand::Move { from, to })
+        }
+        12 => {
+            reader.expect_done()?;
+            BridgeCommand::Queue(BridgeQueueCommand::Clear)
+        }
+        13 => {
+            let path = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::AddTrack(PathBuf::from(path)))
+        }
+        14 => {
+            let path = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(PathBuf::from(path)))
+        }
+        15 => {
+            let paths = reader.read_u16_string_vec()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceWithAlbum(
+                paths.into_iter().map(PathBuf::from).collect(),
+            ))
+        }
+        16 => {
+            let paths = reader.read_u16_string_vec()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(
+                paths.into_iter().map(PathBuf::from).collect(),
+            ))
+        }
+        17 => {
+            let artist = reader.read_u16_string()?;
+            let album = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAlbumByKey { artist, album })
+        }
+        18 => {
+            let artist = reader.read_u16_string()?;
+            let album = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbumByKey { artist, album })
+        }
+        19 => {
+            let artist = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceArtistByKey { artist })
+        }
+        20 => {
+            let artist = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::AppendArtistByKey { artist })
+        }
+        21 => {
+            let path = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::AddRoot(PathBuf::from(path)))
+        }
+        22 => {
+            let path = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::RemoveRoot(PathBuf::from(path)))
+        }
+        23 => {
+            let path = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::RescanRoot(PathBuf::from(path)))
+        }
+        24 => {
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::RescanAll)
+        }
+        25 => {
+            let value = reader.read_u8()?;
+            reader.expect_done()?;
+            let mode = match value {
                 1 => RepeatMode::One,
                 2 => RepeatMode::All,
                 _ => RepeatMode::Off,
             };
-            Some(BridgeCommand::Playback(
-                BridgePlaybackCommand::SetRepeatMode(mode),
-            ))
+            BridgeCommand::Playback(BridgePlaybackCommand::SetRepeatMode(mode))
         }
-        "set_shuffle" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "set_shuffle requires numeric field 'value'".to_string())?;
+        26 => {
+            let enabled = reader.read_u8()? != 0;
+            reader.expect_done()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(enabled))
+        }
+        27 => {
+            let value = reader.read_f32()?;
+            reader.expect_done()?;
             if !value.is_finite() {
-                return Err("set_shuffle value must be a finite number".to_string());
+                return Err("set_db_range value must be finite".to_string());
             }
-            Some(BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(
-                value != 0.0,
-            )))
+            BridgeCommand::Settings(BridgeSettingsCommand::SetDbRange(value))
         }
-        "set_db_range" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "set_db_range requires numeric field 'value'".to_string())?;
-            if !value.is_finite() {
-                return Err("set_db_range value must be a finite number".to_string());
-            }
-            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetDbRange(
-                value as f32,
-            )))
+        28 => {
+            let enabled = reader.read_u8()? != 0;
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(enabled))
         }
-        "set_log_scale" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "set_log_scale requires numeric field 'value'".to_string())?;
-            if !value.is_finite() {
-                return Err("set_log_scale value must be a finite number".to_string());
-            }
-            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(
-                value != 0.0,
-            )))
+        29 => {
+            let enabled = reader.read_u8()? != 0;
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(enabled))
         }
-        "set_show_fps" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "set_show_fps requires numeric field 'value'".to_string())?;
-            if !value.is_finite() {
-                return Err("set_show_fps value must be a finite number".to_string());
-            }
-            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(
-                value != 0.0,
-            )))
+        30 => {
+            let mode = LibrarySortMode::from_i32(reader.read_i32()?);
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLibrarySortMode(mode))
         }
-        "set_library_sort_mode" => {
-            let value = parsed.value.ok_or_else(|| {
-                "set_library_sort_mode requires numeric field 'value'".to_string()
-            })?;
-            if !value.is_finite() {
-                return Err("set_library_sort_mode value must be a finite number".to_string());
-            }
-            let mode = match value as i32 {
-                1 => LibrarySortMode::Title,
-                _ => LibrarySortMode::Year,
-            };
-            Some(BridgeCommand::Settings(
-                BridgeSettingsCommand::SetLibrarySortMode(mode),
-            ))
+        31 => {
+            let fft_size = reader.read_u32()? as usize;
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::SetFftSize(fft_size))
         }
-        "seek" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "seek requires numeric field 'value'".to_string())?;
-            if value < 0.0 {
-                return Err("seek value must be >= 0".to_string());
-            }
-            Some(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
-                Duration::from_secs_f64(value),
-            )))
+        32 => {
+            reader.expect_done()?;
+            BridgeCommand::RequestSnapshot
         }
-        "play_at" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "play_at requires numeric field 'value'".to_string())?;
-            if value < 0.0 || !value.is_finite() {
-                return Err("play_at value must be a non-negative number".to_string());
-            }
-            Some(BridgeCommand::Queue(BridgeQueueCommand::PlayAt(
-                value as usize,
-            )))
+        33 => {
+            reader.expect_done()?;
+            BridgeCommand::Shutdown
         }
-        "select_queue" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "select_queue requires numeric field 'value'".to_string())?;
-            if !value.is_finite() {
-                return Err("select_queue value must be a number".to_string());
-            }
-            let selected = if value < 0.0 {
-                None
-            } else {
-                Some(value as usize)
-            };
-            Some(BridgeCommand::Queue(BridgeQueueCommand::Select(selected)))
-        }
-        "remove_at" => {
-            let value = parsed
-                .value
-                .ok_or_else(|| "remove_at requires numeric field 'value'".to_string())?;
-            if value < 0.0 || !value.is_finite() {
-                return Err("remove_at value must be a non-negative number".to_string());
-            }
-            Some(BridgeCommand::Queue(BridgeQueueCommand::Remove(
-                value as usize,
-            )))
-        }
-        "move_queue" => {
-            let from = parsed
-                .from
-                .ok_or_else(|| "move_queue requires numeric field 'from'".to_string())?;
-            let to = parsed
-                .to
-                .ok_or_else(|| "move_queue requires numeric field 'to'".to_string())?;
-            if !from.is_finite() || !to.is_finite() || from < 0.0 || to < 0.0 {
-                return Err(
-                    "move_queue fields 'from' and 'to' must be non-negative numbers".to_string(),
-                );
-            }
-            Some(BridgeCommand::Queue(BridgeQueueCommand::Move {
-                from: from as usize,
-                to: to as usize,
-            }))
-        }
-        "replace_album" => {
-            let paths = parsed
-                .paths
-                .ok_or_else(|| "replace_album requires array field 'paths'".to_string())?;
-            let items: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-            Some(BridgeCommand::Library(
-                BridgeLibraryCommand::ReplaceWithAlbum(items),
-            ))
-        }
-        "append_album" => {
-            let paths = parsed
-                .paths
-                .ok_or_else(|| "append_album requires array field 'paths'".to_string())?;
-            let items: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-            Some(BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(
-                items,
-            )))
-        }
-        "replace_album_by_key" => {
-            let artist = parsed
-                .artist
-                .ok_or_else(|| "replace_album_by_key requires string field 'artist'".to_string())?;
-            let album = parsed
-                .album
-                .ok_or_else(|| "replace_album_by_key requires string field 'album'".to_string())?;
-            Some(BridgeCommand::Library(
-                BridgeLibraryCommand::ReplaceAlbumByKey { artist, album },
-            ))
-        }
-        "append_album_by_key" => {
-            let artist = parsed
-                .artist
-                .ok_or_else(|| "append_album_by_key requires string field 'artist'".to_string())?;
-            let album = parsed
-                .album
-                .ok_or_else(|| "append_album_by_key requires string field 'album'".to_string())?;
-            Some(BridgeCommand::Library(
-                BridgeLibraryCommand::AppendAlbumByKey { artist, album },
-            ))
-        }
-        "replace_artist_by_key" => {
-            let artist = parsed.artist.ok_or_else(|| {
-                "replace_artist_by_key requires string field 'artist'".to_string()
-            })?;
-            Some(BridgeCommand::Library(
-                BridgeLibraryCommand::ReplaceArtistByKey { artist },
-            ))
-        }
-        "append_artist_by_key" => {
-            let artist = parsed
-                .artist
-                .ok_or_else(|| "append_artist_by_key requires string field 'artist'".to_string())?;
-            Some(BridgeCommand::Library(
-                BridgeLibraryCommand::AppendArtistByKey { artist },
-            ))
-        }
-        "add_track" => {
-            let path = parsed
-                .path
-                .ok_or_else(|| "add_track requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(BridgeLibraryCommand::AddTrack(
-                PathBuf::from(path),
-            )))
-        }
-        "play_track" => {
-            let path = parsed
-                .path
-                .ok_or_else(|| "play_track requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(
-                PathBuf::from(path),
-            )))
-        }
-        "scan_root" => {
-            let path = parsed
-                .path
-                .ok_or_else(|| "scan_root requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(BridgeLibraryCommand::AddRoot(
-                PathBuf::from(path),
-            )))
-        }
-        "add_root" => {
-            let path = parsed
-                .path
-                .ok_or_else(|| "add_root requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(BridgeLibraryCommand::AddRoot(
-                PathBuf::from(path),
-            )))
-        }
-        "remove_root" => {
-            let path = parsed
-                .path
-                .ok_or_else(|| "remove_root requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(BridgeLibraryCommand::RemoveRoot(
-                PathBuf::from(path),
-            )))
-        }
-        "rescan_root" => {
-            let path = parsed
-                .path
-                .ok_or_else(|| "rescan_root requires string field 'path'".to_string())?;
-            Some(BridgeCommand::Library(BridgeLibraryCommand::RescanRoot(
-                PathBuf::from(path),
-            )))
-        }
-        "rescan_all" => Some(BridgeCommand::Library(BridgeLibraryCommand::RescanAll)),
-        "clear_queue" => Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)),
-        "request_snapshot" => Some(BridgeCommand::RequestSnapshot),
-        "shutdown" => Some(BridgeCommand::Shutdown),
-        _ => return Err(format!("unknown command '{}'", parsed.cmd)),
+        _ => return Err(format!("unknown binary command id {cmd_id}")),
     };
-    Ok(out)
+
+    Ok(Some(command))
+}
+
+struct BinaryReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> BinaryReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn expect_done(&self) -> Result<(), String> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err("binary command payload has trailing bytes".to_string())
+        }
+    }
+
+    fn read_exact<const N: usize>(&mut self) -> Result<[u8; N], String> {
+        if self.offset + N > self.bytes.len() {
+            return Err("binary command payload truncated".to_string());
+        }
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.bytes[self.offset..self.offset + N]);
+        self.offset += N;
+        Ok(out)
+    }
+
+    fn read_u8(&mut self) -> Result<u8, String> {
+        Ok(self.read_exact::<1>()?[0])
+    }
+
+    fn read_u16(&mut self) -> Result<u16, String> {
+        Ok(u16::from_le_bytes(self.read_exact::<2>()?))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.read_exact::<4>()?))
+    }
+
+    fn read_i32(&mut self) -> Result<i32, String> {
+        Ok(i32::from_le_bytes(self.read_exact::<4>()?))
+    }
+
+    fn read_f32(&mut self) -> Result<f32, String> {
+        Ok(f32::from_le_bytes(self.read_exact::<4>()?))
+    }
+
+    fn read_f64(&mut self) -> Result<f64, String> {
+        Ok(f64::from_le_bytes(self.read_exact::<8>()?))
+    }
+
+    fn read_u16_string(&mut self) -> Result<String, String> {
+        let len = self.read_u16()? as usize;
+        if self.offset + len > self.bytes.len() {
+            return Err("binary command string truncated".to_string());
+        }
+        let bytes = &self.bytes[self.offset..self.offset + len];
+        self.offset += len;
+        Ok(String::from_utf8_lossy(bytes).to_string())
+    }
+
+    fn read_u16_string_vec(&mut self) -> Result<Vec<String>, String> {
+        let count = self.read_u16()? as usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            out.push(self.read_u16_string()?);
+        }
+        Ok(out)
+    }
+}
+
+fn encode_binary_snapshot(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let mut sections: Vec<(u16, Vec<u8>)> = Vec::new();
+
+    sections.push((SECTION_PLAYBACK, encode_playback_section(snapshot)));
+    sections.push((SECTION_QUEUE, encode_queue_section(snapshot)));
+    sections.push((SECTION_LIBRARY_META, encode_library_meta_section(snapshot)));
+    if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
+        sections.push((SECTION_LIBRARY_TREE, tree_bytes.as_ref().clone()));
+    }
+    sections.push((SECTION_METADATA, encode_metadata_section(snapshot)));
+    sections.push((SECTION_SETTINGS, encode_settings_section(snapshot)));
+
+    encode_packet(sections)
+}
+
+fn encode_error_event(message: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_u16_string(&mut payload, message);
+    encode_packet(vec![(SECTION_ERROR, payload)])
+}
+
+fn encode_stopped_event() -> Vec<u8> {
+    encode_packet(vec![(SECTION_STOPPED, Vec::new())])
+}
+
+fn encode_packet(sections: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
+    let mut section_mask = 0u16;
+    let mut total_length = 12u32;
+    for (bit, payload) in &sections {
+        section_mask |= *bit;
+        total_length = total_length
+            .saturating_add(4)
+            .saturating_add(payload.len() as u32);
+    }
+
+    let mut out = Vec::with_capacity(total_length as usize);
+    push_u32(&mut out, SNAPSHOT_MAGIC);
+    push_u32(&mut out, total_length);
+    push_u16(&mut out, section_mask);
+    push_u16(&mut out, 0);
+    for (_, payload) in sections {
+        push_u32(&mut out, payload.len() as u32);
+        out.extend_from_slice(&payload);
+    }
+    out
+}
+
+fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    let state = match snapshot.playback.state {
+        PlaybackState::Stopped => 0u8,
+        PlaybackState::Playing => 1u8,
+        PlaybackState::Paused => 2u8,
+    };
+    let repeat_mode = match snapshot.playback.repeat_mode {
+        RepeatMode::Off => 0u8,
+        RepeatMode::One => 1u8,
+        RepeatMode::All => 2u8,
+    };
+    let current_queue_index = snapshot
+        .playback
+        .current_queue_index
+        .filter(|idx| *idx < snapshot.queue.len())
+        .map_or(-1, |idx| idx as i32);
+    let current_path = snapshot
+        .playback
+        .current
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    push_u8(&mut out, state);
+    push_f64(&mut out, snapshot.playback.position.as_secs_f64());
+    push_f64(&mut out, snapshot.playback.duration.as_secs_f64());
+    push_f32(&mut out, snapshot.playback.volume);
+    push_u8(&mut out, repeat_mode);
+    push_u8(&mut out, u8::from(snapshot.playback.shuffle_enabled));
+    push_i32(&mut out, current_queue_index);
+    push_u16_string(&mut out, &current_path);
+    out
 }
 
 fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
@@ -665,238 +656,134 @@ fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
     (total_duration_secs, unknown_duration_count)
 }
 
-fn encode_snapshot_payload(
-    s: &BridgeSnapshot,
-    analysis_delta: &AnalysisDelta,
-    emit_state: &mut JsonEmitState,
-    include_analysis_payload: bool,
-) -> serde_json::Value {
-    let sort_mode_value = s.settings.library_sort_mode.to_i32();
-    let library_digest = LibraryDigest {
-        roots_len: s.library.roots.len(),
-        tracks_len: s.library.tracks.len(),
-        sort_mode: sort_mode_value,
-        first_root: s
-            .library
-            .roots
-            .first()
-            .map(|p| p.to_string_lossy().to_string()),
-        last_root: s
-            .library
-            .roots
-            .last()
-            .map(|p| p.to_string_lossy().to_string()),
-        first_track: s
-            .library
-            .tracks
-            .first()
-            .map(|t| t.path.to_string_lossy().to_string()),
-        last_track: s
-            .library
-            .tracks
-            .last()
-            .map(|t| t.path.to_string_lossy().to_string()),
-    };
-    let tree_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
-    let tree_changed_since_last_emit =
-        emit_state.last_emitted_library_tree_digest.as_ref() != Some(&library_digest);
-    let is_first_tree_emit = emit_state.last_emitted_library_tree_digest.is_none();
-    let scan_emit_due = emit_state
-        .last_library_tree_emit_at
-        .map_or(true, |last| last.elapsed() >= scan_tree_emit_interval());
-    let scan_track_delta = s
-        .library
-        .tracks
-        .len()
-        .saturating_sub(emit_state.last_library_tree_tracks_len);
-    let should_emit_tree = tree_changed_since_last_emit
-        && (!s.library.scan_in_progress
-            || is_first_tree_emit
-            || (scan_emit_due && scan_track_delta >= scan_tree_emit_min_track_delta()));
-    emit_state.last_library_digest = Some(library_digest.clone());
-    if should_emit_tree {
-        emit_state.last_emitted_library_tree_digest = Some(library_digest.clone());
-        emit_state.last_library_tree_emit_at = Some(Instant::now());
-        emit_state.last_library_tree_tracks_len = s.library.tracks.len();
+fn encode_queue_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    let selected_index = snapshot.selected_queue_index.map_or(-1, |idx| idx as i32);
+    let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(snapshot);
+
+    push_u32(&mut out, snapshot.queue.len() as u32);
+    push_i32(&mut out, selected_index);
+    push_f64(&mut out, total_duration_secs);
+    push_u32(&mut out, unknown_duration_count as u32);
+    push_u32(&mut out, snapshot.queue.len() as u32);
+
+    for path in &snapshot.queue {
+        let path_str = path.to_string_lossy().to_string();
+        let title = path.file_name().map_or_else(
+            || path_str.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        push_u16_string(&mut out, &title);
+        push_u16_string(&mut out, &path_str);
     }
-    let library_tree = if should_emit_tree {
-        build_library_tree_json(&s.library, s.settings.library_sort_mode)
-    } else {
-        serde_json::Value::Null
-    };
 
-    let queue_digest = QueueDigest {
-        len: s.queue.len(),
-        selected: s.selected_queue_index,
-        first: s.queue.first().map(|p| p.to_string_lossy().to_string()),
-        last: s.queue.last().map(|p| p.to_string_lossy().to_string()),
-    };
-    let queue_changed = emit_state.last_queue_digest.as_ref() != Some(&queue_digest);
-    let queue_tracks = if queue_changed {
-        emit_state.last_queue_digest = Some(queue_digest);
-        serde_json::Value::Array(
-            s.queue
-                .iter()
-                .map(|path| {
-                    let title = path.file_name().map_or_else(
-                        || path.to_string_lossy().into_owned(),
-                        |n| n.to_string_lossy().into_owned(),
-                    );
-                    json!({
-                        "path": path.to_string_lossy().to_string(),
-                        "title": title,
-                    })
-                })
-                .collect(),
-        )
-    } else {
-        serde_json::Value::Null
-    };
-    let (queue_total_duration_secs, queue_unknown_duration_count) = if queue_changed || tree_changed
-    {
-        let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(s);
-        emit_state.last_queue_total_duration_secs = total_duration_secs;
-        emit_state.last_queue_unknown_duration_count = unknown_duration_count;
-        (total_duration_secs, unknown_duration_count)
-    } else {
-        (
-            emit_state.last_queue_total_duration_secs,
-            emit_state.last_queue_unknown_duration_count,
-        )
-    };
-
-    let waveform_peaks = if include_analysis_payload && analysis_delta.waveform_changed {
-        serde_json::Value::Array(
-            analysis_delta
-                .waveform_peaks_u8
-                .iter()
-                .map(|v| json!((*v as f64) / 255.0))
-                .collect(),
-        )
-    } else {
-        serde_json::Value::Null
-    };
-    let spectrogram_rows =
-        if include_analysis_payload && !analysis_delta.spectrogram_rows_u8.is_empty() {
-            serde_json::Value::Array(
-                analysis_delta
-                    .spectrogram_rows_u8
-                    .iter()
-                    .map(|row| serde_json::Value::Array(row.iter().map(|v| json!(v)).collect()))
-                    .collect(),
-            )
-        } else {
-            serde_json::Value::Null
-        };
-    let current_queue_index = s
-        .playback
-        .current_queue_index
-        .filter(|idx| *idx < s.queue.len());
-
-    json!({
-        "event": "snapshot",
-        "playback": {
-            "state": format!("{:?}", s.playback.state),
-            "position_secs": s.playback.position.as_secs_f64(),
-            "duration_secs": s.playback.duration.as_secs_f64(),
-            "volume": s.playback.volume,
-            "repeat_mode": match s.playback.repeat_mode {
-                RepeatMode::Off => 0,
-                RepeatMode::One => 1,
-                RepeatMode::All => 2,
-            },
-            "shuffle_enabled": s.playback.shuffle_enabled,
-            "has_current": s.playback.current.is_some(),
-            "current_path": s.playback.current.as_ref().map(|path| path.to_string_lossy().to_string()),
-            "current_queue_index": current_queue_index,
-        },
-        "queue": {
-            "len": s.queue.len(),
-            "selected_index": s.selected_queue_index,
-            "total_duration_secs": queue_total_duration_secs,
-            "unknown_duration_count": queue_unknown_duration_count,
-            "tracks": queue_tracks,
-        },
-        "library": {
-            "roots": s.library.roots.len(),
-            "root_paths": s.library.roots.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
-            "tracks": s.library.tracks.len(),
-            "scan_in_progress": s.library.scan_in_progress,
-            "tree_changed": should_emit_tree,
-            "tree": library_tree,
-            "sort_mode": sort_mode_value,
-            "last_error": s.library.last_error.clone(),
-            "progress": {
-                "current_root": s
-                    .library
-                    .scan_progress
-                    .as_ref()
-                    .and_then(|p| p.current_root.as_ref())
-                    .map(|p| p.to_string_lossy().to_string()),
-                "roots_completed": s
-                    .library
-                    .scan_progress
-                    .as_ref()
-                    .map_or(0, |p| p.roots_completed),
-                "roots_total": s
-                    .library
-                    .scan_progress
-                    .as_ref()
-                    .map_or(0, |p| p.roots_total),
-                "supported_files_discovered": s
-                    .library
-                    .scan_progress
-                    .as_ref()
-                    .map_or(0, |p| p.supported_files_discovered),
-                "supported_files_processed": s
-                    .library
-                    .scan_progress
-                    .as_ref()
-                    .map_or(0, |p| p.supported_files_processed),
-                "files_per_second": s
-                    .library
-                    .scan_progress
-                    .as_ref()
-                    .and_then(|p| p.files_per_second),
-                "eta_seconds": s
-                    .library
-                    .scan_progress
-                    .as_ref()
-                    .and_then(|p| p.eta_seconds),
-            },
-        },
-        "metadata": {
-            "source_path": s.metadata.source_path.clone(),
-            "title": s.metadata.title.clone(),
-            "artist": s.metadata.artist.clone(),
-            "album": s.metadata.album.clone(),
-            "sample_rate_hz": s.metadata.sample_rate_hz,
-            "bitrate_kbps": s.metadata.bitrate_kbps,
-            "channels": s.metadata.channels,
-            "bit_depth": s.metadata.bit_depth,
-            "cover_path": s.metadata.cover_art_path.clone(),
-        },
-        "analysis": {
-            "spectrogram_seq": analysis_delta.spectrogram_seq,
-            "spectrogram_reset": include_analysis_payload && analysis_delta.spectrogram_reset,
-            "spectrogram_rows": spectrogram_rows,
-            "sample_rate_hz": if include_analysis_payload { analysis_delta.sample_rate_hz } else { 0 },
-            "waveform_len": if include_analysis_payload { analysis_delta.waveform_len } else { 0 },
-            "waveform_changed": include_analysis_payload && analysis_delta.waveform_changed,
-            "waveform_peaks": waveform_peaks,
-        },
-        "settings": {
-            "volume": s.settings.volume,
-            "fft_size": s.settings.fft_size,
-            "db_range": s.settings.db_range,
-            "log_scale": s.settings.log_scale,
-            "show_fps": s.settings.show_fps,
-            "library_sort_mode": sort_mode_value,
-        }
-    })
+    out
 }
 
-fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut JsonEmitState) -> AnalysisDelta {
+fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    let progress = snapshot.library.scan_progress.as_ref();
+    let roots_completed = progress.map_or(0, |p| p.roots_completed as u32);
+    let roots_total = progress.map_or(0, |p| p.roots_total as u32);
+    let files_discovered = progress.map_or(0, |p| p.supported_files_discovered as u32);
+    let files_processed = progress.map_or(0, |p| p.supported_files_processed as u32);
+    let files_per_second = progress.and_then(|p| p.files_per_second).unwrap_or(0.0);
+    let eta_seconds = progress.and_then(|p| p.eta_seconds).unwrap_or(-1.0);
+
+    push_u32(&mut out, snapshot.library.roots.len() as u32);
+    push_u32(&mut out, snapshot.library.tracks.len() as u32);
+    push_u8(&mut out, u8::from(snapshot.library.scan_in_progress));
+    push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
+    push_u16_string(
+        &mut out,
+        snapshot.library.last_error.as_deref().unwrap_or_default(),
+    );
+    push_u32(&mut out, roots_completed);
+    push_u32(&mut out, roots_total);
+    push_u32(&mut out, files_discovered);
+    push_u32(&mut out, files_processed);
+    push_f32(&mut out, files_per_second);
+    push_f32(&mut out, eta_seconds);
+    push_u16(&mut out, clamp_u16(snapshot.library.roots.len()));
+    for root in &snapshot.library.roots {
+        let root_str = root.to_string_lossy().to_string();
+        push_u16_string(&mut out, &root_str);
+    }
+
+    out
+}
+
+fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_u16_string(
+        &mut out,
+        snapshot.metadata.source_path.as_deref().unwrap_or_default(),
+    );
+    push_u16_string(&mut out, &snapshot.metadata.title);
+    push_u16_string(&mut out, &snapshot.metadata.artist);
+    push_u16_string(&mut out, &snapshot.metadata.album);
+    push_u32(&mut out, snapshot.metadata.sample_rate_hz.unwrap_or(0));
+    push_u32(&mut out, snapshot.metadata.bitrate_kbps.unwrap_or(0));
+    push_u16(&mut out, snapshot.metadata.channels.map_or(0, u16::from));
+    push_u16(&mut out, snapshot.metadata.bit_depth.map_or(0, u16::from));
+    push_u16_string(
+        &mut out,
+        snapshot
+            .metadata
+            .cover_art_path
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    out
+}
+
+fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_f32(&mut out, snapshot.settings.volume);
+    push_u32(&mut out, snapshot.settings.fft_size as u32);
+    push_f32(&mut out, snapshot.settings.db_range);
+    push_u8(&mut out, u8::from(snapshot.settings.log_scale));
+    push_u8(&mut out, u8::from(snapshot.settings.show_fps));
+    push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
+    out
+}
+
+fn clamp_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
+}
+
+fn push_u8(out: &mut Vec<u8>, value: u8) {
+    out.push(value);
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f32(out: &mut Vec<u8>, value: f32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f64(out: &mut Vec<u8>, value: f64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u16_string(out: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    let len = bytes.len().min(u16::MAX as usize);
+    push_u16(out, len as u16);
+    out.extend_from_slice(&bytes[..len]);
+}
+
+fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState) -> AnalysisDelta {
     let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
     let waveform_peaks_u8 = if waveform_changed {
         emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
@@ -938,29 +825,10 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut JsonEmitState) ->
     AnalysisDelta {
         sample_rate_hz: s.analysis.sample_rate_hz,
         frame_seq: emit_state.analysis_frame_seq,
-        spectrogram_seq,
         spectrogram_reset,
-        waveform_len: s.analysis.waveform_peaks.len(),
         waveform_changed,
         waveform_peaks_u8,
         spectrogram_rows_u8,
-    }
-}
-
-fn snapshot_summary(s: &BridgeSnapshot) -> JsonSnapshotSummary {
-    JsonSnapshotSummary {
-        playback_state: s.playback.state,
-        playback_current: s.playback.current.clone(),
-        playback_repeat_mode: s.playback.repeat_mode,
-        playback_shuffle_enabled: s.playback.shuffle_enabled,
-        queue_len: s.queue.len(),
-        queue_selected: s.selected_queue_index,
-        queue_first: s.queue.first().cloned(),
-        queue_last: s.queue.last().cloned(),
-        library_roots: s.library.roots.len(),
-        library_tracks: s.library.tracks.len(),
-        library_scan_in_progress: s.library.scan_in_progress,
-        library_sort_mode: s.settings.library_sort_mode.to_i32(),
     }
 }
 
@@ -1064,134 +932,9 @@ mod tests {
     use crate::analysis::AnalysisSnapshot;
     use crate::library::{LibrarySnapshot, LibraryTrack};
     use crate::playback::{PlaybackSnapshot, PlaybackState};
-    use std::ffi::{CStr, CString};
     use std::sync::Arc;
     use std::thread;
-    use std::time::Duration;
     use std::time::Instant;
-
-    #[test]
-    fn parse_json_command_supports_settings_updates() {
-        let cmd = parse_json_command(r#"{"cmd":"set_db_range","value":88}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Settings(BridgeSettingsCommand::SetDbRange(v)) => {
-                assert!((v - 88.0).abs() < 0.001);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let cmd = parse_json_command(r#"{"cmd":"set_log_scale","value":1}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(v)) => {
-                assert!(v);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let cmd = parse_json_command(r#"{"cmd":"set_show_fps","value":1}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(v)) => {
-                assert!(v);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let cmd = parse_json_command(r#"{"cmd":"set_library_sort_mode","value":1}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Settings(BridgeSettingsCommand::SetLibrarySortMode(mode)) => {
-                assert_eq!(mode, LibrarySortMode::Title);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let cmd = parse_json_command(r#"{"cmd":"set_repeat_mode","value":2}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Playback(BridgePlaybackCommand::SetRepeatMode(mode)) => {
-                assert!(matches!(mode, RepeatMode::All));
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let cmd = parse_json_command(r#"{"cmd":"set_shuffle","value":1}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(enabled)) => {
-                assert!(enabled);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_json_command_supports_library_batch_commands() {
-        let cmd = parse_json_command(
-            r#"{"cmd":"replace_album","paths":["/music/a.flac","/music/b.flac"]}"#,
-        )
-        .expect("parse")
-        .expect("command");
-        match cmd {
-            BridgeCommand::Library(BridgeLibraryCommand::ReplaceWithAlbum(paths)) => {
-                assert_eq!(
-                    paths,
-                    vec![
-                        PathBuf::from("/music/a.flac"),
-                        PathBuf::from("/music/b.flac")
-                    ]
-                );
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let cmd = parse_json_command(r#"{"cmd":"append_album","paths":["/music/c.flac"]}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(paths)) => {
-                assert_eq!(paths, vec![PathBuf::from("/music/c.flac")]);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_json_command_supports_library_track_and_scan_commands() {
-        let cmd = parse_json_command(r#"{"cmd":"play_track","path":"/music/track.flac"}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(path)) => {
-                assert_eq!(path, PathBuf::from("/music/track.flac"));
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let cmd = parse_json_command(r#"{"cmd":"scan_root","path":"/home/user/Music"}"#)
-            .expect("parse")
-            .expect("command");
-        match cmd {
-            BridgeCommand::Library(BridgeLibraryCommand::AddRoot(path)) => {
-                assert_eq!(path, PathBuf::from("/home/user/Music"));
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_json_command_rejects_invalid_seek() {
-        let err = parse_json_command(r#"{"cmd":"seek","value":-1}"#).unwrap_err();
-        assert!(err.contains("seek value must be >= 0"));
-    }
 
     fn sample_snapshot() -> BridgeSnapshot {
         BridgeSnapshot {
@@ -1237,6 +980,7 @@ mod tests {
                 }],
                 ..LibrarySnapshot::default()
             }),
+            pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
             queue: vec![PathBuf::from("/music/a.flac")],
             selected_queue_index: Some(0),
             settings: super::super::BridgeSettings {
@@ -1250,98 +994,125 @@ mod tests {
         }
     }
 
-    #[test]
-    fn snapshot_payload_contract_has_expected_shape() {
-        let snapshot = sample_snapshot();
-        let mut emit_state = JsonEmitState::default();
-        let analysis_delta = compute_analysis_delta(&snapshot, &mut emit_state);
-        let payload = encode_snapshot_payload(&snapshot, &analysis_delta, &mut emit_state, false);
-        assert_eq!(
-            payload.get("event").and_then(|v| v.as_str()),
-            Some("snapshot")
-        );
-        assert!(payload
-            .get("playback")
-            .and_then(|v| v.as_object())
-            .is_some());
-        assert!(payload.get("queue").and_then(|v| v.as_object()).is_some());
-        assert!(payload.get("library").and_then(|v| v.as_object()).is_some());
-        assert!(payload
-            .get("metadata")
-            .and_then(|v| v.as_object())
-            .is_some());
-        assert_eq!(
-            payload
-                .get("metadata")
-                .and_then(|v| v.get("source_path"))
-                .and_then(|v| v.as_str()),
-            Some("/music/a.flac")
-        );
-        assert_eq!(
-            payload
-                .get("metadata")
-                .and_then(|v| v.get("cover_path"))
-                .and_then(|v| v.as_str()),
-            Some("/music/a.cover.png")
-        );
-        assert!(payload
-            .get("settings")
-            .and_then(|v| v.as_object())
-            .is_some());
-        assert_eq!(
-            payload
-                .get("queue")
-                .and_then(|v| v.get("total_duration_secs"))
-                .and_then(|v| v.as_f64()),
-            Some(180.0)
-        );
-        assert_eq!(
-            payload
-                .get("queue")
-                .and_then(|v| v.get("unknown_duration_count"))
-                .and_then(|v| v.as_u64()),
-            Some(0)
-        );
+    fn parse_packet_header(packet: &[u8]) -> (u32, u32, u16) {
+        let magic = u32::from_le_bytes([packet[0], packet[1], packet[2], packet[3]]);
+        let len = u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
+        let mask = u16::from_le_bytes([packet[8], packet[9]]);
+        (magic, len, mask)
+    }
+
+    fn encode_command(cmd_id: u16, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + payload.len());
+        out.extend_from_slice(&cmd_id.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
     }
 
     #[test]
-    fn snapshot_payload_skips_tree_on_unchanged_rescan_completion() {
-        let baseline = sample_snapshot();
-        let mut emit_state = JsonEmitState::default();
+    fn parse_binary_command_supports_settings_updates() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&88.0f32.to_le_bytes());
+        let cmd = parse_binary_command(&encode_command(27, &payload))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetDbRange(v)) => {
+                assert!((v - 88.0).abs() < 0.001);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
 
-        let analysis_delta = compute_analysis_delta(&baseline, &mut emit_state);
-        let first_payload =
-            encode_snapshot_payload(&baseline, &analysis_delta, &mut emit_state, false);
-        assert!(first_payload
-            .get("library")
-            .and_then(|v| v.get("tree"))
-            .is_some_and(|tree| tree.is_array()));
+        let cmd = parse_binary_command(&encode_command(28, &[1]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(v)) => {
+                assert!(v);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
 
-        let mut scan_snapshot = baseline.clone();
-        let mut scan_library = (*scan_snapshot.library).clone();
-        scan_library.scan_in_progress = true;
-        scan_snapshot.library = Arc::new(scan_library);
-        let scan_delta = compute_analysis_delta(&scan_snapshot, &mut emit_state);
-        let scan_payload =
-            encode_snapshot_payload(&scan_snapshot, &scan_delta, &mut emit_state, false);
-        assert!(scan_payload
-            .get("library")
-            .and_then(|v| v.get("tree"))
-            .is_some_and(|tree| tree.is_null()));
+        let cmd = parse_binary_command(&encode_command(29, &[1]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(v)) => {
+                assert!(v);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
 
-        let rescan_done_delta = compute_analysis_delta(&baseline, &mut emit_state);
-        let rescan_done_payload =
-            encode_snapshot_payload(&baseline, &rescan_done_delta, &mut emit_state, false);
-        assert!(rescan_done_payload
-            .get("library")
-            .and_then(|v| v.get("tree"))
-            .is_some_and(|tree| tree.is_null()));
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        let cmd = parse_binary_command(&encode_command(30, &payload))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLibrarySortMode(mode)) => {
+                assert_eq!(mode, LibrarySortMode::Title);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_supports_library_batch_commands() {
+        let mut payload = Vec::new();
+        let first = b"/music/a.flac";
+        let second = b"/music/b.flac";
+        payload.extend_from_slice(&2u16.to_le_bytes());
+        payload.extend_from_slice(&(first.len() as u16).to_le_bytes());
+        payload.extend_from_slice(first);
+        payload.extend_from_slice(&(second.len() as u16).to_le_bytes());
+        payload.extend_from_slice(second);
+
+        let cmd = parse_binary_command(&encode_command(15, &payload))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceWithAlbum(paths)) => {
+                assert_eq!(
+                    paths,
+                    vec![
+                        PathBuf::from("/music/a.flac"),
+                        PathBuf::from("/music/b.flac")
+                    ]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_rejects_invalid_seek() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(-1.0f64).to_le_bytes());
+        let err = parse_binary_command(&encode_command(7, &payload)).unwrap_err();
+        assert!(err.contains("seek value must be finite and >= 0"));
+    }
+
+    #[test]
+    fn snapshot_packet_contract_has_expected_shape() {
+        let snapshot = sample_snapshot();
+        let packet = encode_binary_snapshot(&snapshot);
+        let (magic, total_len, mask) = parse_packet_header(&packet);
+        assert_eq!(magic, SNAPSHOT_MAGIC);
+        assert_eq!(total_len as usize, packet.len());
+        assert_ne!(mask & SECTION_PLAYBACK, 0);
+        assert_ne!(mask & SECTION_QUEUE, 0);
+        assert_ne!(mask & SECTION_LIBRARY_META, 0);
+        assert_ne!(mask & SECTION_LIBRARY_TREE, 0);
+        assert_ne!(mask & SECTION_METADATA, 0);
+        assert_ne!(mask & SECTION_SETTINGS, 0);
+        assert_eq!(mask & SECTION_ERROR, 0);
+        assert_eq!(mask & SECTION_STOPPED, 0);
     }
 
     #[test]
     fn analysis_delta_and_frame_include_changes() {
         let snapshot = sample_snapshot();
-        let mut emit_state = JsonEmitState::default();
+        let mut emit_state = AnalysisEmitState::default();
         let delta = compute_analysis_delta(&snapshot, &mut emit_state);
         assert!(delta.waveform_changed);
         assert!(!delta.spectrogram_rows_u8.is_empty());
@@ -1350,28 +1121,21 @@ mod tests {
         assert_eq!(frame[4], ANALYSIS_FRAME_MAGIC);
     }
 
-    fn ffi_send_json(handle: *mut FerrousFfiBridge, cmd: &str) -> bool {
-        let c = CString::new(cmd).expect("CString");
-        // SAFETY: `handle` comes from `ferrous_ffi_bridge_create`, and `c` lives across the call.
-        unsafe { ferrous_ffi_bridge_send_json(handle, c.as_ptr()) }
+    fn ffi_send_binary(handle: *mut FerrousFfiBridge, cmd: &[u8]) -> bool {
+        unsafe { ferrous_ffi_bridge_send_binary(handle, cmd.as_ptr(), cmd.len()) }
     }
 
-    fn ffi_next_event(
-        handle: *mut FerrousFfiBridge,
-        timeout: Duration,
-    ) -> Option<serde_json::Value> {
+    fn ffi_next_event(handle: *mut FerrousFfiBridge, timeout: Duration) -> Option<Vec<u8>> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            // SAFETY: `handle` comes from `ferrous_ffi_bridge_create` for test lifetime.
             unsafe {
                 ferrous_ffi_bridge_poll(handle, 64);
-                let ptr = ferrous_ffi_bridge_pop_json_event(handle);
-                if !ptr.is_null() {
-                    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-                    ferrous_ffi_bridge_free_json_event(ptr);
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                        return Some(value);
-                    }
+                let mut len = 0usize;
+                let ptr = ferrous_ffi_bridge_pop_binary_event(handle, &mut len as *mut usize);
+                if !ptr.is_null() && len > 0 {
+                    let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
+                    ferrous_ffi_bridge_free_binary_event(ptr, len);
+                    return Some(bytes);
                 }
             }
             thread::sleep(Duration::from_millis(10));
@@ -1379,20 +1143,23 @@ mod tests {
         None
     }
 
-    fn ffi_wait_event_kind(
+    fn ffi_wait_for_mask(
         handle: *mut FerrousFfiBridge,
-        kind: &str,
+        section_mask_bit: u16,
         timeout: Duration,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Vec<u8>> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let Some(evt) = ffi_next_event(handle, remaining.min(Duration::from_millis(100)))
+            let Some(packet) = ffi_next_event(handle, remaining.min(Duration::from_millis(100)))
             else {
                 continue;
             };
-            if evt.get("event").and_then(|v| v.as_str()) == Some(kind) {
-                return Some(evt);
+            if packet.len() >= 12 {
+                let (_, _, mask) = parse_packet_header(&packet);
+                if (mask & section_mask_bit) != 0 {
+                    return Some(packet);
+                }
             }
         }
         None
@@ -1400,41 +1167,36 @@ mod tests {
 
     #[test]
     fn ffi_bridge_emits_snapshot_event_end_to_end() {
-        // SAFETY: creating and destroying handle in this test scope.
         let handle = ferrous_ffi_bridge_create();
         assert!(!handle.is_null());
 
-        let snapshot_evt = ffi_wait_event_kind(handle, "snapshot", Duration::from_secs(4))
+        let snapshot_evt = ffi_wait_for_mask(handle, SECTION_PLAYBACK, Duration::from_secs(4))
             .expect("snapshot event");
-        assert!(snapshot_evt.get("playback").is_some());
-        assert!(snapshot_evt.get("queue").is_some());
-        assert!(snapshot_evt.get("settings").is_some());
+        let (_, _, mask) = parse_packet_header(&snapshot_evt);
+        assert_ne!(mask & SECTION_QUEUE, 0);
+        assert_ne!(mask & SECTION_SETTINGS, 0);
 
-        assert!(ffi_send_json(handle, r#"{"cmd":"shutdown"}"#));
-        let stopped = ffi_wait_event_kind(handle, "stopped", Duration::from_secs(3));
+        assert!(ffi_send_binary(handle, &encode_command(33, &[])));
+        let stopped = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         assert!(stopped.is_some());
-        // SAFETY: paired with create and not used after destroy.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
     }
 
     #[test]
     fn ffi_bridge_reports_error_for_bad_command_end_to_end() {
-        // SAFETY: creating and destroying handle in this test scope.
         let handle = ferrous_ffi_bridge_create();
         assert!(!handle.is_null());
 
-        assert!(!ffi_send_json(handle, r#"{"cmd":"seek","value":-1}"#));
+        let mut bad_seek = Vec::new();
+        bad_seek.extend_from_slice(&(-1.0f64).to_le_bytes());
+        assert!(!ffi_send_binary(handle, &encode_command(7, &bad_seek)));
         let error_evt =
-            ffi_wait_event_kind(handle, "error", Duration::from_secs(3)).expect("error event");
-        let message = error_evt
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        assert!(message.contains("seek value must be >= 0"));
+            ffi_wait_for_mask(handle, SECTION_ERROR, Duration::from_secs(3)).expect("error event");
+        let (_, _, mask) = parse_packet_header(&error_evt);
+        assert_ne!(mask & SECTION_ERROR, 0);
 
-        assert!(ffi_send_json(handle, r#"{"cmd":"shutdown"}"#));
-        let _ = ffi_wait_event_kind(handle, "stopped", Duration::from_secs(3));
-        // SAFETY: paired with create and not used after destroy.
+        assert!(ffi_send_binary(handle, &encode_command(33, &[])));
+        let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         unsafe { ferrous_ffi_bridge_destroy(handle) };
     }
 }

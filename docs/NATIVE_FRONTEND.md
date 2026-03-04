@@ -10,10 +10,8 @@ Build a Kirigami frontend on top of the existing Rust backend (playback, analysi
 
 - A typed Rust bridge API exists in `src/frontend_bridge/mod.rs`.
 - A second app entrypoint exists at `src/bin/native_frontend.rs`.
-- `native_frontend` supports:
-  - interactive CLI mode
-  - JSON bridge mode (`--json-bridge`) for external UI clients.
-- A Kirigami shell exists in `ui/` and uses the in-process Rust FFI bridge by default.
+- `native_frontend` supports interactive CLI mode for backend debugging.
+- The Kirigami shell in `ui/` uses the in-process Rust FFI bridge (binary protocol).
 
 ## Engineering Plans
 
@@ -31,8 +29,8 @@ Before wiring Qt/QML bindings, we need:
 ## Current Qt/Kirigami integration path
 
 1. Keep `frontend_bridge` as backend orchestration layer.
-2. UI now links Rust backend in-process via C FFI bridge by default.
-3. Keep JSON bridge mode from `native_frontend --json-bridge` as optional fallback/debug path.
+2. UI links Rust backend in-process via C FFI bridge.
+3. Bridge snapshots and commands use a binary protocol end-to-end.
 
 ## KDE dev prerequisites (target environment)
 
@@ -59,35 +57,6 @@ Commands in bootstrap shell:
 - `snap`
 - `quit`
 
-## Running JSON bridge mode
-
-```bash
-cargo run --release --bin native_frontend --features gst -- --json-bridge
-```
-
-Input is line-delimited JSON commands, for example:
-
-```json
-{"cmd":"play"}
-{"cmd":"set_volume","value":0.5}
-{"cmd":"set_db_range","value":90}
-{"cmd":"set_log_scale","value":1}
-{"cmd":"seek","value":42.25}
-{"cmd":"play_at","value":3}
-{"cmd":"select_queue","value":3}
-{"cmd":"remove_at","value":3}
-{"cmd":"move_queue","from":3,"to":1}
-{"cmd":"clear_queue"}
-{"cmd":"replace_album","paths":["/music/album/01.flac","/music/album/02.flac"]}
-{"cmd":"append_album","paths":["/music/album/03.flac"]}
-{"cmd":"scan_root","path":"/home/user/Music"}
-{"cmd":"request_snapshot"}
-```
-
-Output is line-delimited JSON events (`snapshot`, `error`, `stopped`).
-For performance, `snapshot.analysis.waveform_peaks` and `snapshot.analysis.spectrogram_rows`
-are delta-style payloads and may be `null` when unchanged.
-
 ## Running Kirigami shell scaffold
 
 ```bash
@@ -103,14 +72,6 @@ One-command dev path from repo root:
 ./scripts/run-ui.sh
 ```
 
-The script still builds `target/release/native_frontend` for CLI/debug tooling.
-In default in-process mode, the UI does not launch a long-lived bridge subprocess.
-
-Process bridge fallback:
-
-- Set `FERROUS_BRIDGE_MODE=process` to force legacy process/stdout bridge mode.
-- Or run `./scripts/run-ui.sh --process-bridge`.
-
 Build-only check:
 
 ```bash
@@ -119,5 +80,5 @@ Build-only check:
 
 Notes:
 
-- The UI shell now runs against the in-process Rust bridge by default.
-- Process bridge mode remains available for fallback/debugging only.
+- The UI shell runs against the in-process Rust bridge.
+- `native_frontend` remains a CLI/debug tool; the UI does not launch it as a subprocess.

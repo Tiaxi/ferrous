@@ -4,26 +4,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 
-#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
-#include <QFileInfo>
 #include <QDir>
-#include <QProcessEnvironment>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonValue>
-#include <QHash>
-#include <QMetaObject>
+#include <QFileInfo>
+#include <QProcess>
 #include <QSet>
-#include <QStandardPaths>
 #include <QUrl>
 #include <QUrlQuery>
-#include <QVector>
 #include <QtEndian>
 
 namespace {
@@ -143,15 +137,26 @@ QString findTrackCoverUrl(const QString &trackPath) {
     }
     return QUrl::fromLocalFile(coverPath).toString();
 }
+
+QString playbackStateText(int state, const QString &fallback) {
+    switch (state) {
+    case 0:
+        return QStringLiteral("Stopped");
+    case 1:
+        return QStringLiteral("Playing");
+    case 2:
+        return QStringLiteral("Paused");
+    default:
+        return fallback;
+    }
+}
+
 } // namespace
 
 BridgeClient::BridgeClient(QObject *parent)
     : QObject(parent) {
     m_fileBrowserName = detectFileBrowserName();
-    connect(&m_process, &QProcess::readyReadStandardOutput, this, &BridgeClient::handleStdoutReady);
-    connect(&m_process, &QProcess::readyReadStandardError, this, &BridgeClient::handleStderrReady);
-    connect(&m_process, &QProcess::started, this, &BridgeClient::handleProcessStarted);
-    connect(&m_process, &QProcess::finished, this, &BridgeClient::handleProcessFinished);
+
     m_snapshotNotifyTimer.setSingleShot(true);
     m_snapshotNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_SNAPSHOT_NOTIFY_MS", 100));
     connect(&m_snapshotNotifyTimer, &QTimer::timeout, this, [this]() {
@@ -160,6 +165,7 @@ BridgeClient::BridgeClient(QObject *parent)
             emit snapshotChanged();
         }
     });
+
     m_analysisNotifyTimer.setSingleShot(true);
     m_analysisNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_ANALYSIS_NOTIFY_MS", 16));
     connect(&m_analysisNotifyTimer, &QTimer::timeout, this, [this]() {
@@ -168,17 +174,11 @@ BridgeClient::BridgeClient(QObject *parent)
             emit analysisChanged();
         }
     });
+
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
-    const QString bridgeMode = qEnvironmentVariable("FERROUS_BRIDGE_MODE").trimmed().toLower();
-    const bool forceProcessBridge = bridgeMode == QStringLiteral("process");
-    if (!forceProcessBridge && startInProcessBridge()) {
-        m_useInProcessBridge = true;
-    } else {
-        setupAnalysisSocketServer();
-        startBridgeProcess();
-    }
+    startInProcessBridge();
 }
 
 BridgeClient::~BridgeClient() {
@@ -188,21 +188,6 @@ BridgeClient::~BridgeClient() {
         ferrous_ffi_bridge_destroy(m_ffiBridge);
         m_ffiBridge = nullptr;
     }
-    teardownAnalysisSocket(true);
-    if (m_analysisServer.isListening()) {
-        const QString serverName = m_analysisServer.fullServerName();
-        m_analysisServer.close();
-        if (!serverName.isEmpty()) {
-            QLocalServer::removeServer(serverName);
-        }
-    }
-    if (m_process.state() != QProcess::NotRunning) {
-        m_process.terminate();
-        if (!m_process.waitForFinished(500)) {
-            m_process.kill();
-            m_process.waitForFinished(500);
-        }
-    }
 }
 
 bool BridgeClient::startInProcessBridge() {
@@ -211,8 +196,7 @@ bool BridgeClient::startInProcessBridge() {
         emit bridgeError(QStringLiteral("failed to create in-process Rust bridge"));
         return false;
     }
-    // In-process mode always uses binary analysis frames (no JSON analysis payload).
-    m_analysisSocketConnected = true;
+
     m_bridgePollTimer.start();
     if (!m_connected) {
         m_connected = true;
@@ -229,26 +213,27 @@ void BridgeClient::pollInProcessBridge() {
     ferrous_ffi_bridge_poll(m_ffiBridge, 64);
 
     bool anySnapshotChanged = false;
-    int processedJsonEvents = 0;
-    constexpr int kMaxJsonEventsPerPass = 2;
-    while (processedJsonEvents < kMaxJsonEventsPerPass) {
-        char *linePtr = ferrous_ffi_bridge_pop_json_event(m_ffiBridge);
-        if (linePtr == nullptr) {
+    int processedEvents = 0;
+    constexpr int kMaxEventsPerPass = 8;
+    while (processedEvents < kMaxEventsPerPass) {
+        std::size_t len = 0;
+        std::uint8_t *packetPtr = ferrous_ffi_bridge_pop_binary_event(m_ffiBridge, &len);
+        if (packetPtr == nullptr || len == 0) {
             break;
         }
-        processedJsonEvents++;
-        const QByteArray line(linePtr);
-        ferrous_ffi_bridge_free_json_event(linePtr);
-        if (line.trimmed().isEmpty()) {
+        processedEvents++;
+        const QByteArray packet(
+            reinterpret_cast<const char *>(packetPtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_binary_event(packetPtr, len);
+
+        BinaryBridgeCodec::DecodedSnapshot decoded;
+        QString decodeError;
+        if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
+            emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
             continue;
         }
-        QJsonParseError err;
-        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
-        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-            emit bridgeError(QStringLiteral("invalid bridge json: %1").arg(QString::fromUtf8(line)));
-            continue;
-        }
-        anySnapshotChanged |= processBridgeJsonObject(doc.object());
+        anySnapshotChanged |= processBinarySnapshot(decoded);
     }
 
     int processedAnalysisFrames = 0;
@@ -269,25 +254,6 @@ void BridgeClient::pollInProcessBridge() {
 
     if (anySnapshotChanged) {
         scheduleSnapshotChanged();
-    }
-}
-
-void BridgeClient::teardownAnalysisSocket(bool immediateDelete) {
-    QLocalSocket *socket = m_analysisSocket;
-    m_analysisSocket = nullptr;
-    m_analysisSocketConnected = false;
-    m_hasAnalysisFrameSeq = false;
-    m_analysisBuffer.clear();
-    m_analysisBufferReadOffset = 0;
-    if (socket == nullptr) {
-        return;
-    }
-    socket->disconnect(this);
-    socket->close();
-    if (immediateDelete) {
-        delete socket;
-    } else {
-        socket->deleteLater();
     }
 }
 
@@ -379,8 +345,8 @@ QStringList BridgeClient::libraryAlbums() const {
     return m_libraryAlbums;
 }
 
-QVariantList BridgeClient::libraryTree() const {
-    return m_libraryTree;
+QByteArray BridgeClient::libraryTreeBinary() const {
+    return m_libraryTreeBinary;
 }
 
 int BridgeClient::libraryVersion() const {
@@ -440,23 +406,23 @@ bool BridgeClient::connected() const {
 }
 
 void BridgeClient::play() {
-    sendCommand(QStringLiteral("play"));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdPlay));
 }
 
 void BridgeClient::pause() {
-    sendCommand(QStringLiteral("pause"));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdPause));
 }
 
 void BridgeClient::stop() {
-    sendCommand(QStringLiteral("stop"));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdStop));
 }
 
 void BridgeClient::next() {
-    sendCommand(QStringLiteral("next"));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdNext));
 }
 
 void BridgeClient::previous() {
-    sendCommand(QStringLiteral("prev"));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdPrevious));
 }
 
 void BridgeClient::seek(double seconds) {
@@ -477,11 +443,13 @@ void BridgeClient::seek(double seconds) {
     if (changed) {
         scheduleSnapshotChanged();
     }
-    sendCommand(QStringLiteral("seek"), target);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSeek, target));
 }
 
 void BridgeClient::setVolume(double value) {
-    sendCommand(QStringLiteral("set_volume"), std::clamp(value, 0.0, 1.0));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(
+        BinaryBridgeCodec::CmdSetVolume,
+        std::clamp(value, 0.0, 1.0)));
 }
 
 void BridgeClient::setDbRange(double value) {
@@ -490,7 +458,9 @@ void BridgeClient::setDbRange(double value) {
         m_dbRange = clamped;
         scheduleSnapshotChanged();
     }
-    sendCommand(QStringLiteral("set_db_range"), clamped);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandF32(
+        BinaryBridgeCodec::CmdSetDbRange,
+        static_cast<float>(clamped)));
 }
 
 void BridgeClient::setLogScale(bool value) {
@@ -498,7 +468,9 @@ void BridgeClient::setLogScale(bool value) {
         m_logScale = value;
         scheduleSnapshotChanged();
     }
-    sendCommand(QStringLiteral("set_log_scale"), value ? 1.0 : 0.0);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetLogScale,
+        static_cast<quint8>(value ? 1 : 0)));
 }
 
 void BridgeClient::setRepeatMode(int mode) {
@@ -507,7 +479,9 @@ void BridgeClient::setRepeatMode(int mode) {
         m_repeatMode = clamped;
         scheduleSnapshotChanged();
     }
-    sendCommand(QStringLiteral("set_repeat_mode"), static_cast<double>(clamped));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetRepeatMode,
+        static_cast<quint8>(clamped)));
 }
 
 void BridgeClient::setShuffleEnabled(bool value) {
@@ -515,7 +489,9 @@ void BridgeClient::setShuffleEnabled(bool value) {
         m_shuffleEnabled = value;
         scheduleSnapshotChanged();
     }
-    sendCommand(QStringLiteral("set_shuffle"), value ? 1.0 : 0.0);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetShuffle,
+        static_cast<quint8>(value ? 1 : 0)));
 }
 
 void BridgeClient::setShowFps(bool value) {
@@ -523,7 +499,9 @@ void BridgeClient::setShowFps(bool value) {
         m_showFps = value;
         scheduleSnapshotChanged();
     }
-    sendCommand(QStringLiteral("set_show_fps"), value ? 1.0 : 0.0);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetShowFps,
+        static_cast<quint8>(value ? 1 : 0)));
 }
 
 void BridgeClient::playAt(int index) {
@@ -536,7 +514,9 @@ void BridgeClient::playAt(int index) {
     }
     m_pendingQueueSelection = index;
     m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
-    sendCommand(QStringLiteral("play_at"), static_cast<double>(index));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
+        BinaryBridgeCodec::CmdPlayAt,
+        static_cast<quint32>(index)));
 }
 
 void BridgeClient::selectQueueIndex(int index) {
@@ -549,29 +529,31 @@ void BridgeClient::selectQueueIndex(int index) {
     }
     m_pendingQueueSelection = index;
     m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
-    sendCommand(QStringLiteral("select_queue"), static_cast<double>(index));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandI32(
+        BinaryBridgeCodec::CmdSelectQueue,
+        static_cast<qint32>(index)));
 }
 
 void BridgeClient::removeAt(int index) {
     if (index < 0) {
         return;
     }
-    sendCommand(QStringLiteral("remove_at"), static_cast<double>(index));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
+        BinaryBridgeCodec::CmdRemoveAt,
+        static_cast<quint32>(index)));
 }
 
 void BridgeClient::moveQueue(int from, int to) {
     if (from < 0 || to < 0) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("move_queue"));
-    obj.insert(QStringLiteral("from"), from);
-    obj.insert(QStringLiteral("to"), to);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandMoveQueue(
+        static_cast<quint32>(from),
+        static_cast<quint32>(to)));
 }
 
 void BridgeClient::clearQueue() {
-    sendCommand(QStringLiteral("clear_queue"));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdClearQueue));
 }
 
 void BridgeClient::replaceAlbumAt(int index) {
@@ -589,65 +571,57 @@ void BridgeClient::appendAlbumAt(int index) {
 }
 
 void BridgeClient::playTrack(const QString &path) {
-    if (path.trimmed().isEmpty()) {
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("play_track"));
-    obj.insert(QStringLiteral("path"), path);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(BinaryBridgeCodec::CmdPlayTrack, trimmed));
 }
 
 void BridgeClient::appendTrack(const QString &path) {
-    if (path.trimmed().isEmpty()) {
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("add_track"));
-    obj.insert(QStringLiteral("path"), path);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(BinaryBridgeCodec::CmdAddTrack, trimmed));
 }
 
 void BridgeClient::replaceAlbumByKey(const QString &artist, const QString &album) {
     if (artist.trimmed().isEmpty() || album.trimmed().isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_album_by_key"));
-    obj.insert(QStringLiteral("artist"), artist);
-    obj.insert(QStringLiteral("album"), album);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringPair(
+        BinaryBridgeCodec::CmdReplaceAlbumByKey,
+        artist,
+        album));
 }
 
 void BridgeClient::appendAlbumByKey(const QString &artist, const QString &album) {
     if (artist.trimmed().isEmpty() || album.trimmed().isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_album_by_key"));
-    obj.insert(QStringLiteral("artist"), artist);
-    obj.insert(QStringLiteral("album"), album);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringPair(
+        BinaryBridgeCodec::CmdAppendAlbumByKey,
+        artist,
+        album));
 }
 
 void BridgeClient::replaceArtistByName(const QString &artist) {
     if (artist.trimmed().isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_artist_by_key"));
-    obj.insert(QStringLiteral("artist"), artist);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdReplaceArtistByKey,
+        artist));
 }
 
 void BridgeClient::appendArtistByName(const QString &artist) {
     if (artist.trimmed().isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_artist_by_key"));
-    obj.insert(QStringLiteral("artist"), artist);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdAppendArtistByKey,
+        artist));
 }
 
 void BridgeClient::replaceWithPaths(const QStringList &paths) {
@@ -662,10 +636,9 @@ void BridgeClient::replaceWithPaths(const QStringList &paths) {
     if (sanitized.isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("replace_album"));
-    obj.insert(QStringLiteral("paths"), QJsonArray::fromStringList(sanitized));
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
+        BinaryBridgeCodec::CmdReplaceAlbum,
+        sanitized));
 }
 
 void BridgeClient::appendPaths(const QStringList &paths) {
@@ -680,10 +653,9 @@ void BridgeClient::appendPaths(const QStringList &paths) {
     if (sanitized.isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("append_album"));
-    obj.insert(QStringLiteral("paths"), QJsonArray::fromStringList(sanitized));
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
+        BinaryBridgeCodec::CmdAppendAlbum,
+        sanitized));
 }
 
 QString BridgeClient::libraryAlbumCoverAt(int index) const {
@@ -731,8 +703,7 @@ QString BridgeClient::libraryThumbnailSource(const QString &path) const {
         + QStringLiteral("|")
         + QString::number(mtimeMs);
     if (const auto it = m_libraryThumbnailSourceCache.constFind(cacheKey);
-        it != m_libraryThumbnailSourceCache.constEnd())
-    {
+        it != m_libraryThumbnailSourceCache.constEnd()) {
         return it.value();
     }
 
@@ -764,10 +735,8 @@ void BridgeClient::addLibraryRoot(const QString &path) {
         return;
     }
     m_pendingAddRootPath = normalized;
-    m_pendingAddRootCommand = m_addRootCommand;
-    m_pendingAddRootAttempts = 1;
     m_pendingAddRootIssuedMs = QDateTime::currentMSecsSinceEpoch();
-    sendLibraryRootCommand(m_pendingAddRootCommand, normalized);
+    sendLibraryRootCommand(BinaryBridgeCodec::CmdAddRoot, normalized);
 }
 
 void BridgeClient::removeLibraryRoot(const QString &path) {
@@ -775,10 +744,7 @@ void BridgeClient::removeLibraryRoot(const QString &path) {
     if (normalized.isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("remove_root"));
-    obj.insert(QStringLiteral("path"), normalized);
-    sendJson(obj);
+    sendLibraryRootCommand(BinaryBridgeCodec::CmdRemoveRoot, normalized);
 }
 
 void BridgeClient::rescanLibraryRoot(const QString &path) {
@@ -786,16 +752,11 @@ void BridgeClient::rescanLibraryRoot(const QString &path) {
     if (normalized.isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("rescan_root"));
-    obj.insert(QStringLiteral("path"), normalized);
-    sendJson(obj);
+    sendLibraryRootCommand(BinaryBridgeCodec::CmdRescanRoot, normalized);
 }
 
 void BridgeClient::rescanAllLibraryRoots() {
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("rescan_all"));
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRescanAll));
 }
 
 void BridgeClient::setLibrarySortMode(int mode) {
@@ -804,10 +765,9 @@ void BridgeClient::setLibrarySortMode(int mode) {
         m_librarySortMode = clamped;
         scheduleSnapshotChanged();
     }
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("set_library_sort_mode"));
-    obj.insert(QStringLiteral("value"), clamped);
-    sendJson(obj);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandI32(
+        BinaryBridgeCodec::CmdSetLibrarySortMode,
+        static_cast<qint32>(clamped)));
 }
 
 void BridgeClient::openInFileBrowser(const QString &path) {
@@ -853,64 +813,11 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
 }
 
 void BridgeClient::requestSnapshot() {
-    sendCommand(QStringLiteral("request_snapshot"));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot));
 }
 
 void BridgeClient::shutdown() {
-    sendCommand(QStringLiteral("shutdown"));
-}
-
-void BridgeClient::setupAnalysisSocketServer() {
-    connect(&m_analysisServer, &QLocalServer::newConnection, this, &BridgeClient::handleAnalysisSocketConnected);
-
-#ifdef Q_OS_UNIX
-    const QString socketBase = QStringLiteral("ferrous-analysis-%1-%2.sock")
-                                   .arg(QCoreApplication::applicationPid())
-                                   .arg(QDateTime::currentMSecsSinceEpoch());
-    m_analysisSocketName = QDir::temp().filePath(socketBase);
-#else
-    m_analysisSocketName = QStringLiteral("ferrous-analysis-%1-%2")
-                               .arg(QCoreApplication::applicationPid())
-                               .arg(QDateTime::currentMSecsSinceEpoch());
-#endif
-
-    QLocalServer::removeServer(m_analysisSocketName);
-    if (!m_analysisServer.listen(m_analysisSocketName)) {
-        emit bridgeError(QStringLiteral("failed to listen analysis socket: %1")
-                             .arg(m_analysisServer.errorString()));
-        m_analysisSocketName.clear();
-    }
-}
-
-void BridgeClient::handleAnalysisSocketConnected() {
-    teardownAnalysisSocket(false);
-
-    m_analysisSocket = m_analysisServer.nextPendingConnection();
-    if (m_analysisSocket == nullptr) {
-        return;
-    }
-    m_analysisBuffer.clear();
-    m_analysisBufferReadOffset = 0;
-    m_analysisSocketConnected = true;
-    m_hasAnalysisFrameSeq = false;
-    connect(m_analysisSocket, &QLocalSocket::readyRead, this, &BridgeClient::handleAnalysisSocketReady);
-    QLocalSocket *socket = m_analysisSocket;
-    connect(socket, &QLocalSocket::disconnected, this, [this, socket]() {
-        if (m_analysisSocket == socket) {
-            m_analysisSocket = nullptr;
-            m_analysisSocketConnected = false;
-            m_analysisBuffer.clear();
-        }
-        socket->deleteLater();
-    });
-}
-
-void BridgeClient::handleAnalysisSocketReady() {
-    if (m_analysisSocket == nullptr) {
-        return;
-    }
-    const QByteArray chunk = m_analysisSocket->readAll();
-    processAnalysisBytes(chunk);
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
 }
 
 void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
@@ -1033,7 +940,6 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         return;
     }
 
-    // Avoid front-removing on every frame; compact periodically.
     if (readOffset > (64 * 1024) || readOffset > (m_analysisBuffer.size() / 2)) {
         m_analysisBuffer.remove(0, readOffset);
         m_analysisBufferReadOffset = 0;
@@ -1063,8 +969,7 @@ QString BridgeClient::detectFileBrowserName() {
             return QStringLiteral("Dolphin");
         }
         if (lowered.contains(QStringLiteral("nautilus"))
-            || lowered.contains(QStringLiteral("org.gnome.files")))
-        {
+            || lowered.contains(QStringLiteral("org.gnome.files"))) {
             return QStringLiteral("Files");
         }
         if (lowered.contains(QStringLiteral("thunar"))) {
@@ -1099,7 +1004,9 @@ QString BridgeClient::detectFileBrowserName() {
     };
 
     QProcess proc;
-    proc.start(QStringLiteral("xdg-mime"), {QStringLiteral("query"), QStringLiteral("default"), QStringLiteral("inode/directory")});
+    proc.start(
+        QStringLiteral("xdg-mime"),
+        {QStringLiteral("query"), QStringLiteral("default"), QStringLiteral("inode/directory")});
     if (proc.waitForFinished(250)) {
         const QString output = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
         const QString detected = fromDesktopId(output);
@@ -1143,607 +1050,352 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
     return QDesktopServices::openUrl(QUrl::fromLocalFile(targetPath));
 }
 
-void BridgeClient::startBridgeProcess() {
-    QString command = qEnvironmentVariable("FERROUS_BRIDGE_CMD");
-    if (command.isEmpty()) {
-        // Prefer a prebuilt bridge binary for lower overhead and predictable runtime memory.
-        const QDir appDir(QCoreApplication::applicationDirPath());
-        const QFileInfo appBinaryInfo(QCoreApplication::applicationFilePath());
-        const QDateTime appBuiltAt = appBinaryInfo.lastModified();
-        const QStringList candidates{
-            appDir.absoluteFilePath(QStringLiteral("../../target/release/native_frontend")),
-            QDir::current().absoluteFilePath(QStringLiteral("target/release/native_frontend")),
-        };
-
-        for (const QString &candidate : candidates) {
-            const QFileInfo info(candidate);
-            if (info.exists() && info.isFile() && info.isExecutable()) {
-                // Avoid stale bridge binaries from older builds when the UI executable is newer.
-                if (appBuiltAt.isValid() && info.lastModified().isValid()
-                    && info.lastModified() < appBuiltAt) {
-                    continue;
-                }
-                command = QStringLiteral("\"%1\" --json-bridge").arg(info.absoluteFilePath());
-                break;
-            }
-        }
-
-        if (command.isEmpty()) {
-            command =
-                QStringLiteral("cargo run --release --bin native_frontend --features gst -- --json-bridge");
-        }
-    }
-
-    const QString shell = QStringLiteral("/bin/sh");
-    const QStringList args{QStringLiteral("-lc"), command};
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    if (!m_analysisSocketName.isEmpty()) {
-        env.insert(QStringLiteral("FERROUS_ANALYSIS_SOCKET_PATH"), m_analysisSocketName);
-    }
-    m_process.setProcessEnvironment(env);
-    m_process.start(shell, args);
-}
-
-void BridgeClient::sendLibraryRootCommand(const QString &cmd, const QString &path) {
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), cmd);
-    obj.insert(QStringLiteral("path"), path);
-    sendJson(obj);
-}
-
-void BridgeClient::sendCommand(const QString &cmd) {
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), cmd);
-    sendJson(obj);
-}
-
-void BridgeClient::sendCommand(const QString &cmd, double value) {
-    QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), cmd);
-    obj.insert(QStringLiteral("value"), value);
-    sendJson(obj);
-}
-
-void BridgeClient::sendJson(const QJsonObject &obj) {
-    const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
-    if (m_useInProcessBridge && m_ffiBridge != nullptr) {
-        if (!ferrous_ffi_bridge_send_json(m_ffiBridge, payload.constData())) {
-            emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
-        }
+void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
+    if (payload.isEmpty()) {
+        emit bridgeError(QStringLiteral("failed to encode binary bridge command"));
         return;
     }
-    if (m_process.state() != QProcess::Running) {
-        emit bridgeError(QStringLiteral("bridge process is not running"));
+    if (m_ffiBridge == nullptr) {
+        emit bridgeError(QStringLiteral("bridge is not initialized"));
         return;
     }
-    m_process.write(payload);
+    const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());
+    if (!ferrous_ffi_bridge_send_binary(m_ffiBridge, ptr, static_cast<std::size_t>(payload.size()))) {
+        emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
+    }
 }
 
-bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
-    const QString event = root.value(QStringLiteral("event")).toString();
-    if (event == QStringLiteral("snapshot")) {
-        const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
-        const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
-        const QJsonObject library = root.value(QStringLiteral("library")).toObject();
-        const QJsonObject metadata = root.value(QStringLiteral("metadata")).toObject();
-        const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
-        const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
+void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path) {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(cmdId, path));
+}
 
-        const QString nextState = playback.value(QStringLiteral("state")).toString();
-        const double pos = playback.value(QStringLiteral("position_secs")).toDouble();
-        const double dur = playback.value(QStringLiteral("duration_secs")).toDouble();
-        const int repeatMode = std::clamp(playback.value(QStringLiteral("repeat_mode")).toInt(m_repeatMode), 0, 2);
-        const bool shuffleEnabled =
-            playback.value(QStringLiteral("shuffle_enabled")).toBool(m_shuffleEnabled);
-        const QString currentPath = playback.value(QStringLiteral("current_path")).toString();
-        int playing = playback.value(QStringLiteral("current_queue_index")).toInt(-1);
-        const int qlen = queue.value(QStringLiteral("len")).toInt();
-        const double queueDurationSecs =
-            queue.value(QStringLiteral("total_duration_secs")).toDouble(0.0);
-        const int queueUnknownDurationCount =
-            std::max(0, queue.value(QStringLiteral("unknown_duration_count")).toInt(0));
-        const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
-        const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
-        const QString metadataSourcePath = metadata.value(QStringLiteral("source_path")).toString();
-        const QString metadataCoverPath = metadata.value(QStringLiteral("cover_path")).toString();
-        QString metadataCoverUrl;
-        if (!metadataCoverPath.trimmed().isEmpty() && metadataSourcePath == currentPath) {
-            const QUrl maybeUrl(metadataCoverPath);
-            if (maybeUrl.isValid() && maybeUrl.isLocalFile()) {
-                metadataCoverUrl = maybeUrl.toString();
-            } else {
-                metadataCoverUrl = QUrl::fromLocalFile(metadataCoverPath).toString();
-            }
-        }
-
-        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-        bool changed = false;
-        bool analysisOnlyChanged = false;
-        if (m_playbackState != nextState) {
-            m_playbackState = nextState;
-            changed = true;
-        }
-        bool applyIncomingPosition = true;
-        if (m_pendingSeek) {
-            if (nowMs >= m_pendingSeekUntilMs) {
-                m_pendingSeek = false;
-            } else if (std::abs(pos - m_pendingSeekTargetSeconds) <= 0.8) {
-                m_pendingSeek = false;
-            } else {
-                applyIncomingPosition = false;
-            }
-        }
-        if (applyIncomingPosition) {
-            const QString posText = formatSeconds(pos);
-            if (m_positionText != posText) {
-                m_positionText = posText;
-                changed = true;
-            }
-            if (std::abs(m_positionSeconds - pos) >= 0.03) {
-                m_positionSeconds = pos;
-                changed = true;
-            }
-        }
-        const QString durText = formatSeconds(dur);
-        if (m_durationText != durText) {
-            m_durationText = durText;
-            changed = true;
-        }
-        if (!qFuzzyCompare(m_durationSeconds + 1.0, dur + 1.0)) {
-            m_durationSeconds = dur;
-            changed = true;
-        }
-        if (m_repeatMode != repeatMode) {
-            m_repeatMode = repeatMode;
-            changed = true;
-        }
-        if (m_shuffleEnabled != shuffleEnabled) {
-            m_shuffleEnabled = shuffleEnabled;
-            changed = true;
-        }
-        const QJsonValue settingsVolumeValue = settings.value(QStringLiteral("volume"));
-        const double uiVol = settingsVolumeValue.isDouble()
-            ? settingsVolumeValue.toDouble()
-            : m_volume;
-        if (std::abs(m_volume - uiVol) > 0.0005) {
-            m_volume = uiVol;
-            changed = true;
-        }
-        if (m_queueLength != qlen) {
-            m_queueLength = qlen;
-            changed = true;
-            if (m_pendingQueueSelection >= qlen) {
-                m_pendingQueueSelection = -1;
-                m_pendingQueueSelectionUntilMs = 0;
-            }
-        }
-        QString nextQueueDurationText = formatSeconds(queueDurationSecs);
-        if (queueUnknownDurationCount > 0) {
-            nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
-        }
-        if (m_queueDurationText != nextQueueDurationText) {
-            m_queueDurationText = nextQueueDurationText;
-            changed = true;
-        }
-        const QJsonValue queueTracksValue = queue.value(QStringLiteral("tracks"));
-        if (queueTracksValue.isArray()) {
-            const QJsonArray queueTracks = queueTracksValue.toArray();
-            QStringList items;
-            QStringList paths;
-            items.reserve(queueTracks.size());
-            paths.reserve(queueTracks.size());
-            for (const QJsonValue &track : queueTracks) {
-                const QJsonObject obj = track.toObject();
-                const QString title = obj.value(QStringLiteral("title")).toString();
-                const QString path = obj.value(QStringLiteral("path")).toString();
-                paths.push_back(path);
-                items.push_back(title.isEmpty() ? path : title);
-            }
-            if (m_queueItems != items) {
-                m_queueItems = items;
-                changed = true;
-            }
-            if (m_queuePaths != paths) {
-                m_queuePaths = paths;
-                changed = true;
-            }
-        }
-        if (m_pendingQueueSelection >= 0) {
-            if (selected == m_pendingQueueSelection) {
-                m_pendingQueueSelection = -1;
-                m_pendingQueueSelectionUntilMs = 0;
-                if (m_selectedQueueIndex != selected) {
-                    m_selectedQueueIndex = selected;
-                    changed = true;
-                }
-            } else if (nowMs >= m_pendingQueueSelectionUntilMs) {
-                m_pendingQueueSelection = -1;
-                m_pendingQueueSelectionUntilMs = 0;
-                if (m_selectedQueueIndex != selected) {
-                    m_selectedQueueIndex = selected;
-                    changed = true;
-                }
-            }
-        } else if (m_selectedQueueIndex != selected) {
-            m_selectedQueueIndex = selected;
-            changed = true;
-        }
-        if (m_currentTrackPath != currentPath) {
-            m_currentTrackPath = currentPath;
-            changed = true;
-        }
-        if (nextState == QStringLiteral("Stopped")) {
-            playing = -1;
-        } else if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
-            playing = m_queuePaths.indexOf(currentPath);
-        }
-        if (m_playingQueueIndex != playing) {
-            m_playingQueueIndex = playing;
-            changed = true;
-        }
-        QString currentCover = metadataCoverUrl;
-        if (currentCover.isEmpty() && !currentPath.isEmpty()) {
-            const auto cached = m_trackCoverByPath.constFind(currentPath);
-            if (cached != m_trackCoverByPath.constEnd()) {
-                currentCover = cached.value();
-            } else {
-                currentCover = findTrackCoverUrl(currentPath);
-                m_trackCoverByPath.insert(currentPath, currentCover);
-                if (m_trackCoverByPath.size() > 4096) {
-                    m_trackCoverByPath.clear();
-                    m_trackCoverByPath.insert(currentPath, currentCover);
-                }
-            }
-        }
-        if (m_currentTrackCoverPath != currentCover) {
-            m_currentTrackCoverPath = currentCover;
-            changed = true;
-        }
-        if (!m_analysisSocketConnected) {
-            const bool spectrogramReset = analysis.value(QStringLiteral("spectrogram_reset")).toBool();
-            if (m_spectrogramReset != spectrogramReset) {
-                m_spectrogramReset = spectrogramReset;
-                analysisOnlyChanged = true;
-            }
-            if (spectrogramReset) {
-                if (m_spectrogramPackedRows > 0 || !m_spectrogramRowsPacked.isEmpty()) {
-                    m_spectrogramRowsPacked.clear();
-                    m_spectrogramPackedRows = 0;
-                    analysisOnlyChanged = true;
-                }
-                m_spectrogramPackedBins = 0;
-            }
-            const QJsonValue spectrogramRowsValue = analysis.value(QStringLiteral("spectrogram_rows"));
-            if (spectrogramRowsValue.isArray()) {
-                const QJsonArray rowsArr = spectrogramRowsValue.toArray();
-                int rowsAdded = 0;
-                int bins = m_spectrogramPackedBins;
-                for (const QJsonValue &rowValue : rowsArr) {
-                    const QJsonArray rowArr = rowValue.toArray();
-                    if (rowArr.isEmpty()) {
-                        continue;
-                    }
-                    if (bins == 0) {
-                        bins = rowArr.size();
-                        m_spectrogramPackedBins = bins;
-                    }
-                    if (rowArr.size() != bins) {
-                        continue;
-                    }
-                    QByteArray packedRow;
-                    packedRow.resize(bins);
-                    for (qsizetype i = 0; i < rowArr.size(); ++i) {
-                        const double raw = rowArr[static_cast<int>(i)].toDouble();
-                        const int u8 = std::clamp<int>(static_cast<int>(std::lround(raw)), 0, 255);
-                        packedRow[i] = static_cast<char>(u8);
-                    }
-                    m_spectrogramRowsPacked.append(packedRow);
-                    rowsAdded++;
-                }
-                if (rowsAdded > 0) {
-                    m_spectrogramPackedRows += rowsAdded;
-                    constexpr int kMaxPendingSpectrogramRows = 512;
-                    if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows
-                        && m_spectrogramPackedBins > 0) {
-                        const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;
-                        const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
-                            * static_cast<qsizetype>(m_spectrogramPackedBins);
-                        m_spectrogramRowsPacked.remove(0, dropBytes);
-                        m_spectrogramPackedRows = kMaxPendingSpectrogramRows;
-                    }
-                    analysisOnlyChanged = true;
-                }
-            }
-            if (m_sampleRateHz != sampleRate) {
-                m_sampleRateHz = sampleRate;
-                analysisOnlyChanged = true;
-            }
-        }
-        const double dbRange = settings.value(QStringLiteral("db_range")).toDouble(m_dbRange);
-        if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
-            m_dbRange = dbRange;
-            changed = true;
-        }
-        const bool logScale = settings.value(QStringLiteral("log_scale")).toBool(m_logScale);
-        if (m_logScale != logScale) {
-            m_logScale = logScale;
-            changed = true;
-        }
-        const bool showFps = settings.value(QStringLiteral("show_fps")).toBool(m_showFps);
-        if (m_showFps != showFps) {
-            m_showFps = showFps;
-            changed = true;
-        }
-        const int settingsSortMode = std::clamp(
-            settings.value(QStringLiteral("library_sort_mode")).toInt(m_librarySortMode),
-            0,
-            1);
-        if (m_librarySortMode != settingsSortMode) {
-            m_librarySortMode = settingsSortMode;
-            changed = true;
-        }
-        const bool scanInProgress = library.value(QStringLiteral("scan_in_progress")).toBool();
-        if (m_libraryScanInProgress != scanInProgress) {
-            m_libraryScanInProgress = scanInProgress;
-            changed = true;
-        }
-        const int roots = library.value(QStringLiteral("roots")).toInt(m_libraryRootCount);
-        if (m_libraryRootCount != roots) {
-            m_libraryRootCount = roots;
-            changed = true;
-        }
-        const int tracks = library.value(QStringLiteral("tracks")).toInt(m_libraryTrackCount);
-        if (m_libraryTrackCount != tracks) {
-            m_libraryTrackCount = tracks;
-            changed = true;
-        }
-        QStringList rootPaths;
-        const QJsonValue rootPathsValue = library.value(QStringLiteral("root_paths"));
-        if (rootPathsValue.isArray()) {
-            for (const QJsonValue &rootValue : rootPathsValue.toArray()) {
-                const QString path = rootValue.toString();
-                if (!path.isEmpty()) {
-                    rootPaths.push_back(path);
-                }
-            }
-        }
-        if (m_libraryRoots != rootPaths) {
-            m_libraryRoots = rootPaths;
-            changed = true;
-        }
-        const QString libraryLastError = library.value(QStringLiteral("last_error")).toString();
-        if (m_libraryLastError != libraryLastError) {
-            m_libraryLastError = libraryLastError;
-            if (!m_libraryLastError.trimmed().isEmpty()) {
-                emit bridgeError(QStringLiteral("library: %1").arg(m_libraryLastError));
-            }
-        }
-        if (!m_pendingAddRootPath.isEmpty()) {
-            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-            const bool fresh = m_pendingAddRootIssuedMs > 0 && (nowMs - m_pendingAddRootIssuedMs) <= 10000;
-            const bool rootAppeared = rootPaths.contains(m_pendingAddRootPath);
-            if (!fresh || rootAppeared || m_libraryScanInProgress) {
-                m_pendingAddRootPath.clear();
-                m_pendingAddRootCommand.clear();
-                m_pendingAddRootAttempts = 0;
-                m_pendingAddRootIssuedMs = 0;
-            }
-        }
-
-        const int sortMode = std::clamp(
-            library.value(QStringLiteral("sort_mode")).toInt(m_librarySortMode),
-            0,
-            1);
-        if (m_librarySortMode != sortMode) {
-            m_librarySortMode = sortMode;
-            changed = true;
-        }
-
-        const QJsonObject scanProgress = library.value(QStringLiteral("progress")).toObject();
-        const int rootsCompleted =
-            std::max(0, scanProgress.value(QStringLiteral("roots_completed")).toInt(0));
-        const int rootsTotal =
-            std::max(0, scanProgress.value(QStringLiteral("roots_total")).toInt(0));
-        const int discovered =
-            std::max(0, scanProgress.value(QStringLiteral("supported_files_discovered")).toInt(0));
-        const int processed =
-            std::max(0, scanProgress.value(QStringLiteral("supported_files_processed")).toInt(0));
-        const double filesPerSecond = scanProgress.value(QStringLiteral("files_per_second")).toDouble(0.0);
-        const double etaSeconds = scanProgress.value(QStringLiteral("eta_seconds")).isDouble()
-            ? scanProgress.value(QStringLiteral("eta_seconds")).toDouble(-1.0)
-            : -1.0;
-        if (m_libraryScanRootsCompleted != rootsCompleted) {
-            m_libraryScanRootsCompleted = rootsCompleted;
-            changed = true;
-        }
-        if (m_libraryScanRootsTotal != rootsTotal) {
-            m_libraryScanRootsTotal = rootsTotal;
-            changed = true;
-        }
-        if (m_libraryScanDiscovered != discovered) {
-            m_libraryScanDiscovered = discovered;
-            changed = true;
-        }
-        if (m_libraryScanProcessed != processed) {
-            m_libraryScanProcessed = processed;
-            changed = true;
-        }
-        if (!qFuzzyCompare(m_libraryScanFilesPerSecond + 1.0, filesPerSecond + 1.0)) {
-            m_libraryScanFilesPerSecond = filesPerSecond;
-            changed = true;
-        }
-        if (!qFuzzyCompare(m_libraryScanEtaSeconds + 2.0, etaSeconds + 2.0)) {
-            m_libraryScanEtaSeconds = etaSeconds;
-            changed = true;
-        }
-
-        const QJsonValue treeValue = library.value(QStringLiteral("tree"));
-        if (treeValue.isArray()) {
-            const QVariantList tree = treeValue.toArray().toVariantList();
-            // The backend only includes a tree payload when it decides the tree changed.
-            // Avoid deep QVariantList equality checks here: large trees make that comparison expensive.
-            m_libraryTree = tree;
-            changed = true;
-            const bool libraryStructureChanged = true;
-            if (libraryStructureChanged) {
-                m_libraryAlbums.clear();
-                m_libraryAlbumArtists.clear();
-                m_libraryAlbumNames.clear();
-                m_libraryAlbumCoverPaths.clear();
-                m_libraryAlbumTrackPaths.clear();
-                m_trackCoverByPath.clear();
-                if (!m_currentTrackPath.isEmpty()) {
-                    const QString refreshedCover = findTrackCoverUrl(m_currentTrackPath);
-                    m_trackCoverByPath.insert(m_currentTrackPath, refreshedCover);
-                    if (m_currentTrackCoverPath != refreshedCover) {
-                        m_currentTrackCoverPath = refreshedCover;
-                        changed = true;
-                    }
-                }
-                m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()
-                    ? m_libraryVersion + 1
-                    : 1;
-            }
-        }
-        if (!m_analysisSocketConnected) {
-            const QJsonValue waveformValue = analysis.value(QStringLiteral("waveform_peaks"));
-            if (waveformValue.isArray()) {
-                const QJsonArray arr = waveformValue.toArray();
-                QByteArray peaks;
-                peaks.resize(arr.size());
-                qsizetype i = 0;
-                for (const QJsonValue &v : arr) {
-                    const double f = std::clamp(v.toDouble(), 0.0, 1.0);
-                    const int u8 = std::clamp<int>(static_cast<int>(std::lround(f * 255.0)), 0, 255);
-                    peaks[i++] = static_cast<char>(u8);
-                }
-                if (m_waveformPeaksPacked != peaks) {
-                    m_waveformPeaksPacked = peaks;
-                    analysisOnlyChanged = true;
-                }
-            }
-        }
-        if (analysisOnlyChanged) {
-            scheduleAnalysisChanged();
-        }
-        return changed;
-    }
-    if (event == QStringLiteral("error")) {
-        const QString message = root.value(QStringLiteral("message")).toString();
-        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-        const bool pendingFresh = !m_pendingAddRootPath.isEmpty()
-            && m_pendingAddRootIssuedMs > 0
-            && (nowMs - m_pendingAddRootIssuedMs) <= 3000;
-        if (pendingFresh && m_pendingAddRootAttempts == 1) {
-            if (m_pendingAddRootCommand == QStringLiteral("add_root")
-                && message.contains(QStringLiteral("unknown command 'add_root'")))
-            {
-                m_addRootCommand = QStringLiteral("scan_root");
-                m_pendingAddRootCommand = m_addRootCommand;
-                m_pendingAddRootAttempts = 2;
-                m_pendingAddRootIssuedMs = nowMs;
-                sendLibraryRootCommand(m_pendingAddRootCommand, m_pendingAddRootPath);
-                return false;
-            }
-            if (m_pendingAddRootCommand == QStringLiteral("scan_root")
-                && message.contains(QStringLiteral("unknown command 'scan_root'")))
-            {
-                m_addRootCommand = QStringLiteral("add_root");
-                m_pendingAddRootCommand = m_addRootCommand;
-                m_pendingAddRootAttempts = 2;
-                m_pendingAddRootIssuedMs = nowMs;
-                sendLibraryRootCommand(m_pendingAddRootCommand, m_pendingAddRootPath);
-                return false;
-            }
-        }
-        emit bridgeError(message);
-        return false;
-    }
-    if (event == QStringLiteral("stopped")) {
+bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
+    if (snapshot.hasStopped) {
         if (m_connected) {
             m_connected = false;
             emit connectedChanged();
         }
         return false;
     }
-    return false;
-}
 
-void BridgeClient::handleStdoutReady() {
-    m_stdoutPumpScheduled = false;
-    bool anySnapshotChanged = false;
-    int processedLines = 0;
-    constexpr int kMaxLinesPerPass = 256;
+    if (!snapshot.errorMessage.trimmed().isEmpty()) {
+        emit bridgeError(snapshot.errorMessage);
+        return false;
+    }
 
-    auto processRoot = [&](const QJsonObject &root) { anySnapshotChanged |= processBridgeJsonObject(root); };
+    if (!snapshot.playback.present
+        && !snapshot.queue.present
+        && !snapshot.library.present
+        && !snapshot.metadata.present
+        && !snapshot.settings.present
+        && (snapshot.sectionMask & BinaryBridgeCodec::SectionLibraryTree) == 0) {
+        return false;
+    }
 
-    while (m_process.canReadLine() && processedLines < kMaxLinesPerPass) {
-        processedLines++;
-        const QByteArray line = m_process.readLine().trimmed();
-        if (line.isEmpty()) {
-            continue;
+    const QString nextState = playbackStateText(snapshot.playback.state, m_playbackState);
+    const double pos = snapshot.playback.present ? snapshot.playback.positionSeconds : m_positionSeconds;
+    const double dur = snapshot.playback.present ? snapshot.playback.durationSeconds : m_durationSeconds;
+    const int repeatMode = std::clamp(snapshot.playback.present ? snapshot.playback.repeatMode : m_repeatMode, 0, 2);
+    const bool shuffleEnabled = snapshot.playback.present ? snapshot.playback.shuffleEnabled : m_shuffleEnabled;
+    const QString currentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
+    int playing = snapshot.playback.present ? snapshot.playback.currentQueueIndex : m_playingQueueIndex;
+
+    const int qlen = snapshot.queue.present ? snapshot.queue.len : m_queueLength;
+    const double queueDurationSecs = snapshot.queue.present ? snapshot.queue.totalDurationSeconds : 0.0;
+    const int queueUnknownDurationCount = std::max(0, snapshot.queue.present ? snapshot.queue.unknownDurationCount : 0);
+    const int selected = snapshot.queue.present ? snapshot.queue.selectedIndex : m_selectedQueueIndex;
+
+    const QString metadataSourcePath = snapshot.metadata.present ? snapshot.metadata.sourcePath : QString{};
+    const QString metadataCoverPath = snapshot.metadata.present ? snapshot.metadata.coverPath : QString{};
+    QString metadataCoverUrl;
+    if (!metadataCoverPath.trimmed().isEmpty() && metadataSourcePath == currentPath) {
+        const QUrl maybeUrl(metadataCoverPath);
+        if (maybeUrl.isValid() && maybeUrl.isLocalFile()) {
+            metadataCoverUrl = maybeUrl.toString();
+        } else {
+            metadataCoverUrl = QUrl::fromLocalFile(metadataCoverPath).toString();
+        }
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    bool changed = false;
+
+    if (m_playbackState != nextState) {
+        m_playbackState = nextState;
+        changed = true;
+    }
+
+    bool applyIncomingPosition = true;
+    if (m_pendingSeek) {
+        if (nowMs >= m_pendingSeekUntilMs) {
+            m_pendingSeek = false;
+        } else if (std::abs(pos - m_pendingSeekTargetSeconds) <= 0.8) {
+            m_pendingSeek = false;
+        } else {
+            applyIncomingPosition = false;
+        }
+    }
+    if (applyIncomingPosition) {
+        const QString posText = formatSeconds(pos);
+        if (m_positionText != posText) {
+            m_positionText = posText;
+            changed = true;
+        }
+        if (std::abs(m_positionSeconds - pos) >= 0.03) {
+            m_positionSeconds = pos;
+            changed = true;
+        }
+    }
+
+    const QString durText = formatSeconds(dur);
+    if (m_durationText != durText) {
+        m_durationText = durText;
+        changed = true;
+    }
+    if (!qFuzzyCompare(m_durationSeconds + 1.0, dur + 1.0)) {
+        m_durationSeconds = dur;
+        changed = true;
+    }
+
+    if (m_repeatMode != repeatMode) {
+        m_repeatMode = repeatMode;
+        changed = true;
+    }
+    if (m_shuffleEnabled != shuffleEnabled) {
+        m_shuffleEnabled = shuffleEnabled;
+        changed = true;
+    }
+
+    const double settingsVolume = snapshot.settings.present
+        ? static_cast<double>(snapshot.settings.volume)
+        : m_volume;
+    if (std::abs(m_volume - settingsVolume) > 0.0005) {
+        m_volume = settingsVolume;
+        changed = true;
+    }
+
+    if (m_queueLength != qlen) {
+        m_queueLength = qlen;
+        changed = true;
+        if (m_pendingQueueSelection >= qlen) {
+            m_pendingQueueSelection = -1;
+            m_pendingQueueSelectionUntilMs = 0;
+        }
+    }
+
+    QString nextQueueDurationText = formatSeconds(queueDurationSecs);
+    if (queueUnknownDurationCount > 0) {
+        nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
+    }
+    if (m_queueDurationText != nextQueueDurationText) {
+        m_queueDurationText = nextQueueDurationText;
+        changed = true;
+    }
+
+    if (snapshot.queue.present) {
+        QStringList items;
+        QStringList paths;
+        items.reserve(snapshot.queue.tracks.size());
+        paths.reserve(snapshot.queue.tracks.size());
+        for (const auto &track : snapshot.queue.tracks) {
+            paths.push_back(track.path);
+            items.push_back(track.title.isEmpty() ? track.path : track.title);
+        }
+        if (m_queueItems != items) {
+            m_queueItems = items;
+            changed = true;
+        }
+        if (m_queuePaths != paths) {
+            m_queuePaths = paths;
+            changed = true;
+        }
+    }
+
+    if (m_pendingQueueSelection >= 0) {
+        if (selected == m_pendingQueueSelection || nowMs >= m_pendingQueueSelectionUntilMs) {
+            m_pendingQueueSelection = -1;
+            m_pendingQueueSelectionUntilMs = 0;
+            if (m_selectedQueueIndex != selected) {
+                m_selectedQueueIndex = selected;
+                changed = true;
+            }
+        }
+    } else if (m_selectedQueueIndex != selected) {
+        m_selectedQueueIndex = selected;
+        changed = true;
+    }
+
+    if (m_currentTrackPath != currentPath) {
+        m_currentTrackPath = currentPath;
+        changed = true;
+    }
+
+    if (nextState == QStringLiteral("Stopped")) {
+        playing = -1;
+    } else if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
+        playing = m_queuePaths.indexOf(currentPath);
+    }
+    if (m_playingQueueIndex != playing) {
+        m_playingQueueIndex = playing;
+        changed = true;
+    }
+
+    QString currentCover = metadataCoverUrl;
+    if (currentCover.isEmpty() && !currentPath.isEmpty()) {
+        const auto cached = m_trackCoverByPath.constFind(currentPath);
+        if (cached != m_trackCoverByPath.constEnd()) {
+            currentCover = cached.value();
+        } else {
+            currentCover = findTrackCoverUrl(currentPath);
+            m_trackCoverByPath.insert(currentPath, currentCover);
+            if (m_trackCoverByPath.size() > 4096) {
+                m_trackCoverByPath.clear();
+                m_trackCoverByPath.insert(currentPath, currentCover);
+            }
+        }
+    }
+    if (m_currentTrackCoverPath != currentCover) {
+        m_currentTrackCoverPath = currentCover;
+        changed = true;
+    }
+
+    const double dbRange = snapshot.settings.present
+        ? static_cast<double>(snapshot.settings.dbRange)
+        : m_dbRange;
+    if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
+        m_dbRange = dbRange;
+        changed = true;
+    }
+
+    const bool logScale = snapshot.settings.present ? snapshot.settings.logScale : m_logScale;
+    if (m_logScale != logScale) {
+        m_logScale = logScale;
+        changed = true;
+    }
+
+    const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
+    if (m_showFps != showFps) {
+        m_showFps = showFps;
+        changed = true;
+    }
+
+    const int settingsSortMode = std::clamp(
+        snapshot.settings.present ? snapshot.settings.librarySortMode : m_librarySortMode,
+        0,
+        1);
+    if (m_librarySortMode != settingsSortMode) {
+        m_librarySortMode = settingsSortMode;
+        changed = true;
+    }
+
+    const bool scanInProgress = snapshot.library.present ? snapshot.library.scanInProgress : m_libraryScanInProgress;
+    if (m_libraryScanInProgress != scanInProgress) {
+        m_libraryScanInProgress = scanInProgress;
+        changed = true;
+    }
+
+    const int roots = snapshot.library.present ? snapshot.library.rootCount : m_libraryRootCount;
+    if (m_libraryRootCount != roots) {
+        m_libraryRootCount = roots;
+        changed = true;
+    }
+
+    const int tracks = snapshot.library.present ? snapshot.library.trackCount : m_libraryTrackCount;
+    if (m_libraryTrackCount != tracks) {
+        m_libraryTrackCount = tracks;
+        changed = true;
+    }
+
+    const QStringList rootPaths = snapshot.library.present ? snapshot.library.rootPaths : m_libraryRoots;
+    if (m_libraryRoots != rootPaths) {
+        m_libraryRoots = rootPaths;
+        changed = true;
+    }
+
+    const QString libraryLastError = snapshot.library.present ? snapshot.library.lastError : m_libraryLastError;
+    if (m_libraryLastError != libraryLastError) {
+        m_libraryLastError = libraryLastError;
+        if (!m_libraryLastError.trimmed().isEmpty()) {
+            emit bridgeError(QStringLiteral("library: %1").arg(m_libraryLastError));
+        }
+    }
+
+    if (!m_pendingAddRootPath.isEmpty()) {
+        const bool fresh = m_pendingAddRootIssuedMs > 0 && (nowMs - m_pendingAddRootIssuedMs) <= 10000;
+        const bool rootAppeared = rootPaths.contains(m_pendingAddRootPath);
+        if (!fresh || rootAppeared || m_libraryScanInProgress) {
+            m_pendingAddRootPath.clear();
+            m_pendingAddRootIssuedMs = 0;
+        }
+    }
+
+    const int librarySortMode = std::clamp(
+        snapshot.library.present ? snapshot.library.sortMode : m_librarySortMode,
+        0,
+        1);
+    if (m_librarySortMode != librarySortMode) {
+        m_librarySortMode = librarySortMode;
+        changed = true;
+    }
+
+    const int rootsCompleted = snapshot.library.present ? std::max(0, snapshot.library.rootsCompleted) : m_libraryScanRootsCompleted;
+    const int rootsTotal = snapshot.library.present ? std::max(0, snapshot.library.rootsTotal) : m_libraryScanRootsTotal;
+    const int discovered = snapshot.library.present ? std::max(0, snapshot.library.filesDiscovered) : m_libraryScanDiscovered;
+    const int processed = snapshot.library.present ? std::max(0, snapshot.library.filesProcessed) : m_libraryScanProcessed;
+    const double filesPerSecond = snapshot.library.present ? snapshot.library.filesPerSecond : m_libraryScanFilesPerSecond;
+    const double etaSeconds = snapshot.library.present ? snapshot.library.etaSeconds : m_libraryScanEtaSeconds;
+
+    if (m_libraryScanRootsCompleted != rootsCompleted) {
+        m_libraryScanRootsCompleted = rootsCompleted;
+        changed = true;
+    }
+    if (m_libraryScanRootsTotal != rootsTotal) {
+        m_libraryScanRootsTotal = rootsTotal;
+        changed = true;
+    }
+    if (m_libraryScanDiscovered != discovered) {
+        m_libraryScanDiscovered = discovered;
+        changed = true;
+    }
+    if (m_libraryScanProcessed != processed) {
+        m_libraryScanProcessed = processed;
+        changed = true;
+    }
+    if (!qFuzzyCompare(m_libraryScanFilesPerSecond + 1.0, filesPerSecond + 1.0)) {
+        m_libraryScanFilesPerSecond = filesPerSecond;
+        changed = true;
+    }
+    if (!qFuzzyCompare(m_libraryScanEtaSeconds + 2.0, etaSeconds + 2.0)) {
+        m_libraryScanEtaSeconds = etaSeconds;
+        changed = true;
+    }
+
+    if ((snapshot.sectionMask & BinaryBridgeCodec::SectionLibraryTree) != 0) {
+        m_libraryTreeBinary = snapshot.libraryTreeBytes;
+        changed = true;
+
+        m_libraryAlbums.clear();
+        m_libraryAlbumArtists.clear();
+        m_libraryAlbumNames.clear();
+        m_libraryAlbumCoverPaths.clear();
+        m_libraryAlbumTrackPaths.clear();
+        m_trackCoverByPath.clear();
+
+        if (!m_currentTrackPath.isEmpty()) {
+            const QString refreshedCover = findTrackCoverUrl(m_currentTrackPath);
+            m_trackCoverByPath.insert(m_currentTrackPath, refreshedCover);
+            if (m_currentTrackCoverPath != refreshedCover) {
+                m_currentTrackCoverPath = refreshedCover;
+                changed = true;
+            }
         }
 
-        QJsonParseError err;
-        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
-        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-            emit bridgeError(QStringLiteral("invalid bridge json: %1").arg(QString::fromUtf8(line)));
-            continue;
-        }
-        processRoot(doc.object());
+        m_libraryVersion = m_libraryVersion < std::numeric_limits<int>::max()
+            ? m_libraryVersion + 1
+            : 1;
     }
-    if (anySnapshotChanged) {
-        scheduleSnapshotChanged();
-    }
-    if (m_process.canReadLine() && !m_stdoutPumpScheduled) {
-        m_stdoutPumpScheduled = true;
-        QMetaObject::invokeMethod(this, [this]() { handleStdoutReady(); }, Qt::QueuedConnection);
-    }
-}
 
-void BridgeClient::handleStderrReady() {
-    const QByteArray chunk = m_process.readAllStandardError();
-    if (chunk.isEmpty()) {
-        return;
-    }
-    m_stderrBuffer += chunk;
-    for (;;) {
-        const qsizetype newline = m_stderrBuffer.indexOf('\n');
-        if (newline < 0) {
-            break;
-        }
-        const QByteArray rawLine = m_stderrBuffer.left(newline);
-        m_stderrBuffer.remove(0, newline + 1);
-        const QString line = QString::fromUtf8(rawLine).trimmed();
-        if (line.isEmpty()) {
-            continue;
-        }
-        // Keep high-frequency profiling output out of QML signal path to avoid UI stalls.
-        if (line.contains(QStringLiteral("[analysis]"))
-            || line.contains(QStringLiteral("[gst]"))
-            || line.contains(QStringLiteral("[bridge]"))
-            || line.contains(QStringLiteral("[bridge-json]"))) {
-            std::fprintf(stderr, "%s\n", line.toLocal8Bit().constData());
-            continue;
-        }
-        emit bridgeError(line);
-    }
-}
-
-void BridgeClient::handleProcessStarted() {
-    if (!m_connected) {
-        m_connected = true;
-        emit connectedChanged();
-    }
-    requestSnapshot();
-}
-
-void BridgeClient::handleProcessFinished() {
-    teardownAnalysisSocket(false);
-    if (m_connected) {
-        m_connected = false;
-        emit connectedChanged();
-    }
+    return changed;
 }
 
 QString BridgeClient::formatSeconds(double seconds) {

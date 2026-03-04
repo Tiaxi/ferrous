@@ -60,11 +60,10 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 
 - Scope:
   - Queue transitions, seek behavior, gapless handoff, no early metadata/waveform switch.
-  - In-process bridge mode and process fallback mode parity checks.
+  - In-process bridge binary protocol parity checks between direct bridge-handle flow and FFI flow.
 - Status:
   - Phase 1 implemented:
     - Bridge queue roundtrip integration test (`FrontendBridgeHandle` + snapshot assertions).
-    - Process-vs-FFI queue replacement parity assertion in `src/bin/native_frontend.rs`.
     - Bridge integration regression test for queue/play-at + seek clamp + remove transition flow in `src/frontend_bridge/mod.rs`.
     - Bridge natural-handoff integration test (non-`gst` backend path) in `src/frontend_bridge/mod.rs`.
     - Bridge natural-handoff metadata-timing regression proving the previous track metadata remains visible until the new track metadata arrives in `src/frontend_bridge/mod.rs`.

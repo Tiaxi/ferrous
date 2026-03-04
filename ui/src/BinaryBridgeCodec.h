@@ -1,0 +1,149 @@
+#pragma once
+
+#include <QByteArray>
+#include <QString>
+#include <QStringList>
+#include <QVector>
+
+namespace BinaryBridgeCodec {
+
+constexpr quint32 kSnapshotMagic = 0xFE550001u;
+
+enum SnapshotSection : quint16 {
+    SectionPlayback = 1u << 0,
+    SectionQueue = 1u << 1,
+    SectionLibraryMeta = 1u << 2,
+    SectionLibraryTree = 1u << 3,
+    SectionMetadata = 1u << 4,
+    SectionSettings = 1u << 5,
+    SectionError = 1u << 6,
+    SectionStopped = 1u << 7,
+};
+
+enum CommandId : quint16 {
+    CmdPlay = 1,
+    CmdPause = 2,
+    CmdStop = 3,
+    CmdNext = 4,
+    CmdPrevious = 5,
+    CmdSetVolume = 6,
+    CmdSeek = 7,
+    CmdPlayAt = 8,
+    CmdSelectQueue = 9,
+    CmdRemoveAt = 10,
+    CmdMoveQueue = 11,
+    CmdClearQueue = 12,
+    CmdAddTrack = 13,
+    CmdPlayTrack = 14,
+    CmdReplaceAlbum = 15,
+    CmdAppendAlbum = 16,
+    CmdReplaceAlbumByKey = 17,
+    CmdAppendAlbumByKey = 18,
+    CmdReplaceArtistByKey = 19,
+    CmdAppendArtistByKey = 20,
+    CmdAddRoot = 21,
+    CmdRemoveRoot = 22,
+    CmdRescanRoot = 23,
+    CmdRescanAll = 24,
+    CmdSetRepeatMode = 25,
+    CmdSetShuffle = 26,
+    CmdSetDbRange = 27,
+    CmdSetLogScale = 28,
+    CmdSetShowFps = 29,
+    CmdSetLibrarySortMode = 30,
+    CmdSetFftSize = 31,
+    CmdRequestSnapshot = 32,
+    CmdShutdown = 33,
+};
+
+struct DecodedPlayback {
+    bool present{false};
+    int state{0};
+    double positionSeconds{0.0};
+    double durationSeconds{0.0};
+    float volume{1.0f};
+    int repeatMode{0};
+    bool shuffleEnabled{false};
+    int currentQueueIndex{-1};
+    QString currentPath;
+};
+
+struct DecodedQueueTrack {
+    QString title;
+    QString path;
+};
+
+struct DecodedQueue {
+    bool present{false};
+    int len{0};
+    int selectedIndex{-1};
+    double totalDurationSeconds{0.0};
+    int unknownDurationCount{0};
+    QVector<DecodedQueueTrack> tracks;
+};
+
+struct DecodedLibraryMeta {
+    bool present{false};
+    int rootCount{0};
+    int trackCount{0};
+    bool scanInProgress{false};
+    int sortMode{0};
+    QString lastError;
+    int rootsCompleted{0};
+    int rootsTotal{0};
+    int filesDiscovered{0};
+    int filesProcessed{0};
+    double filesPerSecond{0.0};
+    double etaSeconds{-1.0};
+    QStringList rootPaths;
+};
+
+struct DecodedMetadata {
+    bool present{false};
+    QString sourcePath;
+    QString title;
+    QString artist;
+    QString album;
+    int sampleRateHz{0};
+    int bitrateKbps{0};
+    int channels{0};
+    int bitDepth{0};
+    QString coverPath;
+};
+
+struct DecodedSettings {
+    bool present{false};
+    float volume{1.0f};
+    int fftSize{8192};
+    float dbRange{90.0f};
+    bool logScale{false};
+    bool showFps{false};
+    int librarySortMode{0};
+};
+
+struct DecodedSnapshot {
+    quint16 sectionMask{0};
+    bool hasStopped{false};
+    QString errorMessage;
+    DecodedPlayback playback;
+    DecodedQueue queue;
+    DecodedLibraryMeta library;
+    QByteArray libraryTreeBytes;
+    DecodedMetadata metadata;
+    DecodedSettings settings;
+};
+
+QByteArray encodeCommandNoPayload(quint16 cmdId);
+QByteArray encodeCommandU8(quint16 cmdId, quint8 value);
+QByteArray encodeCommandI32(quint16 cmdId, qint32 value);
+QByteArray encodeCommandU32(quint16 cmdId, quint32 value);
+QByteArray encodeCommandF32(quint16 cmdId, float value);
+QByteArray encodeCommandF64(quint16 cmdId, double value);
+QByteArray encodeCommandString(quint16 cmdId, const QString &value);
+QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
+QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
+QByteArray encodeCommandMoveQueue(quint32 from, quint32 to);
+
+bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QString *errorMessage);
+
+} // namespace BinaryBridgeCodec

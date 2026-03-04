@@ -69,7 +69,7 @@ Kirigami.ApplicationWindow {
         property bool showFps: false
         property int sampleRateHz: 48000
         property var libraryAlbums: []
-        property var libraryTree: []
+        property var libraryTreeBinary: ""
         property int libraryVersion: 0
         property bool libraryScanInProgress: false
         property int libraryRootCount: 0
@@ -1743,7 +1743,7 @@ Kirigami.ApplicationWindow {
 
                             Label {
                                 visible: libraryAlbumView.count === 0
-                                text: uiBridge.libraryTree.length === 0
+                                text: uiBridge.libraryTreeBinary.length === 0
                                     ? (uiBridge.libraryScanInProgress ? "Scanning library..." : "No library rows indexed")
                                     : "No results"
                                 color: Kirigami.Theme.disabledTextColor
@@ -2233,7 +2233,7 @@ Kirigami.ApplicationWindow {
             }
             if (uiBridge.libraryVersion !== root.lastAppliedLibraryVersion) {
                 const preserveY = libraryAlbumView ? libraryAlbumView.contentY : 0
-                libraryModel.setLibraryTree(uiBridge.libraryTree || [])
+                libraryModel.setLibraryTreeFromBinary(uiBridge.libraryTreeBinary || "")
                 root.lastAppliedLibraryVersion = uiBridge.libraryVersion
                 root.syncLibrarySelectionToVisibleRows()
                 if (libraryAlbumView) {
@@ -2260,7 +2260,7 @@ Kirigami.ApplicationWindow {
     }
 
     Component.onCompleted: {
-        libraryModel.setLibraryTree(uiBridge.libraryTree || [])
+        libraryModel.setLibraryTreeFromBinary(uiBridge.libraryTreeBinary || "")
         libraryModel.setSearchText(librarySearchField.text || "")
         root.lastAppliedLibraryVersion = uiBridge.libraryVersion
         root.displayedPositionSeconds = uiBridge.positionSeconds

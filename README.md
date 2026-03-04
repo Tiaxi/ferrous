@@ -63,12 +63,6 @@ Backend CLI/debug shell:
 cargo run --bin native_frontend --features gst
 ```
 
-Force legacy process bridge mode for debugging:
-
-```bash
-./scripts/run-ui.sh --process-bridge
-```
-
 Run project tests (Rust + UI smoke test):
 
 ```bash
@@ -103,8 +97,6 @@ cargo install cargo-llvm-cov
 Optional runtime tuning:
 
 - `FERROUS_BRIDGE_SNAPSHOT_MS`: controls bridge snapshot cadence (default `16`, range `8..1000`).
-- `FERROUS_FFI_JSON_SNAPSHOT_MS`: throttles JSON snapshot delivery to the Qt side in in-process mode (default `100`, range `16..1000`).
-  - Lower values update playback/library text state more frequently with higher JSON/UI overhead.
 - `FERROUS_UI_PAINT_IMAGE=1`: force `QQuickPaintedItem` image target (default uses framebuffer object target).
 - `FERROUS_UI_SHOW_FPS=1`: show spectrogram FPS overlay.
 - `FERROUS_PROFILE_UI=1`: print per-second UI paint cost counters (`[ui-spectrogram]`, `[ui-waveform]`).
@@ -119,7 +111,7 @@ Roadmap and engineering plans live under `docs/`:
 ## Project layout
 
 - `ui/`: Qt6/QML + Kirigami frontend (primary UI path)
-- `src/bin/native_frontend.rs`: backend CLI/debug entrypoint + JSON bridge fallback
+- `src/bin/native_frontend.rs`: backend CLI/debug entrypoint
 - `src/playback/`: playback engine command/event model (`gst` + stub backends)
 - `src/analysis/`: waveform/spectrogram worker
 - `src/metadata/`: track metadata + cover art extraction

@@ -3,15 +3,12 @@
 #include <QObject>
 #include <QByteArray>
 #include <QHash>
-#include <QJsonObject>
-#include <QLocalServer>
-#include <QLocalSocket>
-#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
-#include <QVariantList>
 #include <QVariantMap>
+
+#include "BinaryBridgeCodec.h"
 
 struct FerrousFfiBridge;
 
@@ -39,7 +36,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool shuffleEnabled READ shuffleEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
-    Q_PROPERTY(QVariantList libraryTree READ libraryTree NOTIFY snapshotChanged)
+    Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY snapshotChanged)
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY snapshotChanged)
@@ -81,7 +78,7 @@ public:
     bool shuffleEnabled() const;
     bool showFps() const;
     QStringList libraryAlbums() const;
-    QVariantList libraryTree() const;
+    QByteArray libraryTreeBinary() const;
     int libraryVersion() const;
     bool libraryScanInProgress() const;
     int libraryRootCount() const;
@@ -149,28 +146,16 @@ signals:
 private:
     bool startInProcessBridge();
     void pollInProcessBridge();
-    void teardownAnalysisSocket(bool immediateDelete);
-    void setupAnalysisSocketServer();
-    void handleAnalysisSocketConnected();
-    void handleAnalysisSocketReady();
-    bool processBridgeJsonObject(const QJsonObject &root);
+    bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
     void processAnalysisBytes(const QByteArray &chunk);
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
     static QString detectFileBrowserName();
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
-    void startBridgeProcess();
-    void sendLibraryRootCommand(const QString &cmd, const QString &path);
-    void sendJson(const QJsonObject &obj);
-    void sendCommand(const QString &cmd);
-    void sendCommand(const QString &cmd, double value);
-    void handleStdoutReady();
-    void handleStderrReady();
-    void handleProcessStarted();
-    void handleProcessFinished();
+    void sendBinaryCommand(const QByteArray &payload);
+    void sendLibraryRootCommand(quint16 cmdId, const QString &path);
     static QString formatSeconds(double seconds);
 
-    QProcess m_process;
     FerrousFfiBridge *m_ffiBridge{nullptr};
     QTimer m_bridgePollTimer;
     QString m_playbackState{"Stopped"};
@@ -199,7 +184,7 @@ private:
     bool m_shuffleEnabled{false};
     bool m_showFps{false};
     QStringList m_libraryAlbums;
-    QVariantList m_libraryTree;
+    QByteArray m_libraryTreeBinary;
     int m_libraryVersion{0};
     QStringList m_libraryAlbumArtists;
     QStringList m_libraryAlbumNames;
@@ -220,14 +205,9 @@ private:
     double m_libraryScanFilesPerSecond{0.0};
     double m_libraryScanEtaSeconds{-1.0};
     QString m_libraryLastError;
-    QString m_addRootCommand{QStringLiteral("add_root")};
     QString m_pendingAddRootPath;
-    QString m_pendingAddRootCommand;
-    int m_pendingAddRootAttempts{0};
     qint64 m_pendingAddRootIssuedMs{0};
     bool m_connected{false};
-    bool m_useInProcessBridge{false};
-    bool m_stdoutPumpScheduled{false};
     bool m_snapshotChangedPending{false};
     bool m_analysisChangedPending{false};
     bool m_pendingSeek{false};
@@ -237,13 +217,8 @@ private:
     qint64 m_pendingQueueSelectionUntilMs{0};
     QTimer m_snapshotNotifyTimer;
     QTimer m_analysisNotifyTimer;
-    QByteArray m_stderrBuffer;
-    QLocalServer m_analysisServer;
-    QLocalSocket *m_analysisSocket{nullptr};
     QByteArray m_analysisBuffer;
     qsizetype m_analysisBufferReadOffset{0};
-    QString m_analysisSocketName;
-    bool m_analysisSocketConnected{false};
     bool m_hasAnalysisFrameSeq{false};
     quint32 m_lastAnalysisFrameSeq{0};
     quint64 m_analysisDroppedFrames{0};

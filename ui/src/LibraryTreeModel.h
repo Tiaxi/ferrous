@@ -1,11 +1,11 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QByteArray>
 #include <QFutureWatcher>
 #include <QHash>
 #include <QString>
 #include <QStringList>
-#include <QVariantList>
 #include <QVector>
 
 class LibraryTreeModel : public QAbstractListModel {
@@ -39,7 +39,7 @@ public:
 
     int count() const;
 
-    Q_INVOKABLE void setLibraryTree(const QVariantList &tree);
+    Q_INVOKABLE void setLibraryTreeFromBinary(const QByteArray &treeBytes);
     Q_INVOKABLE void setSearchText(const QString &text);
     Q_INVOKABLE void toggleKey(const QString &key);
     Q_INVOKABLE void toggleArtist(const QString &artist);
@@ -91,10 +91,7 @@ private:
     };
 
     static QString toLower(const QString &text);
-    static QStringList toStringList(const QVariantList &values);
-    static QVector<TreeNode> parseTreeNodes(const QVariantList &rows);
-    static QVector<TreeNode> parseLegacyArtistTree(const QVariantList &rows);
-    static QVector<TreeNode> parseNodes(const QVariantList &rows);
+    static QVector<TreeNode> parseTreeNodesFromBinary(const QByteArray &treeBytes);
     static bool nodeMatchesSearch(const TreeNode &node, const QString &searchLower);
     bool isExpanded(const TreeNode &node, bool autoExpand) const;
     void appendFlatRows(const QVector<TreeNode> &nodes, int depth, bool autoExpand);
@@ -108,5 +105,5 @@ private:
     int m_parseGeneration{0};
     bool m_parseInFlight{false};
     bool m_hasQueuedTree{false};
-    QVariantList m_queuedTree;
+    QByteArray m_queuedTree;
 };

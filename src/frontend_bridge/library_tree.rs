@@ -2,11 +2,15 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
 use crate::library::{LibrarySnapshot, LibraryTrack};
 
 use super::LibrarySortMode;
+
+const ROW_TYPE_ROOT: u8 = 0;
+const ROW_TYPE_ARTIST: u8 = 1;
+const ROW_TYPE_ALBUM: u8 = 2;
+const ROW_TYPE_SECTION: u8 = 3;
+const ROW_TYPE_TRACK: u8 = 4;
 
 #[derive(Debug, Clone)]
 struct TrackLeaf {
@@ -44,6 +48,7 @@ struct RootNodeBuilder {
 struct OrderedTrack {
     label: String,
     path: String,
+    number: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +69,130 @@ struct ResolvedSection {
     tracks: Vec<OrderedTrack>,
 }
 
+#[derive(Debug, Clone)]
+struct FlatTreeRow {
+    row_type: u8,
+    depth: u16,
+    source_index: i32,
+    track_number: u16,
+    child_count: u16,
+    title: String,
+    key: String,
+    artist: String,
+    path: String,
+    cover_path: String,
+    track_path: String,
+    play_paths: Vec<String>,
+}
+
+impl FlatTreeRow {
+    fn root(depth: u16, path: &str, child_count: usize) -> Self {
+        Self {
+            row_type: ROW_TYPE_ROOT,
+            depth,
+            source_index: -1,
+            track_number: 0,
+            child_count: clamp_u16(child_count),
+            title: path.to_string(),
+            key: format!("root|{path}"),
+            artist: String::new(),
+            path: path.to_string(),
+            cover_path: String::new(),
+            track_path: String::new(),
+            play_paths: Vec::new(),
+        }
+    }
+
+    fn artist(
+        depth: u16,
+        artist_name: &str,
+        path: &str,
+        child_count: usize,
+        album_count: usize,
+    ) -> Self {
+        Self {
+            row_type: ROW_TYPE_ARTIST,
+            depth,
+            source_index: -1,
+            track_number: 0,
+            child_count: clamp_u16(child_count),
+            title: format!("{} ({})", artist_name, album_count),
+            key: format!("artist|{artist_name}"),
+            artist: artist_name.to_string(),
+            path: path.to_string(),
+            cover_path: String::new(),
+            track_path: String::new(),
+            play_paths: Vec::new(),
+        }
+    }
+
+    fn album(
+        depth: u16,
+        artist_name: &str,
+        folder_name: &str,
+        title: &str,
+        path: &str,
+        cover_path: Option<&str>,
+        child_count: usize,
+    ) -> Self {
+        Self {
+            row_type: ROW_TYPE_ALBUM,
+            depth,
+            source_index: -1,
+            track_number: 0,
+            child_count: clamp_u16(child_count),
+            title: title.to_string(),
+            key: format!("album|{artist_name}|{folder_name}"),
+            artist: artist_name.to_string(),
+            path: path.to_string(),
+            cover_path: cover_path.unwrap_or_default().to_string(),
+            track_path: String::new(),
+            play_paths: Vec::new(),
+        }
+    }
+
+    fn section(
+        depth: u16,
+        album_key: &str,
+        title: &str,
+        path: &str,
+        play_paths: Vec<String>,
+        child_count: usize,
+    ) -> Self {
+        Self {
+            row_type: ROW_TYPE_SECTION,
+            depth,
+            source_index: -1,
+            track_number: 0,
+            child_count: clamp_u16(child_count),
+            title: title.to_string(),
+            key: format!("section|{album_key}|{title}"),
+            artist: String::new(),
+            path: path.to_string(),
+            cover_path: String::new(),
+            track_path: String::new(),
+            play_paths,
+        }
+    }
+
+    fn track(depth: u16, artist_name: &str, title: &str, path: &str, track_number: u16) -> Self {
+        Self {
+            row_type: ROW_TYPE_TRACK,
+            depth,
+            source_index: -1,
+            track_number,
+            child_count: 0,
+            title: title.to_string(),
+            key: format!("track|{path}"),
+            artist: artist_name.to_string(),
+            path: path.to_string(),
+            cover_path: String::new(),
+            track_path: path.to_string(),
+            play_paths: vec![path.to_string()],
+        }
+    }
+}
+
 struct TrackOrderCandidate {
     path: String,
     title: String,
@@ -71,13 +200,21 @@ struct TrackOrderCandidate {
     number: u32,
 }
 
-pub fn build_library_tree_json(
+pub fn build_library_tree_flat_binary(
     library: &LibrarySnapshot,
     sort_mode: LibrarySortMode,
-) -> serde_json::Value {
+) -> Vec<u8> {
+    let rows = build_library_tree_flat_rows(library, sort_mode);
+    encode_flat_rows(&rows)
+}
+
+fn build_library_tree_flat_rows(
+    library: &LibrarySnapshot,
+    sort_mode: LibrarySortMode,
+) -> Vec<FlatTreeRow> {
     let roots = library.roots.clone();
     if roots.is_empty() {
-        return serde_json::Value::Array(Vec::new());
+        return Vec::new();
     }
 
     let mut builders: BTreeMap<String, RootNodeBuilder> = BTreeMap::new();
@@ -180,29 +317,31 @@ pub fn build_library_tree_json(
     }
 
     let multi_root = roots.len() >= 2;
-    let mut top_rows = Vec::new();
+    let mut rows = Vec::new();
 
     for (_, root_builder) in builders {
-        let mut artist_rows = build_artist_rows(&root_builder, sort_mode);
+        let root_depth = if multi_root { 0 } else { u16::MAX };
+        let artist_depth = if multi_root { 1 } else { 0 };
+        let artist_rows = build_artist_rows_flat(&root_builder, sort_mode, artist_depth);
         if multi_root {
-            let root_path_string = root_builder.root_path.to_string_lossy().to_string();
-            let root_title = root_builder.root_path.to_string_lossy().to_string();
-            let root_node = json!({
-                "rowType": "root",
-                "title": root_title,
-                "path": root_path_string,
-                "children": artist_rows,
-            });
-            top_rows.push(root_node);
-        } else {
-            top_rows.append(&mut artist_rows);
+            let root_path = root_builder.root_path.to_string_lossy().to_string();
+            rows.push(FlatTreeRow::root(
+                root_depth,
+                &root_path,
+                root_builder.artists.len(),
+            ));
         }
+        rows.extend(artist_rows);
     }
 
-    serde_json::Value::Array(top_rows)
+    rows
 }
 
-fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<serde_json::Value> {
+fn build_artist_rows_flat(
+    root: &RootNodeBuilder,
+    sort_mode: LibrarySortMode,
+    artist_depth: u16,
+) -> Vec<FlatTreeRow> {
     let mut artists = root.artists.values().cloned().collect::<Vec<_>>();
     artists.sort_by(|a, b| natural_cmp(&a.artist_name, &b.artist_name));
 
@@ -217,14 +356,29 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
         }
         sort_resolved_albums(&mut resolved_albums, sort_mode);
 
-        let mut children = Vec::new();
+        let artist_path = artist.artist_path.to_string_lossy().to_string();
+        let child_count = loose_tracks.len() + resolved_albums.len();
+        out.push(FlatTreeRow::artist(
+            artist_depth,
+            &artist.artist_name,
+            &artist_path,
+            child_count,
+            album_count,
+        ));
+
+        let track_depth = artist_depth.saturating_add(1);
+        let album_depth = artist_depth.saturating_add(1);
+        let section_depth = artist_depth.saturating_add(2);
+        let section_track_depth = artist_depth.saturating_add(3);
 
         for track in &loose_tracks {
-            children.push(json!({
-                "rowType": "track",
-                "title": track.label,
-                "trackPath": track.path,
-            }));
+            out.push(FlatTreeRow::track(
+                track_depth,
+                &artist.artist_name,
+                &track.label,
+                &track.path,
+                track.number,
+            ));
         }
 
         for album in resolved_albums {
@@ -234,60 +388,107 @@ fn build_artist_rows(root: &RootNodeBuilder, sort_mode: LibrarySortMode) -> Vec<
             } else {
                 album.title.clone()
             };
-
-            let mut album_children = Vec::new();
+            let album_key = format!("album|{}|{}", artist.artist_name, album.folder_name);
+            let album_child_count = album.root_tracks.len() + album.sections.len();
+            out.push(FlatTreeRow::album(
+                album_depth,
+                &artist.artist_name,
+                &album.folder_name,
+                &album_title,
+                &album_path,
+                album.cover_path.as_deref(),
+                album_child_count,
+            ));
 
             for track in &album.root_tracks {
-                album_children.push(json!({
-                    "rowType": "track",
-                    "title": track.label,
-                    "trackPath": track.path,
-                }));
+                out.push(FlatTreeRow::track(
+                    section_depth,
+                    &artist.artist_name,
+                    &track.label,
+                    &track.path,
+                    track.number,
+                ));
             }
 
             for section in &album.sections {
                 let section_path = section.path.to_string_lossy().to_string();
-                let mut section_paths = Vec::new();
-                let mut section_children = Vec::new();
+                let section_play_paths = section
+                    .tracks
+                    .iter()
+                    .map(|track| track.path.clone())
+                    .collect::<Vec<_>>();
+                out.push(FlatTreeRow::section(
+                    section_depth,
+                    &album_key,
+                    &section.name,
+                    &section_path,
+                    section_play_paths,
+                    section.tracks.len(),
+                ));
                 for track in &section.tracks {
-                    section_paths.push(track.path.clone());
-                    section_children.push(json!({
-                        "rowType": "track",
-                        "title": track.label,
-                        "trackPath": track.path,
-                    }));
+                    out.push(FlatTreeRow::track(
+                        section_track_depth,
+                        &artist.artist_name,
+                        &track.label,
+                        &track.path,
+                        track.number,
+                    ));
                 }
-                album_children.push(json!({
-                    "rowType": "section",
-                    "title": section.name,
-                    "path": section_path,
-                    "playPaths": section_paths,
-                    "children": section_children,
-                }));
             }
-
-            children.push(json!({
-                "rowType": "album",
-                "title": album_title,
-                "artist": artist.artist_name.clone(),
-                "name": album.folder_name,
-                "path": album_path,
-                "coverPath": album.cover_path,
-                "children": album_children,
-            }));
         }
-
-        out.push(json!({
-            "rowType": "artist",
-            "title": format!("{} ({})", artist.artist_name, album_count),
-            "artist": artist.artist_name,
-            "path": artist.artist_path.to_string_lossy().to_string(),
-            "count": album_count,
-            "children": children,
-        }));
     }
 
     out
+}
+
+fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows.len() * 96 + 4);
+    push_u32(&mut out, rows.len() as u32);
+    for row in rows {
+        push_u8(&mut out, row.row_type);
+        push_u16(&mut out, row.depth);
+        push_i32(&mut out, row.source_index);
+        push_u16(&mut out, row.track_number);
+        push_u16(&mut out, row.child_count);
+        push_u16_string(&mut out, &row.title);
+        push_u16_string(&mut out, &row.key);
+        push_u16_string(&mut out, &row.artist);
+        push_u16_string(&mut out, &row.path);
+        push_u16_string(&mut out, &row.cover_path);
+        push_u16_string(&mut out, &row.track_path);
+        push_u16(&mut out, clamp_u16(row.play_paths.len()));
+        for path in &row.play_paths {
+            push_u16_string(&mut out, path);
+        }
+    }
+    out
+}
+
+fn clamp_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
+}
+
+fn push_u8(out: &mut Vec<u8>, value: u8) {
+    out.push(value);
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u16_string(out: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    let len = bytes.len().min(u16::MAX as usize);
+    push_u16(out, len as u16);
+    out.extend_from_slice(&bytes[..len]);
 }
 
 fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
@@ -489,6 +690,7 @@ fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
                 width = width
             ),
             path: candidate.path,
+            number: candidate.number.min(u16::MAX as u32) as u16,
         })
         .collect()
 }
@@ -592,6 +794,151 @@ mod tests {
     use super::*;
     use crate::library::LibrarySnapshot;
 
+    #[derive(Debug)]
+    struct DecodedRow {
+        row_type: u8,
+        depth: u16,
+        source_index: i32,
+        track_number: u16,
+        child_count: u16,
+        title: String,
+        key: String,
+        artist: String,
+        path: String,
+        cover_path: String,
+        track_path: String,
+        play_paths: Vec<String>,
+    }
+
+    fn read_u8(input: &[u8], offset: &mut usize) -> Option<u8> {
+        if *offset + 1 > input.len() {
+            return None;
+        }
+        let value = input[*offset];
+        *offset += 1;
+        Some(value)
+    }
+
+    fn read_u16(input: &[u8], offset: &mut usize) -> Option<u16> {
+        if *offset + 2 > input.len() {
+            return None;
+        }
+        let value = u16::from_le_bytes([input[*offset], input[*offset + 1]]);
+        *offset += 2;
+        Some(value)
+    }
+
+    fn read_i32(input: &[u8], offset: &mut usize) -> Option<i32> {
+        if *offset + 4 > input.len() {
+            return None;
+        }
+        let value = i32::from_le_bytes([
+            input[*offset],
+            input[*offset + 1],
+            input[*offset + 2],
+            input[*offset + 3],
+        ]);
+        *offset += 4;
+        Some(value)
+    }
+
+    fn read_u32(input: &[u8], offset: &mut usize) -> Option<u32> {
+        if *offset + 4 > input.len() {
+            return None;
+        }
+        let value = u32::from_le_bytes([
+            input[*offset],
+            input[*offset + 1],
+            input[*offset + 2],
+            input[*offset + 3],
+        ]);
+        *offset += 4;
+        Some(value)
+    }
+
+    fn read_u16_string(input: &[u8], offset: &mut usize) -> Option<String> {
+        let len = read_u16(input, offset)? as usize;
+        if *offset + len > input.len() {
+            return None;
+        }
+        let bytes = &input[*offset..*offset + len];
+        *offset += len;
+        Some(String::from_utf8_lossy(bytes).to_string())
+    }
+
+    fn decode_rows(bytes: &[u8]) -> Vec<DecodedRow> {
+        let mut offset = 0usize;
+        let Some(row_count) = read_u32(bytes, &mut offset) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::with_capacity(row_count as usize);
+        for _ in 0..row_count {
+            let Some(row_type) = read_u8(bytes, &mut offset) else {
+                break;
+            };
+            let Some(depth) = read_u16(bytes, &mut offset) else {
+                break;
+            };
+            let Some(source_index) = read_i32(bytes, &mut offset) else {
+                break;
+            };
+            let Some(track_number) = read_u16(bytes, &mut offset) else {
+                break;
+            };
+            let Some(child_count) = read_u16(bytes, &mut offset) else {
+                break;
+            };
+            let Some(title) = read_u16_string(bytes, &mut offset) else {
+                break;
+            };
+            let Some(key) = read_u16_string(bytes, &mut offset) else {
+                break;
+            };
+            let Some(artist) = read_u16_string(bytes, &mut offset) else {
+                break;
+            };
+            let Some(path) = read_u16_string(bytes, &mut offset) else {
+                break;
+            };
+            let Some(cover_path) = read_u16_string(bytes, &mut offset) else {
+                break;
+            };
+            let Some(track_path) = read_u16_string(bytes, &mut offset) else {
+                break;
+            };
+            let Some(play_path_count) = read_u16(bytes, &mut offset) else {
+                break;
+            };
+            let mut play_paths = Vec::with_capacity(play_path_count as usize);
+            let mut ok = true;
+            for _ in 0..play_path_count {
+                let Some(play_path) = read_u16_string(bytes, &mut offset) else {
+                    ok = false;
+                    break;
+                };
+                play_paths.push(play_path);
+            }
+            if !ok {
+                break;
+            }
+            rows.push(DecodedRow {
+                row_type,
+                depth,
+                source_index,
+                track_number,
+                child_count,
+                title,
+                key,
+                artist,
+                path,
+                cover_path,
+                track_path,
+                play_paths,
+            });
+        }
+        rows
+    }
+
     fn track(
         path: &str,
         album: &str,
@@ -654,13 +1001,10 @@ mod tests {
             ..LibrarySnapshot::default()
         };
 
-        let tree = build_library_tree_json(&library, LibrarySortMode::Year);
-        let rows = tree.as_array().expect("array");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].get("rowType").and_then(|v| v.as_str()),
-            Some("artist")
-        );
+        let tree = build_library_tree_flat_binary(&library, LibrarySortMode::Year);
+        let rows = decode_rows(&tree);
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0].row_type, ROW_TYPE_ARTIST);
     }
 
     #[test]
@@ -692,17 +1036,13 @@ mod tests {
             ..LibrarySnapshot::default()
         };
 
-        let tree = build_library_tree_json(&library, LibrarySortMode::Year);
-        let rows = tree.as_array().expect("array");
-        assert_eq!(rows.len(), 2);
-        assert_eq!(
-            rows[0].get("rowType").and_then(|v| v.as_str()),
-            Some("root")
-        );
-        assert_eq!(
-            rows[1].get("rowType").and_then(|v| v.as_str()),
-            Some("root")
-        );
+        let tree = build_library_tree_flat_binary(&library, LibrarySortMode::Year);
+        let rows = decode_rows(&tree);
+        let root_rows = rows
+            .iter()
+            .filter(|row| row.row_type == ROW_TYPE_ROOT)
+            .collect::<Vec<_>>();
+        assert_eq!(root_rows.len(), 2);
     }
 
     #[test]
@@ -727,5 +1067,40 @@ mod tests {
         ]);
         assert_eq!(ordered[0].label, "01 - One");
         assert_eq!(ordered[1].label, "10 - Ten");
+        assert_eq!(ordered[0].number, 1);
+        assert_eq!(ordered[1].number, 10);
+    }
+
+    #[test]
+    fn binary_row_tracks_include_paths_and_play_paths() {
+        let library = LibrarySnapshot {
+            roots: vec![PathBuf::from("/music")],
+            tracks: vec![track(
+                "/music/Artist A/Album A/01.flac",
+                "Album A",
+                Some(2020),
+                Some(1),
+                "Track 01",
+            )],
+            ..LibrarySnapshot::default()
+        };
+        let bytes = build_library_tree_flat_binary(&library, LibrarySortMode::Year);
+        let rows = decode_rows(&bytes);
+        let track_row = rows
+            .iter()
+            .find(|row| row.row_type == ROW_TYPE_TRACK)
+            .expect("track row");
+        assert_eq!(track_row.track_path, "/music/Artist A/Album A/01.flac");
+        assert_eq!(track_row.path, "/music/Artist A/Album A/01.flac");
+        assert_eq!(track_row.play_paths.len(), 1);
+        assert_eq!(track_row.play_paths[0], "/music/Artist A/Album A/01.flac");
+        assert!(track_row.key.starts_with("track|"));
+        assert_eq!(track_row.source_index, -1);
+        assert_eq!(track_row.track_number, 1);
+        assert_eq!(track_row.child_count, 0);
+        assert!(!track_row.title.is_empty());
+        assert!(!track_row.artist.is_empty());
+        assert!(track_row.cover_path.is_empty());
+        assert!(track_row.depth > 0);
     }
 }

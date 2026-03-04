@@ -7,13 +7,10 @@ UI_DIR="${REPO_ROOT}/ui"
 BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${FERROUS_NATIVE_BUILD_DIR:-${UI_DIR}/build}}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
-DEFAULT_BRIDGE_CMD='cargo run --release --bin native_frontend --features gst -- --json-bridge'
-DEFAULT_BRIDGE_BIN="${REPO_ROOT}/target/release/native_frontend"
 
 DO_CONFIGURE=1
 DO_BUILD=1
 DO_RUN=1
-FORCE_PROCESS_BRIDGE=0
 NUKE_DB=0
 NUKE_THUMBNAILS=0
 ENABLE_COREDUMP=0
@@ -98,7 +95,6 @@ Options:
   --no-configure    Skip cmake configure step
   --no-build        Skip cmake build step
   --no-run          Only configure/build; do not launch UI
-  --process-bridge  Force legacy process/stdout bridge (default: in-process FFI bridge)
   --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
   --nuke-thumbnails Delete Ferrous library thumbnail cache (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
   --nuke-all        Equivalent to --nuke-db --nuke-thumbnails
@@ -106,8 +102,6 @@ Options:
   -h, --help        Show this help
 
 Environment:
-  FERROUS_BRIDGE_CMD       Override bridge command (default: ${DEFAULT_BRIDGE_CMD})
-  FERROUS_BRIDGE_MODE      Set to 'process' to force legacy process bridge
   FERROUS_UI_BUILD_DIR     Override build dir (default: ${UI_DIR}/build)
   FERROUS_NATIVE_BUILD_DIR Backward-compatible alias for FERROUS_UI_BUILD_DIR
   XDG_DATA_HOME            Base path for DB cleanup target (default: \$HOME/.local/share)
@@ -127,9 +121,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-run)
             DO_RUN=0
-            ;;
-        --process-bridge)
-            FORCE_PROCESS_BRIDGE=1
             ;;
         --nuke-db)
             NUKE_DB=1
@@ -176,25 +167,12 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-BRIDGE_MODE_RAW="${FERROUS_BRIDGE_MODE:-}"
-if [[ ${FORCE_PROCESS_BRIDGE} -eq 1 ]]; then
-    BRIDGE_MODE_RAW="process"
-fi
-BRIDGE_MODE="$(printf '%s' "${BRIDGE_MODE_RAW}" | tr '[:upper:]' '[:lower:]')"
-USE_PROCESS_BRIDGE=0
-if [[ "${BRIDGE_MODE}" == "process" ]]; then
-    USE_PROCESS_BRIDGE=1
-fi
-
 if [[ ${DO_CONFIGURE} -eq 1 ]]; then
     reset_stale_cmake_cache
     cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then
-    if [[ ${USE_PROCESS_BRIDGE} -eq 1 ]]; then
-        cargo build --release --bin native_frontend --features gst
-    fi
     cmake --build "${BUILD_DIR}" -j
 fi
 
@@ -205,20 +183,6 @@ if [[ ${DO_RUN} -eq 1 ]]; then
         echo "After a crash:"
         echo "  coredumpctl list ferrous"
         echo "  coredumpctl gdb -1 ${BUILD_DIR}/ferrous"
-    fi
-    if [[ ${USE_PROCESS_BRIDGE} -eq 1 ]]; then
-        BRIDGE_CMD="${FERROUS_BRIDGE_CMD:-}"
-        if [[ -z "${BRIDGE_CMD}" ]]; then
-            if [[ -x "${DEFAULT_BRIDGE_BIN}" ]]; then
-                BRIDGE_CMD="${DEFAULT_BRIDGE_BIN} --json-bridge"
-            else
-                BRIDGE_CMD="${DEFAULT_BRIDGE_CMD}"
-            fi
-        fi
-        export FERROUS_BRIDGE_MODE=process
-        export FERROUS_BRIDGE_CMD="${BRIDGE_CMD}"
-    else
-        export FERROUS_BRIDGE_MODE=in-process
     fi
     exec "${BUILD_DIR}/ferrous" "${APP_ARGS[@]}"
 fi
