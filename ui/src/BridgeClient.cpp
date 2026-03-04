@@ -788,11 +788,11 @@ void BridgeClient::addLibraryRoot(const QString &path) {
     if (normalized.isEmpty()) {
         return;
     }
-    QJsonObject obj;
-    // Keep wire compatibility with older process bridge binaries that only support "scan_root".
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("scan_root"));
-    obj.insert(QStringLiteral("path"), normalized);
-    sendJson(obj);
+    m_pendingAddRootPath = normalized;
+    m_pendingAddRootCommand = m_addRootCommand;
+    m_pendingAddRootAttempts = 1;
+    m_pendingAddRootIssuedMs = QDateTime::currentMSecsSinceEpoch();
+    sendLibraryRootCommand(m_pendingAddRootCommand, normalized);
 }
 
 void BridgeClient::removeLibraryRoot(const QString &path) {
@@ -1209,6 +1209,13 @@ void BridgeClient::startBridgeProcess() {
     m_process.start(shell, args);
 }
 
+void BridgeClient::sendLibraryRootCommand(const QString &cmd, const QString &path) {
+    QJsonObject obj;
+    obj.insert(QStringLiteral("cmd"), cmd);
+    obj.insert(QStringLiteral("path"), path);
+    sendJson(obj);
+}
+
 void BridgeClient::sendCommand(const QString &cmd) {
     QJsonObject obj;
     obj.insert(QStringLiteral("cmd"), cmd);
@@ -1504,6 +1511,24 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             m_libraryRoots = rootPaths;
             changed = true;
         }
+        const QString libraryLastError = library.value(QStringLiteral("last_error")).toString();
+        if (m_libraryLastError != libraryLastError) {
+            m_libraryLastError = libraryLastError;
+            if (!m_libraryLastError.trimmed().isEmpty()) {
+                emit bridgeError(QStringLiteral("library: %1").arg(m_libraryLastError));
+            }
+        }
+        if (!m_pendingAddRootPath.isEmpty()) {
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            const bool fresh = m_pendingAddRootIssuedMs > 0 && (nowMs - m_pendingAddRootIssuedMs) <= 10000;
+            const bool rootAppeared = rootPaths.contains(m_pendingAddRootPath);
+            if (!fresh || rootAppeared || m_libraryScanInProgress) {
+                m_pendingAddRootPath.clear();
+                m_pendingAddRootCommand.clear();
+                m_pendingAddRootAttempts = 0;
+                m_pendingAddRootIssuedMs = 0;
+            }
+        }
 
         const int sortMode = std::clamp(
             library.value(QStringLiteral("sort_mode")).toInt(m_librarySortMode),
@@ -1679,7 +1704,34 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
         return changed;
     }
     if (event == QStringLiteral("error")) {
-        emit bridgeError(root.value(QStringLiteral("message")).toString());
+        const QString message = root.value(QStringLiteral("message")).toString();
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool pendingFresh = !m_pendingAddRootPath.isEmpty()
+            && m_pendingAddRootIssuedMs > 0
+            && (nowMs - m_pendingAddRootIssuedMs) <= 3000;
+        if (pendingFresh && m_pendingAddRootAttempts == 1) {
+            if (m_pendingAddRootCommand == QStringLiteral("add_root")
+                && message.contains(QStringLiteral("unknown command 'add_root'")))
+            {
+                m_addRootCommand = QStringLiteral("scan_root");
+                m_pendingAddRootCommand = m_addRootCommand;
+                m_pendingAddRootAttempts = 2;
+                m_pendingAddRootIssuedMs = nowMs;
+                sendLibraryRootCommand(m_pendingAddRootCommand, m_pendingAddRootPath);
+                return false;
+            }
+            if (m_pendingAddRootCommand == QStringLiteral("scan_root")
+                && message.contains(QStringLiteral("unknown command 'scan_root'")))
+            {
+                m_addRootCommand = QStringLiteral("add_root");
+                m_pendingAddRootCommand = m_addRootCommand;
+                m_pendingAddRootAttempts = 2;
+                m_pendingAddRootIssuedMs = nowMs;
+                sendLibraryRootCommand(m_pendingAddRootCommand, m_pendingAddRootPath);
+                return false;
+            }
+        }
+        emit bridgeError(message);
         return false;
     }
     if (event == QStringLiteral("stopped")) {

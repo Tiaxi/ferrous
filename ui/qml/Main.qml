@@ -39,6 +39,7 @@ Kirigami.ApplicationWindow {
     property real albumArtPanX: 0.0
     property real albumArtPanY: 0.0
     property string pendingFolderDialogContext: ""
+    property string transientBridgeError: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -177,6 +178,13 @@ Kirigami.ApplicationWindow {
                 root.displayedPositionSeconds = Math.max(0.0, predicted)
             }
         }
+    }
+
+    Timer {
+        id: bridgeErrorTimer
+        interval: 10000
+        repeat: false
+        onTriggered: root.transientBridgeError = ""
     }
 
     function moveSelected(delta) {
@@ -591,6 +599,9 @@ Kirigami.ApplicationWindow {
     }
 
     function statusLineText() {
+        if (root.transientBridgeError.length > 0) {
+            return "error | " + root.transientBridgeError
+        }
         if (!uiBridge.connected) {
             return "bridge disconnected"
         }
@@ -2174,6 +2185,8 @@ Kirigami.ApplicationWindow {
                     || message.indexOf("[bridge-json]") !== -1) {
                 return
             }
+            root.transientBridgeError = message
+            bridgeErrorTimer.restart()
             console.warn("bridge error:", message)
         }
     }

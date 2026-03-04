@@ -158,6 +158,7 @@ private:
     static QString detectFileBrowserName();
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     void startBridgeProcess();
+    void sendLibraryRootCommand(const QString &cmd, const QString &path);
     void sendJson(const QJsonObject &obj);
     void sendCommand(const QString &cmd);
     void sendCommand(const QString &cmd, double value);
@@ -216,6 +217,12 @@ private:
     int m_libraryScanProcessed{0};
     double m_libraryScanFilesPerSecond{0.0};
     double m_libraryScanEtaSeconds{-1.0};
+    QString m_libraryLastError;
+    QString m_addRootCommand{QStringLiteral("add_root")};
+    QString m_pendingAddRootPath;
+    QString m_pendingAddRootCommand;
+    int m_pendingAddRootAttempts{0};
+    qint64 m_pendingAddRootIssuedMs{0};
     bool m_connected{false};
     bool m_useInProcessBridge{false};
     bool m_stdoutPumpScheduled{false};
