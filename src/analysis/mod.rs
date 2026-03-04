@@ -147,7 +147,8 @@ impl AnalysisEngine {
                                 let cache_hit = waveform_cache
                                     .get(&path)
                                     .filter(|entry| entry.stamp == active_track_stamp)
-                                    .map(|entry| entry.peaks.clone());
+                                    .map(|entry| entry.peaks.clone())
+                                    .filter(|peaks| !peaks.is_empty());
                                 let peaks = if let Some(peaks) = cache_hit {
                                     touch_waveform_cache_lru(&mut waveform_cache_lru, &path);
                                     Some(peaks)
@@ -237,6 +238,13 @@ impl AnalysisEngine {
                                 done,
                             } => {
                                 if track_token == active_track_token {
+                                    if peaks.is_empty() {
+                                        if done {
+                                            // Ignore and do not persist empty waveform snapshots.
+                                            // A zero-point waveform is treated as a decode miss.
+                                        }
+                                        continue;
+                                    }
                                     snapshot.waveform_peaks = peaks;
                                     if done {
                                         if let Some(path) = active_track_path.as_ref() {
@@ -510,6 +518,9 @@ fn load_waveform_from_db(
         return None;
     }
     let peak_count = usize::try_from(row.1).ok()?;
+    if peak_count == 0 {
+        return None;
+    }
     decode_peaks_blob(&row.2, peak_count)
 }
 
@@ -519,6 +530,13 @@ fn persist_waveform_to_db(
     stamp: WaveformSourceStamp,
     peaks: &[f32],
 ) -> rusqlite::Result<()> {
+    if peaks.is_empty() {
+        let _ = conn.execute(
+            "DELETE FROM waveform_cache WHERE path = ?1",
+            params![path.to_string_lossy().to_string()],
+        );
+        return Ok(());
+    }
     let blob = encode_peaks_blob(peaks);
     let now = unix_ts_i64();
     conn.execute(
@@ -606,6 +624,13 @@ fn insert_waveform_cache_entry(
     path: PathBuf,
     entry: WaveformCacheEntry,
 ) {
+    if entry.peaks.is_empty() {
+        cache.remove(&path);
+        if let Some(pos) = lru.iter().position(|p| p == &path) {
+            lru.remove(pos);
+        }
+        return;
+    }
     cache.insert(path.clone(), entry);
     touch_waveform_cache_lru(lru, &path);
 
