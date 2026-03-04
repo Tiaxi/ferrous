@@ -16,6 +16,7 @@ DO_RUN=1
 FORCE_PROCESS_BRIDGE=0
 NUKE_DB=0
 NUKE_THUMBNAILS=0
+ENABLE_COREDUMP=0
 APP_ARGS=()
 
 reset_stale_cmake_cache() {
@@ -101,6 +102,7 @@ Options:
   --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
   --nuke-thumbnails Delete Ferrous library thumbnail cache (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
   --nuke-all        Equivalent to --nuke-db --nuke-thumbnails
+  --coredump        Enable unlimited core dump size and print coredumpctl hints
   -h, --help        Show this help
 
 Environment:
@@ -138,6 +140,9 @@ while [[ $# -gt 0 ]]; do
         --nuke-all)
             NUKE_DB=1
             NUKE_THUMBNAILS=1
+            ;;
+        --coredump)
+            ENABLE_COREDUMP=1
             ;;
         -h|--help)
             usage
@@ -194,6 +199,13 @@ if [[ ${DO_BUILD} -eq 1 ]]; then
 fi
 
 if [[ ${DO_RUN} -eq 1 ]]; then
+    if [[ ${ENABLE_COREDUMP} -eq 1 ]]; then
+        ulimit -c unlimited || true
+        echo "Core dumps enabled (ulimit -c unlimited)."
+        echo "After a crash:"
+        echo "  coredumpctl list ferrous"
+        echo "  coredumpctl gdb -1 ${BUILD_DIR}/ferrous"
+    fi
     if [[ ${USE_PROCESS_BRIDGE} -eq 1 ]]; then
         BRIDGE_CMD="${FERROUS_BRIDGE_CMD:-}"
         if [[ -z "${BRIDGE_CMD}" ]]; then

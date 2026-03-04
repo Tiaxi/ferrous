@@ -1462,11 +1462,17 @@ Kirigami.ApplicationWindow {
 
                             Label {
                                 Layout.fillWidth: true
+                                readonly property int scanBacklog: Math.max(
+                                    0,
+                                    uiBridge.libraryScanDiscovered - uiBridge.libraryScanProcessed)
                                 text: "Indexed tracks: " + uiBridge.libraryTrackCount
                                       + " | roots: " + uiBridge.libraryRootCount
                                       + (uiBridge.libraryScanInProgress
                                           ? (" | scanning " + uiBridge.libraryScanProcessed
                                              + "/" + Math.max(uiBridge.libraryScanDiscovered, uiBridge.libraryScanProcessed)
+                                             + (scanBacklog > 0
+                                                 ? (" (+" + scanBacklog + " queued)")
+                                                 : "")
                                              + (uiBridge.libraryScanFilesPerSecond > 0
                                                  ? (" @ " + uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
                                                  : "")

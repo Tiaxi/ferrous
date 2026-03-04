@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QMutex>
 #include <QQuickPaintedItem>
 
 #include <chrono>
@@ -31,6 +32,7 @@ signals:
     void durationSecondsChanged();
 
 private:
+    mutable QMutex m_stateMutex;
     QByteArray m_peaksData;
     double m_positionSeconds{0.0};
     double m_durationSeconds{0.0};

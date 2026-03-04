@@ -1,5 +1,6 @@
 #include "WaveformItem.h"
 
+#include <QMutexLocker>
 #include <QPainter>
 
 #include <algorithm>
@@ -23,39 +24,51 @@ WaveformItem::WaveformItem(QQuickItem *parent)
 }
 
 QByteArray WaveformItem::peaksData() const {
+    QMutexLocker lock(&m_stateMutex);
     return m_peaksData;
 }
 
 void WaveformItem::setPeaksData(const QByteArray &data) {
-    if (m_peaksData == data) {
-        return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_peaksData == data) {
+            return;
+        }
+        m_peaksData = data;
     }
-    m_peaksData = data;
     emit peaksDataChanged();
     update();
 }
 
 double WaveformItem::positionSeconds() const {
+    QMutexLocker lock(&m_stateMutex);
     return m_positionSeconds;
 }
 
 void WaveformItem::setPositionSeconds(double value) {
-    if (std::abs(m_positionSeconds - value) < 0.0001) {
-        return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (std::abs(m_positionSeconds - value) < 0.0001) {
+            return;
+        }
+        m_positionSeconds = value;
     }
-    m_positionSeconds = value;
     emit positionSecondsChanged();
 }
 
 double WaveformItem::durationSeconds() const {
+    QMutexLocker lock(&m_stateMutex);
     return m_durationSeconds;
 }
 
 void WaveformItem::setDurationSeconds(double value) {
-    if (std::abs(m_durationSeconds - value) < 0.0001) {
-        return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (std::abs(m_durationSeconds - value) < 0.0001) {
+            return;
+        }
+        m_durationSeconds = value;
     }
-    m_durationSeconds = value;
     emit durationSecondsChanged();
 }
 
@@ -64,13 +77,19 @@ void WaveformItem::paint(QPainter *painter) {
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
 
+    QByteArray peaksDataLocal;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        peaksDataLocal = m_peaksData;
+    }
+
     painter->fillRect(QRect(0, 0, w, h), QColor("#ffffff"));
-    if (!m_peaksData.isEmpty()) {
+    if (!peaksDataLocal.isEmpty()) {
         painter->setPen(Qt::NoPen);
         painter->setBrush(QColor("#0f2e5d"));
-        const int count = m_peaksData.size();
+        const int count = peaksDataLocal.size();
         const double half = static_cast<double>(h) / 2.0;
-        const auto *src = reinterpret_cast<const uchar *>(m_peaksData.constData());
+        const auto *src = reinterpret_cast<const uchar *>(peaksDataLocal.constData());
         for (int x = 0; x < w; ++x) {
             const int idx = (count <= 1 || w <= 1) ? 0 : (x * (count - 1) / (w - 1));
             const double peak = static_cast<double>(src[idx]) / 255.0;
@@ -92,7 +111,7 @@ void WaveformItem::paint(QPainter *painter) {
                 static_cast<unsigned long long>(m_profilePaints),
                 m_profilePaintMs,
                 m_profilePaints > 0 ? (m_profilePaintMs / static_cast<double>(m_profilePaints)) : 0.0,
-                m_peaksData.size());
+                peaksDataLocal.size());
             m_profileLast = paint_end;
             m_profilePaints = 0;
             m_profilePaintMs = 0.0;
