@@ -7,6 +7,7 @@
 #include <QStringList>
 #include <QTimer>
 #include <QVariantMap>
+#include <QVariantList>
 
 #include "BinaryBridgeCodec.h"
 
@@ -42,6 +43,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryArtistCount READ libraryArtistCount NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryAlbumCount READ libraryAlbumCount NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryRoots READ libraryRoots NOTIFY snapshotChanged)
     Q_PROPERTY(int librarySortMode READ librarySortMode NOTIFY snapshotChanged)
     Q_PROPERTY(QString fileBrowserName READ fileBrowserName NOTIFY snapshotChanged)
@@ -51,6 +54,12 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int libraryScanProcessed READ libraryScanProcessed NOTIFY snapshotChanged)
     Q_PROPERTY(double libraryScanFilesPerSecond READ libraryScanFilesPerSecond NOTIFY snapshotChanged)
     Q_PROPERTY(double libraryScanEtaSeconds READ libraryScanEtaSeconds NOTIFY snapshotChanged)
+    Q_PROPERTY(QVariantList globalSearchArtistResults READ globalSearchArtistResults NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(QVariantList globalSearchAlbumResults READ globalSearchAlbumResults NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(QVariantList globalSearchTrackResults READ globalSearchTrackResults NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(quint32 globalSearchSeq READ globalSearchSeq NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
+    Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
 
 public:
@@ -85,6 +94,8 @@ public:
     bool libraryScanInProgress() const;
     int libraryRootCount() const;
     int libraryTrackCount() const;
+    int libraryArtistCount() const;
+    int libraryAlbumCount() const;
     QStringList libraryRoots() const;
     int librarySortMode() const;
     QString fileBrowserName() const;
@@ -94,6 +105,12 @@ public:
     int libraryScanProcessed() const;
     double libraryScanFilesPerSecond() const;
     double libraryScanEtaSeconds() const;
+    QVariantList globalSearchArtistResults() const;
+    QVariantList globalSearchAlbumResults() const;
+    QVariantList globalSearchTrackResults() const;
+    quint32 globalSearchSeq() const;
+    QString diagnosticsText() const;
+    QString diagnosticsLogPath() const;
     bool connected() const;
 
     Q_INVOKABLE void play();
@@ -132,6 +149,7 @@ public:
     Q_INVOKABLE void rescanAllLibraryRoots();
     Q_INVOKABLE void setLibraryNodeExpanded(const QString &key, bool expanded);
     Q_INVOKABLE void setLibrarySortMode(int mode);
+    Q_INVOKABLE void setGlobalSearchQuery(const QString &query);
     Q_INVOKABLE void openInFileBrowser(const QString &path);
     Q_INVOKABLE void openContainingFolder(const QString &path);
     Q_INVOKABLE void scanRoot(const QString &path);
@@ -139,11 +157,15 @@ public:
     Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
+    Q_INVOKABLE void clearDiagnostics();
+    Q_INVOKABLE void reloadDiagnosticsFromDisk();
 
 signals:
     void snapshotChanged();
     void analysisChanged();
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
+    void globalSearchResultsChanged();
+    void diagnosticsChanged();
     void connectedChanged();
     void bridgeError(const QString &message);
 
@@ -153,6 +175,12 @@ private:
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
     void processAnalysisBytes(const QByteArray &chunk);
+    bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
+    void flushGlobalSearchQuery();
+    void logDiagnostic(const QString &category, const QString &message);
+    void appendDiagnosticLine(const QString &line);
+    void rebuildDiagnosticsText();
+    static QString resolveDiagnosticsLogPath();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
     static QString detectFileBrowserName();
@@ -160,6 +188,7 @@ private:
     void sendBinaryCommand(const QByteArray &payload);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path);
     static QString formatSeconds(double seconds);
+    static QString formatDurationCompact(double seconds);
 
     FerrousFfiBridge *m_ffiBridge{nullptr};
     QTimer m_bridgePollTimer;
@@ -201,6 +230,8 @@ private:
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
     int m_libraryTrackCount{0};
+    int m_libraryArtistCount{0};
+    int m_libraryAlbumCount{0};
     QStringList m_libraryRoots;
     int m_librarySortMode{0};
     QString m_fileBrowserName{QStringLiteral("File Manager")};
@@ -210,6 +241,17 @@ private:
     int m_libraryScanProcessed{0};
     double m_libraryScanFilesPerSecond{0.0};
     double m_libraryScanEtaSeconds{-1.0};
+    QVariantList m_globalSearchArtistResults;
+    QVariantList m_globalSearchAlbumResults;
+    QVariantList m_globalSearchTrackResults;
+    quint32 m_globalSearchSeq{0};
+    quint32 m_nextGlobalSearchSeq{1};
+    quint32 m_latestGlobalSearchSeqSent{0};
+    QString m_pendingGlobalSearchQuery;
+    QString m_lastGlobalSearchQuerySent;
+    QString m_diagnosticsText;
+    QString m_diagnosticsLogPath;
+    QStringList m_diagnosticsLines;
     QString m_libraryLastError;
     QString m_pendingAddRootPath;
     qint64 m_pendingAddRootIssuedMs{0};
@@ -223,6 +265,7 @@ private:
     qint64 m_pendingQueueSelectionUntilMs{0};
     QTimer m_snapshotNotifyTimer;
     QTimer m_analysisNotifyTimer;
+    QTimer m_globalSearchDebounceTimer;
     QByteArray m_analysisBuffer;
     qsizetype m_analysisBufferReadOffset{0};
     bool m_hasAnalysisFrameSeq{false};

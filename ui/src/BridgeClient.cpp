@@ -13,9 +13,12 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QSet>
+#include <QStandardPaths>
+#include <QTextStream>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QtEndian>
@@ -26,6 +29,7 @@ constexpr quint8 kAnalysisFlagWaveform = 0x01;
 constexpr quint8 kAnalysisFlagReset = 0x02;
 constexpr quint8 kAnalysisFlagSpectrogram = 0x04;
 constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
+constexpr int kMaxDiagnosticsLines = 2000;
 
 bool isNewerSeq(quint32 seq, quint32 last) {
     return static_cast<qint32>(seq - last) > 0;
@@ -158,6 +162,9 @@ QString playbackStateText(int state, const QString &fallback) {
 BridgeClient::BridgeClient(QObject *parent)
     : QObject(parent) {
     m_fileBrowserName = detectFileBrowserName();
+    m_diagnosticsLogPath = resolveDiagnosticsLogPath();
+    reloadDiagnosticsFromDisk();
+    logDiagnostic(QStringLiteral("ui"), QStringLiteral("BridgeClient started"));
 
     m_snapshotNotifyTimer.setSingleShot(true);
     m_snapshotNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_SNAPSHOT_NOTIFY_MS", 100));
@@ -177,6 +184,10 @@ BridgeClient::BridgeClient(QObject *parent)
         }
     });
 
+    m_globalSearchDebounceTimer.setSingleShot(true);
+    m_globalSearchDebounceTimer.setInterval(readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 120));
+    connect(&m_globalSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushGlobalSearchQuery);
+
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
@@ -186,6 +197,7 @@ BridgeClient::BridgeClient(QObject *parent)
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
     m_analysisNotifyTimer.stop();
+    m_globalSearchDebounceTimer.stop();
     if (m_ffiBridge != nullptr) {
         ferrous_ffi_bridge_destroy(m_ffiBridge);
         m_ffiBridge = nullptr;
@@ -195,6 +207,7 @@ BridgeClient::~BridgeClient() {
 bool BridgeClient::startInProcessBridge() {
     m_ffiBridge = ferrous_ffi_bridge_create();
     if (m_ffiBridge == nullptr) {
+        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("failed to create in-process bridge"));
         emit bridgeError(QStringLiteral("failed to create in-process Rust bridge"));
         return false;
     }
@@ -204,6 +217,7 @@ bool BridgeClient::startInProcessBridge() {
         m_connected = true;
         emit connectedChanged();
     }
+    logDiagnostic(QStringLiteral("bridge"), QStringLiteral("in-process bridge created"));
     requestSnapshot();
     return true;
 }
@@ -251,6 +265,40 @@ void BridgeClient::pollInProcessBridge() {
         applyLibraryTreeFrame(versionInt, treeBytes);
     }
 
+    bool anySearchChanged = false;
+    int processedSearchFrames = 0;
+    constexpr int kMaxSearchFramesPerPass = 4;
+    while (processedSearchFrames < kMaxSearchFramesPerPass) {
+        std::size_t len = 0;
+        std::uint32_t seq = 0;
+        std::uint8_t *searchPtr = ferrous_ffi_bridge_pop_search_results(
+            m_ffiBridge,
+            &len,
+            &seq);
+        if (searchPtr == nullptr || len == 0) {
+            break;
+        }
+        processedSearchFrames++;
+        const QByteArray payload(
+            reinterpret_cast<const char *>(searchPtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_search_results(searchPtr, len);
+
+        BinaryBridgeCodec::DecodedSearchResults decoded;
+        QString decodeError;
+        if (!BinaryBridgeCodec::decodeSearchResultsFrame(payload, &decoded, &decodeError)) {
+            logDiagnostic(
+                QStringLiteral("search"),
+                QStringLiteral("decode error: %1").arg(decodeError));
+            emit bridgeError(QStringLiteral("invalid search frame: %1").arg(decodeError));
+            continue;
+        }
+        if (seq != 0) {
+            decoded.seq = seq;
+        }
+        anySearchChanged |= processSearchResultsFrame(decoded);
+    }
+
     int processedEvents = 0;
     constexpr int kMaxEventsPerPass = 3;
     while (processedEvents < kMaxEventsPerPass) {
@@ -268,6 +316,9 @@ void BridgeClient::pollInProcessBridge() {
         BinaryBridgeCodec::DecodedSnapshot decoded;
         QString decodeError;
         if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
+            logDiagnostic(
+                QStringLiteral("bridge"),
+                QStringLiteral("snapshot decode error: %1").arg(decodeError));
             emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
             continue;
         }
@@ -276,6 +327,9 @@ void BridgeClient::pollInProcessBridge() {
 
     if (anySnapshotChanged) {
         scheduleSnapshotChanged();
+    }
+    if (anySearchChanged) {
+        emit globalSearchResultsChanged();
     }
 }
 
@@ -391,6 +445,14 @@ int BridgeClient::libraryTrackCount() const {
     return m_libraryTrackCount;
 }
 
+int BridgeClient::libraryArtistCount() const {
+    return m_libraryArtistCount;
+}
+
+int BridgeClient::libraryAlbumCount() const {
+    return m_libraryAlbumCount;
+}
+
 QStringList BridgeClient::libraryRoots() const {
     return m_libraryRoots;
 }
@@ -425,6 +487,30 @@ double BridgeClient::libraryScanFilesPerSecond() const {
 
 double BridgeClient::libraryScanEtaSeconds() const {
     return m_libraryScanEtaSeconds;
+}
+
+QVariantList BridgeClient::globalSearchArtistResults() const {
+    return m_globalSearchArtistResults;
+}
+
+QVariantList BridgeClient::globalSearchAlbumResults() const {
+    return m_globalSearchAlbumResults;
+}
+
+QVariantList BridgeClient::globalSearchTrackResults() const {
+    return m_globalSearchTrackResults;
+}
+
+quint32 BridgeClient::globalSearchSeq() const {
+    return m_globalSearchSeq;
+}
+
+QString BridgeClient::diagnosticsText() const {
+    return m_diagnosticsText;
+}
+
+QString BridgeClient::diagnosticsLogPath() const {
+    return m_diagnosticsLogPath;
 }
 
 bool BridgeClient::connected() const {
@@ -807,6 +893,44 @@ void BridgeClient::setLibrarySortMode(int mode) {
         static_cast<qint32>(clamped)));
 }
 
+void BridgeClient::setGlobalSearchQuery(const QString &query) {
+    const QString nextQuery = query;
+    if (!m_globalSearchDebounceTimer.isActive()
+        && m_pendingGlobalSearchQuery == nextQuery
+        && m_lastGlobalSearchQuerySent == nextQuery) {
+        return;
+    }
+    if (m_pendingGlobalSearchQuery == nextQuery && m_globalSearchDebounceTimer.isActive()) {
+        return;
+    }
+    m_pendingGlobalSearchQuery = nextQuery;
+
+    if (nextQuery.trimmed().isEmpty()) {
+        bool changed = false;
+        if (!m_globalSearchArtistResults.isEmpty()) {
+            m_globalSearchArtistResults.clear();
+            changed = true;
+        }
+        if (!m_globalSearchAlbumResults.isEmpty()) {
+            m_globalSearchAlbumResults.clear();
+            changed = true;
+        }
+        if (!m_globalSearchTrackResults.isEmpty()) {
+            m_globalSearchTrackResults.clear();
+            changed = true;
+        }
+        if (changed) {
+            emit globalSearchResultsChanged();
+        }
+        logDiagnostic(QStringLiteral("search"), QStringLiteral("clear query"));
+        m_globalSearchDebounceTimer.stop();
+        flushGlobalSearchQuery();
+        return;
+    }
+
+    m_globalSearchDebounceTimer.start();
+}
+
 void BridgeClient::openInFileBrowser(const QString &path) {
     if (path.trimmed().isEmpty()) {
         return;
@@ -855,6 +979,235 @@ void BridgeClient::requestSnapshot() {
 
 void BridgeClient::shutdown() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
+}
+
+void BridgeClient::clearDiagnostics() {
+    m_diagnosticsLines.clear();
+    m_diagnosticsText.clear();
+    if (!m_diagnosticsLogPath.isEmpty()) {
+        QFile::remove(m_diagnosticsLogPath);
+    }
+    emit diagnosticsChanged();
+    logDiagnostic(QStringLiteral("ui"), QStringLiteral("diagnostics cleared"));
+}
+
+void BridgeClient::reloadDiagnosticsFromDisk() {
+    QStringList lines;
+    if (!m_diagnosticsLogPath.isEmpty()) {
+        QFile file(m_diagnosticsLogPath);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            while (!in.atEnd()) {
+                const QString line = in.readLine();
+                if (!line.isNull()) {
+                    lines.push_back(line);
+                }
+            }
+        }
+    }
+    if (lines.size() > kMaxDiagnosticsLines) {
+        lines = lines.mid(lines.size() - kMaxDiagnosticsLines);
+    }
+    m_diagnosticsLines = std::move(lines);
+    rebuildDiagnosticsText();
+    emit diagnosticsChanged();
+}
+
+void BridgeClient::logDiagnostic(const QString &category, const QString &message) {
+    const QString ts = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+    const QString cat = category.trimmed().isEmpty() ? QStringLiteral("app") : category.trimmed();
+    QString msg = message;
+    msg.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+    msg.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
+    const QString line = QStringLiteral("[%1] [%2] %3").arg(ts, cat, msg);
+
+    appendDiagnosticLine(line);
+
+    if (m_diagnosticsLogPath.isEmpty()) {
+        return;
+    }
+
+    const QFileInfo info(m_diagnosticsLogPath);
+    const QString dirPath = info.absolutePath();
+    if (!dirPath.isEmpty()) {
+        QDir dir(dirPath);
+        if (!dir.exists()) {
+            dir.mkpath(QStringLiteral("."));
+        }
+    }
+
+    QFile file(m_diagnosticsLogPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        return;
+    }
+
+    QTextStream out(&file);
+    out << line << '\n';
+}
+
+void BridgeClient::appendDiagnosticLine(const QString &line) {
+    if (line.isEmpty()) {
+        return;
+    }
+    m_diagnosticsLines.push_back(line);
+    if (m_diagnosticsLines.size() > kMaxDiagnosticsLines) {
+        const int removeCount = m_diagnosticsLines.size() - kMaxDiagnosticsLines;
+        m_diagnosticsLines.erase(
+            m_diagnosticsLines.begin(),
+            m_diagnosticsLines.begin() + removeCount);
+    }
+    rebuildDiagnosticsText();
+    emit diagnosticsChanged();
+}
+
+void BridgeClient::rebuildDiagnosticsText() {
+    m_diagnosticsText = m_diagnosticsLines.join(QLatin1Char('\n'));
+}
+
+QString BridgeClient::resolveDiagnosticsLogPath() {
+    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (baseDir.isEmpty()) {
+        baseDir = QDir::tempPath();
+    }
+    if (baseDir.isEmpty()) {
+        return {};
+    }
+
+    QDir dir(baseDir);
+    if (!dir.exists()) {
+        dir.mkpath(QStringLiteral("."));
+    }
+    return dir.filePath(QStringLiteral("diagnostics.log"));
+}
+
+bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame) {
+    if (m_latestGlobalSearchSeqSent != 0
+        && frame.seq != m_latestGlobalSearchSeqSent
+        && !isNewerSeq(frame.seq, m_latestGlobalSearchSeqSent)) {
+        logDiagnostic(
+            QStringLiteral("search"),
+            QStringLiteral("drop stale frame seq=%1 latestSent=%2")
+                .arg(frame.seq)
+                .arg(m_latestGlobalSearchSeqSent));
+        return false;
+    }
+    if (m_globalSearchSeq != 0
+        && frame.seq != m_globalSearchSeq
+        && !isNewerSeq(frame.seq, m_globalSearchSeq)) {
+        logDiagnostic(
+            QStringLiteral("search"),
+            QStringLiteral("drop non-new frame seq=%1 current=%2")
+                .arg(frame.seq)
+                .arg(m_globalSearchSeq));
+        return false;
+    }
+
+    QVariantList artistRows;
+    QVariantList albumRows;
+    QVariantList trackRows;
+    artistRows.reserve(frame.rows.size());
+    albumRows.reserve(frame.rows.size());
+    trackRows.reserve(frame.rows.size());
+
+    for (const auto &row : frame.rows) {
+        QVariantMap item;
+        item.insert(QStringLiteral("rowType"), row.rowType);
+        item.insert(QStringLiteral("score"), row.score);
+        item.insert(QStringLiteral("label"), row.label);
+        item.insert(QStringLiteral("artist"), row.artist);
+        item.insert(QStringLiteral("album"), row.album);
+        item.insert(QStringLiteral("genre"), row.genre);
+        item.insert(QStringLiteral("count"), row.count);
+        item.insert(QStringLiteral("coverPath"), row.coverPath);
+        item.insert(
+            QStringLiteral("coverUrl"),
+            row.coverPath.isEmpty() ? QString{} : libraryThumbnailSource(row.coverPath));
+        item.insert(QStringLiteral("artistKey"), row.artistKey);
+        item.insert(QStringLiteral("albumKey"), row.albumKey);
+        item.insert(QStringLiteral("trackKey"), row.trackKey);
+        item.insert(QStringLiteral("trackPath"), row.trackPath);
+        if (row.year != std::numeric_limits<int>::min()) {
+            item.insert(QStringLiteral("year"), row.year);
+        } else {
+            item.insert(QStringLiteral("year"), QVariant{});
+        }
+        if (row.trackNumber > 0) {
+            item.insert(QStringLiteral("trackNumber"), row.trackNumber);
+        } else {
+            item.insert(QStringLiteral("trackNumber"), QVariant{});
+        }
+        item.insert(QStringLiteral("lengthSeconds"), row.lengthSeconds);
+        item.insert(
+            QStringLiteral("lengthText"),
+            row.lengthSeconds >= 0.0f
+                ? formatDurationCompact(static_cast<double>(row.lengthSeconds))
+                : QStringLiteral("--:--"));
+        switch (row.rowType) {
+        case BinaryBridgeCodec::SearchRowArtist:
+            artistRows.push_back(item);
+            break;
+        case BinaryBridgeCodec::SearchRowAlbum:
+            albumRows.push_back(item);
+            break;
+        case BinaryBridgeCodec::SearchRowTrack:
+            trackRows.push_back(item);
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (m_globalSearchSeq == frame.seq
+        && m_globalSearchArtistResults == artistRows
+        && m_globalSearchAlbumResults == albumRows
+        && m_globalSearchTrackResults == trackRows) {
+        logDiagnostic(
+            QStringLiteral("search"),
+            QStringLiteral("frame seq=%1 unchanged").arg(frame.seq));
+        return false;
+    }
+
+    logDiagnostic(
+        QStringLiteral("search"),
+        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4")
+            .arg(frame.seq)
+            .arg(artistRows.size())
+            .arg(albumRows.size())
+            .arg(trackRows.size()));
+    m_globalSearchSeq = frame.seq;
+    m_globalSearchArtistResults = std::move(artistRows);
+    m_globalSearchAlbumResults = std::move(albumRows);
+    m_globalSearchTrackResults = std::move(trackRows);
+    return true;
+}
+
+void BridgeClient::flushGlobalSearchQuery() {
+    if (m_ffiBridge == nullptr) {
+        logDiagnostic(QStringLiteral("search"), QStringLiteral("skip send: bridge unavailable"));
+        return;
+    }
+    if (m_pendingGlobalSearchQuery == m_lastGlobalSearchQuerySent) {
+        logDiagnostic(QStringLiteral("search"), QStringLiteral("skip duplicate query"));
+        return;
+    }
+    const quint32 seq = m_nextGlobalSearchSeq++;
+    m_latestGlobalSearchSeqSent = seq;
+    m_lastGlobalSearchQuerySent = m_pendingGlobalSearchQuery;
+    const QString trimmedQuery = m_pendingGlobalSearchQuery.trimmed();
+    QString preview = trimmedQuery;
+    if (preview.size() > 64) {
+        preview = preview.left(64) + QStringLiteral("...");
+    }
+    logDiagnostic(
+        QStringLiteral("search"),
+        QStringLiteral("send query seq=%1 chars=%2 text=\"%3\"")
+            .arg(seq)
+            .arg(trimmedQuery.size())
+            .arg(preview));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandSearchQuery(
+        BinaryBridgeCodec::CmdSetSearchQuery,
+        seq,
+        m_pendingGlobalSearchQuery));
 }
 
 void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
@@ -1089,15 +1442,20 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
 
 void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     if (payload.isEmpty()) {
+        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop empty command payload"));
         emit bridgeError(QStringLiteral("failed to encode binary bridge command"));
         return;
     }
     if (m_ffiBridge == nullptr) {
+        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command: bridge not initialized"));
         emit bridgeError(QStringLiteral("bridge is not initialized"));
         return;
     }
     const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());
     if (!ferrous_ffi_bridge_send_binary(m_ffiBridge, ptr, static_cast<std::size_t>(payload.size()))) {
+        logDiagnostic(
+            QStringLiteral("bridge"),
+            QStringLiteral("failed to send command bytes=%1").arg(payload.size()));
         emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
     }
 }
@@ -1372,6 +1730,18 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         changed = true;
     }
 
+    const int artists = snapshot.library.present ? snapshot.library.artistCount : m_libraryArtistCount;
+    if (m_libraryArtistCount != artists) {
+        m_libraryArtistCount = artists;
+        changed = true;
+    }
+
+    const int albums = snapshot.library.present ? snapshot.library.albumCount : m_libraryAlbumCount;
+    if (m_libraryAlbumCount != albums) {
+        m_libraryAlbumCount = albums;
+        changed = true;
+    }
+
     const QStringList rootPaths = snapshot.library.present ? snapshot.library.rootPaths : m_libraryRoots;
     if (m_libraryRoots != rootPaths) {
         m_libraryRoots = rootPaths;
@@ -1448,5 +1818,24 @@ QString BridgeClient::formatSeconds(double seconds) {
     const int secs = total % 60;
     return QStringLiteral("%1:%2")
         .arg(minutes, 2, 10, QChar('0'))
+        .arg(secs, 2, 10, QChar('0'));
+}
+
+QString BridgeClient::formatDurationCompact(double seconds) {
+    if (!std::isfinite(seconds) || seconds < 0.0) {
+        return QStringLiteral("--:--");
+    }
+    const int total = static_cast<int>(seconds + 0.5);
+    const int hours = total / 3600;
+    const int minutes = (total % 3600) / 60;
+    const int secs = total % 60;
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3")
+            .arg(hours)
+            .arg(minutes, 2, 10, QChar('0'))
+            .arg(secs, 2, 10, QChar('0'));
+    }
+    return QStringLiteral("%1:%2")
+        .arg(minutes)
         .arg(secs, 2, 10, QChar('0'));
 }

@@ -17,9 +17,23 @@ pub struct LibraryTrack {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub genre: String,
     pub year: Option<i32>,
     pub track_no: Option<u32>,
     pub duration_secs: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LibrarySearchTrack {
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub year: Option<i32>,
+    pub track_no: Option<u32>,
+    pub duration_secs: Option<f32>,
+    pub score: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -283,6 +297,7 @@ fn apply_pending_upserts_for_root(
             title: indexed.title,
             artist: indexed.artist,
             album: indexed.album,
+            genre: indexed.genre,
             year: indexed.year,
             track_no: indexed.track_no,
             duration_secs: indexed.duration_secs,
@@ -325,6 +340,84 @@ fn library_db_path() -> anyhow::Result<PathBuf> {
         .join("library.sqlite3"))
 }
 
+fn build_fts_query(raw: &str) -> Option<String> {
+    let mut terms = Vec::new();
+    for part in raw.split_whitespace() {
+        let token = part.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let escaped = token.replace('"', "\"\"");
+        terms.push(format!("\"{escaped}\"*"));
+    }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" AND "))
+    }
+}
+
+pub fn search_tracks_fts(raw_query: &str, limit: usize) -> Result<Vec<LibrarySearchTrack>, String> {
+    let Some(query) = build_fts_query(raw_query) else {
+        return Ok(Vec::new());
+    };
+    let limit = limit.clamp(1, 5000) as i64;
+
+    let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
+    // Search runs on keystrokes and can coincide with long-running scan writes.
+    // Keep lock waits short so we can fail fast and use in-memory fallback.
+    let _ = conn.busy_timeout(Duration::from_millis(40));
+
+    let mut out = Vec::new();
+    let mut stmt = conn
+        .prepare(
+            r"
+            SELECT
+                t.path,
+                t.title,
+                t.artist,
+                t.album,
+                t.genre,
+                t.year,
+                t.track_no,
+                t.duration_secs,
+                bm25(tracks_fts) AS rank
+            FROM tracks_fts
+            JOIN tracks t ON t.rowid = tracks_fts.rowid
+            WHERE tracks_fts MATCH ?1
+            ORDER BY rank ASC, t.path COLLATE NOCASE
+            LIMIT ?2
+            ",
+        )
+        .map_err(|e| format!("failed to prepare search query: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![query, limit], |row| {
+            Ok(LibrarySearchTrack {
+                path: PathBuf::from(row.get::<_, String>(0)?),
+                title: row.get::<_, String>(1)?,
+                artist: row.get::<_, String>(2)?,
+                album: row.get::<_, String>(3)?,
+                genre: row.get::<_, String>(4)?,
+                year: row
+                    .get::<_, Option<i64>>(5)?
+                    .and_then(|v| i32::try_from(v).ok()),
+                track_no: row
+                    .get::<_, Option<i64>>(6)?
+                    .and_then(|v| u32::try_from(v).ok()),
+                duration_secs: row.get::<_, Option<f32>>(7)?,
+                score: row.get::<_, f64>(8).map_or(0.0, |v| v as f32),
+            })
+        })
+        .map_err(|e| format!("failed to execute search query: {e}"))?;
+
+    for row in rows.flatten() {
+        out.push(row);
+    }
+
+    Ok(out)
+}
+
 fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r"
@@ -339,6 +432,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             title TEXT NOT NULL,
             artist TEXT NOT NULL,
             album TEXT NOT NULL,
+            genre TEXT NOT NULL DEFAULT '',
             year INTEGER,
             track_no INTEGER,
             duration_secs REAL,
@@ -354,6 +448,10 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         "ALTER TABLE tracks ADD COLUMN root_path TEXT NOT NULL DEFAULT ''",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN track_no INTEGER", []);
 
@@ -364,8 +462,43 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
         CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
         CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+        CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre);
+        CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
+            title,
+            artist,
+            album,
+            genre,
+            path UNINDEXED,
+            content='tracks',
+            content_rowid='rowid',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+        CREATE TRIGGER IF NOT EXISTS tracks_fts_ai AFTER INSERT ON tracks BEGIN
+            INSERT INTO tracks_fts(rowid, title, artist, album, genre, path)
+            VALUES (new.rowid, new.title, new.artist, new.album, new.genre, new.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS tracks_fts_ad AFTER DELETE ON tracks BEGIN
+            INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre, path)
+            VALUES('delete', old.rowid, old.title, old.artist, old.album, old.genre, old.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS tracks_fts_au AFTER UPDATE ON tracks BEGIN
+            INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre, path)
+            VALUES('delete', old.rowid, old.title, old.artist, old.album, old.genre, old.path);
+            INSERT INTO tracks_fts(rowid, title, artist, album, genre, path)
+            VALUES (new.rowid, new.title, new.artist, new.album, new.genre, new.path);
+        END;
         ",
     )?;
+
+    let track_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+        .unwrap_or(0);
+    let fts_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks_fts", [], |row| row.get(0))
+        .unwrap_or(0);
+    if track_count > 0 && fts_count == 0 {
+        let _ = conn.execute("INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild')", []);
+    }
 
     Ok(())
 }
@@ -388,7 +521,7 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
 
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, root_path, title, artist, album, year, track_no, duration_secs
+        SELECT path, root_path, title, artist, album, genre, year, track_no, duration_secs
         FROM tracks
         ORDER BY
             root_path COLLATE NOCASE,
@@ -402,13 +535,14 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
                 title: row.get::<_, String>(2)?,
                 artist: row.get::<_, String>(3)?,
                 album: row.get::<_, String>(4)?,
+                genre: row.get::<_, String>(5)?,
                 year: row
-                    .get::<_, Option<i64>>(5)?
+                    .get::<_, Option<i64>>(6)?
                     .and_then(|v| i32::try_from(v).ok()),
                 track_no: row
-                    .get::<_, Option<i64>>(6)?
+                    .get::<_, Option<i64>>(7)?
                     .and_then(|v| u32::try_from(v).ok()),
-                duration_secs: row.get::<_, Option<f32>>(7)?,
+                duration_secs: row.get::<_, Option<f32>>(8)?,
             })
         }) {
             for row in rows.flatten() {
@@ -569,6 +703,7 @@ where
                 title,
                 artist,
                 album,
+                genre,
                 year,
                 track_no,
                 duration_secs,
@@ -576,12 +711,13 @@ where
                 size_bytes,
                 indexed_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(path) DO UPDATE SET
                 root_path=excluded.root_path,
                 title=excluded.title,
                 artist=excluded.artist,
                 album=excluded.album,
+                genre=excluded.genre,
                 year=excluded.year,
                 track_no=excluded.track_no,
                 duration_secs=excluded.duration_secs,
@@ -684,6 +820,7 @@ where
                 indexed.title.as_str(),
                 indexed.artist.as_str(),
                 indexed.album.as_str(),
+                indexed.genre.as_str(),
                 indexed.year.map(i64::from),
                 indexed.track_no.map(i64::from),
                 indexed.duration_secs,
@@ -837,6 +974,7 @@ struct IndexedTrack {
     title: String,
     artist: String,
     album: String,
+    genre: String,
     year: Option<i32>,
     track_no: Option<u32>,
     duration_secs: Option<f32>,
@@ -851,6 +989,7 @@ fn read_track_info(path: &Path) -> IndexedTrack {
             .to_owned(),
         artist: String::new(),
         album: String::new(),
+        genre: String::new(),
         year: None,
         track_no: None,
         duration_secs: None,
@@ -866,6 +1005,9 @@ fn read_track_info(path: &Path) -> IndexedTrack {
             }
             if let Some(album) = tag.album() {
                 out.album = album.into_owned();
+            }
+            if let Some(genre) = tag.genre() {
+                out.genre = genre.into_owned();
             }
             out.year = tag.date().map(|v| i32::from(v.year));
             out.track_no = tag.track();

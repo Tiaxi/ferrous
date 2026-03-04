@@ -47,6 +47,12 @@ Kirigami.ApplicationWindow {
     property real albumArtPanY: 0.0
     property string pendingFolderDialogContext: ""
     property string transientBridgeError: ""
+    property string libraryTypeAheadBuffer: ""
+    property string pendingLibraryRevealSelectionKey: ""
+    property var pendingLibraryRevealExpandKeys: []
+    property int pendingLibraryRevealAttempts: 0
+    property var globalSearchDisplayRows: []
+    property int globalSearchSelectedDisplayIndex: -1
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -82,6 +88,8 @@ Kirigami.ApplicationWindow {
         property bool libraryScanInProgress: false
         property int libraryRootCount: 0
         property int libraryTrackCount: 0
+        property int libraryArtistCount: 0
+        property int libraryAlbumCount: 0
         property var libraryRoots: []
         property int librarySortMode: 0
         property string fileBrowserName: "File Manager"
@@ -91,10 +99,18 @@ Kirigami.ApplicationWindow {
         property int libraryScanProcessed: 0
         property real libraryScanFilesPerSecond: 0
         property real libraryScanEtaSeconds: -1
+        property var globalSearchArtistResults: []
+        property var globalSearchAlbumResults: []
+        property var globalSearchTrackResults: []
+        property int globalSearchSeq: 0
+        property string diagnosticsText: ""
+        property string diagnosticsLogPath: ""
         property bool connected: false
         signal snapshotChanged()
         signal analysisChanged()
         signal libraryTreeFrameReceived(int version, var treeBytes)
+        signal globalSearchResultsChanged()
+        signal diagnosticsChanged()
         signal bridgeError(string message)
         function play() {}
         function pause() {}
@@ -131,12 +147,15 @@ Kirigami.ApplicationWindow {
         function rescanAllLibraryRoots() {}
         function setLibraryNodeExpanded(key, expanded) {}
         function setLibrarySortMode(mode) {}
+        function setGlobalSearchQuery(query) {}
         function openInFileBrowser(path) {}
         function openContainingFolder(path) {}
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
         function shutdown() {}
+        function clearDiagnostics() {}
+        function reloadDiagnosticsFromDisk() {}
         function takeSpectrogramRowsDeltaPacked() { return ({ rows: 0, bins: 0, data: "" }) }
     }
 
@@ -199,6 +218,20 @@ Kirigami.ApplicationWindow {
         onTriggered: root.transientBridgeError = ""
     }
 
+    Timer {
+        id: libraryTypeAheadTimer
+        interval: 900
+        repeat: false
+        onTriggered: root.libraryTypeAheadBuffer = ""
+    }
+
+    Timer {
+        id: libraryRevealRetryTimer
+        interval: 80
+        repeat: false
+        onTriggered: root.applyPendingLibraryReveal()
+    }
+
     function moveSelected(delta) {
         const from = uiBridge.selectedQueueIndex
         if (from < 0 || uiBridge.queueLength <= 0) {
@@ -238,7 +271,12 @@ Kirigami.ApplicationWindow {
             return true
         }
         if (rowType === "album") {
-            uiBridge.appendAlbumByKey(rowMap.artist || "", rowMap.name || "")
+            const albumPaths = rowMap.playPaths || []
+            if (albumPaths.length > 0) {
+                uiBridge.appendPaths(albumPaths)
+            } else {
+                uiBridge.appendAlbumByKey(rowMap.artist || "", rowMap.name || "")
+            }
             return true
         }
         if (rowType === "artist") {
@@ -259,7 +297,12 @@ Kirigami.ApplicationWindow {
             return true
         }
         if (rowType === "album") {
-            uiBridge.replaceAlbumByKey(rowMap.artist || "", rowMap.name || "")
+            const albumPaths = rowMap.playPaths || []
+            if (albumPaths.length > 0) {
+                uiBridge.replaceWithPaths(albumPaths)
+            } else {
+                uiBridge.replaceAlbumByKey(rowMap.artist || "", rowMap.name || "")
+            }
             return true
         }
         if (rowType === "artist") {
@@ -533,18 +576,8 @@ Kirigami.ApplicationWindow {
         if (!key || key.length === 0) {
             return
         }
-        if (!libraryAlbumView) {
-            libraryModel.toggleKey(key)
-            return
-        }
-        const preserveY = libraryAlbumView.contentY
-        const restoreY = function() {
-            const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
-            libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
-        }
+        pendingLibraryAnchorValid = false
         libraryModel.toggleKey(key)
-        restoreY()
-        Qt.callLater(restoreY)
     }
 
     function captureLibraryViewAnchor() {
@@ -809,9 +842,354 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    function focusLibrarySearch() {
-        librarySearchField.forceActiveFocus()
-        librarySearchField.selectAll()
+    function currentLibrarySelectionIndex() {
+        if (selectedLibrarySelectionKey.length > 0) {
+            const selectedIndex = libraryModel.indexForSelectionKey(selectedLibrarySelectionKey)
+            if (selectedIndex >= 0) {
+                return selectedIndex
+            }
+        }
+        if (libraryModel.count > 0) {
+            return 0
+        }
+        return -1
+    }
+
+    function selectLibraryIndex(index) {
+        if (index < 0 || index >= libraryModel.count) {
+            return false
+        }
+        const rowMap = libraryModel.rowDataForRow(index)
+        if (!rowMap || !(rowMap.selectionKey || "").length) {
+            return false
+        }
+        setLibrarySingleSelection(index, rowMap)
+        if (libraryAlbumView) {
+            libraryAlbumView.positionViewAtIndex(index, ListView.Contain)
+        }
+        return true
+    }
+
+    function selectLibraryRelative(delta) {
+        if (libraryModel.count <= 0) {
+            return
+        }
+        const current = currentLibrarySelectionIndex()
+        const base = current >= 0 ? current : 0
+        const next = Math.max(0, Math.min(libraryModel.count - 1, base + delta))
+        selectLibraryIndex(next)
+    }
+
+    function expandLibrarySelection() {
+        const index = currentLibrarySelectionIndex()
+        if (index < 0) {
+            return
+        }
+        if (selectedLibrarySelectionKey.length === 0) {
+            selectLibraryIndex(index)
+        }
+        const rowMap = libraryModel.rowDataForRow(index)
+        const rowType = rowMap.rowType || ""
+        const key = rowMap.key || ""
+        const expanded = !!rowMap.expanded
+        const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0 && key.length > 0
+        if (hasChildren && !expanded) {
+            toggleLibraryNode(key)
+            return
+        }
+        if (index + 1 < libraryModel.count) {
+            const nextRow = libraryModel.rowDataForRow(index + 1)
+            const nextDepth = nextRow.depth !== undefined ? nextRow.depth : 0
+            const currentDepth = rowMap.depth !== undefined ? rowMap.depth : 0
+            if (nextDepth > currentDepth) {
+                selectLibraryIndex(index + 1)
+            }
+        }
+    }
+
+    function collapseLibrarySelection() {
+        const index = currentLibrarySelectionIndex()
+        if (index < 0) {
+            return
+        }
+        if (selectedLibrarySelectionKey.length === 0) {
+            selectLibraryIndex(index)
+        }
+        const rowMap = libraryModel.rowDataForRow(index)
+        const key = rowMap.key || ""
+        const expanded = !!rowMap.expanded
+        const rowType = rowMap.rowType || ""
+        const currentDepth = rowMap.depth !== undefined ? rowMap.depth : 0
+        const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0 && key.length > 0
+        if (hasChildren && expanded) {
+            toggleLibraryNode(key)
+            return
+        }
+        for (let i = index - 1; i >= 0; --i) {
+            const candidate = libraryModel.rowDataForRow(i)
+            const candidateDepth = candidate.depth !== undefined ? candidate.depth : 0
+            if (candidateDepth < currentDepth) {
+                selectLibraryIndex(i)
+                return
+            }
+        }
+    }
+
+    function activateLibrarySelection() {
+        const index = currentLibrarySelectionIndex()
+        if (index < 0) {
+            return
+        }
+        if (selectedLibrarySelectionKey.length === 0) {
+            selectLibraryIndex(index)
+        }
+        const rowMap = libraryModel.rowDataForRow(index)
+        const rows = rowsForLibraryAction(rowMap)
+        if (rows.length > 0) {
+            playLibraryRows(rows)
+        }
+    }
+
+    function libraryTypeAheadSearch(prefix) {
+        if (prefix.length === 0) {
+            return false
+        }
+        const total = libraryModel.count
+        if (total <= 0) {
+            return false
+        }
+        for (let i = 0; i < total; ++i) {
+            const rowMap = libraryModel.rowDataForRow(i)
+            if ((rowMap.rowType || "") !== "artist") {
+                continue
+            }
+            const name = (rowMap.artist || "").toLowerCase()
+            if (name.startsWith(prefix)) {
+                selectLibraryIndex(i)
+                return true
+            }
+        }
+        return false
+    }
+
+    function handleLibraryKeyPress(event) {
+        if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
+            return
+        }
+        if (libraryModel.count <= 0) {
+            return
+        }
+        if (event.key === Qt.Key_Up) {
+            selectLibraryRelative(-1)
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Down) {
+            selectLibraryRelative(1)
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Right) {
+            expandLibrarySelection()
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Left) {
+            collapseLibrarySelection()
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Space) {
+            const index = currentLibrarySelectionIndex()
+            if (index >= 0) {
+                const rowMap = libraryModel.rowDataForRow(index)
+                const rowType = rowMap.rowType || ""
+                if (rowType !== "track" && (rowMap.key || "").length > 0 && (rowMap.count || 0) > 0) {
+                    toggleLibraryNode(rowMap.key || "")
+                }
+            }
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            activateLibrarySelection()
+            event.accepted = true
+            return
+        }
+
+        const text = event.text || ""
+        if (text.length === 1 && text !== "\n" && text !== "\r" && text !== "\t") {
+            const nextPrefix = (root.libraryTypeAheadBuffer + text).toLowerCase()
+            root.libraryTypeAheadBuffer = nextPrefix
+            libraryTypeAheadTimer.restart()
+            if (libraryTypeAheadSearch(nextPrefix)) {
+                event.accepted = true
+            }
+        }
+    }
+
+    function rebuildGlobalSearchDisplayRows() {
+        const rows = []
+        const appendSection = function(title, rowType, sourceRows) {
+            if (!sourceRows || sourceRows.length === 0) {
+                return
+            }
+            rows.push({
+                kind: "section",
+                sectionTitle: title,
+                rowType: rowType
+            })
+            rows.push({
+                kind: "columns",
+                rowType: rowType
+            })
+            for (let i = 0; i < sourceRows.length; ++i) {
+                const source = sourceRows[i]
+                const item = { kind: "item", rowType: rowType }
+                for (const key in source) {
+                    if (key === "rowType") {
+                        continue
+                    }
+                    item[key] = source[key]
+                }
+                rows.push(item)
+            }
+        }
+        appendSection("Artists", "artist", uiBridge.globalSearchArtistResults || [])
+        appendSection("Albums", "album", uiBridge.globalSearchAlbumResults || [])
+        appendSection("Tracks", "track", uiBridge.globalSearchTrackResults || [])
+        globalSearchDisplayRows = rows
+        const firstIndex = nextSearchSelectableIndex(-1, 1, false)
+        if (globalSearchSelectedDisplayIndex < 0 || !isSearchRowSelectable(globalSearchSelectedDisplayIndex)) {
+            globalSearchSelectedDisplayIndex = firstIndex
+        } else if (globalSearchSelectedDisplayIndex >= globalSearchDisplayRows.length) {
+            globalSearchSelectedDisplayIndex = firstIndex
+        }
+    }
+
+    function isSearchRowSelectable(index) {
+        if (index < 0 || index >= globalSearchDisplayRows.length) {
+            return false
+        }
+        const row = globalSearchDisplayRows[index]
+        return row && row.kind === "item"
+    }
+
+    function nextSearchSelectableIndex(startIndex, step, wrap) {
+        if (globalSearchDisplayRows.length === 0) {
+            return -1
+        }
+        const direction = step < 0 ? -1 : 1
+        let index = startIndex
+        for (let i = 0; i < globalSearchDisplayRows.length; ++i) {
+            index += direction
+            if (index < 0 || index >= globalSearchDisplayRows.length) {
+                if (!wrap) {
+                    return -1
+                }
+                index = direction > 0 ? 0 : globalSearchDisplayRows.length - 1
+            }
+            if (isSearchRowSelectable(index)) {
+                return index
+            }
+        }
+        return -1
+    }
+
+    function selectGlobalSearchDisplayIndex(index) {
+        if (!isSearchRowSelectable(index)) {
+            return false
+        }
+        globalSearchSelectedDisplayIndex = index
+        if (globalSearchResultsView) {
+            globalSearchResultsView.positionViewAtIndex(index, ListView.Contain)
+        }
+        return true
+    }
+
+    function selectedGlobalSearchRow() {
+        if (!isSearchRowSelectable(globalSearchSelectedDisplayIndex)) {
+            return null
+        }
+        return globalSearchDisplayRows[globalSearchSelectedDisplayIndex]
+    }
+
+    function openGlobalSearch() {
+        globalSearchDialog.open()
+        globalSearchQueryField.forceActiveFocus()
+        globalSearchQueryField.selectAll()
+        uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
+        rebuildGlobalSearchDisplayRows()
+    }
+
+    function openDiagnostics() {
+        diagnosticsDialog.open()
+        uiBridge.reloadDiagnosticsFromDisk()
+    }
+
+    function requestLibraryRevealForSearchRow(row) {
+        if (!row) {
+            return
+        }
+        const expandKeys = []
+        if ((row.artistKey || "").length > 0) {
+            expandKeys.push(row.artistKey)
+        }
+        if ((row.albumKey || "").length > 0) {
+            expandKeys.push(row.albumKey)
+        }
+        pendingLibraryRevealExpandKeys = expandKeys
+        pendingLibraryRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")
+        pendingLibraryRevealAttempts = 24
+        for (let i = 0; i < expandKeys.length; ++i) {
+            uiBridge.setLibraryNodeExpanded(expandKeys[i], true)
+        }
+        Qt.callLater(root.applyPendingLibraryReveal)
+    }
+
+    function applyPendingLibraryReveal() {
+        if (pendingLibraryRevealSelectionKey.length === 0) {
+            return
+        }
+        const index = libraryModel.indexForSelectionKey(pendingLibraryRevealSelectionKey)
+        if (index >= 0) {
+            selectLibraryIndex(index)
+            pendingLibraryRevealSelectionKey = ""
+            pendingLibraryRevealExpandKeys = []
+            pendingLibraryRevealAttempts = 0
+            return
+        }
+        if (pendingLibraryRevealAttempts <= 0) {
+            pendingLibraryRevealSelectionKey = ""
+            pendingLibraryRevealExpandKeys = []
+            return
+        }
+        pendingLibraryRevealAttempts -= 1
+        libraryRevealRetryTimer.restart()
+    }
+
+    function activateGlobalSearchRow(row) {
+        if (!row || row.kind !== "item") {
+            return
+        }
+        const rowType = row.rowType || ""
+        if (rowType === "track") {
+            uiBridge.playTrack(row.trackPath || "")
+        } else if (rowType === "album") {
+            const albumName = (row.album || row.label || "").trim()
+            uiBridge.replaceAlbumByKey((row.artist || "").trim(), albumName)
+        } else if (rowType === "artist") {
+            uiBridge.replaceArtistByName((row.artist || row.label || "").trim())
+        }
+        requestLibraryRevealForSearchRow(row)
+        globalSearchDialog.close()
+    }
+
+    function activateGlobalSearchSelection() {
+        const row = selectedGlobalSearchRow()
+        if (row) {
+            activateGlobalSearchRow(row)
+        }
     }
 
     function urlToLocalPath(urlValue) {
@@ -924,10 +1302,15 @@ Kirigami.ApplicationWindow {
         onTriggered: root.selectQueueRelative(1)
     }
     Action {
-        id: focusSearchAction
-        text: "Focus Search"
+        id: globalSearchAction
+        text: "Global Search..."
         shortcut: StandardKey.Find
-        onTriggered: root.focusLibrarySearch()
+        onTriggered: root.openGlobalSearch()
+    }
+    Action {
+        id: diagnosticsAction
+        text: "Diagnostics..."
+        onTriggered: root.openDiagnostics()
     }
     Action {
         id: refreshSnapshotAction
@@ -1042,6 +1425,10 @@ Kirigami.ApplicationWindow {
 
     Shortcut {
         sequence: "Space"
+        enabled: !(libraryAlbumView && libraryAlbumView.activeFocus)
+            && !(globalSearchDialog.visible
+                && ((globalSearchQueryField && globalSearchQueryField.activeFocus)
+                    || (globalSearchResultsView && globalSearchResultsView.activeFocus)))
         onActivated: root.togglePlayPause()
     }
     Shortcut {
@@ -1097,13 +1484,15 @@ Kirigami.ApplicationWindow {
         Menu {
             title: "View"
             width: root.menuPopupWidth([
-                { label: focusSearchAction.text, shortcut: String(focusSearchAction.shortcut) },
+                { label: globalSearchAction.text, shortcut: String(globalSearchAction.shortcut) },
+                { label: diagnosticsAction.text, shortcut: "" },
                 { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
                 { label: autoCenterSelectionAction.text, shortcut: "" },
                 { label: resetSpectrogramAction.text, shortcut: "" },
                 { label: showFpsOverlayAction.text, shortcut: "" }
             ])
-            MenuItem { action: focusSearchAction }
+            MenuItem { action: globalSearchAction }
+            MenuItem { action: diagnosticsAction }
             MenuItem { action: refreshSnapshotAction }
             MenuSeparator {}
             MenuItem { action: autoCenterSelectionAction }
@@ -1320,6 +1709,458 @@ Kirigami.ApplicationWindow {
                             onToggled: root.autoCenterQueueSelection = checked
                         }
                     }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: globalSearchDialog
+        modal: true
+        title: "Global Search"
+        standardButtons: Dialog.Close
+        width: Math.min(1080, root.width - 80)
+        height: Math.min(720, root.height - 80)
+        onOpened: {
+            root.rebuildGlobalSearchDisplayRows()
+            globalSearchQueryField.forceActiveFocus()
+            globalSearchQueryField.selectAll()
+            uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
+        }
+        onClosed: {
+            uiBridge.setGlobalSearchQuery("")
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 8
+
+            TextField {
+                id: globalSearchQueryField
+                Layout.fillWidth: true
+                placeholderText: "Type artist, album, or track"
+                onTextChanged: {
+                    uiBridge.setGlobalSearchQuery(text)
+                }
+                Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Tab) {
+                        const direction = (event.modifiers & Qt.ShiftModifier) ? -1 : 1
+                        const next = root.nextSearchSelectableIndex(
+                            root.globalSearchSelectedDisplayIndex,
+                            direction,
+                            true)
+                        if (next >= 0) {
+                            root.selectGlobalSearchDisplayIndex(next)
+                            globalSearchResultsView.forceActiveFocus()
+                        }
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Down) {
+                        const next = root.nextSearchSelectableIndex(
+                            root.globalSearchSelectedDisplayIndex,
+                            1,
+                            true)
+                        if (next >= 0) {
+                            root.selectGlobalSearchDisplayIndex(next)
+                            globalSearchResultsView.forceActiveFocus()
+                        }
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Up) {
+                        const next = root.nextSearchSelectableIndex(
+                            root.globalSearchSelectedDisplayIndex,
+                            -1,
+                            true)
+                        if (next >= 0) {
+                            root.selectGlobalSearchDisplayIndex(next)
+                            globalSearchResultsView.forceActiveFocus()
+                        }
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        root.activateGlobalSearchSelection()
+                        event.accepted = true
+                    }
+                }
+            }
+
+            Label {
+                Layout.fillWidth: true
+                color: Kirigami.Theme.disabledTextColor
+                text: "Artists: " + (uiBridge.globalSearchArtistResults || []).length
+                    + " | Albums: " + (uiBridge.globalSearchAlbumResults || []).length
+                    + " | Tracks: " + (uiBridge.globalSearchTrackResults || []).length
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Qt.rgba(0, 0, 0, 0.02)
+                border.color: Qt.rgba(0, 0, 0, 0.08)
+
+                ListView {
+                    id: globalSearchResultsView
+                    anchors.fill: parent
+                    clip: true
+                    model: root.globalSearchDisplayRows
+                    spacing: 0
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar {
+                        policy: ScrollBar.AsNeeded
+                    }
+
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Tab) {
+                            const direction = (event.modifiers & Qt.ShiftModifier) ? -1 : 1
+                            const next = root.nextSearchSelectableIndex(
+                                root.globalSearchSelectedDisplayIndex,
+                                direction,
+                                true)
+                            if (next >= 0) {
+                                root.selectGlobalSearchDisplayIndex(next)
+                            }
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_Down) {
+                            const next = root.nextSearchSelectableIndex(
+                                root.globalSearchSelectedDisplayIndex,
+                                1,
+                                true)
+                            if (next >= 0) {
+                                root.selectGlobalSearchDisplayIndex(next)
+                            }
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_Up) {
+                            const next = root.nextSearchSelectableIndex(
+                                root.globalSearchSelectedDisplayIndex,
+                                -1,
+                                true)
+                            if (next >= 0) {
+                                root.selectGlobalSearchDisplayIndex(next)
+                            }
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                            root.activateGlobalSearchSelection()
+                            event.accepted = true
+                        }
+                    }
+
+                    delegate: Rectangle {
+                        readonly property var rowData: (modelData && typeof modelData === "object")
+                            ? modelData
+                            : ({})
+                        readonly property string kind: rowData.kind || ""
+                        readonly property string rowType: rowData.rowType || ""
+                        readonly property string sectionTitle: rowData.sectionTitle || ""
+                        readonly property string label: rowData.label || ""
+                        readonly property string artist: rowData.artist || ""
+                        readonly property string album: rowData.album || ""
+                        readonly property string genre: rowData.genre || ""
+                        readonly property string coverUrl: rowData.coverUrl || ""
+                        readonly property string lengthText: rowData.lengthText || ""
+                        readonly property var year: rowData.year
+                        readonly property var trackNumber: rowData.trackNumber
+                        readonly property var count: rowData.count
+                        width: ListView.view.width
+                        height: kind === "section" ? 30 : 24
+                        color: kind === "section"
+                            ? Kirigami.Theme.alternateBackgroundColor
+                            : (kind === "columns"
+                                ? Qt.rgba(0, 0, 0, 0.05)
+                                : (index === root.globalSearchSelectedDisplayIndex
+                                    ? Kirigami.Theme.highlightColor
+                                    : (index % 2 === 0
+                                        ? Kirigami.Theme.backgroundColor
+                                        : Kirigami.Theme.alternateBackgroundColor)))
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 8
+
+                            Label {
+                                visible: kind === "section"
+                                Layout.fillWidth: true
+                                text: sectionTitle || ""
+                                font.bold: true
+                            }
+
+                            RowLayout {
+                                visible: kind === "columns" && rowType === "artist"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: "Name (albums)"; Layout.fillWidth: true; font.bold: true }
+                            }
+
+                            RowLayout {
+                                visible: kind === "columns" && rowType === "album"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: ""; Layout.preferredWidth: 26; font.bold: true }
+                                Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
+                                Label { text: "Artist"; Layout.preferredWidth: 170; font.bold: true }
+                                Label { text: "Year"; Layout.preferredWidth: 52; font.bold: true }
+                                Label { text: "Genre"; Layout.preferredWidth: 120; font.bold: true }
+                                Label { text: "#"; Layout.preferredWidth: 34; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            }
+
+                            RowLayout {
+                                visible: kind === "columns" && rowType === "track"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: "#"; Layout.preferredWidth: 34; font.bold: true }
+                                Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
+                                Label { text: "Artist"; Layout.preferredWidth: 170; font.bold: true }
+                                Label { text: "Album"; Layout.preferredWidth: 190; font.bold: true }
+                                Label { text: "Genre"; Layout.preferredWidth: 120; font.bold: true }
+                                Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            }
+
+                            RowLayout {
+                                visible: kind === "item" && rowType === "artist"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: (label || "")
+                                        + " (" + (count !== undefined ? count : 0) + ")"
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                            }
+
+                            RowLayout {
+                                visible: kind === "item" && rowType === "album"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Item {
+                                    Layout.preferredWidth: 26
+                                    Layout.preferredHeight: 20
+                                    Image {
+                                        anchors.fill: parent
+                                        source: coverUrl || ""
+                                        fillMode: Image.PreserveAspectFit
+                                        asynchronous: true
+                                        cache: true
+                                        sourceSize.width: 32
+                                        sourceSize.height: 32
+                                    }
+                                }
+                                Label {
+                                    text: label || ""
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: artist || ""
+                                    Layout.preferredWidth: 170
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: year !== undefined && year !== null ? year : ""
+                                    Layout.preferredWidth: 52
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: genre || ""
+                                    Layout.preferredWidth: 120
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: count !== undefined ? count : ""
+                                    Layout.preferredWidth: 34
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: lengthText || "--:--"
+                                    Layout.preferredWidth: 76
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                            }
+
+                            RowLayout {
+                                visible: kind === "item" && rowType === "track"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label {
+                                    text: trackNumber !== undefined && trackNumber !== null ? trackNumber : ""
+                                    Layout.preferredWidth: 34
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: label || ""
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: artist || ""
+                                    Layout.preferredWidth: 170
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: album || ""
+                                    Layout.preferredWidth: 190
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: genre || ""
+                                    Layout.preferredWidth: 120
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: lengthText || "--:--"
+                                    Layout.preferredWidth: 76
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                            }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: kind === "item"
+                            acceptedButtons: Qt.LeftButton
+                            onClicked: function(mouse) {
+                                root.selectGlobalSearchDisplayIndex(index)
+                                if (mouse.button === Qt.LeftButton) {
+                                    globalSearchResultsView.forceActiveFocus()
+                                }
+                            }
+                            onDoubleClicked: function(mouse) {
+                                if (mouse.button === Qt.LeftButton) {
+                                    root.selectGlobalSearchDisplayIndex(index)
+                                    root.activateGlobalSearchSelection()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Label {
+                Layout.fillWidth: true
+                visible: (uiBridge.globalSearchArtistResults || []).length === 0
+                    && (uiBridge.globalSearchAlbumResults || []).length === 0
+                    && (uiBridge.globalSearchTrackResults || []).length === 0
+                text: (globalSearchQueryField.text || "").trim().length === 0
+                    ? "Type to search"
+                    : "No matches"
+                color: Kirigami.Theme.disabledTextColor
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+    }
+
+    Dialog {
+        id: diagnosticsDialog
+        modal: true
+        title: "Diagnostics"
+        standardButtons: Dialog.Close
+        width: Math.min(980, root.width - 80)
+        height: Math.min(680, root.height - 80)
+        onOpened: uiBridge.reloadDiagnosticsFromDisk()
+
+        contentItem: ColumnLayout {
+            spacing: 8
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label {
+                    text: "Log file:"
+                    color: Kirigami.Theme.disabledTextColor
+                }
+                TextField {
+                    Layout.fillWidth: true
+                    readOnly: true
+                    text: uiBridge.diagnosticsLogPath || ""
+                    selectByMouse: true
+                }
+                Button {
+                    text: "Open Folder"
+                    enabled: (uiBridge.diagnosticsLogPath || "").length > 0
+                    onClicked: uiBridge.openContainingFolder(uiBridge.diagnosticsLogPath || "")
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Button {
+                    text: "Reload"
+                    onClicked: uiBridge.reloadDiagnosticsFromDisk()
+                }
+                Button {
+                    text: "Clear"
+                    onClicked: uiBridge.clearDiagnostics()
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Copy All"
+                    onClicked: {
+                        diagnosticsTextArea.selectAll()
+                        diagnosticsTextArea.copy()
+                    }
+                }
+            }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+
+                TextArea {
+                    id: diagnosticsTextArea
+                    text: uiBridge.diagnosticsText || ""
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.NoWrap
+                    font.family: "Monospace"
+                    persistentSelection: true
                 }
             }
         }
@@ -1544,86 +2385,18 @@ Kirigami.ApplicationWindow {
                             anchors.margins: 6
                             spacing: 6
 
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Label { text: "Sort:" }
-                                ComboBox {
-                                    id: librarySortModeCombo
-                                    model: ["Year", "Title"]
-                                    Layout.preferredWidth: 120
-                                    currentIndex: Math.max(0, Math.min(1, uiBridge.librarySortMode))
-                                    onActivated: uiBridge.setLibrarySortMode(currentIndex)
-                                }
-                                ToolButton {
-                                    icon.name: "document-edit"
-                                    display: AbstractButton.IconOnly
-                                    onClicked: scanFolderAction.trigger()
-                                    ToolTip.visible: hovered
-                                    ToolTip.text: "Add root"
-                                }
-                                Button {
-                                    text: "Rescan All"
-                                    onClicked: uiBridge.rescanAllLibraryRoots()
-                                }
-                            }
-
-                            TextField {
-                                id: librarySearchField
-                                Layout.fillWidth: true
-                                placeholderText: "Search"
-                                onTextChanged: {
-                                    libraryModel.setSearchText(text)
-                                    root.syncLibrarySelectionToVisibleRows()
-                                }
-                            }
-
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: Math.min(140, 28 * Math.max(1, uiBridge.libraryRoots.length))
-                                color: Qt.rgba(0, 0, 0, 0.03)
-                                border.color: Qt.rgba(0, 0, 0, 0.08)
-                                visible: uiBridge.libraryRoots.length > 0
-
-                                ListView {
-                                    anchors.fill: parent
-                                    clip: true
-                                    model: uiBridge.libraryRoots
-                                    delegate: RowLayout {
-                                        width: ListView.view.width
-                                        spacing: 6
-                                        Label {
-                                            Layout.fillWidth: true
-                                            text: modelData
-                                            elide: Text.ElideMiddle
-                                        }
-                                        ToolButton {
-                                            text: "Rescan"
-                                            onClicked: uiBridge.rescanLibraryRoot(modelData)
-                                        }
-                                        ToolButton {
-                                            text: "Remove"
-                                            onClicked: uiBridge.removeLibraryRoot(modelData)
-                                        }
-                                    }
-                                }
-                            }
-
                             Label {
                                 Layout.fillWidth: true
                                 readonly property int scanBacklog: Math.max(
                                     0,
                                     uiBridge.libraryScanDiscovered - uiBridge.libraryScanProcessed)
-                                text: "Indexed tracks: " + uiBridge.libraryTrackCount
-                                      + " | roots: " + uiBridge.libraryRootCount
+                                text: "Artists: " + uiBridge.libraryArtistCount
+                                      + " | albums: " + uiBridge.libraryAlbumCount
+                                      + " | tracks: " + uiBridge.libraryTrackCount
                                       + (uiBridge.libraryScanInProgress
                                           ? (" | scanning " + uiBridge.libraryScanProcessed
                                              + (scanBacklog > 0
                                                  ? (" (+" + scanBacklog + " queued)")
-                                                 : "")
-                                             + (uiBridge.libraryScanRootsTotal > 0
-                                                 ? (" | roots "
-                                                    + uiBridge.libraryScanRootsCompleted
-                                                    + "/" + uiBridge.libraryScanRootsTotal)
                                                  : "")
                                              + (uiBridge.libraryScanFilesPerSecond > 0
                                                  ? (" @ " + uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
@@ -1642,6 +2415,8 @@ Kirigami.ApplicationWindow {
                                 Layout.fillHeight: true
                                 clip: true
                                 model: libraryModel
+                                activeFocusOnTab: true
+                                focus: true
                                 reuseItems: true
                                 cacheBuffer: 200
                                 boundsBehavior: Flickable.StopAtBounds
@@ -1649,6 +2424,9 @@ Kirigami.ApplicationWindow {
                                 maximumFlickVelocity: 5200
                                 ScrollBar.vertical: ScrollBar {
                                     policy: ScrollBar.AlwaysOn
+                                }
+                                Keys.onPressed: function(event) {
+                                    root.handleLibraryKeyPress(event)
                                 }
 
                                 delegate: Rectangle {
@@ -1761,6 +2539,7 @@ Kirigami.ApplicationWindow {
                                             libraryDragProxy.y = 0
                                         }
                                         onClicked: function(mouse) {
+                                            libraryAlbumView.forceActiveFocus()
                                             const rowMap = {
                                                 selectionKey: selectionKeyResolved,
                                                 sourceIndex: sourceIndexResolved,
@@ -1839,6 +2618,7 @@ Kirigami.ApplicationWindow {
                                         MenuSeparator {}
                                         MenuItem {
                                             text: "Open in " + uiBridge.fileBrowserName
+                                            visible: libraryContextMenu.rowMap.rowType !== "track"
                                             enabled: (libraryContextMenu.rowMap.openPath || "").length > 0
                                             onTriggered: uiBridge.openInFileBrowser(libraryContextMenu.rowMap.openPath || "")
                                         }
@@ -1856,10 +2636,7 @@ Kirigami.ApplicationWindow {
                                 visible: libraryAlbumView.count === 0
                                 text: root.isLibraryTreeLoading()
                                     ? "Loading library..."
-                                    : (((librarySearchField.text || "").trim().length > 0
-                                        || root.hasReceivedLibraryTreeFrame)
-                                        ? "No results"
-                                        : "No library rows indexed")
+                                    : "Library is empty"
                                 color: Kirigami.Theme.disabledTextColor
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignHCenter
@@ -2357,6 +3134,9 @@ Kirigami.ApplicationWindow {
         function onAnalysisChanged() {
             applyAnalysisDelta()
         }
+        function onGlobalSearchResultsChanged() {
+            root.rebuildGlobalSearchDisplayRows()
+        }
         function onBridgeError(message) {
             if (message.indexOf("[analysis]") !== -1
                     || message.indexOf("[gst]") !== -1
@@ -2374,6 +3154,7 @@ Kirigami.ApplicationWindow {
         target: libraryModel
         function onTreeApplied() {
             root.finishPendingLibraryTreeApply()
+            root.applyPendingLibraryReveal()
         }
         function onNodeExpansionRequested(key, expanded) {
             uiBridge.setLibraryNodeExpanded(key, expanded)
@@ -2382,7 +3163,6 @@ Kirigami.ApplicationWindow {
 
     Component.onCompleted: {
         root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
-        libraryModel.setSearchText(librarySearchField.text || "")
         root.lastSeenQueueVersion = uiBridge.queueVersion
         root.displayedPositionSeconds = uiBridge.positionSeconds
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
@@ -2391,5 +3171,6 @@ Kirigami.ApplicationWindow {
         root.positionSmoothingTrackPath = uiBridge.currentTrackPath
         root.syncQueueSelectionToCurrentQueue()
         root.syncLibrarySelectionToVisibleRows()
+        root.rebuildGlobalSearchDisplayRows()
     }
 }

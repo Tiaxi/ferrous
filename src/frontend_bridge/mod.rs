@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +9,10 @@ use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TryS
 use serde_json::json;
 
 use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
-use crate::library::{LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot};
+use crate::library::{
+    search_tracks_fts, LibraryCommand, LibraryEvent, LibrarySearchTrack, LibraryService,
+    LibrarySnapshot,
+};
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
     PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
@@ -98,6 +102,7 @@ pub enum BridgeLibraryCommand {
     ReplaceArtistByKey { artist: String },
     AppendArtistByKey { artist: String },
     SetNodeExpanded { key: String, expanded: bool },
+    SetSearchQuery { seq: u32, query: String },
 }
 
 #[derive(Debug, Clone)]
@@ -120,8 +125,41 @@ pub enum BridgeSettingsCommand {
 #[derive(Debug, Clone)]
 pub enum BridgeEvent {
     Snapshot(Box<BridgeSnapshot>),
+    SearchResults(Box<BridgeSearchResultsFrame>),
     Error(String),
     Stopped,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeSearchResultsFrame {
+    pub seq: u32,
+    pub rows: Vec<BridgeSearchResultRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeSearchResultRowType {
+    Artist = 1,
+    Album = 2,
+    Track = 3,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeSearchResultRow {
+    pub row_type: BridgeSearchResultRowType,
+    pub score: f32,
+    pub year: Option<i32>,
+    pub track_number: Option<u32>,
+    pub count: u32,
+    pub length_seconds: Option<f32>,
+    pub label: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub cover_path: String,
+    pub artist_key: String,
+    pub album_key: String,
+    pub track_key: String,
+    pub track_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +168,8 @@ pub struct BridgeSnapshot {
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
+    pub library_artist_count: usize,
+    pub library_album_count: usize,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
     pub queue: Vec<PathBuf>,
     pub selected_queue_index: Option<usize>,
@@ -168,11 +208,21 @@ struct BridgeState {
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
+    library_artist_count: usize,
+    library_album_count: usize,
     pre_built_tree_bytes: Arc<Vec<u8>>,
     expanded_keys: HashSet<String>,
     queue: Vec<PathBuf>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
+    pending_search_results: Option<BridgeSearchResultsFrame>,
+}
+
+#[derive(Debug)]
+struct SearchWorkerQuery {
+    seq: u32,
+    query: String,
+    library: Arc<LibrarySnapshot>,
 }
 
 impl BridgeState {
@@ -182,6 +232,8 @@ impl BridgeState {
             analysis: self.analysis.clone(),
             metadata: metadata_for_snapshot(&self.metadata),
             library: self.library.clone(),
+            library_artist_count: self.library_artist_count,
+            library_album_count: self.library_album_count,
             pre_built_tree_bytes: if include_tree {
                 Some(self.pre_built_tree_bytes.clone())
             } else {
@@ -195,6 +247,8 @@ impl BridgeState {
 
     fn rebuild_pre_built_tree(&mut self) {
         library_tree::retain_valid_expanded_keys(&self.library, &mut self.expanded_keys);
+        (self.library_artist_count, self.library_album_count) =
+            library_tree::compute_artist_album_counts(&self.library);
         self.pre_built_tree_bytes = Arc::new(library_tree::build_library_tree_flat_binary(
             &self.library,
             self.settings.library_sort_mode,
@@ -282,6 +336,11 @@ fn run_bridge_loop(
     let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
     let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
     let (library, library_rx) = LibraryService::new();
+    let (search_query_tx, search_query_rx) = unbounded::<SearchWorkerQuery>();
+    let (search_results_tx, search_results_rx) = unbounded::<BridgeSearchResultsFrame>();
+    let _ = std::thread::Builder::new()
+        .name("ferrous-bridge-search".to_string())
+        .spawn(move || run_search_worker(search_query_rx, search_results_tx));
 
     let mut state = BridgeState::default();
     load_settings_into(&mut state.settings);
@@ -345,6 +404,7 @@ fn run_bridge_loop(
                             playback: &playback,
                             analysis: &analysis,
                             library: &library,
+                            search_query_tx: &search_query_tx,
                             event_tx: &event_tx,
                             running: &mut running,
                             settings_dirty: &mut settings_dirty,
@@ -398,6 +458,8 @@ fn run_bridge_loop(
         let analysis_changed = pump_analysis_events(&analysis_rx, &mut state);
         let metadata_changed = pump_metadata_events(&metadata_rx, &mut state);
         let library_changed = pump_library_events(&library_rx, &mut state);
+        let _ = pump_search_results(&search_results_rx, &mut state);
+        let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
         let changed = playback_changed || analysis_changed || metadata_changed || library_changed;
         if library_changed {
             let now = Instant::now();
@@ -435,6 +497,8 @@ fn run_bridge_loop(
             }
             last_snapshot_emit = Instant::now();
         }
+
+        let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
 
         if profile_enabled && profile_last.elapsed() >= Duration::from_secs(1) {
             let rss_kb = current_rss_kb();
@@ -483,6 +547,23 @@ fn run_bridge_loop(
     let _ = try_send_event(&event_tx, BridgeEvent::Stopped);
 }
 
+fn run_search_worker(
+    query_rx: Receiver<SearchWorkerQuery>,
+    results_tx: Sender<BridgeSearchResultsFrame>,
+) {
+    while let Ok(mut query) = query_rx.recv() {
+        while let Ok(next) = query_rx.try_recv() {
+            query = next;
+        }
+
+        if let Some(frame) =
+            build_search_results_frame(query.seq, query.query.trim(), &query.library)
+        {
+            let _ = results_tx.send(frame);
+        }
+    }
+}
+
 fn try_send_event(
     event_tx: &Sender<BridgeEvent>,
     event: BridgeEvent,
@@ -504,6 +585,26 @@ fn send_snapshot_event(
         BridgeEvent::Snapshot(Box::new(state.snapshot(include_tree))),
     )
     .is_ok()
+}
+
+fn flush_pending_search_results_event(
+    event_tx: &Sender<BridgeEvent>,
+    pending_search_results: &mut Option<BridgeSearchResultsFrame>,
+) -> bool {
+    let Some(frame) = pending_search_results.take() else {
+        return false;
+    };
+
+    match try_send_event(event_tx, BridgeEvent::SearchResults(Box::new(frame))) {
+        Ok(()) => true,
+        Err(TrySendError::Full(event)) => {
+            if let BridgeEvent::SearchResults(frame) = event {
+                *pending_search_results = Some(*frame);
+            }
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => false,
+    }
 }
 
 fn scan_tree_emit_interval() -> Duration {
@@ -552,6 +653,7 @@ struct BridgeCommandContext<'a> {
     playback: &'a PlaybackEngine,
     analysis: &'a AnalysisEngine,
     library: &'a LibraryService,
+    search_query_tx: &'a Sender<SearchWorkerQuery>,
     event_tx: &'a Sender<BridgeEvent>,
     running: &'a mut bool,
     settings_dirty: &'a mut bool,
@@ -602,9 +704,14 @@ fn handle_bridge_command(
         BridgeCommand::Queue(cmd) => {
             handle_queue_command(cmd, state, context.playback, context.event_tx)
         }
-        BridgeCommand::Library(cmd) => {
-            handle_library_command(cmd, state, context.playback, context.library)
-        }
+        BridgeCommand::Library(cmd) => handle_library_command(
+            cmd,
+            state,
+            context.playback,
+            context.library,
+            context.search_query_tx,
+            context.event_tx,
+        ),
         BridgeCommand::Analysis(cmd) => match cmd {
             BridgeAnalysisCommand::SetFftSize(size) => {
                 let fft = size.clamp(512, 8192).next_power_of_two();
@@ -841,6 +948,8 @@ fn handle_library_command(
     state: &mut BridgeState,
     playback: &PlaybackEngine,
     library: &LibraryService,
+    search_query_tx: &Sender<SearchWorkerQuery>,
+    _event_tx: &Sender<BridgeEvent>,
 ) -> bool {
     match cmd {
         BridgeLibraryCommand::ScanRoot(path) => {
@@ -1030,7 +1139,491 @@ fn handle_library_command(
                 state.expanded_keys.remove(normalized)
             }
         }
+        BridgeLibraryCommand::SetSearchQuery { seq, query } => {
+            let _ = search_query_tx.send(SearchWorkerQuery {
+                seq,
+                query: query.trim().to_string(),
+                library: Arc::clone(&state.library),
+            });
+            false
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+struct TreePathContext {
+    artist_name: String,
+    artist_key: String,
+    album_folder: Option<String>,
+    album_key: Option<String>,
+    album_path: Option<PathBuf>,
+    track_key: String,
+    is_main_level_album_track: bool,
+}
+
+fn build_search_results_frame(
+    seq: u32,
+    query: &str,
+    library: &LibrarySnapshot,
+) -> Option<BridgeSearchResultsFrame> {
+    #[derive(Default)]
+    struct HitAlbumAcc {
+        artist_name: String,
+        album_title: String,
+        artist_key: String,
+        year_counts: HashMap<i32, usize>,
+        genre_counts: HashMap<String, usize>,
+        main_track_count: u32,
+        main_total_length: f32,
+        has_main_duration: bool,
+        cover_path: String,
+    }
+
+    if query.trim().is_empty() {
+        return Some(BridgeSearchResultsFrame {
+            seq,
+            rows: Vec::new(),
+        });
+    }
+
+    // In-memory search is deterministic and responsive while library scans are writing to SQLite.
+    // Optional FTS can be enabled explicitly for experimentation.
+    let use_fts = std::env::var_os("FERROUS_SEARCH_USE_FTS").is_some();
+    let hits = if use_fts {
+        match search_tracks_fts(query, 500) {
+            Ok(rows) if !rows.is_empty() => rows,
+            Ok(_) | Err(_) => search_tracks_fallback(query, library, 500),
+        }
+    } else {
+        search_tracks_fallback(query, library, 500)
+    };
+    if hits.is_empty() {
+        return Some(BridgeSearchResultsFrame {
+            seq,
+            rows: Vec::new(),
+        });
+    }
+
+    let roots = library.roots.clone();
+    if roots.is_empty() {
+        return Some(BridgeSearchResultsFrame {
+            seq,
+            rows: Vec::new(),
+        });
+    }
+
+    let mut artist_groups: HashMap<String, (f32, String)> = HashMap::new();
+    let mut artist_album_sets: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut album_groups: HashMap<String, (f32, String)> = HashMap::new();
+    let mut album_hit_stats: HashMap<String, HitAlbumAcc> = HashMap::new();
+    let mut track_rows = Vec::new();
+
+    for hit in &hits {
+        let Some(context) = derive_tree_path_context(&hit.path, &roots, &hit.artist) else {
+            continue;
+        };
+        let hit_artist = if hit.artist.trim().is_empty() {
+            context.artist_name.clone()
+        } else {
+            hit.artist.trim().to_string()
+        };
+        let hit_album = if hit.album.trim().is_empty() {
+            context
+                .album_folder
+                .clone()
+                .unwrap_or_else(|| String::from("Unknown Album"))
+        } else {
+            hit.album.trim().to_string()
+        };
+
+        let artist_entry = artist_groups
+            .entry(context.artist_key.clone())
+            .or_insert((hit.score, context.artist_name.clone()));
+        if hit.score < artist_entry.0 {
+            artist_entry.0 = hit.score;
+            artist_entry.1 = context.artist_name.clone();
+        }
+
+        if let Some(album_key) = context.album_key.clone() {
+            artist_album_sets
+                .entry(context.artist_key.clone())
+                .or_default()
+                .insert(album_key.clone());
+            let album_entry = album_groups
+                .entry(album_key.clone())
+                .or_insert((hit.score, hit_album.clone()));
+            if hit.score < album_entry.0 {
+                album_entry.0 = hit.score;
+                album_entry.1 = hit_album.clone();
+            }
+
+            let stats_entry = album_hit_stats.entry(album_key).or_default();
+            if stats_entry.artist_name.is_empty() {
+                stats_entry.artist_name = context.artist_name.clone();
+            }
+            if stats_entry.artist_key.is_empty() {
+                stats_entry.artist_key = context.artist_key.clone();
+            }
+            if stats_entry.album_title.is_empty() {
+                stats_entry.album_title = hit_album.clone();
+            }
+            if let Some(year) = hit.year {
+                *stats_entry.year_counts.entry(year).or_insert(0) += 1;
+            }
+            if !hit.genre.trim().is_empty() {
+                *stats_entry
+                    .genre_counts
+                    .entry(hit.genre.trim().to_string())
+                    .or_insert(0) += 1;
+            }
+            if context.is_main_level_album_track {
+                stats_entry.main_track_count = stats_entry.main_track_count.saturating_add(1);
+                if let Some(duration) = hit.duration_secs {
+                    if duration.is_finite() && duration >= 0.0 {
+                        stats_entry.main_total_length += duration;
+                        stats_entry.has_main_duration = true;
+                    }
+                }
+            }
+            if stats_entry.cover_path.is_empty() {
+                if let Some(album_path) = context.album_path.clone() {
+                    stats_entry.cover_path =
+                        find_cover_path_for_album(&album_path).unwrap_or_default();
+                }
+            }
+        }
+
+        track_rows.push(BridgeSearchResultRow {
+            row_type: BridgeSearchResultRowType::Track,
+            score: hit.score,
+            year: hit.year,
+            track_number: hit.track_no,
+            count: 0,
+            length_seconds: hit.duration_secs,
+            label: if hit.title.trim().is_empty() {
+                hit.path
+                    .file_name()
+                    .map_or_else(String::new, |v| v.to_string_lossy().to_string())
+            } else {
+                hit.title.trim().to_string()
+            },
+            artist: hit_artist,
+            album: hit_album,
+            genre: hit.genre.trim().to_string(),
+            cover_path: String::new(),
+            artist_key: context.artist_key.clone(),
+            album_key: context.album_key.unwrap_or_default(),
+            track_key: context.track_key,
+            track_path: hit.path.to_string_lossy().to_string(),
+        });
+    }
+
+    let mut artist_rows = artist_groups
+        .into_iter()
+        .map(|(artist_key, (score, artist_name))| BridgeSearchResultRow {
+            row_type: BridgeSearchResultRowType::Artist,
+            score,
+            year: None,
+            track_number: None,
+            count: artist_album_sets
+                .get(&artist_key)
+                .map_or(0, |albums| albums.len() as u32),
+            length_seconds: None,
+            label: artist_name.clone(),
+            artist: artist_name,
+            album: String::new(),
+            genre: String::new(),
+            cover_path: String::new(),
+            artist_key,
+            album_key: String::new(),
+            track_key: String::new(),
+            track_path: String::new(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut album_rows = album_groups
+        .into_iter()
+        .filter_map(|(album_key, (score, fallback_title))| {
+            let stats = album_hit_stats.get(&album_key)?;
+            let year = choose_most_common_year(&stats.year_counts);
+            let genre = choose_most_common_genre(&stats.genre_counts);
+            Some(BridgeSearchResultRow {
+                row_type: BridgeSearchResultRowType::Album,
+                score,
+                year,
+                track_number: None,
+                count: stats.main_track_count,
+                length_seconds: if stats.has_main_duration {
+                    Some(stats.main_total_length)
+                } else {
+                    None
+                },
+                label: if stats.album_title.is_empty() {
+                    fallback_title
+                } else {
+                    stats.album_title.clone()
+                },
+                artist: stats.artist_name.clone(),
+                album: if stats.album_title.is_empty() {
+                    String::new()
+                } else {
+                    stats.album_title.clone()
+                },
+                genre,
+                cover_path: stats.cover_path.clone(),
+                artist_key: stats.artist_key.clone(),
+                album_key,
+                track_key: String::new(),
+                track_path: String::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    artist_rows.sort_by(search_row_cmp);
+    album_rows.sort_by(search_row_cmp);
+    track_rows.sort_by(search_row_cmp);
+    artist_rows.truncate(40);
+    album_rows.truncate(80);
+    track_rows.truncate(160);
+
+    let mut rows = Vec::with_capacity(artist_rows.len() + album_rows.len() + track_rows.len());
+    rows.extend(artist_rows);
+    rows.extend(album_rows);
+    rows.extend(track_rows);
+    Some(BridgeSearchResultsFrame { seq, rows })
+}
+
+fn pump_search_results(
+    search_rx: &Receiver<BridgeSearchResultsFrame>,
+    state: &mut BridgeState,
+) -> bool {
+    let mut latest = None;
+    while let Ok(frame) = search_rx.try_recv() {
+        latest = Some(frame);
+    }
+
+    if let Some(frame) = latest {
+        state.pending_search_results = Some(frame);
+        return true;
+    }
+    false
+}
+
+fn search_tracks_fallback(
+    query: &str,
+    library: &LibrarySnapshot,
+    limit: usize,
+) -> Vec<LibrarySearchTrack> {
+    let terms = query
+        .split_whitespace()
+        .map(|term| term.trim().to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for track in &library.tracks {
+        let path_str = track.path.to_string_lossy().to_string();
+        let title = track.title.trim().to_string();
+        let artist = track.artist.trim().to_string();
+        let album = track.album.trim().to_string();
+        let genre = track.genre.trim().to_string();
+
+        let title_l = title.to_lowercase();
+        let artist_l = artist.to_lowercase();
+        let album_l = album.to_lowercase();
+        let genre_l = genre.to_lowercase();
+        let path_l = path_str.to_lowercase();
+        let haystack = format!("{title_l} {artist_l} {album_l} {genre_l} {path_l}");
+        if !terms.iter().all(|term| haystack.contains(term)) {
+            continue;
+        }
+
+        let mut score = 0.0f32;
+        for term in &terms {
+            score += if title_l.starts_with(term) {
+                0.0
+            } else if title_l.contains(term) {
+                0.8
+            } else if artist_l.starts_with(term) {
+                1.2
+            } else if artist_l.contains(term) {
+                1.8
+            } else if album_l.starts_with(term) {
+                2.0
+            } else if album_l.contains(term) {
+                2.6
+            } else if genre_l.contains(term) {
+                3.2
+            } else {
+                4.0
+            };
+        }
+        score += (path_str.len() as f32) / 10_000.0;
+
+        out.push(LibrarySearchTrack {
+            path: track.path.clone(),
+            title,
+            artist,
+            album,
+            genre,
+            year: track.year,
+            track_no: track.track_no,
+            duration_secs: track.duration_secs,
+            score,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                a.path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .cmp(&b.path.to_string_lossy().to_lowercase())
+            })
+    });
+    out.truncate(limit.clamp(1, 5_000));
+    out
+}
+
+fn search_row_cmp(a: &BridgeSearchResultRow, b: &BridgeSearchResultRow) -> Ordering {
+    a.score
+        .partial_cmp(&b.score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+        .then_with(|| a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
+        .then_with(|| {
+            a.track_path
+                .to_lowercase()
+                .cmp(&b.track_path.to_lowercase())
+        })
+}
+
+fn choose_most_common_year(counts: &HashMap<i32, usize>) -> Option<i32> {
+    let mut best: Option<(i32, usize)> = None;
+    for (&year, &count) in counts {
+        best = match best {
+            Some((best_year, best_count))
+                if count > best_count || (count == best_count && year < best_year) =>
+            {
+                Some((year, count))
+            }
+            None => Some((year, count)),
+            other => other,
+        };
+    }
+    best.map(|(year, _)| year)
+}
+
+fn choose_most_common_genre(counts: &HashMap<String, usize>) -> String {
+    let mut best: Option<(&str, usize)> = None;
+    for (genre, &count) in counts {
+        let key = genre.as_str();
+        best = match best {
+            Some((best_genre, best_count))
+                if count > best_count || (count == best_count && key < best_genre) =>
+            {
+                Some((key, count))
+            }
+            None => Some((key, count)),
+            other => other,
+        };
+    }
+    best.map_or_else(String::new, |(genre, _)| genre.to_string())
+}
+
+fn find_cover_path_for_album(album_path: &PathBuf) -> Option<String> {
+    let Ok(read_dir) = std::fs::read_dir(album_path) else {
+        return None;
+    };
+    let mut candidates = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        let ext = ext.to_ascii_lowercase();
+        if ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "webp" || ext == "bmp" {
+            candidates.push(path.to_string_lossy().to_string());
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_unstable();
+    candidates.into_iter().next()
+}
+
+fn pick_root_for_path<'a>(roots: &'a [PathBuf], path: &PathBuf) -> Option<&'a PathBuf> {
+    roots
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
+fn derive_tree_path_context(
+    path: &PathBuf,
+    roots: &[PathBuf],
+    fallback_artist: &str,
+) -> Option<TreePathContext> {
+    let root = pick_root_for_path(roots, path)?;
+    let rel = path.strip_prefix(root).ok()?;
+    let components = rel
+        .components()
+        .filter_map(|component| {
+            let std::path::Component::Normal(name) = component else {
+                return None;
+            };
+            Some(name.to_string_lossy().to_string())
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return None;
+    }
+
+    let root_key = root.to_string_lossy().to_string();
+    let artist_name = if components.len() >= 2 {
+        components[0].clone()
+    } else if fallback_artist.trim().is_empty() {
+        String::from("Unknown Artist")
+    } else {
+        fallback_artist.trim().to_string()
+    };
+    let artist_key = format!("artist|{root_key}|{artist_name}");
+    let track_path = path.to_string_lossy().to_string();
+    let track_key = format!("track|{track_path}");
+
+    if components.len() <= 2 {
+        return Some(TreePathContext {
+            artist_name,
+            artist_key,
+            album_folder: None,
+            album_key: None,
+            album_path: None,
+            track_key,
+            is_main_level_album_track: false,
+        });
+    }
+
+    let album_folder = components[1].clone();
+    let album_key = format!("album|{root_key}|{artist_name}|{album_folder}");
+    Some(TreePathContext {
+        artist_name: artist_name.clone(),
+        artist_key,
+        album_folder: Some(album_folder.clone()),
+        album_key: Some(album_key),
+        album_path: Some(root.join(&artist_name).join(album_folder)),
+        track_key,
+        is_main_level_album_track: components.len() == 3,
+    })
 }
 
 fn pump_playback_events(
@@ -1122,7 +1715,10 @@ fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeSt
         }
     }
     if let Some(snapshot) = latest_snapshot {
+        let (artist_count, album_count) = library_tree::compute_artist_album_counts(&snapshot);
         state.library = Arc::new(snapshot);
+        state.library_artist_count = artist_count;
+        state.library_album_count = album_count;
         return true;
     }
     false
