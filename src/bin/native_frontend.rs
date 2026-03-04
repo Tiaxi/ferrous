@@ -31,7 +31,7 @@ use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, unbounded, Sender, TrySendError};
@@ -391,6 +391,7 @@ struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
     last_emitted_library_tree_digest: Option<LibraryDigest>,
+    last_library_tree_emit_at: Option<Instant>,
     last_queue_digest: Option<QueueDigest>,
     last_queue_total_duration_secs: f64,
     last_queue_unknown_duration_count: usize,
@@ -404,12 +405,22 @@ struct JsonEmitState {
 struct LibraryDigest {
     roots_len: usize,
     tracks_len: usize,
-    scan_in_progress: bool,
     sort_mode: i32,
     first_root: Option<String>,
     last_root: Option<String>,
     first_track: Option<String>,
     last_track: Option<String>,
+}
+
+fn scan_tree_emit_interval() -> Duration {
+    static INTERVAL: OnceLock<Duration> = OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let ms = std::env::var("FERROUS_LIBRARY_TREE_EMIT_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map_or(1000, |v| v.clamp(100, 5000));
+        Duration::from_millis(ms)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -786,7 +797,6 @@ fn encode_snapshot_payload(
     let library_digest = LibraryDigest {
         roots_len: s.library.roots.len(),
         tracks_len: s.library.tracks.len(),
-        scan_in_progress: s.library.scan_in_progress,
         sort_mode: sort_mode_value,
         first_root: s
             .library
@@ -812,11 +822,16 @@ fn encode_snapshot_payload(
     let tree_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
     let tree_changed_since_last_emit =
         emit_state.last_emitted_library_tree_digest.as_ref() != Some(&library_digest);
+    let is_first_tree_emit = emit_state.last_emitted_library_tree_digest.is_none();
+    let scan_emit_due = emit_state
+        .last_library_tree_emit_at
+        .map_or(true, |last| last.elapsed() >= scan_tree_emit_interval());
     let should_emit_tree = tree_changed_since_last_emit
-        && (!s.library.scan_in_progress || emit_state.last_emitted_library_tree_digest.is_none());
+        && (!s.library.scan_in_progress || is_first_tree_emit || scan_emit_due);
     emit_state.last_library_digest = Some(library_digest.clone());
     if should_emit_tree {
         emit_state.last_emitted_library_tree_digest = Some(library_digest.clone());
+        emit_state.last_library_tree_emit_at = Some(Instant::now());
     }
     let library_tree = if should_emit_tree {
         build_library_tree_json(&s.library, s.settings.library_sort_mode)
@@ -965,6 +980,7 @@ fn encode_snapshot_payload(
             },
         },
         "metadata": {
+            "source_path": s.metadata.source_path.clone(),
             "title": s.metadata.title.clone(),
             "artist": s.metadata.artist.clone(),
             "album": s.metadata.album.clone(),
@@ -972,6 +988,7 @@ fn encode_snapshot_payload(
             "bitrate_kbps": s.metadata.bitrate_kbps,
             "channels": s.metadata.channels,
             "bit_depth": s.metadata.bit_depth,
+            "cover_path": s.metadata.cover_art_path.clone(),
         },
         "analysis": {
             "spectrogram_seq": analysis_delta.spectrogram_seq,

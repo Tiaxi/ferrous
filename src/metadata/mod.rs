@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -6,6 +7,7 @@ use lofty::prelude::Accessor;
 
 #[derive(Debug, Clone, Default)]
 pub struct TrackMetadata {
+    pub source_path: Option<String>,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -13,6 +15,7 @@ pub struct TrackMetadata {
     pub bitrate_kbps: Option<u32>,
     pub channels: Option<u8>,
     pub bit_depth: Option<u8>,
+    pub cover_art_path: Option<String>,
     pub cover_art_rgba: Option<(usize, usize, Vec<u8>)>,
 }
 
@@ -39,6 +42,7 @@ impl MetadataService {
             .spawn(move || {
                 while let Ok(path) = req_rx.recv() {
                     let mut metadata = TrackMetadata {
+                        source_path: Some(path.to_string_lossy().to_string()),
                         title: path
                             .file_stem()
                             .and_then(|s| s.to_str())
@@ -71,11 +75,12 @@ impl MetadataService {
                             if let Some(pic) = tag.pictures().first() {
                                 if let Ok(img) = image::load_from_memory(pic.data()) {
                                     let rgba = img.to_rgba8();
-                                    metadata.cover_art_rgba = Some((
-                                        rgba.width() as usize,
-                                        rgba.height() as usize,
-                                        rgba.into_raw(),
-                                    ));
+                                    let width = rgba.width() as usize;
+                                    let height = rgba.height() as usize;
+                                    let raw = rgba.into_raw();
+                                    metadata.cover_art_path =
+                                        cache_embedded_cover_png(&path, width, height, &raw);
+                                    metadata.cover_art_rgba = Some((width, height, raw));
                                 }
                             }
                         }
@@ -150,4 +155,40 @@ fn load_folder_cover_art(track_path: &PathBuf) -> Option<(usize, usize, Vec<u8>)
         }
     }
     None
+}
+
+fn cover_cache_dir() -> Option<PathBuf> {
+    let cache_base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))?;
+    Some(cache_base.join("ferrous").join("embedded_covers"))
+}
+
+fn cache_embedded_cover_png(
+    track_path: &Path,
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> Option<String> {
+    let cache_dir = cover_cache_dir()?;
+    if std::fs::create_dir_all(&cache_dir).is_err() {
+        return None;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    track_path.hash(&mut hasher);
+    let key = hasher.finish();
+    let out_path = cache_dir.join(format!("{key:016x}.png"));
+
+    if !out_path.is_file() {
+        let dims_match = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec())?;
+        if dims_match
+            .save_with_format(&out_path, image::ImageFormat::Png)
+            .is_err()
+        {
+            return None;
+        }
+    }
+
+    Some(out_path.to_string_lossy().to_string())
 }

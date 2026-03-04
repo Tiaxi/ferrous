@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_uchar, CStr, CString};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -38,6 +38,7 @@ struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
     last_emitted_library_tree_digest: Option<LibraryDigest>,
+    last_library_tree_emit_at: Option<Instant>,
     last_queue_digest: Option<QueueDigest>,
     last_queue_total_duration_secs: f64,
     last_queue_unknown_duration_count: usize,
@@ -49,12 +50,22 @@ struct JsonEmitState {
 struct LibraryDigest {
     roots_len: usize,
     tracks_len: usize,
-    scan_in_progress: bool,
     sort_mode: i32,
     first_root: Option<String>,
     last_root: Option<String>,
     first_track: Option<String>,
     last_track: Option<String>,
+}
+
+fn scan_tree_emit_interval() -> Duration {
+    static INTERVAL: OnceLock<Duration> = OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let ms = std::env::var("FERROUS_LIBRARY_TREE_EMIT_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map_or(1000, |v| v.clamp(100, 5000));
+        Duration::from_millis(ms)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,7 +114,7 @@ impl FfiRuntime {
         let json_snapshot_interval = Duration::from_millis(json_snapshot_interval_ms);
         let now = Instant::now();
         let last_json_snapshot_emit = now.checked_sub(json_snapshot_interval).unwrap_or(now);
-        let mut runtime = Self {
+        let runtime = Self {
             bridge,
             emit_state: JsonEmitState::default(),
             json_snapshot_interval,
@@ -115,7 +126,6 @@ impl FfiRuntime {
             stopped: false,
         };
         runtime.bridge.command(BridgeCommand::RequestSnapshot);
-        runtime.poll(16);
         runtime
     }
 
@@ -647,7 +657,6 @@ fn encode_snapshot_payload(
     let library_digest = LibraryDigest {
         roots_len: s.library.roots.len(),
         tracks_len: s.library.tracks.len(),
-        scan_in_progress: s.library.scan_in_progress,
         sort_mode: sort_mode_value,
         first_root: s
             .library
@@ -673,11 +682,16 @@ fn encode_snapshot_payload(
     let tree_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
     let tree_changed_since_last_emit =
         emit_state.last_emitted_library_tree_digest.as_ref() != Some(&library_digest);
+    let is_first_tree_emit = emit_state.last_emitted_library_tree_digest.is_none();
+    let scan_emit_due = emit_state
+        .last_library_tree_emit_at
+        .map_or(true, |last| last.elapsed() >= scan_tree_emit_interval());
     let should_emit_tree = tree_changed_since_last_emit
-        && (!s.library.scan_in_progress || emit_state.last_emitted_library_tree_digest.is_none());
+        && (!s.library.scan_in_progress || is_first_tree_emit || scan_emit_due);
     emit_state.last_library_digest = Some(library_digest.clone());
     if should_emit_tree {
         emit_state.last_emitted_library_tree_digest = Some(library_digest.clone());
+        emit_state.last_library_tree_emit_at = Some(Instant::now());
     }
     let library_tree = if should_emit_tree {
         build_library_tree_json(&s.library, s.settings.library_sort_mode)
@@ -826,6 +840,7 @@ fn encode_snapshot_payload(
             },
         },
         "metadata": {
+            "source_path": s.metadata.source_path.clone(),
             "title": s.metadata.title.clone(),
             "artist": s.metadata.artist.clone(),
             "album": s.metadata.album.clone(),
@@ -833,6 +848,7 @@ fn encode_snapshot_payload(
             "bitrate_kbps": s.metadata.bitrate_kbps,
             "channels": s.metadata.channels,
             "bit_depth": s.metadata.bit_depth,
+            "cover_path": s.metadata.cover_art_path.clone(),
         },
         "analysis": {
             "spectrogram_seq": analysis_delta.spectrogram_seq,
@@ -1170,6 +1186,7 @@ mod tests {
                 sample_rate_hz: 48_000,
             },
             metadata: crate::metadata::TrackMetadata {
+                source_path: Some("/music/a.flac".to_string()),
                 title: "Sample Track".to_string(),
                 artist: "Sample Artist".to_string(),
                 album: "Sample Album".to_string(),
@@ -1177,6 +1194,7 @@ mod tests {
                 bitrate_kbps: Some(320),
                 channels: Some(2),
                 bit_depth: Some(24),
+                cover_art_path: Some("/music/a.cover.png".to_string()),
                 cover_art_rgba: None,
             },
             library: Arc::new(LibrarySnapshot {
@@ -1226,6 +1244,20 @@ mod tests {
             .get("metadata")
             .and_then(|v| v.as_object())
             .is_some());
+        assert_eq!(
+            payload
+                .get("metadata")
+                .and_then(|v| v.get("source_path"))
+                .and_then(|v| v.as_str()),
+            Some("/music/a.flac")
+        );
+        assert_eq!(
+            payload
+                .get("metadata")
+                .and_then(|v| v.get("cover_path"))
+                .and_then(|v| v.as_str()),
+            Some("/music/a.cover.png")
+        );
         assert!(payload
             .get("settings")
             .and_then(|v| v.as_object())

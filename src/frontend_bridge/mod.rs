@@ -193,6 +193,7 @@ struct SessionSnapshot {
 
 fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
     TrackMetadata {
+        source_path: metadata.source_path.clone(),
         title: metadata.title.clone(),
         artist: metadata.artist.clone(),
         album: metadata.album.clone(),
@@ -200,6 +201,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         bitrate_kbps: metadata.bitrate_kbps,
         channels: metadata.channels,
         bit_depth: metadata.bit_depth,
+        cover_art_path: metadata.cover_art_path.clone(),
         // Large RGBA cover payload is not needed in bridge snapshots; avoid per-snapshot megabyte clones.
         cover_art_rgba: None,
     }

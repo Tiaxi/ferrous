@@ -1197,6 +1197,7 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
         const QJsonObject playback = root.value(QStringLiteral("playback")).toObject();
         const QJsonObject queue = root.value(QStringLiteral("queue")).toObject();
         const QJsonObject library = root.value(QStringLiteral("library")).toObject();
+        const QJsonObject metadata = root.value(QStringLiteral("metadata")).toObject();
         const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
         const QJsonObject analysis = root.value(QStringLiteral("analysis")).toObject();
 
@@ -1215,6 +1216,17 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             std::max(0, queue.value(QStringLiteral("unknown_duration_count")).toInt(0));
         const int selected = queue.value(QStringLiteral("selected_index")).toInt(-1);
         const int sampleRate = analysis.value(QStringLiteral("sample_rate_hz")).toInt(m_sampleRateHz);
+        const QString metadataSourcePath = metadata.value(QStringLiteral("source_path")).toString();
+        const QString metadataCoverPath = metadata.value(QStringLiteral("cover_path")).toString();
+        QString metadataCoverUrl;
+        if (!metadataCoverPath.trimmed().isEmpty() && metadataSourcePath == currentPath) {
+            const QUrl maybeUrl(metadataCoverPath);
+            if (maybeUrl.isValid() && maybeUrl.isLocalFile()) {
+                metadataCoverUrl = maybeUrl.toString();
+            } else {
+                metadataCoverUrl = QUrl::fromLocalFile(metadataCoverPath).toString();
+            }
+        }
 
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         bool changed = false;
@@ -1341,8 +1353,8 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
             m_playingQueueIndex = playing;
             changed = true;
         }
-        QString currentCover;
-        if (!currentPath.isEmpty()) {
+        QString currentCover = metadataCoverUrl;
+        if (currentCover.isEmpty() && !currentPath.isEmpty()) {
             const auto cached = m_trackCoverByPath.constFind(currentPath);
             if (cached != m_trackCoverByPath.constEnd()) {
                 currentCover = cached.value();
