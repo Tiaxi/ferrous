@@ -1001,19 +1001,19 @@ fn pump_metadata_events(metadata_rx: &Receiver<MetadataEvent>, state: &mut Bridg
 }
 
 fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeState) -> bool {
-    let mut changed = false;
-    for _ in 0..4 {
-        let Ok(event) = library_rx.try_recv() else {
-            break;
-        };
+    let mut latest_snapshot: Option<LibrarySnapshot> = None;
+    while let Ok(event) = library_rx.try_recv() {
         match event {
             LibraryEvent::Snapshot(snapshot) => {
-                state.library = Arc::new(snapshot);
-                changed = true;
+                latest_snapshot = Some(snapshot);
             }
         }
     }
-    changed
+    if let Some(snapshot) = latest_snapshot {
+        state.library = Arc::new(snapshot);
+        return true;
+    }
+    false
 }
 
 fn config_base_path() -> Option<PathBuf> {

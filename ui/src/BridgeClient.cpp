@@ -1552,12 +1552,11 @@ bool BridgeClient::processBridgeJsonObject(const QJsonObject &root) {
         const QJsonValue treeValue = library.value(QStringLiteral("tree"));
         if (treeValue.isArray()) {
             const QVariantList tree = treeValue.toArray().toVariantList();
-            bool libraryStructureChanged = false;
-            if (m_libraryTree != tree) {
-                m_libraryTree = tree;
-                changed = true;
-                libraryStructureChanged = true;
-            }
+            // The backend only includes a tree payload when it decides the tree changed.
+            // Avoid deep QVariantList equality checks here: large trees make that comparison expensive.
+            m_libraryTree = tree;
+            changed = true;
+            const bool libraryStructureChanged = true;
             if (libraryStructureChanged) {
                 m_libraryAlbums.clear();
                 m_libraryAlbumArtists.clear();

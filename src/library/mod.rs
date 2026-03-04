@@ -191,6 +191,8 @@ fn run_scans(
     }
 
     let roots_total = roots.len();
+    let snapshot_emit_interval = scan_snapshot_emit_interval();
+    let snapshot_min_processed_delta = scan_snapshot_min_processed_delta();
     for (idx, root) in roots.iter().enumerate() {
         let mut final_progress = RootScanProgress::default();
         let mut root_track_indices: HashMap<String, usize> = HashMap::new();
@@ -200,6 +202,10 @@ fn run_scans(
             }
         }
         let pending_upserts = std::cell::RefCell::new(Vec::<(MetadataTask, IndexedTrack)>::new());
+        let mut last_snapshot_emit = Instant::now()
+            .checked_sub(snapshot_emit_interval)
+            .unwrap_or_else(Instant::now);
+        let mut last_snapshot_processed = 0usize;
         let mut collect_upsert = |task: &MetadataTask, indexed: &IndexedTrack| {
             pending_upserts
                 .borrow_mut()
@@ -223,7 +229,16 @@ fn run_scans(
                 files_per_second: progress.files_per_second,
                 eta_seconds: progress.eta_seconds,
             });
-            emit_snapshot(event_tx, snapshot);
+            let processed_delta = progress.processed.saturating_sub(last_snapshot_processed);
+            let emit_due = progress.processed == 0
+                || progress.processed >= progress.discovered
+                || processed_delta >= snapshot_min_processed_delta
+                || last_snapshot_emit.elapsed() >= snapshot_emit_interval;
+            if emit_due {
+                emit_snapshot(event_tx, snapshot);
+                last_snapshot_emit = Instant::now();
+                last_snapshot_processed = progress.processed;
+            }
         };
 
         let stale_paths = scan_root(conn, root, &mut on_progress, &mut collect_upsert)?;
@@ -484,6 +499,22 @@ fn scan_worker_count() -> usize {
         return cores.clamp(1, MAX_SCAN_WORKERS);
     }
     (cores.saturating_mul(2)).clamp(2, 24)
+}
+
+fn scan_snapshot_emit_interval() -> Duration {
+    std::env::var("FERROUS_LIBRARY_SNAPSHOT_EMIT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map_or(Duration::from_millis(1100), |ms| {
+            Duration::from_millis(ms.clamp(100, 10_000))
+        })
+}
+
+fn scan_snapshot_min_processed_delta() -> usize {
+    std::env::var("FERROUS_LIBRARY_SNAPSHOT_MIN_DELTA")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(96, |delta| delta.clamp(8, 8192))
 }
 
 fn scan_root<F, U>(

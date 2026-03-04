@@ -392,6 +392,7 @@ struct JsonEmitState {
     last_library_digest: Option<LibraryDigest>,
     last_emitted_library_tree_digest: Option<LibraryDigest>,
     last_library_tree_emit_at: Option<Instant>,
+    last_library_tree_tracks_len: usize,
     last_queue_digest: Option<QueueDigest>,
     last_queue_total_duration_secs: f64,
     last_queue_unknown_duration_count: usize,
@@ -418,8 +419,18 @@ fn scan_tree_emit_interval() -> Duration {
         let ms = std::env::var("FERROUS_LIBRARY_TREE_EMIT_MS")
             .ok()
             .and_then(|raw| raw.parse::<u64>().ok())
-            .map_or(1000, |v| v.clamp(100, 5000));
+            .map_or(5000, |v| v.clamp(250, 30_000));
         Duration::from_millis(ms)
+    })
+}
+
+fn scan_tree_emit_min_track_delta() -> usize {
+    static MIN_DELTA: OnceLock<usize> = OnceLock::new();
+    *MIN_DELTA.get_or_init(|| {
+        std::env::var("FERROUS_LIBRARY_TREE_EMIT_MIN_TRACK_DELTA")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .map_or(512, |v| v.clamp(32, 16_384))
     })
 }
 
@@ -432,28 +443,35 @@ struct QueueDigest {
 }
 
 fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
-    let mut duration_by_path: HashMap<&std::path::Path, f64> =
-        HashMap::with_capacity(snapshot.library.tracks.len());
-    for track in &snapshot.library.tracks {
-        let Some(duration_secs) = track.duration_secs else {
-            continue;
-        };
-        let duration = f64::from(duration_secs);
-        if duration.is_finite() && duration > 0.0 {
-            duration_by_path.insert(track.path.as_path(), duration);
-        }
+    let mut queue_path_counts: HashMap<&std::path::Path, usize> =
+        HashMap::with_capacity(snapshot.queue.len());
+    for path in &snapshot.queue {
+        let entry = queue_path_counts.entry(path.as_path()).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+    if queue_path_counts.is_empty() {
+        return (0.0, 0);
     }
 
     let mut total_duration_secs = 0.0;
-    let mut unknown_duration_count = 0usize;
-    for path in &snapshot.queue {
-        if let Some(duration) = duration_by_path.get(path.as_path()) {
-            total_duration_secs += *duration;
-        } else {
-            unknown_duration_count = unknown_duration_count.saturating_add(1);
+    let mut known_duration_count = 0usize;
+    for track in &snapshot.library.tracks {
+        let Some(count) = queue_path_counts.remove(track.path.as_path()) else {
+            continue;
+        };
+        if let Some(duration_secs) = track.duration_secs {
+            let duration = f64::from(duration_secs);
+            if duration.is_finite() && duration > 0.0 {
+                total_duration_secs += duration * (count as f64);
+                known_duration_count = known_duration_count.saturating_add(count);
+            }
+        }
+        if queue_path_counts.is_empty() {
+            break;
         }
     }
 
+    let unknown_duration_count = snapshot.queue.len().saturating_sub(known_duration_count);
     (total_duration_secs, unknown_duration_count)
 }
 
@@ -826,12 +844,20 @@ fn encode_snapshot_payload(
     let scan_emit_due = emit_state
         .last_library_tree_emit_at
         .map_or(true, |last| last.elapsed() >= scan_tree_emit_interval());
+    let scan_track_delta = s
+        .library
+        .tracks
+        .len()
+        .saturating_sub(emit_state.last_library_tree_tracks_len);
     let should_emit_tree = tree_changed_since_last_emit
-        && (!s.library.scan_in_progress || is_first_tree_emit || scan_emit_due);
+        && (!s.library.scan_in_progress
+            || is_first_tree_emit
+            || (scan_emit_due && scan_track_delta >= scan_tree_emit_min_track_delta()));
     emit_state.last_library_digest = Some(library_digest.clone());
     if should_emit_tree {
         emit_state.last_emitted_library_tree_digest = Some(library_digest.clone());
         emit_state.last_library_tree_emit_at = Some(Instant::now());
+        emit_state.last_library_tree_tracks_len = s.library.tracks.len();
     }
     let library_tree = if should_emit_tree {
         build_library_tree_json(&s.library, s.settings.library_sort_mode)
