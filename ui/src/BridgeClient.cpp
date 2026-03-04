@@ -789,7 +789,8 @@ void BridgeClient::addLibraryRoot(const QString &path) {
         return;
     }
     QJsonObject obj;
-    obj.insert(QStringLiteral("cmd"), QStringLiteral("add_root"));
+    // Keep wire compatibility with older process bridge binaries that only support "scan_root".
+    obj.insert(QStringLiteral("cmd"), QStringLiteral("scan_root"));
     obj.insert(QStringLiteral("path"), normalized);
     sendJson(obj);
 }
@@ -1172,6 +1173,8 @@ void BridgeClient::startBridgeProcess() {
     if (command.isEmpty()) {
         // Prefer a prebuilt bridge binary for lower overhead and predictable runtime memory.
         const QDir appDir(QCoreApplication::applicationDirPath());
+        const QFileInfo appBinaryInfo(QCoreApplication::applicationFilePath());
+        const QDateTime appBuiltAt = appBinaryInfo.lastModified();
         const QStringList candidates{
             appDir.absoluteFilePath(QStringLiteral("../../target/release/native_frontend")),
             QDir::current().absoluteFilePath(QStringLiteral("target/release/native_frontend")),
@@ -1180,6 +1183,11 @@ void BridgeClient::startBridgeProcess() {
         for (const QString &candidate : candidates) {
             const QFileInfo info(candidate);
             if (info.exists() && info.isFile() && info.isExecutable()) {
+                // Avoid stale bridge binaries from older builds when the UI executable is newer.
+                if (appBuiltAt.isValid() && info.lastModified().isValid()
+                    && info.lastModified() < appBuiltAt) {
+                    continue;
+                }
                 command = QStringLiteral("\"%1\" --json-bridge").arg(info.absoluteFilePath());
                 break;
             }
