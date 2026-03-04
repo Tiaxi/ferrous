@@ -229,11 +229,14 @@ void BridgeClient::pollInProcessBridge() {
     ferrous_ffi_bridge_poll(m_ffiBridge, 64);
 
     bool anySnapshotChanged = false;
-    for (;;) {
+    int processedJsonEvents = 0;
+    constexpr int kMaxJsonEventsPerPass = 2;
+    while (processedJsonEvents < kMaxJsonEventsPerPass) {
         char *linePtr = ferrous_ffi_bridge_pop_json_event(m_ffiBridge);
         if (linePtr == nullptr) {
             break;
         }
+        processedJsonEvents++;
         const QByteArray line(linePtr);
         ferrous_ffi_bridge_free_json_event(linePtr);
         if (line.trimmed().isEmpty()) {
@@ -248,12 +251,15 @@ void BridgeClient::pollInProcessBridge() {
         anySnapshotChanged |= processBridgeJsonObject(doc.object());
     }
 
-    for (;;) {
+    int processedAnalysisFrames = 0;
+    constexpr int kMaxAnalysisFramesPerPass = 6;
+    while (processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
         std::size_t len = 0;
         std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
         if (framePtr == nullptr || len == 0) {
             break;
         }
+        processedAnalysisFrames++;
         const QByteArray chunk(
             reinterpret_cast<const char *>(framePtr),
             static_cast<qsizetype>(len));
