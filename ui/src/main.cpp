@@ -1,15 +1,11 @@
 #include <QApplication>
 #include <QDateTime>
-#include <QDir>
-#include <QFile>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
-#include <QStandardPaths>
 #include <qqml.h>
 #include <QQuickStyle>
 
 #include <array>
-#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -18,26 +14,12 @@
 #endif
 
 #include "BridgeClient.h"
+#include "DiagnosticsLog.h"
 #include "LibraryTreeModel.h"
 #include "SpectrogramItem.h"
 #include "WaveformItem.h"
 
 namespace {
-
-QString diagnosticsLogPath() {
-    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (baseDir.isEmpty()) {
-        baseDir = QDir::tempPath();
-    }
-    if (baseDir.isEmpty()) {
-        return {};
-    }
-    QDir dir(baseDir);
-    if (!dir.exists()) {
-        dir.mkpath(QStringLiteral("."));
-    }
-    return dir.filePath(QStringLiteral("diagnostics.log"));
-}
 
 class ConsoleTeeManager {
 public:
@@ -75,14 +57,8 @@ private:
 
         const QString timestamp = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
         const QString fullLine = QStringLiteral("[%1] [%2] %3").arg(timestamp, tag, line);
-
-        std::lock_guard<std::mutex> lock(m_logMutex);
-        QFile file(m_logPath);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-            return;
-        }
-        file.write(fullLine.toUtf8());
-        file.write("\n", 1);
+        const bool written = DiagnosticsLog::appendLine(m_logPath, fullLine);
+        (void)written;
     }
 
 #if defined(Q_OS_UNIX)
@@ -186,7 +162,6 @@ private:
 #endif
 
     QString m_logPath;
-    std::mutex m_logMutex;
 };
 
 } // namespace
@@ -194,7 +169,7 @@ private:
 int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
     QApplication app(argc, argv);
-    ConsoleTeeManager consoleTee(diagnosticsLogPath());
+    ConsoleTeeManager consoleTee(DiagnosticsLog::defaultLogPath());
     BridgeClient bridge;
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;

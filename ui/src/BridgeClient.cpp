@@ -1,5 +1,6 @@
 #include "BridgeClient.h"
 
+#include "DiagnosticsLog.h"
 #include "FerrousBridgeFfi.h"
 
 #include <algorithm>
@@ -17,7 +18,6 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QSet>
-#include <QStandardPaths>
 #include <QTextStream>
 #include <QUrl>
 #include <QUrlQuery>
@@ -1026,23 +1026,8 @@ void BridgeClient::logDiagnostic(const QString &category, const QString &message
     if (m_diagnosticsLogPath.isEmpty()) {
         return;
     }
-
-    const QFileInfo info(m_diagnosticsLogPath);
-    const QString dirPath = info.absolutePath();
-    if (!dirPath.isEmpty()) {
-        QDir dir(dirPath);
-        if (!dir.exists()) {
-            dir.mkpath(QStringLiteral("."));
-        }
-    }
-
-    QFile file(m_diagnosticsLogPath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        return;
-    }
-
-    QTextStream out(&file);
-    out << line << '\n';
+    const bool written = DiagnosticsLog::appendLine(m_diagnosticsLogPath, line);
+    (void)written;
 }
 
 void BridgeClient::appendDiagnosticLine(const QString &line) {
@@ -1065,19 +1050,7 @@ void BridgeClient::rebuildDiagnosticsText() {
 }
 
 QString BridgeClient::resolveDiagnosticsLogPath() {
-    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (baseDir.isEmpty()) {
-        baseDir = QDir::tempPath();
-    }
-    if (baseDir.isEmpty()) {
-        return {};
-    }
-
-    QDir dir(baseDir);
-    if (!dir.exists()) {
-        dir.mkpath(QStringLiteral("."));
-    }
-    return dir.filePath(QStringLiteral("diagnostics.log"));
+    return DiagnosticsLog::defaultLogPath();
 }
 
 bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame) {

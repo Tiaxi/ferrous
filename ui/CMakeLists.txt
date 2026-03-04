@@ -36,6 +36,7 @@ add_custom_target(ferrous_rust_bridge ALL
 
 qt_add_executable(ferrous
     src/main.cpp
+    src/DiagnosticsLog.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
     src/LibraryTreeModel.cpp
