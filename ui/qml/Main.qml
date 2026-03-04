@@ -478,6 +478,24 @@ Kirigami.ApplicationWindow {
         setLibrarySingleSelection(index, rowMap)
     }
 
+    function toggleLibraryNode(key) {
+        if (!key || key.length === 0) {
+            return
+        }
+        if (!libraryAlbumView) {
+            libraryModel.toggleKey(key)
+            return
+        }
+        const preserveY = libraryAlbumView.contentY
+        const restoreY = function() {
+            const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
+            libraryAlbumView.contentY = Math.min(preserveY, maxYNow)
+        }
+        libraryModel.toggleKey(key)
+        restoreY()
+        Qt.callLater(restoreY)
+    }
+
     function clearQueueSelection() {
         selectedQueueIndices = []
         queueSelectionAnchorIndex = -1
@@ -1596,7 +1614,7 @@ Kirigami.ApplicationWindow {
                                             if (mouse.button === Qt.LeftButton
                                                     && hasChildren
                                                     && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                                                libraryModel.toggleKey(key)
+                                                root.toggleLibraryNode(key)
                                                 return
                                             }
                                             root.handleLibraryRowSelection(
@@ -1623,7 +1641,7 @@ Kirigami.ApplicationWindow {
                                             }
                                             if (hasChildren
                                                     && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                                                libraryModel.toggleKey(key)
+                                                root.toggleLibraryNode(key)
                                                 return
                                             }
                                             const rows = root.rowsForLibraryAction(rowMap)

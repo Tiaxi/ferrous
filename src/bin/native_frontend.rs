@@ -390,6 +390,7 @@ impl AnalysisSocketWriter {
 struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
+    last_emitted_library_tree_digest: Option<LibraryDigest>,
     last_queue_digest: Option<QueueDigest>,
     last_queue_total_duration_secs: f64,
     last_queue_unknown_duration_count: usize,
@@ -809,9 +810,14 @@ fn encode_snapshot_payload(
             .map(|t| t.path.to_string_lossy().to_string()),
     };
     let tree_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
-    let should_emit_tree =
-        tree_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
-    emit_state.last_library_digest = Some(library_digest);
+    let tree_changed_since_last_emit =
+        emit_state.last_emitted_library_tree_digest.as_ref() != Some(&library_digest);
+    let should_emit_tree = tree_changed_since_last_emit
+        && (!s.library.scan_in_progress || emit_state.last_emitted_library_tree_digest.is_none());
+    emit_state.last_library_digest = Some(library_digest.clone());
+    if should_emit_tree {
+        emit_state.last_emitted_library_tree_digest = Some(library_digest.clone());
+    }
     let library_tree = if should_emit_tree {
         build_library_tree_json(&s.library, s.settings.library_sort_mode)
     } else {

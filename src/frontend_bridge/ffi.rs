@@ -37,6 +37,7 @@ struct AnalysisDelta {
 struct JsonEmitState {
     last_waveform_peaks: Vec<f32>,
     last_library_digest: Option<LibraryDigest>,
+    last_emitted_library_tree_digest: Option<LibraryDigest>,
     last_queue_digest: Option<QueueDigest>,
     last_queue_total_duration_secs: f64,
     last_queue_unknown_duration_count: usize,
@@ -670,9 +671,14 @@ fn encode_snapshot_payload(
             .map(|t| t.path.to_string_lossy().to_string()),
     };
     let tree_changed = emit_state.last_library_digest.as_ref() != Some(&library_digest);
-    let should_emit_tree =
-        tree_changed && (!s.library.scan_in_progress || emit_state.last_library_digest.is_none());
-    emit_state.last_library_digest = Some(library_digest);
+    let tree_changed_since_last_emit =
+        emit_state.last_emitted_library_tree_digest.as_ref() != Some(&library_digest);
+    let should_emit_tree = tree_changed_since_last_emit
+        && (!s.library.scan_in_progress || emit_state.last_emitted_library_tree_digest.is_none());
+    emit_state.last_library_digest = Some(library_digest.clone());
+    if should_emit_tree {
+        emit_state.last_emitted_library_tree_digest = Some(library_digest.clone());
+    }
     let library_tree = if should_emit_tree {
         build_library_tree_json(&s.library, s.settings.library_sort_mode)
     } else {
@@ -1238,6 +1244,40 @@ mod tests {
                 .and_then(|v| v.as_u64()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn snapshot_payload_skips_tree_on_unchanged_rescan_completion() {
+        let baseline = sample_snapshot();
+        let mut emit_state = JsonEmitState::default();
+
+        let analysis_delta = compute_analysis_delta(&baseline, &mut emit_state);
+        let first_payload =
+            encode_snapshot_payload(&baseline, &analysis_delta, &mut emit_state, false);
+        assert!(first_payload
+            .get("library")
+            .and_then(|v| v.get("tree"))
+            .is_some_and(|tree| tree.is_array()));
+
+        let mut scan_snapshot = baseline.clone();
+        let mut scan_library = (*scan_snapshot.library).clone();
+        scan_library.scan_in_progress = true;
+        scan_snapshot.library = Arc::new(scan_library);
+        let scan_delta = compute_analysis_delta(&scan_snapshot, &mut emit_state);
+        let scan_payload =
+            encode_snapshot_payload(&scan_snapshot, &scan_delta, &mut emit_state, false);
+        assert!(scan_payload
+            .get("library")
+            .and_then(|v| v.get("tree"))
+            .is_some_and(|tree| tree.is_null()));
+
+        let rescan_done_delta = compute_analysis_delta(&baseline, &mut emit_state);
+        let rescan_done_payload =
+            encode_snapshot_payload(&baseline, &rescan_done_delta, &mut emit_state, false);
+        assert!(rescan_done_payload
+            .get("library")
+            .and_then(|v| v.get("tree"))
+            .is_some_and(|tree| tree.is_null()));
     }
 
     #[test]
