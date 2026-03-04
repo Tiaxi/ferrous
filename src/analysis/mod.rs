@@ -480,6 +480,8 @@ fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {
             ON waveform_cache(updated_at);
         ",
     )?;
+    // Legacy/failed decodes may have written empty entries; treat them as invalid cache rows.
+    let _ = conn.execute("DELETE FROM waveform_cache WHERE peak_count <= 0", []);
     Ok(())
 }
 
