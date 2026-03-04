@@ -268,11 +268,6 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             size_bytes INTEGER NOT NULL,
             indexed_at INTEGER NOT NULL
         );
-
-        CREATE INDEX IF NOT EXISTS idx_tracks_root_path ON tracks(root_path);
-        CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
-        CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
-        CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
         ",
     )?;
 
@@ -283,6 +278,16 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     );
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN track_no INTEGER", []);
+
+    // Build indexes after migrations so pre-existing DBs without root_path can initialize.
+    conn.execute_batch(
+        r"
+        CREATE INDEX IF NOT EXISTS idx_tracks_root_path ON tracks(root_path);
+        CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
+        CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
+        CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+        ",
+    )?;
 
     Ok(())
 }
@@ -676,6 +681,45 @@ mod tests {
         assert!(is_supported_audio(Path::new("a.wav")));
         assert!(!is_supported_audio(Path::new("a.txt")));
         assert!(!is_supported_audio(Path::new("a")));
+    }
+
+    #[test]
+    fn init_schema_migrates_legacy_tracks_before_index_creation() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            r"
+            CREATE TABLE tracks (
+                path TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                indexed_at INTEGER NOT NULL
+            );
+            ",
+        )
+        .expect("legacy schema");
+
+        init_schema(&conn).expect("schema migration");
+
+        let mut has_root_path = false;
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('tracks')")
+            .expect("pragma table_info");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query columns");
+        for name in rows.flatten() {
+            if name == "root_path" {
+                has_root_path = true;
+                break;
+            }
+        }
+        assert!(
+            has_root_path,
+            "tracks.root_path should exist after migration"
+        );
     }
 
     #[test]
