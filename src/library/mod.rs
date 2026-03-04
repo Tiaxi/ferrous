@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 use rusqlite::{params, Connection};
@@ -395,6 +396,31 @@ fn remove_root_and_purge(conn: &Connection, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+struct MetadataTask {
+    path: PathBuf,
+    path_string: String,
+    mtime_ns: i64,
+    size_bytes: i64,
+}
+
+struct MetadataResult {
+    task: MetadataTask,
+    indexed: IndexedTrack,
+}
+
+fn scan_worker_count() -> usize {
+    const MAX_SCAN_WORKERS: usize = 32;
+    if let Ok(raw) = std::env::var("FERROUS_SCAN_WORKERS") {
+        if let Ok(parsed) = raw.trim().parse::<usize>() {
+            return parsed.clamp(1, MAX_SCAN_WORKERS);
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+}
+
 fn scan_root<F>(conn: &Connection, root: &Path, on_progress: &mut F) -> Result<(), String>
 where
     F: FnMut(RootScanProgress),
@@ -432,6 +458,37 @@ where
         Ok(tx) => tx,
         Err(e) => return Err(format!("failed to begin transaction: {e}")),
     };
+    let mut upsert_stmt = tx
+        .prepare_cached(
+            r"
+            INSERT INTO tracks(
+                path,
+                root_path,
+                title,
+                artist,
+                album,
+                year,
+                track_no,
+                duration_secs,
+                mtime_ns,
+                size_bytes,
+                indexed_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(path) DO UPDATE SET
+                root_path=excluded.root_path,
+                title=excluded.title,
+                artist=excluded.artist,
+                album=excluded.album,
+                year=excluded.year,
+                track_no=excluded.track_no,
+                duration_secs=excluded.duration_secs,
+                mtime_ns=excluded.mtime_ns,
+                size_bytes=excluded.size_bytes,
+                indexed_at=excluded.indexed_at
+            ",
+        )
+        .map_err(|e| format!("failed to prepare track upsert statement: {e}"))?;
 
     let mut discovered = 0usize;
     let mut processed = 0usize;
@@ -482,6 +539,56 @@ where
     emit_progress(true, discovered, processed);
 
     let now = unix_ts_i64();
+    let worker_count = scan_worker_count();
+    let mut workers = Vec::new();
+    let mut task_tx: Option<Sender<MetadataTask>> = None;
+    let mut result_rx: Option<Receiver<MetadataResult>> = None;
+    let mut pending_metadata_tasks = 0usize;
+
+    if worker_count > 1 {
+        let (tx_tasks, rx_tasks) = unbounded::<MetadataTask>();
+        let (tx_results, rx_results) = unbounded::<MetadataResult>();
+        for _ in 0..worker_count {
+            let rx_tasks = rx_tasks.clone();
+            let tx_results = tx_results.clone();
+            workers.push(thread::spawn(move || {
+                while let Ok(task) = rx_tasks.recv() {
+                    let indexed = read_track_info(&task.path);
+                    if tx_results.send(MetadataResult { task, indexed }).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(rx_tasks);
+        drop(tx_results);
+        task_tx = Some(tx_tasks);
+        result_rx = Some(rx_results);
+    }
+
+    macro_rules! apply_metadata_result {
+        ($result:expr) => {{
+            let result = $result;
+            let task = result.task;
+            let indexed = result.indexed;
+            let _ = upsert_stmt.execute(params![
+                task.path_string,
+                root_str.as_str(),
+                indexed.title,
+                indexed.artist,
+                indexed.album,
+                indexed.year.map(i64::from),
+                indexed.track_no.map(i64::from),
+                indexed.duration_secs,
+                task.mtime_ns,
+                task.size_bytes,
+                now,
+            ]);
+            processed = processed.saturating_add(1);
+            emit_progress(false, discovered, processed);
+        }};
+    }
+
     for entry in WalkDir::new(&root)
         .follow_links(false)
         .into_iter()
@@ -518,61 +625,79 @@ where
         };
 
         if needs_update {
-            let indexed = read_track_info(path);
-            if tx
-                .execute(
-                    r"
-                    INSERT INTO tracks(
-                        path,
-                        root_path,
-                        title,
-                        artist,
-                        album,
-                        year,
-                        track_no,
-                        duration_secs,
-                        mtime_ns,
-                        size_bytes,
-                        indexed_at
-                    )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                    ON CONFLICT(path) DO UPDATE SET
-                        root_path=excluded.root_path,
-                        title=excluded.title,
-                        artist=excluded.artist,
-                        album=excluded.album,
-                        year=excluded.year,
-                        track_no=excluded.track_no,
-                        duration_secs=excluded.duration_secs,
-                        mtime_ns=excluded.mtime_ns,
-                        size_bytes=excluded.size_bytes,
-                        indexed_at=excluded.indexed_at
-                    ",
-                    params![
-                        path_string,
-                        root_str.as_str(),
-                        indexed.title,
-                        indexed.artist,
-                        indexed.album,
-                        indexed.year.map(i64::from),
-                        indexed.track_no.map(i64::from),
-                        indexed.duration_secs,
-                        mtime_ns,
-                        size_bytes,
-                        now,
-                    ],
-                )
-                .is_err()
-            {
-                processed = processed.saturating_add(1);
-                emit_progress(false, discovered, processed);
-                continue;
+            let task = MetadataTask {
+                path: path.to_path_buf(),
+                path_string,
+                mtime_ns,
+                size_bytes,
+            };
+            if let Some(task_tx_ref) = task_tx.as_ref() {
+                match task_tx_ref.send(task) {
+                    Ok(()) => {
+                        pending_metadata_tasks = pending_metadata_tasks.saturating_add(1);
+                    }
+                    Err(err) => {
+                        let task = err.into_inner();
+                        let indexed = read_track_info(&task.path);
+                        apply_metadata_result!(MetadataResult { task, indexed });
+                    }
+                }
+            } else {
+                let indexed = read_track_info(&task.path);
+                apply_metadata_result!(MetadataResult { task, indexed });
             }
+        } else {
+            processed = processed.saturating_add(1);
+            emit_progress(false, discovered, processed);
         }
 
-        processed = processed.saturating_add(1);
-        emit_progress(false, discovered, processed);
+        if let Some(result_rx_ref) = result_rx.as_ref() {
+            while pending_metadata_tasks > 0 {
+                match result_rx_ref.try_recv() {
+                    Ok(result) => {
+                        pending_metadata_tasks -= 1;
+                        apply_metadata_result!(result);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        return Err("metadata scan workers disconnected unexpectedly".to_string());
+                    }
+                }
+            }
+            if pending_metadata_tasks >= 1024 {
+                match result_rx_ref.recv() {
+                    Ok(result) => {
+                        pending_metadata_tasks -= 1;
+                        apply_metadata_result!(result);
+                    }
+                    Err(_) => {
+                        return Err("metadata scan workers disconnected unexpectedly".to_string());
+                    }
+                }
+            }
+        }
     }
+
+    if let Some(task_tx) = task_tx.take() {
+        drop(task_tx);
+    }
+    if let Some(result_rx_ref) = result_rx.as_ref() {
+        while pending_metadata_tasks > 0 {
+            match result_rx_ref.recv() {
+                Ok(result) => {
+                    pending_metadata_tasks -= 1;
+                    apply_metadata_result!(result);
+                }
+                Err(_) => {
+                    return Err("metadata scan workers disconnected unexpectedly".to_string());
+                }
+            }
+        }
+    }
+    for worker in workers {
+        let _ = worker.join();
+    }
+    drop(upsert_stmt);
 
     let stale: Vec<String> = existing
         .into_keys()
