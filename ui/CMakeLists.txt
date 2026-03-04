@@ -10,7 +10,7 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Network Widgets)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
@@ -61,6 +61,7 @@ target_link_libraries(ferrous PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Concurrent
     Qt6::Network
     Qt6::Widgets
     KF6::Kirigami
@@ -88,6 +89,7 @@ if(BUILD_TESTING)
         Qt6::Qml
         Qt6::Quick
         Qt6::QuickControls2
+        Qt6::Concurrent
         Qt6::Test
         KF6::Kirigami
     )

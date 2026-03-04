@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QFutureWatcher>
 #include <QHash>
 #include <QString>
 #include <QStringList>
@@ -103,4 +104,9 @@ private:
     QVector<FlatRow> m_rows;
     QHash<QString, bool> m_expandedByKey;
     QString m_searchLower;
+    QFutureWatcher<QVector<TreeNode>> m_parseWatcher;
+    int m_parseGeneration{0};
+    bool m_parseInFlight{false};
+    bool m_hasQueuedTree{false};
+    QVariantList m_queuedTree;
 };

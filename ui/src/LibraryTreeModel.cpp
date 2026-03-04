@@ -1,9 +1,32 @@
 #include "LibraryTreeModel.h"
 
+#include <QtConcurrent/QtConcurrentRun>
 #include <QVariantMap>
 
 LibraryTreeModel::LibraryTreeModel(QObject *parent)
-    : QAbstractListModel(parent) {}
+    : QAbstractListModel(parent) {
+    connect(&m_parseWatcher, &QFutureWatcher<QVector<TreeNode>>::finished, this, [this]() {
+        m_parseInFlight = false;
+        const int finishedGeneration = m_parseWatcher.property("parseGeneration").toInt();
+        if (finishedGeneration != m_parseGeneration) {
+            if (m_hasQueuedTree) {
+                QVariantList queued = std::move(m_queuedTree);
+                m_queuedTree.clear();
+                m_hasQueuedTree = false;
+                setLibraryTree(queued);
+            }
+            return;
+        }
+        m_tree = m_parseWatcher.result();
+        rebuildRows();
+        if (m_hasQueuedTree) {
+            QVariantList queued = std::move(m_queuedTree);
+            m_queuedTree.clear();
+            m_hasQueuedTree = false;
+            setLibraryTree(queued);
+        }
+    });
+}
 
 int LibraryTreeModel::rowCount(const QModelIndex &parent) const {
     if (parent.isValid()) {
@@ -95,8 +118,24 @@ int LibraryTreeModel::count() const {
 }
 
 void LibraryTreeModel::setLibraryTree(const QVariantList &tree) {
-    m_tree = parseTreeNodes(tree);
-    rebuildRows();
+    // Keep tiny trees synchronous to preserve deterministic behavior in tests
+    // and avoid async overhead for small libraries.
+    if (!m_parseInFlight && tree.size() <= 64) {
+        ++m_parseGeneration;
+        m_tree = parseTreeNodes(tree);
+        rebuildRows();
+        return;
+    }
+    if (m_parseInFlight) {
+        m_queuedTree = tree;
+        m_hasQueuedTree = true;
+        return;
+    }
+    const int generation = ++m_parseGeneration;
+    auto future = QtConcurrent::run([tree]() { return parseTreeNodes(tree); });
+    m_parseWatcher.setProperty("parseGeneration", generation);
+    m_parseInFlight = true;
+    m_parseWatcher.setFuture(future);
 }
 
 void LibraryTreeModel::setSearchText(const QString &text) {

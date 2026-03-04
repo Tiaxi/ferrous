@@ -193,7 +193,25 @@ fn run_scans(
     let roots_total = roots.len();
     for (idx, root) in roots.iter().enumerate() {
         let mut final_progress = RootScanProgress::default();
+        let mut root_track_indices: HashMap<String, usize> = HashMap::new();
+        for (track_index, track) in snapshot.tracks.iter().enumerate() {
+            if track.root_path == *root {
+                root_track_indices.insert(track.path.to_string_lossy().to_string(), track_index);
+            }
+        }
+        let pending_upserts = std::cell::RefCell::new(Vec::<(MetadataTask, IndexedTrack)>::new());
+        let mut collect_upsert = |task: &MetadataTask, indexed: &IndexedTrack| {
+            pending_upserts
+                .borrow_mut()
+                .push((task.clone(), indexed.clone()));
+        };
         let mut on_progress = |progress: RootScanProgress| {
+            apply_pending_upserts_for_root(
+                snapshot,
+                root,
+                &mut root_track_indices,
+                &pending_upserts,
+            );
             final_progress = progress.clone();
             snapshot.scan_in_progress = true;
             snapshot.scan_progress = Some(LibraryScanProgress {
@@ -208,7 +226,14 @@ fn run_scans(
             emit_snapshot(event_tx, snapshot);
         };
 
-        scan_root(conn, root, &mut on_progress)?;
+        let stale_paths = scan_root(conn, root, &mut on_progress, &mut collect_upsert)?;
+        apply_pending_upserts_for_root(snapshot, root, &mut root_track_indices, &pending_upserts);
+        if !stale_paths.is_empty() {
+            let stale_set: HashSet<String> = stale_paths.into_iter().collect();
+            snapshot
+                .tracks
+                .retain(|track| !stale_set.contains(track.path.to_string_lossy().as_ref()));
+        }
 
         snapshot.scan_in_progress = true;
         snapshot.scan_progress = Some(LibraryScanProgress {
@@ -224,6 +249,41 @@ fn run_scans(
     }
 
     Ok(())
+}
+
+fn apply_pending_upserts_for_root(
+    snapshot: &mut LibrarySnapshot,
+    root: &Path,
+    root_track_indices: &mut HashMap<String, usize>,
+    pending_upserts: &std::cell::RefCell<Vec<(MetadataTask, IndexedTrack)>>,
+) {
+    let mut updates = pending_upserts.borrow_mut();
+    if updates.is_empty() {
+        return;
+    }
+    for (task, indexed) in updates.drain(..) {
+        let as_snapshot_track = LibraryTrack {
+            path: task.path.clone(),
+            root_path: root.to_path_buf(),
+            title: indexed.title,
+            artist: indexed.artist,
+            album: indexed.album,
+            year: indexed.year,
+            track_no: indexed.track_no,
+            duration_secs: indexed.duration_secs,
+        };
+
+        if let Some(existing_index) = root_track_indices.get(&task.path_string).copied() {
+            if let Some(existing) = snapshot.tracks.get_mut(existing_index) {
+                *existing = as_snapshot_track;
+            }
+            continue;
+        }
+
+        let new_index = snapshot.tracks.len();
+        snapshot.tracks.push(as_snapshot_track);
+        root_track_indices.insert(task.path_string, new_index);
+    }
 }
 
 fn open_library_db() -> anyhow::Result<Connection> {
@@ -396,6 +456,7 @@ fn remove_root_and_purge(conn: &Connection, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
 struct MetadataTask {
     path: PathBuf,
     path_string: String,
@@ -403,6 +464,7 @@ struct MetadataTask {
     size_bytes: i64,
 }
 
+#[derive(Debug, Clone)]
 struct MetadataResult {
     task: MetadataTask,
     indexed: IndexedTrack,
@@ -415,15 +477,24 @@ fn scan_worker_count() -> usize {
             return parsed.clamp(1, MAX_SCAN_WORKERS);
         }
     }
-    std::thread::available_parallelism()
+    let cores = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(1)
-        .clamp(1, 8)
+        .unwrap_or(1);
+    if cores <= 2 {
+        return cores.clamp(1, MAX_SCAN_WORKERS);
+    }
+    (cores.saturating_mul(2)).clamp(2, 24)
 }
 
-fn scan_root<F>(conn: &Connection, root: &Path, on_progress: &mut F) -> Result<(), String>
+fn scan_root<F, U>(
+    conn: &Connection,
+    root: &Path,
+    on_progress: &mut F,
+    on_upsert: &mut U,
+) -> Result<Vec<String>, String>
 where
     F: FnMut(RootScanProgress),
+    U: FnMut(&MetadataTask, &IndexedTrack),
 {
     let root = canonicalize_root(root)?;
     insert_root(conn, &root)?;
@@ -516,10 +587,14 @@ where
             None
         };
 
-        let estimated_total = discovered.max(previous_index_count);
-        let eta_seconds = if let Some(rate) = files_per_second {
-            if rate >= 0.5 && processed < estimated_total {
-                Some((estimated_total - processed) as f32 / rate)
+        let eta_seconds = if previous_index_count > 0 {
+            let estimated_total = discovered.max(previous_index_count);
+            if let Some(rate) = files_per_second {
+                if rate >= 0.5 && processed < estimated_total {
+                    Some((estimated_total - processed) as f32 / rate)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -540,6 +615,7 @@ where
 
     let now = unix_ts_i64();
     let worker_count = scan_worker_count();
+    let max_pending_tasks = worker_count.saturating_mul(256).clamp(512, 8192);
     let mut workers = Vec::new();
     let mut task_tx: Option<Sender<MetadataTask>> = None;
     let mut result_rx: Option<Receiver<MetadataResult>> = None;
@@ -572,11 +648,11 @@ where
             let task = result.task;
             let indexed = result.indexed;
             let _ = upsert_stmt.execute(params![
-                task.path_string,
+                task.path_string.as_str(),
                 root_str.as_str(),
-                indexed.title,
-                indexed.artist,
-                indexed.album,
+                indexed.title.as_str(),
+                indexed.artist.as_str(),
+                indexed.album.as_str(),
                 indexed.year.map(i64::from),
                 indexed.track_no.map(i64::from),
                 indexed.duration_secs,
@@ -584,6 +660,7 @@ where
                 task.size_bytes,
                 now,
             ]);
+            on_upsert(&task, &indexed);
             processed = processed.saturating_add(1);
             emit_progress(false, discovered, processed);
         }};
@@ -664,7 +741,7 @@ where
                     }
                 }
             }
-            if pending_metadata_tasks >= 1024 {
+            if pending_metadata_tasks >= max_pending_tasks {
                 match result_rx_ref.recv() {
                     Ok(result) => {
                         pending_metadata_tasks -= 1;
@@ -703,7 +780,7 @@ where
         .into_keys()
         .filter(|p| !seen_paths.contains(p))
         .collect();
-    for p in stale {
+    for p in &stale {
         let _ = tx.execute("DELETE FROM tracks WHERE path=?1", params![p]);
     }
 
@@ -711,7 +788,7 @@ where
         .map_err(|e| format!("failed to finalize scan transaction: {e}"))?;
 
     emit_progress(true, discovered, processed);
-    Ok(())
+    Ok(stale)
 }
 
 fn is_supported_audio(path: &Path) -> bool {
@@ -724,6 +801,7 @@ fn is_supported_audio(path: &Path) -> bool {
     )
 }
 
+#[derive(Debug, Clone)]
 struct IndexedTrack {
     title: String,
     artist: String,
@@ -867,9 +945,14 @@ mod tests {
         write_stub(&txt, b"ignore me");
 
         let mut last = RootScanProgress::default();
-        scan_root(&conn, &root, &mut |progress| {
-            last = progress;
-        })
+        let _ = scan_root(
+            &conn,
+            &root,
+            &mut |progress| {
+                last = progress;
+            },
+            &mut |_, _| {},
+        )
         .expect("scan");
 
         let mut snapshot = LibrarySnapshot::default();
@@ -896,14 +979,14 @@ mod tests {
         let mp3 = root.join("song1.mp3");
         write_stub(&mp3, b"not-real-mp3");
 
-        scan_root(&conn, &root, &mut |_| {}).expect("initial scan");
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("initial scan");
 
         let mut snapshot = LibrarySnapshot::default();
         load_snapshot(&conn, &mut snapshot);
         assert_eq!(snapshot.tracks.len(), 1);
 
         fs::remove_file(&mp3).expect("remove mp3");
-        scan_root(&conn, &root, &mut |_| {}).expect("rescan");
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("rescan");
         load_snapshot(&conn, &mut snapshot);
         assert!(snapshot.tracks.is_empty());
 
@@ -925,8 +1008,8 @@ mod tests {
         write_stub(&a_track, b"a");
         write_stub(&b_track, b"b");
 
-        scan_root(&conn, &root_a, &mut |_| {}).expect("scan a");
-        scan_root(&conn, &root_b, &mut |_| {}).expect("scan b");
+        let _ = scan_root(&conn, &root_a, &mut |_| {}, &mut |_, _| {}).expect("scan a");
+        let _ = scan_root(&conn, &root_b, &mut |_| {}, &mut |_, _| {}).expect("scan b");
 
         let root_a_canon = root_a.canonicalize().expect("canon a");
         remove_root_and_purge(&conn, &root_a_canon).expect("remove root a");

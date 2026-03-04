@@ -55,7 +55,7 @@ void QmlSmokeTest::libraryTreeStartsCollapsedByDefault() {
     model.setLibraryTree(QVariantList{artist});
 
     // By default only artist rows should be visible until explicitly expanded.
-    QCOMPARE(model.rowCount(), 1);
+    QTRY_COMPARE(model.rowCount(), 1);
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("artist"));
 }
 
@@ -83,12 +83,12 @@ void QmlSmokeTest::artistExpansionPopulatesInBatches() {
         {QStringLiteral("albums"), albums},
     };
     model.setLibraryTree(QVariantList{artist});
-    QCOMPARE(model.rowCount(), 1);
+    QTRY_COMPARE(model.rowCount(), 1);
 
     model.toggleArtist(QStringLiteral("Artist A"));
 
     // Expanded view should expose artist + album rows.
-    QCOMPARE(model.rowCount(), 81);
+    QTRY_COMPARE(model.rowCount(), 81);
 }
 
 QTEST_MAIN(QmlSmokeTest)
