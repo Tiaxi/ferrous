@@ -141,6 +141,8 @@ fn handle_add_root(
 ) -> Result<(), String> {
     let root = canonicalize_root(root)?;
     insert_root(conn, &root)?;
+    // Reflect the newly-added root in UI state immediately, before scan completion.
+    snapshot.roots = load_roots(conn);
     run_scans(conn, &[root], snapshot, event_tx)
 }
 
