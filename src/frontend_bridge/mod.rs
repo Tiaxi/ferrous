@@ -361,6 +361,7 @@ struct SessionSnapshot {
     queue: Vec<PathBuf>,
     selected_queue_index: Option<usize>,
     current_queue_index: Option<usize>,
+    current_path: Option<PathBuf>,
 }
 
 fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
@@ -2336,15 +2337,33 @@ fn session_path() -> Option<PathBuf> {
 }
 
 fn session_snapshot_for_state(state: &BridgeState) -> SessionSnapshot {
-    let current_queue_index = state
+    let current_path = state
         .playback
-        .current_queue_index
-        .filter(|idx| *idx < state.queue.len());
+        .current
+        .clone()
+        .filter(|path| state.queue.iter().any(|queued| queued == path));
+    let current_queue_index = resolve_session_current_index(
+        &state.queue,
+        state.playback.current_queue_index,
+        current_path.as_ref(),
+    );
     SessionSnapshot {
         queue: state.queue.clone(),
         selected_queue_index: state.selected_queue_index,
         current_queue_index,
+        current_path,
     }
+}
+
+fn resolve_session_current_index(
+    queue: &[PathBuf],
+    current_queue_index: Option<usize>,
+    current_path: Option<&PathBuf>,
+) -> Option<usize> {
+    if let Some(idx) = current_queue_index.filter(|idx| *idx < queue.len()) {
+        return Some(idx);
+    }
+    current_path.and_then(|path| queue.iter().position(|queued| queued == path))
 }
 
 fn apply_session_restore(
@@ -2356,17 +2375,20 @@ fn apply_session_restore(
         return;
     };
     state.queue = session.queue.clone();
+    let restored_current_index = resolve_session_current_index(
+        &state.queue,
+        session.current_queue_index,
+        session.current_path.as_ref(),
+    );
     state.selected_queue_index = session
         .selected_queue_index
-        .filter(|idx| *idx < state.queue.len());
+        .filter(|idx| *idx < state.queue.len())
+        .or(restored_current_index);
     if state.queue.is_empty() {
         return;
     }
     playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-    if let Some(idx) = session
-        .current_queue_index
-        .filter(|idx| *idx < state.queue.len())
-    {
+    if let Some(idx) = restored_current_index {
         state.playback.current = state.queue.get(idx).cloned();
         state.playback.current_queue_index = Some(idx);
         playback.command(PlaybackCommand::PlayAt(idx));
@@ -2396,10 +2418,15 @@ fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
         .get("current_queue_index")
         .and_then(serde_json::Value::as_u64)
         .map(|v| v as usize);
+    let current_path = value
+        .get("current_path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
     Some(SessionSnapshot {
         queue,
         selected_queue_index,
         current_queue_index,
+        current_path,
     })
 }
 
@@ -2412,6 +2439,10 @@ fn format_session_text(session: &SessionSnapshot) -> String {
             .collect::<Vec<_>>(),
         "selected_queue_index": session.selected_queue_index,
         "current_queue_index": session.current_queue_index,
+        "current_path": session
+            .current_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
     });
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
@@ -2664,6 +2695,7 @@ mod tests {
             queue: vec![p("/a.flac"), p("/b.flac")],
             selected_queue_index: Some(1),
             current_queue_index: Some(0),
+            current_path: Some(p("/a.flac")),
         };
         let text = format_session_text(&session);
         let parsed = parse_session_text(&text).expect("parse session text");
@@ -2674,6 +2706,27 @@ mod tests {
     fn session_parse_rejects_missing_queue_array() {
         let parsed = parse_session_text(r#"{"selected_queue_index":1}"#);
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn resolve_session_current_index_prefers_valid_index() {
+        let queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
+        let idx = resolve_session_current_index(&queue, Some(2), Some(&p("/a.flac")));
+        assert_eq!(idx, Some(2));
+    }
+
+    #[test]
+    fn resolve_session_current_index_falls_back_to_path_when_index_missing() {
+        let queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
+        let idx = resolve_session_current_index(&queue, None, Some(&p("/b.flac")));
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn resolve_session_current_index_falls_back_to_path_when_index_invalid() {
+        let queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
+        let idx = resolve_session_current_index(&queue, Some(9), Some(&p("/c.flac")));
+        assert_eq!(idx, Some(2));
     }
 
     #[test]

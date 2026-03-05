@@ -3646,17 +3646,6 @@ Kirigami.ApplicationWindow {
                                     color: Kirigami.Theme.disabledTextColor
                                     elide: Text.ElideRight
                                 }
-
-                                ToolButton {
-                                    text: "Play All"
-                                    enabled: playAllLibraryTracksAction.enabled
-                                    onClicked: playAllLibraryTracksAction.trigger()
-                                }
-                                ToolButton {
-                                    text: "Queue All"
-                                    enabled: appendAllLibraryTracksAction.enabled
-                                    onClicked: appendAllLibraryTracksAction.trigger()
-                                }
                             }
 
                             ListView {
