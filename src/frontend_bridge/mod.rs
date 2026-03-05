@@ -226,6 +226,70 @@ struct SearchWorkerQuery {
     library: Arc<LibrarySnapshot>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct AlbumInventoryAcc {
+    main_track_count: u32,
+    main_total_length: f32,
+    has_main_duration: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSearchTrack {
+    path: PathBuf,
+    path_string: String,
+    path_lower: String,
+    title: String,
+    artist: String,
+    album: String,
+    genre: String,
+    year: Option<i32>,
+    track_no: Option<u32>,
+    duration_secs: Option<f32>,
+    title_l: String,
+    artist_l: String,
+    album_l: String,
+    genre_l: String,
+    haystack_l: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreparedSearchLibrary {
+    roots: Vec<PathBuf>,
+    tracks: Vec<PreparedSearchTrack>,
+    context_by_path: HashMap<String, TreePathContext>,
+    album_inventory: HashMap<String, AlbumInventoryAcc>,
+}
+
+#[derive(Default)]
+struct SearchWorkerPreparedCache {
+    source_library: Option<Arc<LibrarySnapshot>>,
+    prepared: Option<Arc<PreparedSearchLibrary>>,
+}
+
+impl SearchWorkerPreparedCache {
+    fn prepared_for(&mut self, library: &Arc<LibrarySnapshot>) -> Arc<PreparedSearchLibrary> {
+        if let (Some(source), Some(prepared)) = (&self.source_library, &self.prepared) {
+            if Arc::ptr_eq(source, library) {
+                return Arc::clone(prepared);
+            }
+        }
+        let prepared = Arc::new(prepare_search_library(library.as_ref()));
+        self.source_library = Some(Arc::clone(library));
+        self.prepared = Some(Arc::clone(&prepared));
+        prepared
+    }
+}
+
+enum SearchBuildOutcome {
+    Frame(BridgeSearchResultsFrame),
+    Cancelled(SearchWorkerQuery),
+}
+
+enum SearchFallbackOutcome {
+    Hits(Vec<LibrarySearchTrack>),
+    Cancelled(SearchWorkerQuery),
+}
+
 impl BridgeState {
     fn snapshot(&self, include_tree: bool) -> BridgeSnapshot {
         BridgeSnapshot {
@@ -552,15 +616,31 @@ fn run_search_worker(
     query_rx: Receiver<SearchWorkerQuery>,
     results_tx: Sender<BridgeSearchResultsFrame>,
 ) {
-    while let Ok(mut query) = query_rx.recv() {
+    let Ok(mut query) = query_rx.recv() else {
+        return;
+    };
+    let mut prepared_cache = SearchWorkerPreparedCache::default();
+    loop {
         while let Ok(next) = query_rx.try_recv() {
             query = next;
         }
 
-        if let Some(frame) =
-            build_search_results_frame(query.seq, query.query.trim(), &query.library)
-        {
-            let _ = results_tx.send(frame);
+        let prepared = prepared_cache.prepared_for(&query.library);
+        match build_search_results_frame(&query, prepared.as_ref(), &query_rx) {
+            SearchBuildOutcome::Frame(frame) => {
+                let _ = results_tx.send(frame);
+            }
+            SearchBuildOutcome::Cancelled(next) => {
+                query = next;
+                continue;
+            }
+        }
+
+        match query_rx.recv() {
+            Ok(next) => {
+                query = next;
+            }
+            Err(_) => break,
         }
     }
 }
@@ -1165,10 +1245,10 @@ struct TreePathContext {
 }
 
 fn build_search_results_frame(
-    seq: u32,
-    query: &str,
-    library: &LibrarySnapshot,
-) -> Option<BridgeSearchResultsFrame> {
+    query: &SearchWorkerQuery,
+    prepared: &PreparedSearchLibrary,
+    query_rx: &Receiver<SearchWorkerQuery>,
+) -> SearchBuildOutcome {
     #[derive(Default)]
     struct HitAlbumAcc {
         artist_name: String,
@@ -1178,22 +1258,17 @@ fn build_search_results_frame(
         genre_counts: HashMap<String, usize>,
     }
 
-    #[derive(Default)]
-    struct AlbumInventoryAcc {
-        main_track_count: u32,
-        main_total_length: f32,
-        has_main_duration: bool,
-    }
-
-    if query.trim().is_empty() {
-        return Some(BridgeSearchResultsFrame {
+    let seq = query.seq;
+    let query_text = query.query.trim();
+    if query_text.is_empty() {
+        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
             seq,
             rows: Vec::new(),
         });
     }
-    let query_terms = split_search_terms(query);
+    let query_terms = split_search_terms(query_text);
     if query_terms.is_empty() {
-        return Some(BridgeSearchResultsFrame {
+        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
             seq,
             rows: Vec::new(),
         });
@@ -1203,48 +1278,36 @@ fn build_search_results_frame(
     // Optional FTS can be enabled explicitly for experimentation.
     let use_fts = std::env::var_os("FERROUS_SEARCH_USE_FTS").is_some();
     let hits = if use_fts {
-        match search_tracks_fts(query, 500) {
+        match search_tracks_fts(query_text, 500) {
             Ok(rows) if !rows.is_empty() => rows,
-            Ok(_) | Err(_) => search_tracks_fallback(query, library, 500),
-        }
-    } else {
-        search_tracks_fallback(query, library, 500)
-    };
-    if hits.is_empty() {
-        return Some(BridgeSearchResultsFrame {
-            seq,
-            rows: Vec::new(),
-        });
-    }
-
-    let roots = library.roots.clone();
-    if roots.is_empty() {
-        return Some(BridgeSearchResultsFrame {
-            seq,
-            rows: Vec::new(),
-        });
-    }
-
-    let mut album_inventory: HashMap<String, AlbumInventoryAcc> = HashMap::new();
-    for track in &library.tracks {
-        let Some(context) = derive_tree_path_context(&track.path, &roots, &track.artist) else {
-            continue;
-        };
-        let Some(album_key) = context.album_key.clone() else {
-            continue;
-        };
-        let include_in_main_album =
-            context.is_main_level_album_track || context.is_disc_section_album_track;
-        let inventory = album_inventory.entry(album_key).or_default();
-        if include_in_main_album {
-            inventory.main_track_count = inventory.main_track_count.saturating_add(1);
-            if let Some(duration) = track.duration_secs {
-                if duration.is_finite() && duration >= 0.0 {
-                    inventory.main_total_length += duration;
-                    inventory.has_main_duration = true;
+            Ok(_) | Err(_) => {
+                match search_tracks_fallback_prepared(query_text, prepared, 500, query_rx) {
+                    SearchFallbackOutcome::Hits(rows) => rows,
+                    SearchFallbackOutcome::Cancelled(next) => {
+                        return SearchBuildOutcome::Cancelled(next)
+                    }
                 }
             }
         }
+    } else {
+        match search_tracks_fallback_prepared(query_text, prepared, 500, query_rx) {
+            SearchFallbackOutcome::Hits(rows) => rows,
+            SearchFallbackOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
+        }
+    };
+    if hits.is_empty() {
+        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
+            seq,
+            rows: Vec::new(),
+        });
+    }
+
+    let roots = prepared.roots.clone();
+    if roots.is_empty() {
+        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
+            seq,
+            rows: Vec::new(),
+        });
     }
 
     let mut album_cover_paths: HashMap<String, String> = HashMap::new();
@@ -1254,7 +1317,13 @@ fn build_search_results_frame(
     let mut track_rows = Vec::new();
 
     for hit in &hits {
-        let Some(context) = derive_tree_path_context(&hit.path, &roots, &hit.artist) else {
+        let hit_path_string = hit.path.to_string_lossy().to_string();
+        let Some(context) = prepared
+            .context_by_path
+            .get(&hit_path_string)
+            .cloned()
+            .or_else(|| derive_tree_path_context(&hit.path, &roots, &hit.artist))
+        else {
             continue;
         };
         let hit_artist = if hit.artist.trim().is_empty() {
@@ -1343,7 +1412,7 @@ fn build_search_results_frame(
             album_key: album_key.unwrap_or_default(),
             section_key: context.section_key.unwrap_or_default(),
             track_key: context.track_key,
-            track_path: hit.path.to_string_lossy().to_string(),
+            track_path: hit_path_string,
         });
     }
 
@@ -1373,7 +1442,7 @@ fn build_search_results_frame(
         .into_iter()
         .filter_map(|(album_key, (score, fallback_title))| {
             let stats = album_hit_stats.get(&album_key)?;
-            let inventory = album_inventory.get(&album_key);
+            let inventory = prepared.album_inventory.get(&album_key);
             let year = choose_most_common_year(&stats.year_counts);
             let genre = choose_most_common_genre(&stats.genre_counts);
             Some(BridgeSearchResultRow {
@@ -1420,7 +1489,7 @@ fn build_search_results_frame(
     rows.extend(artist_rows);
     rows.extend(album_rows);
     rows.extend(track_rows);
-    Some(BridgeSearchResultsFrame { seq, rows })
+    SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, rows })
 }
 
 fn pump_search_results(
@@ -1439,58 +1508,60 @@ fn pump_search_results(
     false
 }
 
-fn search_tracks_fallback(
-    query: &str,
-    library: &LibrarySnapshot,
-    limit: usize,
-) -> Vec<LibrarySearchTrack> {
-    let terms = split_search_terms(query);
-    if terms.is_empty() {
-        return Vec::new();
+fn poll_latest_search_query(query_rx: &Receiver<SearchWorkerQuery>) -> Option<SearchWorkerQuery> {
+    let mut latest = None;
+    while let Ok(next) = query_rx.try_recv() {
+        latest = Some(next);
+    }
+    latest
+}
+
+fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
+    let roots = library.roots.clone();
+    if roots.is_empty() {
+        return PreparedSearchLibrary::default();
     }
 
-    let mut out = Vec::new();
+    let mut tracks = Vec::with_capacity(library.tracks.len());
+    let mut context_by_path: HashMap<String, TreePathContext> =
+        HashMap::with_capacity(library.tracks.len());
+    let mut album_inventory: HashMap<String, AlbumInventoryAcc> = HashMap::new();
+
     for track in &library.tracks {
-        let path_str = track.path.to_string_lossy().to_string();
+        let path_string = track.path.to_string_lossy().to_string();
+        let path_lower = path_string.to_lowercase();
         let title = track.title.trim().to_string();
         let artist = track.artist.trim().to_string();
         let album = track.album.trim().to_string();
         let genre = track.genre.trim().to_string();
-
         let title_l = title.to_lowercase();
         let artist_l = artist.to_lowercase();
         let album_l = album.to_lowercase();
         let genre_l = genre.to_lowercase();
-        let path_l = path_str.to_lowercase();
-        let haystack = format!("{title_l} {artist_l} {album_l} {genre_l} {path_l}");
-        if !terms.iter().all(|term| haystack.contains(term)) {
-            continue;
+        let haystack_l = format!("{title_l} {artist_l} {album_l} {genre_l} {path_lower}");
+
+        if let Some(context) = derive_tree_path_context(&track.path, &roots, &artist) {
+            if let Some(album_key) = context.album_key.clone() {
+                let include_in_main_album =
+                    context.is_main_level_album_track || context.is_disc_section_album_track;
+                let inventory = album_inventory.entry(album_key).or_default();
+                if include_in_main_album {
+                    inventory.main_track_count = inventory.main_track_count.saturating_add(1);
+                    if let Some(duration) = track.duration_secs {
+                        if duration.is_finite() && duration >= 0.0 {
+                            inventory.main_total_length += duration;
+                            inventory.has_main_duration = true;
+                        }
+                    }
+                }
+            }
+            context_by_path.insert(path_string.clone(), context);
         }
 
-        let mut score = 0.0f32;
-        for term in &terms {
-            score += if title_l.starts_with(term) {
-                0.0
-            } else if title_l.contains(term) {
-                0.8
-            } else if artist_l.starts_with(term) {
-                1.2
-            } else if artist_l.contains(term) {
-                1.8
-            } else if album_l.starts_with(term) {
-                2.0
-            } else if album_l.contains(term) {
-                2.6
-            } else if genre_l.contains(term) {
-                3.2
-            } else {
-                4.0
-            };
-        }
-        score += (path_str.len() as f32) / 10_000.0;
-
-        out.push(LibrarySearchTrack {
+        tracks.push(PreparedSearchTrack {
             path: track.path.clone(),
+            path_string,
+            path_lower,
             title,
             artist,
             album,
@@ -1498,23 +1569,149 @@ fn search_tracks_fallback(
             year: track.year,
             track_no: track.track_no,
             duration_secs: track.duration_secs,
-            score,
+            title_l,
+            artist_l,
+            album_l,
+            genre_l,
+            haystack_l,
         });
     }
 
-    out.sort_by(|a, b| {
-        a.score
-            .partial_cmp(&b.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| {
-                a.path
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&b.path.to_string_lossy().to_lowercase())
-            })
-    });
-    out.truncate(limit.clamp(1, 5_000));
-    out
+    PreparedSearchLibrary {
+        roots,
+        tracks,
+        context_by_path,
+        album_inventory,
+    }
+}
+
+fn compare_fallback_rank(
+    a_score: f32,
+    a_path_lower: &str,
+    b_score: f32,
+    b_path_lower: &str,
+) -> Ordering {
+    a_score
+        .partial_cmp(&b_score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| a_path_lower.cmp(b_path_lower))
+}
+
+#[derive(Clone)]
+struct FallbackRankedHit {
+    score: f32,
+    path_lower: String,
+    track_index: usize,
+}
+
+impl PartialEq for FallbackRankedHit {
+    fn eq(&self, other: &Self) -> bool {
+        compare_fallback_rank(self.score, &self.path_lower, other.score, &other.path_lower)
+            == Ordering::Equal
+    }
+}
+
+impl Eq for FallbackRankedHit {}
+
+impl PartialOrd for FallbackRankedHit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FallbackRankedHit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_fallback_rank(self.score, &self.path_lower, other.score, &other.path_lower)
+    }
+}
+
+fn search_tracks_fallback_prepared(
+    query: &str,
+    prepared: &PreparedSearchLibrary,
+    limit: usize,
+    query_rx: &Receiver<SearchWorkerQuery>,
+) -> SearchFallbackOutcome {
+    let terms = split_search_terms(query);
+    if terms.is_empty() {
+        return SearchFallbackOutcome::Hits(Vec::new());
+    }
+
+    let capped_limit = limit.clamp(1, 5_000);
+    let mut heap =
+        std::collections::BinaryHeap::<FallbackRankedHit>::with_capacity(capped_limit + 1);
+    for (index, track) in prepared.tracks.iter().enumerate() {
+        if index % 256 == 0 {
+            if let Some(next) = poll_latest_search_query(query_rx) {
+                return SearchFallbackOutcome::Cancelled(next);
+            }
+        }
+        if !terms.iter().all(|term| track.haystack_l.contains(term)) {
+            continue;
+        }
+
+        let mut score = 0.0f32;
+        for term in &terms {
+            score += if track.title_l.starts_with(term) {
+                0.0
+            } else if track.title_l.contains(term) {
+                0.8
+            } else if track.artist_l.starts_with(term) {
+                1.2
+            } else if track.artist_l.contains(term) {
+                1.8
+            } else if track.album_l.starts_with(term) {
+                2.0
+            } else if track.album_l.contains(term) {
+                2.6
+            } else if track.genre_l.contains(term) {
+                3.2
+            } else {
+                4.0
+            };
+        }
+        score += (track.path_string.len() as f32) / 10_000.0;
+
+        if heap.len() >= capped_limit {
+            if let Some(worst) = heap.peek() {
+                let is_better =
+                    compare_fallback_rank(score, &track.path_lower, worst.score, &worst.path_lower)
+                        == Ordering::Less;
+                if !is_better {
+                    continue;
+                }
+            }
+            let _ = heap.pop();
+        }
+        heap.push(FallbackRankedHit {
+            score,
+            path_lower: track.path_lower.clone(),
+            track_index: index,
+        });
+    }
+
+    if let Some(next) = poll_latest_search_query(query_rx) {
+        return SearchFallbackOutcome::Cancelled(next);
+    }
+
+    let mut ranked = heap.into_vec();
+    ranked.sort_by(|a, b| compare_fallback_rank(a.score, &a.path_lower, b.score, &b.path_lower));
+
+    let mut out = Vec::with_capacity(ranked.len());
+    for rank in ranked {
+        let track = &prepared.tracks[rank.track_index];
+        out.push(LibrarySearchTrack {
+            path: track.path.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            genre: track.genre.clone(),
+            year: track.year,
+            track_no: track.track_no,
+            duration_secs: track.duration_secs,
+            score: rank.score,
+        });
+    }
+    SearchFallbackOutcome::Hits(out)
 }
 
 fn search_row_cmp(a: &BridgeSearchResultRow, b: &BridgeSearchResultRow) -> Ordering {
@@ -2036,6 +2233,97 @@ mod tests {
         assert!(is_main_album_disc_section("Disk 4 (bonus)"));
         assert!(!is_main_album_disc_section("Live"));
         assert!(!is_main_album_disc_section("discography"));
+    }
+
+    #[test]
+    fn prepare_search_library_counts_main_album_tracks_with_cd_sections() {
+        let root = p("/music");
+        let snapshot = LibrarySnapshot {
+            roots: vec![root.clone()],
+            tracks: vec![
+                crate::library::LibraryTrack {
+                    path: p("/music/Artist/Album/01 - Intro.flac"),
+                    root_path: root.clone(),
+                    title: "Intro".to_string(),
+                    artist: "Artist".to_string(),
+                    album: "Album".to_string(),
+                    genre: String::new(),
+                    year: Some(2020),
+                    track_no: Some(1),
+                    duration_secs: Some(100.0),
+                },
+                crate::library::LibraryTrack {
+                    path: p("/music/Artist/Album/CD1/02 - Song.flac"),
+                    root_path: root.clone(),
+                    title: "Song".to_string(),
+                    artist: "Artist".to_string(),
+                    album: "Album".to_string(),
+                    genre: String::new(),
+                    year: Some(2020),
+                    track_no: Some(2),
+                    duration_secs: Some(120.0),
+                },
+                crate::library::LibraryTrack {
+                    path: p("/music/Artist/Album/Bonus/03 - Extra.flac"),
+                    root_path: root.clone(),
+                    title: "Extra".to_string(),
+                    artist: "Artist".to_string(),
+                    album: "Album".to_string(),
+                    genre: String::new(),
+                    year: Some(2020),
+                    track_no: Some(3),
+                    duration_secs: Some(80.0),
+                },
+            ],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+
+        let prepared = prepare_search_library(&snapshot);
+        let album_key = "album|/music|Artist|Album".to_string();
+        let inv = prepared
+            .album_inventory
+            .get(&album_key)
+            .expect("album inventory present");
+        assert_eq!(inv.main_track_count, 2);
+        assert!(inv.has_main_duration);
+        assert!((inv.main_total_length - 220.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fallback_search_cancels_when_newer_query_arrives() {
+        let root = p("/music");
+        let snapshot = LibrarySnapshot {
+            roots: vec![root.clone()],
+            tracks: vec![crate::library::LibraryTrack {
+                path: p("/music/Artist/Album/01 - Song.flac"),
+                root_path: root,
+                title: "Song".to_string(),
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+                genre: String::new(),
+                year: Some(2020),
+                track_no: Some(1),
+                duration_secs: Some(60.0),
+            }],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+        let prepared = prepare_search_library(&snapshot);
+        let (tx, rx) = unbounded::<SearchWorkerQuery>();
+        tx.send(SearchWorkerQuery {
+            seq: 99,
+            query: "new".to_string(),
+            library: Arc::new(snapshot),
+        })
+        .expect("queue newer search");
+
+        match search_tracks_fallback_prepared("song", &prepared, 10, &rx) {
+            SearchFallbackOutcome::Cancelled(next) => assert_eq!(next.seq, 99),
+            SearchFallbackOutcome::Hits(_) => panic!("expected cancellation"),
+        }
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {
