@@ -227,6 +227,15 @@ BridgeClient::BridgeClient(QObject *parent)
     m_globalSearchDebounceTimer.setInterval(m_globalSearchDebounceMs);
     connect(&m_globalSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushGlobalSearchQuery);
 
+    m_searchApplyDispatchMs = readEnvMillis("FERROUS_UI_SEARCH_APPLY_DISPATCH_MS", 12);
+    m_searchApplyDispatchTimer.setSingleShot(true);
+    m_searchApplyDispatchTimer.setInterval(m_searchApplyDispatchMs);
+    connect(
+        &m_searchApplyDispatchTimer,
+        &QTimer::timeout,
+        this,
+        &BridgeClient::dispatchPendingSearchApplyFrame);
+
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
@@ -238,6 +247,7 @@ BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
     m_analysisNotifyTimer.stop();
     m_globalSearchDebounceTimer.stop();
+    m_searchApplyDispatchTimer.stop();
     stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
         ferrous_ffi_bridge_destroy(m_ffiBridge);
@@ -280,6 +290,11 @@ void BridgeClient::stopSearchApplyWorker() {
         m_searchApplyStop = true;
         m_searchPendingInputFrame.reset();
     }
+    {
+        std::lock_guard<std::mutex> lock(m_searchOutputMutex);
+        m_searchPendingOutputFrame.reset();
+        m_searchOutputCoalescedDrops = 0;
+    }
     m_searchApplyCv.notify_all();
     if (m_searchApplyThread.joinable()) {
         m_searchApplyThread.join();
@@ -300,6 +315,52 @@ void BridgeClient::enqueueSearchFrame(quint32 seq, QByteArray payload, qint64 ff
         };
     }
     m_searchApplyCv.notify_one();
+}
+
+void BridgeClient::queuePreparedSearchResultsFrame(SearchWorkerOutputFrame frame) {
+    {
+        std::lock_guard<std::mutex> lock(m_searchOutputMutex);
+        if (m_searchPendingOutputFrame.has_value()) {
+            m_searchOutputCoalescedDrops++;
+        }
+        m_searchPendingOutputFrame = std::move(frame);
+    }
+    QMetaObject::invokeMethod(
+        this,
+        &BridgeClient::scheduleSearchApplyDispatch,
+        Qt::QueuedConnection);
+}
+
+void BridgeClient::scheduleSearchApplyDispatch() {
+    if (!m_searchApplyDispatchTimer.isActive()) {
+        m_searchApplyDispatchTimer.start();
+    }
+}
+
+void BridgeClient::dispatchPendingSearchApplyFrame() {
+    SearchWorkerOutputFrame frame;
+    {
+        std::lock_guard<std::mutex> lock(m_searchOutputMutex);
+        if (!m_searchPendingOutputFrame.has_value()) {
+            return;
+        }
+        frame = std::move(*m_searchPendingOutputFrame);
+        m_searchPendingOutputFrame.reset();
+        frame.coalescedOutputDrops = m_searchOutputCoalescedDrops;
+        m_searchOutputCoalescedDrops = 0;
+    }
+
+    const bool changed = applyPreparedSearchResultsFrame(std::move(frame));
+    if (changed) {
+        emit globalSearchResultsChanged();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_searchOutputMutex);
+        if (m_searchPendingOutputFrame.has_value() && !m_searchApplyDispatchTimer.isActive()) {
+            m_searchApplyDispatchTimer.start();
+        }
+    }
 }
 
 void BridgeClient::searchApplyWorkerLoop() {
@@ -488,15 +549,7 @@ void BridgeClient::searchApplyWorkerLoop() {
         }
 
         out.workerTotalMs = workerTimer.elapsed();
-        QMetaObject::invokeMethod(
-            this,
-            [this, frame = std::move(out)]() mutable {
-                const bool changed = applyPreparedSearchResultsFrame(std::move(frame));
-                if (changed) {
-                    emit globalSearchResultsChanged();
-                }
-            },
-            Qt::QueuedConnection);
+        queuePreparedSearchResultsFrame(std::move(out));
     }
 }
 
@@ -1572,7 +1625,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     const qint64 queueDelayMs = frame.ffiPoppedAtMs > 0 ? (nowMs - frame.ffiPoppedAtMs) : -1;
     logDiagnostic(
         QStringLiteral("search"),
-        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5 ffiPopMs=%6 decodeMs=%7 materializeMs=%8 modelApplyMs=%9 queueDelayMs=%10 workerMs=%11 coalesced=%12 recv=%13 applied=%14 dropped=%15 decodeErr=%16")
+        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5 ffiPopMs=%6 decodeMs=%7 materializeMs=%8 modelApplyMs=%9 queueDelayMs=%10 workerMs=%11 coalesced=%12 coalescedUi=%13 recv=%14 applied=%15 dropped=%16 decodeErr=%17")
             .arg(frame.seq)
             .arg(artistCount)
             .arg(albumCount)
@@ -1585,6 +1638,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
             .arg(queueDelayMs)
             .arg(frame.workerTotalMs)
             .arg(frame.coalescedInputDrops)
+            .arg(frame.coalescedOutputDrops)
             .arg(m_searchFramesReceived)
             .arg(m_searchFramesApplied)
             .arg(m_searchFramesDroppedStale)

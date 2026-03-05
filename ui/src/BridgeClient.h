@@ -207,6 +207,7 @@ private:
         qint64 materializeMs{0};
         qint64 workerTotalMs{0};
         quint64 coalescedInputDrops{0};
+        quint64 coalescedOutputDrops{0};
     };
 
     bool startInProcessBridge();
@@ -214,6 +215,9 @@ private:
     void stopSearchApplyWorker();
     void searchApplyWorkerLoop();
     void enqueueSearchFrame(quint32 seq, QByteArray payload, qint64 ffiPopMs);
+    void queuePreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
+    void scheduleSearchApplyDispatch();
+    void dispatchPendingSearchApplyFrame();
     bool applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
@@ -319,12 +323,17 @@ private:
     QTimer m_snapshotNotifyTimer;
     QTimer m_analysisNotifyTimer;
     QTimer m_globalSearchDebounceTimer;
+    QTimer m_searchApplyDispatchTimer;
+    int m_searchApplyDispatchMs{12};
     std::thread m_searchApplyThread;
     std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;
     bool m_searchApplyStop{false};
     std::optional<SearchWorkerInputFrame> m_searchPendingInputFrame;
     quint64 m_searchInputCoalescedDrops{0};
+    std::mutex m_searchOutputMutex;
+    std::optional<SearchWorkerOutputFrame> m_searchPendingOutputFrame;
+    quint64 m_searchOutputCoalescedDrops{0};
     quint64 m_searchFramesReceived{0};
     quint64 m_searchFramesApplied{0};
     quint64 m_searchFramesDroppedStale{0};

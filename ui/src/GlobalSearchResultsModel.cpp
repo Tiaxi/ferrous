@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <vector>
 
 namespace {
 constexpr auto kItemKind = "item";
@@ -147,21 +148,27 @@ void GlobalSearchResultsModel::replaceRows(QVector<SearchDisplayRow> rows) {
         endRemoveRows();
     }
 
-    int firstChanged = -1;
-    int lastChanged = -1;
+    std::vector<QPair<int, int>> changedRuns;
+    int runStart = -1;
     for (int i = 0; i < overlap; ++i) {
         const qsizetype idx = static_cast<qsizetype>(i);
         if (m_rows[idx] == rows[idx]) {
+            if (runStart >= 0) {
+                changedRuns.emplace_back(runStart, i - 1);
+                runStart = -1;
+            }
             continue;
         }
         m_rows[idx] = rows[idx];
-        if (firstChanged < 0) {
-            firstChanged = i;
+        if (runStart < 0) {
+            runStart = i;
         }
-        lastChanged = i;
     }
-    if (firstChanged >= 0) {
-        emit dataChanged(index(firstChanged, 0), index(lastChanged, 0));
+    if (runStart >= 0) {
+        changedRuns.emplace_back(runStart, overlap - 1);
+    }
+    for (const auto &run : changedRuns) {
+        emit dataChanged(index(run.first, 0), index(run.second, 0));
     }
 
     if (newSize > oldSize) {
