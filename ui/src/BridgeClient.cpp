@@ -185,7 +185,11 @@ BridgeClient::BridgeClient(QObject *parent)
     });
 
     m_globalSearchDebounceTimer.setSingleShot(true);
-    m_globalSearchDebounceTimer.setInterval(readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 90));
+    m_globalSearchDebounceMs = readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 90);
+    m_globalSearchShortDebounceMs = readEnvMillis(
+        "FERROUS_UI_SEARCH_DEBOUNCE_SHORT_MS",
+        std::max(140, m_globalSearchDebounceMs + 50));
+    m_globalSearchDebounceTimer.setInterval(m_globalSearchDebounceMs);
     connect(&m_globalSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushGlobalSearchQuery);
 
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
@@ -895,6 +899,12 @@ void BridgeClient::setLibrarySortMode(int mode) {
 
 void BridgeClient::setGlobalSearchQuery(const QString &query) {
     const QString nextQuery = query;
+    const int trimmedChars = nextQuery.trimmed().size();
+    const int nextDebounceMs =
+        trimmedChars <= 1 ? m_globalSearchShortDebounceMs : m_globalSearchDebounceMs;
+    if (m_globalSearchDebounceTimer.interval() != nextDebounceMs) {
+        m_globalSearchDebounceTimer.setInterval(nextDebounceMs);
+    }
     if (!m_globalSearchDebounceTimer.isActive()
         && m_pendingGlobalSearchQuery == nextQuery
         && m_lastGlobalSearchQuerySent == nextQuery) {

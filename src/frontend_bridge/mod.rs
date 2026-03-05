@@ -725,7 +725,7 @@ fn search_fallback_limit() -> usize {
     std::env::var("FERROUS_SEARCH_FALLBACK_LIMIT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(420, |v| v.clamp(64, 5_000))
+        .map_or(256, |v| v.clamp(64, 5_000))
 }
 
 fn search_artist_row_limit() -> usize {
@@ -753,7 +753,7 @@ fn search_cancel_poll_rows() -> usize {
     std::env::var("FERROUS_SEARCH_CANCEL_POLL_ROWS")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(128, |v| v.clamp(16, 4_096))
+        .map_or(64, |v| v.clamp(16, 4_096))
 }
 
 fn scan_tree_emit_interval() -> Duration {

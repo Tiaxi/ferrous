@@ -248,6 +248,8 @@ private:
     quint32 m_nextGlobalSearchSeq{1};
     quint32 m_latestGlobalSearchSeqSent{0};
     QHash<quint32, qint64> m_globalSearchSentAtMs;
+    int m_globalSearchDebounceMs{90};
+    int m_globalSearchShortDebounceMs{160};
     QString m_pendingGlobalSearchQuery;
     QString m_lastGlobalSearchQuerySent;
     QString m_diagnosticsText;
