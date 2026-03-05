@@ -140,7 +140,25 @@ void GlobalSearchResultsModel::replaceRows(QVector<SearchDisplayRow> rows) {
 
     const int oldSize = static_cast<int>(m_rows.size());
     const int newSize = static_cast<int>(rows.size());
+    const int diff = std::abs(oldSize - newSize);
     const int overlap = std::min(oldSize, newSize);
+
+    // For large non-empty cardinality shifts, overlap updates can trigger costly
+    // delegate churn in QML. A direct rebuild has proven smoother in practice.
+    const bool largeCardinalityShift =
+        (oldSize > 0 && newSize > 0)
+        && (diff >= 64)
+        && (std::min(oldSize, newSize) <= 64);
+    if (largeCardinalityShift) {
+        beginRemoveRows(QModelIndex{}, 0, oldSize - 1);
+        m_rows.clear();
+        endRemoveRows();
+
+        beginInsertRows(QModelIndex{}, 0, newSize - 1);
+        m_rows = std::move(rows);
+        endInsertRows();
+        return;
+    }
 
     if (newSize < oldSize) {
         beginRemoveRows(QModelIndex{}, newSize, oldSize - 1);
