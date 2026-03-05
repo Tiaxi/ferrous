@@ -57,6 +57,7 @@ Kirigami.ApplicationWindow {
     property int globalSearchSelectedDisplayIndex: -1
     property var globalSearchContextRowData: ({})
     property bool globalSearchOpening: false
+    property bool globalSearchIgnoreRefocusFind: false
     property string pendingGlobalSearchPrefillText: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
@@ -258,6 +259,13 @@ Kirigami.ApplicationWindow {
         interval: 80
         repeat: false
         onTriggered: root.applyPendingSearchOpen()
+    }
+
+    Timer {
+        id: globalSearchOpenSettleTimer
+        interval: 260
+        repeat: false
+        onTriggered: root.globalSearchIgnoreRefocusFind = false
     }
 
     function moveSelected(delta) {
@@ -1199,6 +1207,7 @@ Kirigami.ApplicationWindow {
             return
         }
         root.globalSearchOpening = true
+        root.globalSearchIgnoreRefocusFind = true
         root.pendingGlobalSearchPrefillText = ""
         globalSearchDialog.open()
         Qt.callLater(function() {
@@ -1952,6 +1961,8 @@ Kirigami.ApplicationWindow {
         height: Math.min(720, root.height - 80)
         onOpened: {
             root.globalSearchOpening = false
+            root.globalSearchIgnoreRefocusFind = true
+            globalSearchOpenSettleTimer.restart()
             root.syncGlobalSearchSelectionAfterResultsChange()
             root.focusGlobalSearchQueryField(false)
             if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
@@ -1964,6 +1975,8 @@ Kirigami.ApplicationWindow {
         }
         onClosed: {
             root.globalSearchOpening = false
+            root.globalSearchIgnoreRefocusFind = false
+            globalSearchOpenSettleTimer.stop()
             root.pendingGlobalSearchPrefillText = ""
             uiBridge.setGlobalSearchQuery("")
         }
@@ -1980,7 +1993,7 @@ Kirigami.ApplicationWindow {
                 }
                 Keys.onPressed: function(event) {
                     if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                        root.focusGlobalSearchQueryField(true)
+                        root.focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
                         event.accepted = true
                         return
                     }
@@ -2084,7 +2097,7 @@ Kirigami.ApplicationWindow {
 
                     Keys.onPressed: function(event) {
                         if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                            root.focusGlobalSearchQueryField(true)
+                            root.focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
                             event.accepted = true
                             return
                         }
