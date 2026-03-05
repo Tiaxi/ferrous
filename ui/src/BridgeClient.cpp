@@ -216,6 +216,14 @@ BridgeClient::BridgeClient(QObject *parent)
             qEnvironmentVariableIntValue("FERROUS_UI_SEARCH_DEBOUNCE_SHORT_CHARS", &ok);
         m_globalSearchShortDebounceChars = ok ? std::clamp(value, 1, 8) : 1;
     }
+    {
+        const QByteArray raw = qgetenv("FERROUS_UI_SEARCH_LEGACY_LISTS");
+        const QByteArray normalized = raw.trimmed().toLower();
+        m_publishLegacySearchLists = !normalized.isEmpty()
+            && normalized != QByteArrayLiteral("0")
+            && normalized != QByteArrayLiteral("false")
+            && normalized != QByteArrayLiteral("no");
+    }
     m_globalSearchDebounceTimer.setInterval(m_globalSearchDebounceMs);
     connect(&m_globalSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushGlobalSearchQuery);
 
@@ -706,6 +714,18 @@ QVariantList BridgeClient::globalSearchTrackResults() const {
     return m_globalSearchTrackResults;
 }
 
+int BridgeClient::globalSearchArtistCount() const {
+    return m_globalSearchArtistCount;
+}
+
+int BridgeClient::globalSearchAlbumCount() const {
+    return m_globalSearchAlbumCount;
+}
+
+int BridgeClient::globalSearchTrackCount() const {
+    return m_globalSearchTrackCount;
+}
+
 quint32 BridgeClient::globalSearchSeq() const {
     return m_globalSearchSeq;
 }
@@ -1124,16 +1144,25 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
 
     if (nextQuery.trimmed().isEmpty()) {
         bool changed = false;
-        if (!m_globalSearchArtistResults.isEmpty()) {
-            m_globalSearchArtistResults.clear();
-            changed = true;
+        if (m_publishLegacySearchLists) {
+            if (!m_globalSearchArtistResults.isEmpty()) {
+                m_globalSearchArtistResults.clear();
+                changed = true;
+            }
+            if (!m_globalSearchAlbumResults.isEmpty()) {
+                m_globalSearchAlbumResults.clear();
+                changed = true;
+            }
+            if (!m_globalSearchTrackResults.isEmpty()) {
+                m_globalSearchTrackResults.clear();
+                changed = true;
+            }
         }
-        if (!m_globalSearchAlbumResults.isEmpty()) {
-            m_globalSearchAlbumResults.clear();
-            changed = true;
-        }
-        if (!m_globalSearchTrackResults.isEmpty()) {
-            m_globalSearchTrackResults.clear();
+        if (m_globalSearchArtistCount != 0 || m_globalSearchAlbumCount != 0
+            || m_globalSearchTrackCount != 0) {
+            m_globalSearchArtistCount = 0;
+            m_globalSearchAlbumCount = 0;
+            m_globalSearchTrackCount = 0;
             changed = true;
         }
         if (m_globalSearchModel.rowCount() > 0) {
@@ -1415,9 +1444,24 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     const int albumCount = frame.albumRows.size();
     const int trackCount = frame.trackRows.size();
     m_globalSearchSeq = frame.seq;
-    m_globalSearchArtistResults = std::move(frame.artistRows);
-    m_globalSearchAlbumResults = std::move(frame.albumRows);
-    m_globalSearchTrackResults = std::move(frame.trackRows);
+    m_globalSearchArtistCount = artistCount;
+    m_globalSearchAlbumCount = albumCount;
+    m_globalSearchTrackCount = trackCount;
+    if (m_publishLegacySearchLists) {
+        m_globalSearchArtistResults = std::move(frame.artistRows);
+        m_globalSearchAlbumResults = std::move(frame.albumRows);
+        m_globalSearchTrackResults = std::move(frame.trackRows);
+    } else {
+        if (!m_globalSearchArtistResults.isEmpty()) {
+            m_globalSearchArtistResults.clear();
+        }
+        if (!m_globalSearchAlbumResults.isEmpty()) {
+            m_globalSearchAlbumResults.clear();
+        }
+        if (!m_globalSearchTrackResults.isEmpty()) {
+            m_globalSearchTrackResults.clear();
+        }
+    }
     m_globalSearchModel.replaceRows(std::move(frame.displayRows));
     const qint64 modelApplyMs = modelApplyTimer.elapsed();
     m_searchFramesApplied++;

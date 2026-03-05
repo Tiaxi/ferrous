@@ -63,6 +63,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QVariantList globalSearchArtistResults READ globalSearchArtistResults NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QVariantList globalSearchAlbumResults READ globalSearchAlbumResults NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QVariantList globalSearchTrackResults READ globalSearchTrackResults NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(int globalSearchArtistCount READ globalSearchArtistCount NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(int globalSearchAlbumCount READ globalSearchAlbumCount NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(int globalSearchTrackCount READ globalSearchTrackCount NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(quint32 globalSearchSeq READ globalSearchSeq NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QObject* globalSearchModel READ globalSearchModel CONSTANT)
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
@@ -115,6 +118,9 @@ public:
     QVariantList globalSearchArtistResults() const;
     QVariantList globalSearchAlbumResults() const;
     QVariantList globalSearchTrackResults() const;
+    int globalSearchArtistCount() const;
+    int globalSearchAlbumCount() const;
+    int globalSearchTrackCount() const;
     quint32 globalSearchSeq() const;
     QObject *globalSearchModel() const;
     QString diagnosticsText() const;
@@ -279,6 +285,9 @@ private:
     QVariantList m_globalSearchArtistResults;
     QVariantList m_globalSearchAlbumResults;
     QVariantList m_globalSearchTrackResults;
+    int m_globalSearchArtistCount{0};
+    int m_globalSearchAlbumCount{0};
+    int m_globalSearchTrackCount{0};
     quint32 m_globalSearchSeq{0};
     GlobalSearchResultsModel m_globalSearchModel;
     quint32 m_nextGlobalSearchSeq{1};
@@ -287,6 +296,7 @@ private:
     int m_globalSearchDebounceMs{90};
     int m_globalSearchShortDebounceMs{160};
     int m_globalSearchShortDebounceChars{1};
+    bool m_publishLegacySearchLists{false};
     QString m_pendingGlobalSearchQuery;
     QString m_lastGlobalSearchQuerySent;
     QString m_diagnosticsText;

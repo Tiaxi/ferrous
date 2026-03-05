@@ -116,6 +116,9 @@ Kirigami.ApplicationWindow {
         property var globalSearchArtistResults: []
         property var globalSearchAlbumResults: []
         property var globalSearchTrackResults: []
+        property int globalSearchArtistCount: 0
+        property int globalSearchAlbumCount: 0
+        property int globalSearchTrackCount: 0
         property int globalSearchSeq: 0
         property var globalSearchModel: null
         property string diagnosticsText: ""
@@ -2005,9 +2008,9 @@ Kirigami.ApplicationWindow {
             Label {
                 Layout.fillWidth: true
                 color: Kirigami.Theme.disabledTextColor
-                text: "Artists: " + (uiBridge.globalSearchArtistResults || []).length
-                    + " | Albums: " + (uiBridge.globalSearchAlbumResults || []).length
-                    + " | Tracks: " + (uiBridge.globalSearchTrackResults || []).length
+                text: "Artists: " + (uiBridge.globalSearchArtistCount || 0)
+                    + " | Albums: " + (uiBridge.globalSearchAlbumCount || 0)
+                    + " | Tracks: " + (uiBridge.globalSearchTrackCount || 0)
             }
 
             Rectangle {
@@ -2109,26 +2112,6 @@ Kirigami.ApplicationWindow {
                         readonly property var yearValue: year
                         readonly property var trackNumberValue: trackNumber
                         readonly property var countValue: count
-                        readonly property var rowData: ({
-                            kind: rowKind,
-                            rowType: rowTypeValue,
-                            sectionTitle: sectionTitleValue,
-                            label: labelValue,
-                            artist: artistValue,
-                            album: albumValue,
-                            genre: genreValue,
-                            coverUrl: coverUrlValue,
-                            lengthText: lengthTextValue,
-                            year: yearValue,
-                            trackNumber: trackNumberValue,
-                            count: countValue,
-                            artistKey: artistKey || "",
-                            albumKey: albumKey || "",
-                            sectionKey: sectionKey || "",
-                            trackKey: trackKey || "",
-                            trackPath: trackPath || "",
-                            coverPath: coverPath || ""
-                        })
                         width: Math.max(
                             0,
                             ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
@@ -2361,7 +2344,9 @@ Kirigami.ApplicationWindow {
                             onClicked: function(mouse) {
                                 root.selectGlobalSearchDisplayIndex(index)
                                 if (mouse.button === Qt.RightButton) {
-                                    globalSearchContextMenu.rowData = rowData
+                                    globalSearchContextMenu.rowData = globalSearchModelApi
+                                        ? globalSearchModelApi.rowDataAt(index)
+                                        : ({})
                                     globalSearchContextMenu.popup()
                                     return
                                 }
@@ -2411,9 +2396,9 @@ Kirigami.ApplicationWindow {
 
             Label {
                 Layout.fillWidth: true
-                visible: (uiBridge.globalSearchArtistResults || []).length === 0
-                    && (uiBridge.globalSearchAlbumResults || []).length === 0
-                    && (uiBridge.globalSearchTrackResults || []).length === 0
+                visible: (uiBridge.globalSearchArtistCount || 0) === 0
+                    && (uiBridge.globalSearchAlbumCount || 0) === 0
+                    && (uiBridge.globalSearchTrackCount || 0) === 0
                 text: (globalSearchQueryField.text || "").trim().length === 0
                     ? "Type to search"
                     : "No matches"
