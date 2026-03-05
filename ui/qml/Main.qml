@@ -26,7 +26,9 @@ Kirigami.ApplicationWindow {
     property var selectedLibrarySelectionKeys: []
     property int librarySelectionAnchorIndex: -1
     property var selectedQueueIndices: []
+    property var selectedQueueIndexLookup: ({})
     property int queueSelectionAnchorIndex: -1
+    property int lastSyncedBridgeSelectedQueueIndex: -2
     property int lastAppliedLibraryVersion: -1
     property int pendingLibraryVersion: -1
     property bool hasReceivedLibraryTreeFrame: false
@@ -578,7 +580,20 @@ Kirigami.ApplicationWindow {
     }
 
     function isQueueIndexSelected(index) {
-        return selectedQueueIndices.indexOf(index) >= 0
+        return !!selectedQueueIndexLookup[index]
+    }
+
+    function setSelectedQueueIndices(indices) {
+        const next = indices || []
+        selectedQueueIndices = next
+        const lookup = ({})
+        for (let i = 0; i < next.length; ++i) {
+            const idx = next[i]
+            if (idx >= 0 && idx < uiBridge.queueLength) {
+                lookup[idx] = true
+            }
+        }
+        selectedQueueIndexLookup = lookup
     }
 
     function isLibrarySelectionKeySelected(key) {
@@ -782,10 +797,10 @@ Kirigami.ApplicationWindow {
 
     function resetQueueSelectionForUpdatedQueue() {
         if (uiBridge.selectedQueueIndex >= 0 && uiBridge.selectedQueueIndex < uiBridge.queueLength) {
-            selectedQueueIndices = [uiBridge.selectedQueueIndex]
+            setSelectedQueueIndices([uiBridge.selectedQueueIndex])
             queueSelectionAnchorIndex = uiBridge.selectedQueueIndex
         } else {
-            selectedQueueIndices = []
+            setSelectedQueueIndices([])
             queueSelectionAnchorIndex = -1
         }
     }
@@ -801,7 +816,7 @@ Kirigami.ApplicationWindow {
     }
 
     function clearQueueSelection() {
-        selectedQueueIndices = []
+        setSelectedQueueIndices([])
         queueSelectionAnchorIndex = -1
         uiBridge.selectQueueIndex(-1)
     }
@@ -841,7 +856,7 @@ Kirigami.ApplicationWindow {
                 && uiBridge.selectedQueueIndex === index) {
             return
         }
-        selectedQueueIndices = [index]
+        setSelectedQueueIndices([index])
         queueSelectionAnchorIndex = index
         uiBridge.selectQueueIndex(index)
     }
@@ -859,7 +874,7 @@ Kirigami.ApplicationWindow {
         for (let i = first; i <= last; ++i) {
             indices.push(i)
         }
-        selectedQueueIndices = indices
+        setSelectedQueueIndices(indices)
         queueSelectionAnchorIndex = anchor
         uiBridge.selectQueueIndex(index)
     }
@@ -876,7 +891,7 @@ Kirigami.ApplicationWindow {
             indices.push(index)
             indices.sort(function(a, b) { return a - b })
         }
-        selectedQueueIndices = indices
+        setSelectedQueueIndices(indices)
         queueSelectionAnchorIndex = index
         if (indices.length > 0) {
             uiBridge.selectQueueIndex(index)
@@ -906,9 +921,11 @@ Kirigami.ApplicationWindow {
 
     function syncQueueSelectionToCurrentQueue() {
         const valid = []
+        const seen = ({})
         for (let i = 0; i < selectedQueueIndices.length; ++i) {
             const idx = selectedQueueIndices[i]
-            if (idx >= 0 && idx < uiBridge.queueLength && valid.indexOf(idx) < 0) {
+            if (idx >= 0 && idx < uiBridge.queueLength && !seen[idx]) {
+                seen[idx] = true
                 valid.push(idx)
             }
         }
@@ -916,7 +933,7 @@ Kirigami.ApplicationWindow {
         if (valid.length === 0 && uiBridge.selectedQueueIndex >= 0) {
             valid.push(uiBridge.selectedQueueIndex)
         }
-        selectedQueueIndices = valid
+        setSelectedQueueIndices(valid)
         if (queueSelectionAnchorIndex < 0 || queueSelectionAnchorIndex >= uiBridge.queueLength) {
             queueSelectionAnchorIndex = valid.length > 0 ? valid[valid.length - 1] : -1
         }
@@ -1039,7 +1056,7 @@ Kirigami.ApplicationWindow {
         const primary = uiBridge.selectedQueueIndex >= 0
             ? uiBridge.selectedQueueIndex
             : 0
-        selectedQueueIndices = indices
+        setSelectedQueueIndices(indices)
         queueSelectionAnchorIndex = primary
         uiBridge.selectQueueIndex(primary)
     }
@@ -1104,7 +1121,7 @@ Kirigami.ApplicationWindow {
             for (let i = 0; i < indices.length; ++i) {
                 uiBridge.removeAt(indices[i])
             }
-            selectedQueueIndices = []
+            setSelectedQueueIndices([])
             queueSelectionAnchorIndex = -1
             return
         }
@@ -4576,8 +4593,13 @@ Kirigami.ApplicationWindow {
                 root.lastSeenQueueVersion = uiBridge.queueVersion
                 root.resetQueueSelectionForUpdatedQueue()
                 root.applyPendingPlaylistViewportRestore()
+                root.syncQueueSelectionToCurrentQueue()
+                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
             }
-            root.syncQueueSelectionToCurrentQueue()
+            if (uiBridge.selectedQueueIndex !== root.lastSyncedBridgeSelectedQueueIndex) {
+                root.syncQueueSelectionToCurrentQueue()
+                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
+            }
         }
         function onLibraryTreeFrameReceived(version, treeBytes) {
             root.requestLibraryTreeApply(version, treeBytes || "")
@@ -4623,6 +4645,7 @@ Kirigami.ApplicationWindow {
         root.positionSmoothingLastMs = Date.now()
         root.positionSmoothingTrackPath = uiBridge.currentTrackPath
         root.syncQueueSelectionToCurrentQueue()
+        root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
         root.syncLibrarySelectionToVisibleRows()
         root.syncGlobalSearchSelectionAfterResultsChange()
     }
