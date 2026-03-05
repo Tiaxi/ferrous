@@ -188,7 +188,13 @@ BridgeClient::BridgeClient(QObject *parent)
     m_globalSearchDebounceMs = readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 90);
     m_globalSearchShortDebounceMs = readEnvMillis(
         "FERROUS_UI_SEARCH_DEBOUNCE_SHORT_MS",
-        std::max(140, m_globalSearchDebounceMs + 50));
+        std::max(180, m_globalSearchDebounceMs + 90));
+    {
+        bool ok = false;
+        const int value =
+            qEnvironmentVariableIntValue("FERROUS_UI_SEARCH_DEBOUNCE_SHORT_CHARS", &ok);
+        m_globalSearchShortDebounceChars = ok ? std::clamp(value, 1, 8) : 1;
+    }
     m_globalSearchDebounceTimer.setInterval(m_globalSearchDebounceMs);
     connect(&m_globalSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushGlobalSearchQuery);
 
@@ -901,7 +907,9 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
     const QString nextQuery = query;
     const int trimmedChars = nextQuery.trimmed().size();
     const int nextDebounceMs =
-        trimmedChars <= 1 ? m_globalSearchShortDebounceMs : m_globalSearchDebounceMs;
+        trimmedChars <= m_globalSearchShortDebounceChars
+        ? m_globalSearchShortDebounceMs
+        : m_globalSearchDebounceMs;
     if (m_globalSearchDebounceTimer.interval() != nextDebounceMs) {
         m_globalSearchDebounceTimer.setInterval(nextDebounceMs);
     }

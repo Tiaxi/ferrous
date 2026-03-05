@@ -728,11 +728,32 @@ fn search_fallback_limit() -> usize {
         .map_or(256, |v| v.clamp(64, 5_000))
 }
 
+fn search_short_query_char_threshold() -> usize {
+    std::env::var("FERROUS_SEARCH_SHORT_QUERY_CHARS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(1, |v| v.clamp(1, 8))
+}
+
+fn search_fallback_limit_short() -> usize {
+    std::env::var("FERROUS_SEARCH_FALLBACK_LIMIT_SHORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(160, |v| v.clamp(64, 5_000))
+}
+
 fn search_artist_row_limit() -> usize {
     std::env::var("FERROUS_SEARCH_ARTIST_LIMIT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .map_or(32, |v| v.clamp(8, 400))
+}
+
+fn search_artist_row_limit_short() -> usize {
+    std::env::var("FERROUS_SEARCH_ARTIST_LIMIT_SHORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(24, |v| v.clamp(8, 400))
 }
 
 fn search_album_row_limit() -> usize {
@@ -742,11 +763,25 @@ fn search_album_row_limit() -> usize {
         .map_or(64, |v| v.clamp(8, 800))
 }
 
+fn search_album_row_limit_short() -> usize {
+    std::env::var("FERROUS_SEARCH_ALBUM_LIMIT_SHORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(40, |v| v.clamp(8, 800))
+}
+
 fn search_track_row_limit() -> usize {
     std::env::var("FERROUS_SEARCH_TRACK_LIMIT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .map_or(128, |v| v.clamp(16, 2_000))
+}
+
+fn search_track_row_limit_short() -> usize {
+    std::env::var("FERROUS_SEARCH_TRACK_LIMIT_SHORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(96, |v| v.clamp(16, 2_000))
 }
 
 fn search_cancel_poll_rows() -> usize {
@@ -1341,10 +1376,30 @@ fn build_search_results_frame(
             rows: Vec::new(),
         });
     }
+    let is_short_query = query_text.chars().count() <= search_short_query_char_threshold();
 
     // In-memory search is deterministic and responsive while library scans are writing to SQLite.
     // Optional FTS can be enabled explicitly for experimentation.
-    let fallback_limit = search_fallback_limit();
+    let fallback_limit = if is_short_query {
+        search_fallback_limit_short()
+    } else {
+        search_fallback_limit()
+    };
+    let artist_limit = if is_short_query {
+        search_artist_row_limit_short()
+    } else {
+        search_artist_row_limit()
+    };
+    let album_limit = if is_short_query {
+        search_album_row_limit_short()
+    } else {
+        search_album_row_limit()
+    };
+    let track_limit = if is_short_query {
+        search_track_row_limit_short()
+    } else {
+        search_track_row_limit()
+    };
     let use_fts = std::env::var_os("FERROUS_SEARCH_USE_FTS").is_some();
     let hits = if use_fts {
         match search_tracks_fts(query_text, fallback_limit) {
@@ -1555,9 +1610,9 @@ fn build_search_results_frame(
     artist_rows.sort_by(search_row_cmp);
     album_rows.sort_by(search_row_cmp);
     track_rows.sort_by(search_row_cmp);
-    artist_rows.truncate(search_artist_row_limit());
-    album_rows.truncate(search_album_row_limit());
-    track_rows.truncate(search_track_row_limit());
+    artist_rows.truncate(artist_limit);
+    album_rows.truncate(album_limit);
+    track_rows.truncate(track_limit);
 
     let mut rows = Vec::with_capacity(artist_rows.len() + album_rows.len() + track_rows.len());
     rows.extend(artist_rows);
