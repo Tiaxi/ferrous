@@ -890,7 +890,7 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
 
 fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
     match cmd {
-        BridgeCommand::Queue(_) => true,
+        BridgeCommand::Queue(queue_cmd) => !matches!(queue_cmd, BridgeQueueCommand::Select(_)),
         BridgeCommand::Library(library_cmd) => matches!(
             library_cmd,
             BridgeLibraryCommand::AddTrack(_)
@@ -1199,9 +1199,11 @@ fn apply_queue_command_state(
             }
         }
         BridgeQueueCommand::Select(sel) => {
-            *selected_queue_index = sel;
+            let normalized = sel.filter(|idx| *idx < queue.len());
+            let changed = *selected_queue_index != normalized;
+            *selected_queue_index = normalized;
             QueueCommandOutcome {
-                changed: true,
+                changed,
                 playback_ops: Vec::new(),
                 error: None,
             }
@@ -2850,6 +2852,46 @@ mod tests {
         assert_eq!(selected, Some(1));
         assert!(outcome.playback_ops.is_empty());
         assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn queue_select_same_index_is_noop() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac")];
+        let mut selected = Some(1);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Select(Some(1)),
+            &mut queue,
+            &mut selected,
+        );
+        assert!(!outcome.changed);
+        assert_eq!(selected, Some(1));
+        assert!(outcome.playback_ops.is_empty());
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn queue_select_out_of_bounds_clears_selection() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac")];
+        let mut selected = Some(0);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Select(Some(9)),
+            &mut queue,
+            &mut selected,
+        );
+        assert!(outcome.changed);
+        assert!(selected.is_none());
+        assert!(outcome.playback_ops.is_empty());
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn queue_select_command_does_not_require_queue_snapshot() {
+        assert!(!command_requires_queue_snapshot(&BridgeCommand::Queue(
+            BridgeQueueCommand::Select(Some(0)),
+        )));
+        assert!(command_requires_queue_snapshot(&BridgeCommand::Queue(
+            BridgeQueueCommand::PlayAt(0),
+        )));
     }
 
     #[test]

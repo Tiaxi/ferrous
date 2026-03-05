@@ -1023,10 +1023,11 @@ void BridgeClient::selectQueueIndex(int index) {
     if (index < 0) {
         return;
     }
-    if (m_selectedQueueIndex != index) {
-        m_selectedQueueIndex = index;
-        emit snapshotChanged();
+    if (m_selectedQueueIndex == index) {
+        return;
     }
+    m_selectedQueueIndex = index;
+    scheduleSnapshotChanged();
     m_pendingQueueSelection = index;
     m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandI32(

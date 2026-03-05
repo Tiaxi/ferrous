@@ -37,6 +37,9 @@ Kirigami.ApplicationWindow {
     property int lastSeenQueueVersion: -1
     property int lastCenteredQueueIndex: -2
     property string lastAutoCenterPlaybackState: ""
+    property string lastAutoCenterTrackPath: ""
+    property real playlistViewportRestoreUntilMs: 0
+    property real playlistViewportRestoreContentY: 0
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
     property bool positionSmoothingPrimed: false
@@ -803,9 +806,39 @@ Kirigami.ApplicationWindow {
         uiBridge.selectQueueIndex(-1)
     }
 
+    function requestPlaylistViewportRestoreWindow(durationMs) {
+        if (!playlistView) {
+            return
+        }
+        const ms = Math.max(100, durationMs || 700)
+        playlistViewportRestoreContentY = playlistView.contentY
+        playlistViewportRestoreUntilMs = Math.max(playlistViewportRestoreUntilMs, Date.now() + ms)
+    }
+
+    function playlistViewportRestoreActive() {
+        return playlistViewportRestoreUntilMs > Date.now()
+    }
+
+    function applyPendingPlaylistViewportRestore() {
+        if (!playlistView || !playlistViewportRestoreActive()) {
+            return
+        }
+        const maxY = Math.max(0, playlistView.contentHeight - playlistView.height)
+        const targetY = Math.max(0, Math.min(maxY, playlistViewportRestoreContentY))
+        if (Math.abs(playlistView.contentY - targetY) > 0.5) {
+            playlistView.contentY = targetY
+        }
+    }
+
     function setQueueSingleSelection(index) {
         if (index < 0 || index >= uiBridge.queueLength) {
             clearQueueSelection()
+            return
+        }
+        if (selectedQueueIndices.length === 1
+                && selectedQueueIndices[0] === index
+                && queueSelectionAnchorIndex === index
+                && uiBridge.selectedQueueIndex === index) {
             return
         }
         selectedQueueIndices = [index]
@@ -946,10 +979,128 @@ Kirigami.ApplicationWindow {
         setQueueSingleSelection(nextIdx)
     }
 
+    function firstSelectedQueueIndex() {
+        let first = -1
+        for (let i = 0; i < selectedQueueIndices.length; ++i) {
+            const idx = selectedQueueIndices[i]
+            if (idx < 0 || idx >= uiBridge.queueLength) {
+                continue
+            }
+            if (first < 0 || idx < first) {
+                first = idx
+            }
+        }
+        if (first >= 0) {
+            return first
+        }
+        if (uiBridge.selectedQueueIndex >= 0 && uiBridge.selectedQueueIndex < uiBridge.queueLength) {
+            return uiBridge.selectedQueueIndex
+        }
+        return -1
+    }
+
+    function playFirstSelectedQueueTrack() {
+        const target = firstSelectedQueueIndex()
+        if (target >= 0) {
+            uiBridge.playAt(target)
+        }
+    }
+
+    function playlistPageStep() {
+        const rowHeight = 24
+        const viewportHeight = playlistView ? playlistView.height : 240
+        return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1)
+    }
+
+    function ensurePlaylistIndexVisible(index) {
+        if (!playlistView || index < 0) {
+            return
+        }
+        const firstVisible = playlistView.indexAt(0, 0)
+        const lastVisible = playlistView.indexAt(0, playlistView.height - 1)
+        if (firstVisible >= 0
+                && lastVisible >= 0
+                && index >= firstVisible
+                && index <= lastVisible) {
+            return
+        }
+        playlistView.positionViewAtIndex(index, ListView.Contain)
+    }
+
+    function selectAllQueueItems() {
+        if (uiBridge.queueLength <= 0) {
+            clearQueueSelection()
+            return
+        }
+        const indices = []
+        for (let i = 0; i < uiBridge.queueLength; ++i) {
+            indices.push(i)
+        }
+        const primary = uiBridge.selectedQueueIndex >= 0
+            ? uiBridge.selectedQueueIndex
+            : 0
+        selectedQueueIndices = indices
+        queueSelectionAnchorIndex = primary
+        uiBridge.selectQueueIndex(primary)
+    }
+
+    function handlePlaylistKeyPress(event) {
+        if (!event) {
+            return
+        }
+        const modifiers = event.modifiers || Qt.NoModifier
+        const ctrl = (modifiers & Qt.ControlModifier) !== 0
+        const shift = (modifiers & Qt.ShiftModifier) !== 0
+
+        if (!ctrl && !shift
+                && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
+            playFirstSelectedQueueTrack()
+            event.accepted = true
+            return
+        }
+
+        if (ctrl && !shift && event.key === Qt.Key_A) {
+            selectAllQueueItems()
+            event.accepted = true
+            return
+        }
+
+        let delta = 0
+        if (event.key === Qt.Key_Up) {
+            delta = -1
+        } else if (event.key === Qt.Key_Down) {
+            delta = 1
+        } else if (event.key === Qt.Key_PageUp) {
+            delta = -playlistPageStep()
+        } else if (event.key === Qt.Key_PageDown) {
+            delta = playlistPageStep()
+        } else {
+            return
+        }
+
+        if (uiBridge.queueLength <= 0) {
+            event.accepted = true
+            return
+        }
+
+        const current = uiBridge.selectedQueueIndex >= 0
+            ? uiBridge.selectedQueueIndex
+            : (uiBridge.playingQueueIndex >= 0 ? uiBridge.playingQueueIndex : 0)
+        const next = Math.max(0, Math.min(uiBridge.queueLength - 1, current + delta))
+        if (shift) {
+            setQueueRangeSelection(next)
+        } else {
+            setQueueSingleSelection(next)
+        }
+        ensurePlaylistIndexVisible(next)
+        event.accepted = true
+    }
+
     function removeSelectedQueueTrack() {
         if (selectedQueueIndices.length > 0) {
             const indices = selectedQueueIndices.slice()
             indices.sort(function(a, b) { return b - a })
+            requestPlaylistViewportRestoreWindow(Math.max(700, indices.length * 120))
             for (let i = 0; i < indices.length; ++i) {
                 uiBridge.removeAt(indices[i])
             }
@@ -958,6 +1109,7 @@ Kirigami.ApplicationWindow {
             return
         }
         if (uiBridge.selectedQueueIndex >= 0) {
+            requestPlaylistViewportRestoreWindow(700)
             uiBridge.removeAt(uiBridge.selectedQueueIndex)
         }
     }
@@ -3782,10 +3934,18 @@ Kirigami.ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
+                            activeFocusOnTab: true
                             model: uiBridge.queueRows
                             property real reservedRightPadding: playlistVerticalScrollBar.visible
                                 ? (playlistVerticalScrollBar.width + 6)
                                 : 0
+                            onContentYChanged: root.applyPendingPlaylistViewportRestore()
+                            onContentHeightChanged: root.applyPendingPlaylistViewportRestore()
+                            onCountChanged: root.applyPendingPlaylistViewportRestore()
+                            onHeightChanged: root.applyPendingPlaylistViewportRestore()
+                            Keys.onPressed: function(event) {
+                                root.handlePlaylistKeyPress(event)
+                            }
                             ScrollBar.vertical: ScrollBar {
                                 id: playlistVerticalScrollBar
                                 policy: ScrollBar.AsNeeded
@@ -3900,6 +4060,7 @@ Kirigami.ApplicationWindow {
                                         playlistDragProxy.y = 0
                                     }
                                     onPressed: function(mouse) {
+                                        playlistView.forceActiveFocus()
                                         root.handleQueueRowSelection(
                                             index,
                                             mouse.button,
@@ -3962,6 +4123,7 @@ Kirigami.ApplicationWindow {
                                                 && root.selectedQueueIndices.length > 1) {
                                             root.removeSelectedQueueTrack()
                                         } else {
+                                            root.requestPlaylistViewportRestoreWindow(700)
                                             uiBridge.removeAt(playlistContextMenu.rowIndex)
                                         }
                                     }
@@ -4006,22 +4168,36 @@ Kirigami.ApplicationWindow {
                         Connections {
                             target: uiBridge
                             function onSnapshotChanged() {
+                                const playbackState = uiBridge.playbackState || ""
+                                const currentTrackPath = uiBridge.currentTrackPath || ""
                                 if (!root.autoCenterQueueSelection) {
-                                    root.lastAutoCenterPlaybackState = uiBridge.playbackState
+                                    root.lastAutoCenterPlaybackState = playbackState
+                                    root.lastAutoCenterTrackPath = currentTrackPath
                                     return
                                 }
-                                const playbackState = uiBridge.playbackState || ""
+                                if (root.playlistViewportRestoreActive()) {
+                                    root.lastAutoCenterPlaybackState = playbackState
+                                    root.lastAutoCenterTrackPath = currentTrackPath
+                                    return
+                                }
                                 const targetIndex = uiBridge.playingQueueIndex
                                 if (playbackState === "Stopped"
                                         && root.lastAutoCenterPlaybackState !== "Stopped") {
                                     root.lastAutoCenterPlaybackState = playbackState
+                                    root.lastAutoCenterTrackPath = currentTrackPath
                                     return
                                 }
-                                if (targetIndex >= 0 && targetIndex !== root.lastCenteredQueueIndex) {
+                                const trackChanged = currentTrackPath.length > 0
+                                    && currentTrackPath !== root.lastAutoCenterTrackPath
+                                const resumedFromStop = playbackState !== "Stopped"
+                                    && root.lastAutoCenterPlaybackState === "Stopped"
+                                const needsInitialCenter = root.lastCenteredQueueIndex < 0
+                                if (targetIndex >= 0 && (trackChanged || resumedFromStop || needsInitialCenter)) {
                                     playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
                                     root.lastCenteredQueueIndex = targetIndex
                                 }
                                 root.lastAutoCenterPlaybackState = playbackState
+                                root.lastAutoCenterTrackPath = currentTrackPath
                             }
                         }
                     }
@@ -4399,6 +4575,7 @@ Kirigami.ApplicationWindow {
             if (uiBridge.queueVersion !== root.lastSeenQueueVersion) {
                 root.lastSeenQueueVersion = uiBridge.queueVersion
                 root.resetQueueSelectionForUpdatedQueue()
+                root.applyPendingPlaylistViewportRestore()
             }
             root.syncQueueSelectionToCurrentQueue()
         }
@@ -4439,6 +4616,7 @@ Kirigami.ApplicationWindow {
         root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
         root.lastSeenQueueVersion = uiBridge.queueVersion
         root.lastAutoCenterPlaybackState = uiBridge.playbackState
+        root.lastAutoCenterTrackPath = uiBridge.currentTrackPath
         root.displayedPositionSeconds = uiBridge.positionSeconds
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
         root.positionSmoothingAnchorSeconds = uiBridge.positionSeconds
