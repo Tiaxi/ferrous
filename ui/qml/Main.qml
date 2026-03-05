@@ -2114,6 +2114,9 @@ Kirigami.ApplicationWindow {
                         readonly property var yearValue: year
                         readonly property var trackNumberValue: trackNumber
                         readonly property var countValue: count
+                        readonly property color rowTextColor: index === root.globalSearchSelectedDisplayIndex
+                            ? Kirigami.Theme.highlightedTextColor
+                            : Kirigami.Theme.textColor
                         width: Math.max(
                             0,
                             ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
@@ -2180,23 +2183,33 @@ Kirigami.ApplicationWindow {
                                 Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
                             }
 
-                            RowLayout {
-                                visible: rowKind === "item" && rowTypeValue === "artist"
+                            Loader {
+                                visible: rowKind === "item"
                                 Layout.fillWidth: true
+                                sourceComponent: rowTypeValue === "artist"
+                                    ? globalSearchArtistItemComponent
+                                    : (rowTypeValue === "album"
+                                        ? globalSearchAlbumItemComponent
+                                        : globalSearchTrackItemComponent)
+                            }
+                        }
+
+                        Component {
+                            id: globalSearchArtistItemComponent
+                            RowLayout {
                                 spacing: 8
                                 Label {
                                     Layout.fillWidth: true
                                     text: labelValue || ""
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                             }
+                        }
 
+                        Component {
+                            id: globalSearchAlbumItemComponent
                             RowLayout {
-                                visible: rowKind === "item" && rowTypeValue === "album"
-                                Layout.fillWidth: true
                                 spacing: 8
                                 Item {
                                     Layout.preferredWidth: 26
@@ -2215,55 +2228,44 @@ Kirigami.ApplicationWindow {
                                     text: labelValue || ""
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: artistValue || ""
                                     Layout.preferredWidth: 170
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: yearValue !== undefined && yearValue !== null ? yearValue : ""
                                     Layout.preferredWidth: 52
                                     horizontalAlignment: Text.AlignRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: genreValue || ""
                                     Layout.preferredWidth: 120
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: countValue !== undefined ? countValue : ""
                                     Layout.preferredWidth: 34
                                     horizontalAlignment: Text.AlignRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: lengthTextValue || "--:--"
                                     Layout.preferredWidth: 76
                                     horizontalAlignment: Text.AlignRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                             }
+                        }
 
+                        Component {
+                            id: globalSearchTrackItemComponent
                             RowLayout {
-                                visible: rowKind === "item" && rowTypeValue === "track"
-                                Layout.fillWidth: true
                                 spacing: 8
                                 Label {
                                     text: trackNumberValue !== undefined && trackNumberValue !== null
@@ -2271,25 +2273,19 @@ Kirigami.ApplicationWindow {
                                         : ""
                                     Layout.preferredWidth: 34
                                     horizontalAlignment: Text.AlignRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: labelValue || ""
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: artistValue || ""
                                     Layout.preferredWidth: 160
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Item {
                                     Layout.preferredWidth: 20
@@ -2308,33 +2304,25 @@ Kirigami.ApplicationWindow {
                                     text: albumValue || ""
                                     Layout.preferredWidth: 182
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: yearValue !== undefined && yearValue !== null ? yearValue : ""
                                     Layout.preferredWidth: 52
                                     horizontalAlignment: Text.AlignRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: genreValue || ""
                                     Layout.preferredWidth: 112
                                     elide: Text.ElideRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                                 Label {
                                     text: lengthTextValue || "--:--"
                                     Layout.preferredWidth: 76
                                     horizontalAlignment: Text.AlignRight
-                                    color: index === root.globalSearchSelectedDisplayIndex
-                                        ? Kirigami.Theme.highlightedTextColor
-                                        : Kirigami.Theme.textColor
+                                    color: rowTextColor
                                 }
                             }
                         }
