@@ -2101,209 +2101,6 @@ Kirigami.ApplicationWindow {
                         }
                     }
 
-                    Component {
-                        id: globalSearchSectionRow
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-                            Label {
-                                Layout.fillWidth: true
-                                text: sectionTitleValue || ""
-                                font.bold: true
-                            }
-                        }
-                    }
-
-                    Component {
-                        id: globalSearchArtistColumnsRow
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-                            Label { text: "Name"; Layout.fillWidth: true; font.bold: true }
-                        }
-                    }
-
-                    Component {
-                        id: globalSearchAlbumColumnsRow
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-                            Label { text: ""; Layout.preferredWidth: 26; font.bold: true }
-                            Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
-                            Label { text: "Artist"; Layout.preferredWidth: 170; font.bold: true }
-                            Label { text: "Year"; Layout.preferredWidth: 52; font.bold: true }
-                            Label { text: "Genre"; Layout.preferredWidth: 120; font.bold: true }
-                            Label { text: "#"; Layout.preferredWidth: 34; font.bold: true; horizontalAlignment: Text.AlignRight }
-                            Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
-                        }
-                    }
-
-                    Component {
-                        id: globalSearchTrackColumnsRow
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-                            Label { text: "#"; Layout.preferredWidth: 34; font.bold: true }
-                            Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
-                            Label { text: "Artist"; Layout.preferredWidth: 160; font.bold: true }
-                            Label { text: ""; Layout.preferredWidth: 20; font.bold: true }
-                            Label { text: "Album"; Layout.preferredWidth: 182; font.bold: true }
-                            Label { text: "Year"; Layout.preferredWidth: 52; font.bold: true; horizontalAlignment: Text.AlignRight }
-                            Label { text: "Genre"; Layout.preferredWidth: 112; font.bold: true }
-                            Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
-                        }
-                    }
-
-                    Component {
-                        id: globalSearchArtistItemRow
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-                            Label {
-                                Layout.fillWidth: true
-                                text: labelValue || ""
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                        }
-                    }
-
-                    Component {
-                        id: globalSearchAlbumItemRow
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-                            Item {
-                                Layout.preferredWidth: 26
-                                Layout.preferredHeight: 20
-                                Image {
-                                    anchors.fill: parent
-                                    source: coverUrlValue || ""
-                                    fillMode: Image.PreserveAspectFit
-                                    asynchronous: true
-                                    cache: true
-                                    sourceSize.width: 32
-                                    sourceSize.height: 32
-                                }
-                            }
-                            Label {
-                                text: labelValue || ""
-                                Layout.fillWidth: true
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: artistValue || ""
-                                Layout.preferredWidth: 170
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: yearValue !== undefined && yearValue !== null ? yearValue : ""
-                                Layout.preferredWidth: 52
-                                horizontalAlignment: Text.AlignRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: genreValue || ""
-                                Layout.preferredWidth: 120
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: countValue !== undefined ? countValue : ""
-                                Layout.preferredWidth: 34
-                                horizontalAlignment: Text.AlignRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: lengthTextValue || "--:--"
-                                Layout.preferredWidth: 76
-                                horizontalAlignment: Text.AlignRight
-                                color: rowTextColor
-                            }
-                        }
-                    }
-
-                    Component {
-                        id: globalSearchTrackItemRow
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-                            Label {
-                                text: trackNumberValue !== undefined && trackNumberValue !== null
-                                    ? String(trackNumberValue).padStart(2, "0")
-                                    : ""
-                                Layout.preferredWidth: 34
-                                horizontalAlignment: Text.AlignRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: labelValue || ""
-                                Layout.fillWidth: true
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: artistValue || ""
-                                Layout.preferredWidth: 160
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                            Item {
-                                Layout.preferredWidth: 20
-                                Layout.preferredHeight: 18
-                                Image {
-                                    anchors.fill: parent
-                                    source: coverUrlValue || ""
-                                    fillMode: Image.PreserveAspectFit
-                                    asynchronous: true
-                                    cache: true
-                                    sourceSize.width: 24
-                                    sourceSize.height: 24
-                                }
-                            }
-                            Label {
-                                text: albumValue || ""
-                                Layout.preferredWidth: 182
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: yearValue !== undefined && yearValue !== null ? yearValue : ""
-                                Layout.preferredWidth: 52
-                                horizontalAlignment: Text.AlignRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: genreValue || ""
-                                Layout.preferredWidth: 112
-                                elide: Text.ElideRight
-                                color: rowTextColor
-                            }
-                            Label {
-                                text: lengthTextValue || "--:--"
-                                Layout.preferredWidth: 76
-                                horizontalAlignment: Text.AlignRight
-                                color: rowTextColor
-                            }
-                        }
-                    }
-
                     delegate: Rectangle {
                         readonly property string rowKind: kind || ""
                         readonly property string rowTypeValue: rowType || ""
@@ -2317,9 +2114,6 @@ Kirigami.ApplicationWindow {
                         readonly property var yearValue: year
                         readonly property var trackNumberValue: trackNumber
                         readonly property var countValue: count
-                        readonly property color rowTextColor: index === root.globalSearchSelectedDisplayIndex
-                            ? Kirigami.Theme.highlightedTextColor
-                            : Kirigami.Theme.textColor
                         width: Math.max(
                             0,
                             ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
@@ -2334,21 +2128,215 @@ Kirigami.ApplicationWindow {
                                         ? Kirigami.Theme.backgroundColor
                                         : Kirigami.Theme.alternateBackgroundColor)))
 
-                        Loader {
+                        RowLayout {
                             anchors.fill: parent
-                            sourceComponent: rowKind === "section"
-                                ? globalSearchSectionRow
-                                : (rowKind === "columns"
-                                    ? (rowTypeValue === "artist"
-                                        ? globalSearchArtistColumnsRow
-                                        : (rowTypeValue === "album"
-                                            ? globalSearchAlbumColumnsRow
-                                            : globalSearchTrackColumnsRow))
-                                    : (rowTypeValue === "artist"
-                                        ? globalSearchArtistItemRow
-                                        : (rowTypeValue === "album"
-                                            ? globalSearchAlbumItemRow
-                                            : globalSearchTrackItemRow)))
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 8
+
+                            Label {
+                                visible: rowKind === "section"
+                                Layout.fillWidth: true
+                                text: sectionTitleValue || ""
+                                font.bold: true
+                            }
+
+                            RowLayout {
+                                visible: rowKind === "columns" && rowTypeValue === "artist"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: "Name"; Layout.fillWidth: true; font.bold: true }
+                            }
+
+                            RowLayout {
+                                visible: rowKind === "columns" && rowTypeValue === "album"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: ""; Layout.preferredWidth: 26; font.bold: true }
+                                Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
+                                Label { text: "Artist"; Layout.preferredWidth: 170; font.bold: true }
+                                Label { text: "Year"; Layout.preferredWidth: 52; font.bold: true }
+                                Label { text: "Genre"; Layout.preferredWidth: 120; font.bold: true }
+                                Label { text: "#"; Layout.preferredWidth: 34; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            }
+
+                            RowLayout {
+                                visible: rowKind === "columns" && rowTypeValue === "track"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: "#"; Layout.preferredWidth: 34; font.bold: true }
+                                Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
+                                Label { text: "Artist"; Layout.preferredWidth: 160; font.bold: true }
+                                Label { text: ""; Layout.preferredWidth: 20; font.bold: true }
+                                Label { text: "Album"; Layout.preferredWidth: 182; font.bold: true }
+                                Label {
+                                    text: "Year"
+                                    Layout.preferredWidth: 52
+                                    font.bold: true
+                                    horizontalAlignment: Text.AlignRight
+                                }
+                                Label { text: "Genre"; Layout.preferredWidth: 112; font.bold: true }
+                                Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            }
+
+                            RowLayout {
+                                visible: rowKind === "item" && rowTypeValue === "artist"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: labelValue || ""
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                            }
+
+                            RowLayout {
+                                visible: rowKind === "item" && rowTypeValue === "album"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Item {
+                                    Layout.preferredWidth: 26
+                                    Layout.preferredHeight: 20
+                                    Image {
+                                        anchors.fill: parent
+                                        source: coverUrlValue || ""
+                                        fillMode: Image.PreserveAspectFit
+                                        asynchronous: true
+                                        cache: true
+                                        sourceSize.width: 32
+                                        sourceSize.height: 32
+                                    }
+                                }
+                                Label {
+                                    text: labelValue || ""
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: artistValue || ""
+                                    Layout.preferredWidth: 170
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: yearValue !== undefined && yearValue !== null ? yearValue : ""
+                                    Layout.preferredWidth: 52
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: genreValue || ""
+                                    Layout.preferredWidth: 120
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: countValue !== undefined ? countValue : ""
+                                    Layout.preferredWidth: 34
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: lengthTextValue || "--:--"
+                                    Layout.preferredWidth: 76
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                            }
+
+                            RowLayout {
+                                visible: rowKind === "item" && rowTypeValue === "track"
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label {
+                                    text: trackNumberValue !== undefined && trackNumberValue !== null
+                                        ? String(trackNumberValue).padStart(2, "0")
+                                        : ""
+                                    Layout.preferredWidth: 34
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: labelValue || ""
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: artistValue || ""
+                                    Layout.preferredWidth: 160
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Item {
+                                    Layout.preferredWidth: 20
+                                    Layout.preferredHeight: 18
+                                    Image {
+                                        anchors.fill: parent
+                                        source: coverUrlValue || ""
+                                        fillMode: Image.PreserveAspectFit
+                                        asynchronous: true
+                                        cache: true
+                                        sourceSize.width: 24
+                                        sourceSize.height: 24
+                                    }
+                                }
+                                Label {
+                                    text: albumValue || ""
+                                    Layout.preferredWidth: 182
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: yearValue !== undefined && yearValue !== null ? yearValue : ""
+                                    Layout.preferredWidth: 52
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: genreValue || ""
+                                    Layout.preferredWidth: 112
+                                    elide: Text.ElideRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                                Label {
+                                    text: lengthTextValue || "--:--"
+                                    Layout.preferredWidth: 76
+                                    horizontalAlignment: Text.AlignRight
+                                    color: index === root.globalSearchSelectedDisplayIndex
+                                        ? Kirigami.Theme.highlightedTextColor
+                                        : Kirigami.Theme.textColor
+                                }
+                            }
                         }
 
                         MouseArea {
