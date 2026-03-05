@@ -3995,12 +3995,18 @@ Kirigami.ApplicationWindow {
                         Connections {
                             target: uiBridge
                             function onSnapshotChanged() {
-                                if (uiBridge.selectedQueueIndex >= 0
-                                        && uiBridge.selectedQueueIndex !== root.lastCenteredQueueIndex
-                                        && root.autoCenterQueueSelection) {
-                                    playlistView.positionViewAtIndex(uiBridge.selectedQueueIndex, ListView.Contain)
-                                    root.lastCenteredQueueIndex = uiBridge.selectedQueueIndex
-                                } else if (uiBridge.selectedQueueIndex < 0) {
+                                if (!root.autoCenterQueueSelection) {
+                                    return
+                                }
+                                const hasPlayingIndex = uiBridge.playbackState !== "Stopped"
+                                    && uiBridge.playingQueueIndex >= 0
+                                const targetIndex = hasPlayingIndex
+                                    ? uiBridge.playingQueueIndex
+                                    : uiBridge.selectedQueueIndex
+                                if (targetIndex >= 0 && targetIndex !== root.lastCenteredQueueIndex) {
+                                    playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
+                                    root.lastCenteredQueueIndex = targetIndex
+                                } else if (targetIndex < 0) {
                                     root.lastCenteredQueueIndex = -2
                                 }
                             }
