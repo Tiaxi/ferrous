@@ -1242,7 +1242,18 @@ Kirigami.ApplicationWindow {
                 || openingText === "\t") {
             return false
         }
-        root.pendingGlobalSearchPrefillText += openingText
+        if (globalSearchDialog.visible && !root.globalSearchOpening && globalSearchQueryField) {
+            const hasSelection = (globalSearchQueryField.selectedText || "").length > 0
+            if (hasSelection) {
+                globalSearchQueryField.text = openingText
+            } else {
+                globalSearchQueryField.text = (globalSearchQueryField.text || "") + openingText
+            }
+            globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+            root.focusGlobalSearchQueryField(false)
+        } else {
+            root.pendingGlobalSearchPrefillText += openingText
+        }
         event.accepted = true
         return true
     }
