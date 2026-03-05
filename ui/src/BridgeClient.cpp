@@ -2337,7 +2337,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     QString currentCover = metadataCoverUrl;
-    if (isStopped) {
+    if (isStopped && !stoppedTrackAdvanced) {
         currentCover = m_currentTrackCoverPath;
     } else if (currentCover.isEmpty() && !currentPath.isEmpty()) {
         const auto cached = m_trackCoverByPath.constFind(currentPath);

@@ -371,6 +371,39 @@ mod tests {
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.current.as_ref(), Some(&a));
     }
+
+    #[test]
+    fn paused_navigation_resumes_playback() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        let c = PathBuf::from("/tmp/c.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ]));
+        engine.command(PlaybackCommand::PlayAt(1));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Pause);
+        engine.command(PlaybackCommand::Next);
+        engine.command(PlaybackCommand::Poll);
+
+        let next_snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot next");
+        assert_eq!(next_snap.current.as_ref(), Some(&c));
+        assert_eq!(next_snap.state, PlaybackState::Playing);
+
+        engine.command(PlaybackCommand::Pause);
+        engine.command(PlaybackCommand::Previous);
+        engine.command(PlaybackCommand::Poll);
+
+        let prev_snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot previous");
+        assert_eq!(prev_snap.current.as_ref(), Some(&b));
+        assert_eq!(prev_snap.state, PlaybackState::Playing);
+    }
 }
 
 #[cfg(not(feature = "gst"))]
@@ -515,6 +548,9 @@ mod backend {
                                     snapshot.current_queue_index = Some(queue_idx);
                                     snapshot.position = Duration::ZERO;
                                     snapshot.duration = Duration::from_secs(180);
+                                    if snapshot.state == PlaybackState::Paused {
+                                        snapshot.state = PlaybackState::Playing;
+                                    }
                                     let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                         path: next,
                                         queue_index: queue_idx,
@@ -531,6 +567,9 @@ mod backend {
                                     snapshot.current_queue_index = Some(queue_idx);
                                     snapshot.position = Duration::ZERO;
                                     snapshot.duration = Duration::from_secs(180);
+                                    if snapshot.state == PlaybackState::Paused {
+                                        snapshot.state = PlaybackState::Playing;
+                                    }
                                     let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                         path: prev,
                                         queue_index: queue_idx,
@@ -1031,6 +1070,7 @@ mod backend {
                                 &uri,
                                 applied_volume,
                                 startup_gain_ramp,
+                                false,
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: first.clone(),
@@ -1068,6 +1108,7 @@ mod backend {
                                     &uri,
                                     applied_volume,
                                     startup_gain_ramp,
+                                    false,
                                 );
                             }
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
@@ -1126,6 +1167,7 @@ mod backend {
                                 &uri,
                                 applied_volume,
                                 startup_gain_ramp,
+                                false,
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: path.clone(),
@@ -1141,6 +1183,7 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     snapshot.repeat_mode = state.repeat_mode;
                     snapshot.shuffle_enabled = state.shuffle_enabled;
+                    let resume_from_pause = snapshot.state == PlaybackState::Paused;
                     if let Some(path) = state.next_manual() {
                         if let Some(uri) = file_uri(&path) {
                             snapshot.current_queue_index = state.current_index();
@@ -1151,6 +1194,7 @@ mod backend {
                                 &uri,
                                 applied_volume,
                                 startup_gain_ramp,
+                                resume_from_pause,
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: path.clone(),
@@ -1166,6 +1210,7 @@ mod backend {
                 if let Ok(mut state) = queue_state.lock() {
                     snapshot.repeat_mode = state.repeat_mode;
                     snapshot.shuffle_enabled = state.shuffle_enabled;
+                    let resume_from_pause = snapshot.state == PlaybackState::Paused;
                     if let Some(path) = state.previous_manual() {
                         if let Some(uri) = file_uri(&path) {
                             snapshot.current_queue_index = state.current_index();
@@ -1176,6 +1221,7 @@ mod backend {
                                 &uri,
                                 applied_volume,
                                 startup_gain_ramp,
+                                resume_from_pause,
                             );
                             let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                 path: path.clone(),
@@ -1366,8 +1412,9 @@ mod backend {
         uri: &str,
         applied_volume: &mut f64,
         startup_gain_ramp: &mut bool,
+        force_play: bool,
     ) {
-        let was_playing = snapshot.state == PlaybackState::Playing;
+        let was_playing = snapshot.state == PlaybackState::Playing || force_play;
         soft_mute(playbin, applied_volume);
         let _ = playbin.set_state(gst::State::Ready);
         playbin.set_property("uri", uri);
