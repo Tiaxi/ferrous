@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
 use crate::library::{
     search_tracks_fts, LibraryCommand, LibraryEvent, LibrarySearchTrack, LibraryService,
-    LibrarySnapshot,
+    LibrarySnapshot, LibraryTrack,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -1221,6 +1221,245 @@ fn apply_queue_command_state(
     }
 }
 
+fn normalized_library_artist(track: &LibraryTrack) -> &str {
+    if track.artist.trim().is_empty() {
+        "Unknown Artist"
+    } else {
+        track.artist.as_str()
+    }
+}
+
+fn normalized_library_album(track: &LibraryTrack) -> &str {
+    if track.album.trim().is_empty() {
+        "Unknown Album"
+    } else {
+        track.album.as_str()
+    }
+}
+
+fn normalized_library_track_title(track: &LibraryTrack) -> String {
+    if !track.title.trim().is_empty() {
+        return track.title.trim().to_string();
+    }
+    track
+        .path
+        .file_stem()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+}
+
+fn leading_track_number(input: &str) -> Option<u32> {
+    let mut n: u32 = 0;
+    let mut saw_digit = false;
+    for ch in input.chars() {
+        if let Some(d) = ch.to_digit(10) {
+            saw_digit = true;
+            n = n.saturating_mul(10).saturating_add(d);
+        } else {
+            break;
+        }
+    }
+    if saw_digit {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut ia = 0usize;
+    let mut ib = 0usize;
+
+    while ia < a.len() && ib < b.len() {
+        let ca = a[ia];
+        let cb = b[ib];
+
+        if ca.is_ascii_digit() && cb.is_ascii_digit() {
+            let start_a = ia;
+            let start_b = ib;
+            while ia < a.len() && a[ia].is_ascii_digit() {
+                ia += 1;
+            }
+            while ib < b.len() && b[ib].is_ascii_digit() {
+                ib += 1;
+            }
+
+            let mut na = &a[start_a..ia];
+            let mut nb = &b[start_b..ib];
+            while na.len() > 1 && na[0] == b'0' {
+                na = &na[1..];
+            }
+            while nb.len() > 1 && nb[0] == b'0' {
+                nb = &nb[1..];
+            }
+
+            let cmp = na
+                .len()
+                .cmp(&nb.len())
+                .then_with(|| na.cmp(nb))
+                .then_with(|| (ia - start_a).cmp(&(ib - start_b)));
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+            continue;
+        }
+
+        let la = ca.to_ascii_lowercase();
+        let lb = cb.to_ascii_lowercase();
+        let cmp = la.cmp(&lb);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        ia += 1;
+        ib += 1;
+    }
+
+    a.len().cmp(&b.len())
+}
+
+fn resolved_album_year(tracks: &[&LibraryTrack]) -> Option<i32> {
+    let mut counts: HashMap<i32, usize> = HashMap::new();
+    for year in tracks.iter().filter_map(|track| track.year) {
+        *counts.entry(year).or_insert(0) += 1;
+    }
+    if counts.is_empty() {
+        return None;
+    }
+    let mut items = counts.into_iter().collect::<Vec<_>>();
+    items.sort_by(|(a_year, a_count), (b_year, b_count)| {
+        b_count.cmp(a_count).then_with(|| a_year.cmp(b_year))
+    });
+    items.first().map(|(year, _)| *year)
+}
+
+fn ordered_track_paths_for_queue(tracks: Vec<&LibraryTrack>) -> Vec<PathBuf> {
+    struct QueueTrackOrder<'a> {
+        track: &'a LibraryTrack,
+        title: String,
+        path: String,
+        rank: u8,
+        number: u32,
+    }
+
+    let mut ordered = tracks
+        .into_iter()
+        .map(|track| {
+            let file_stem = track
+                .path
+                .file_stem()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            let filename_number = leading_track_number(&file_stem);
+            let number = track
+                .track_no
+                .or(filename_number)
+                .unwrap_or_else(|| u32::MAX.saturating_sub(1));
+            let rank = if track.track_no.is_some() {
+                0
+            } else if filename_number.is_some() {
+                1
+            } else {
+                2
+            };
+            QueueTrackOrder {
+                track,
+                title: normalized_library_track_title(track),
+                path: track.path.to_string_lossy().to_string(),
+                rank,
+                number,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    ordered.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| a.number.cmp(&b.number))
+            .then_with(|| natural_cmp(&a.title, &b.title))
+            .then_with(|| natural_cmp(&a.path, &b.path))
+    });
+
+    ordered
+        .into_iter()
+        .map(|item| item.track.path.clone())
+        .collect()
+}
+
+fn collect_artist_paths_for_queue(
+    library: &LibrarySnapshot,
+    artist: &str,
+    sort_mode: LibrarySortMode,
+) -> Vec<PathBuf> {
+    struct AlbumBucket<'a> {
+        key: String,
+        title: String,
+        year: Option<i32>,
+        tracks: Vec<&'a LibraryTrack>,
+    }
+
+    let mut loose_tracks = Vec::new();
+    let mut album_buckets: HashMap<String, AlbumBucket<'_>> = HashMap::new();
+
+    for track in &library.tracks {
+        if normalized_library_artist(track) != artist {
+            continue;
+        }
+        let Some(context) = derive_tree_path_context(&track.path, &library.roots, &track.artist)
+        else {
+            loose_tracks.push(track);
+            continue;
+        };
+        let Some(album_key) = context.album_key else {
+            loose_tracks.push(track);
+            continue;
+        };
+        let fallback_title = normalized_library_album(track);
+        let bucket = album_buckets
+            .entry(album_key.clone())
+            .or_insert_with(|| AlbumBucket {
+                key: album_key.clone(),
+                title: fallback_title.to_string(),
+                year: None,
+                tracks: Vec::new(),
+            });
+        if bucket.title == "Unknown Album" && fallback_title != "Unknown Album" {
+            bucket.title = fallback_title.to_string();
+        }
+        bucket.tracks.push(track);
+    }
+
+    let mut albums = album_buckets.into_values().collect::<Vec<_>>();
+    for bucket in &mut albums {
+        bucket.year = resolved_album_year(&bucket.tracks);
+    }
+    albums.sort_by(|a, b| match sort_mode {
+        LibrarySortMode::Year => {
+            let a_unknown = a.year.is_none();
+            let b_unknown = b.year.is_none();
+            a_unknown
+                .cmp(&b_unknown)
+                .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
+                .then_with(|| natural_cmp(&a.title, &b.title))
+                .then_with(|| natural_cmp(&a.key, &b.key))
+        }
+        LibrarySortMode::Title => natural_cmp(&a.title, &b.title)
+            .then_with(|| {
+                let a_unknown = a.year.is_none();
+                let b_unknown = b.year.is_none();
+                a_unknown
+                    .cmp(&b_unknown)
+                    .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
+            })
+            .then_with(|| natural_cmp(&a.key, &b.key)),
+    });
+
+    let mut out = ordered_track_paths_for_queue(loose_tracks);
+    for bucket in albums {
+        out.extend(ordered_track_paths_for_queue(bucket.tracks));
+    }
+    out
+}
+
 fn handle_library_command(
     cmd: BridgeLibraryCommand,
     state: &mut BridgeState,
@@ -1355,20 +1594,11 @@ fn handle_library_command(
             true
         }
         BridgeLibraryCommand::ReplaceArtistByKey { artist } => {
-            let paths: Vec<PathBuf> = state
-                .library
-                .tracks
-                .iter()
-                .filter(|track| {
-                    let track_artist = if track.artist.trim().is_empty() {
-                        "Unknown Artist"
-                    } else {
-                        track.artist.as_str()
-                    };
-                    track_artist == artist
-                })
-                .map(|track| track.path.clone())
-                .collect();
+            let paths = collect_artist_paths_for_queue(
+                &state.library,
+                &artist,
+                state.settings.library_sort_mode,
+            );
             if paths.is_empty() {
                 return false;
             }
@@ -1380,20 +1610,11 @@ fn handle_library_command(
             true
         }
         BridgeLibraryCommand::AppendArtistByKey { artist } => {
-            let paths: Vec<PathBuf> = state
-                .library
-                .tracks
-                .iter()
-                .filter(|track| {
-                    let track_artist = if track.artist.trim().is_empty() {
-                        "Unknown Artist"
-                    } else {
-                        track.artist.as_str()
-                    };
-                    track_artist == artist
-                })
-                .map(|track| track.path.clone())
-                .collect();
+            let paths = collect_artist_paths_for_queue(
+                &state.library,
+                &artist,
+                state.settings.library_sort_mode,
+            );
             if paths.is_empty() {
                 return false;
             }
@@ -2544,6 +2765,27 @@ mod tests {
         PathBuf::from(path)
     }
 
+    fn library_track(
+        path: &str,
+        root: &PathBuf,
+        artist: &str,
+        album: &str,
+        year: Option<i32>,
+        track_no: Option<u32>,
+    ) -> crate::library::LibraryTrack {
+        crate::library::LibraryTrack {
+            path: p(path),
+            root_path: root.clone(),
+            title: String::new(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            genre: String::new(),
+            year,
+            track_no,
+            duration_secs: None,
+        }
+    }
+
     #[test]
     fn disc_section_detection_accepts_common_main_disc_names() {
         assert!(is_main_album_disc_section("CD1"));
@@ -2727,6 +2969,82 @@ mod tests {
         let queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
         let idx = resolve_session_current_index(&queue, Some(9), Some(&p("/c.flac")));
         assert_eq!(idx, Some(2));
+    }
+
+    #[test]
+    fn collect_artist_paths_for_queue_respects_year_sort_mode() {
+        let root = p("/music");
+        let library = LibrarySnapshot {
+            roots: vec![root.clone()],
+            tracks: vec![
+                library_track(
+                    "/music/Artist/Alpha/01 - One.flac",
+                    &root,
+                    "Artist",
+                    "Alpha",
+                    Some(2020),
+                    Some(1),
+                ),
+                library_track(
+                    "/music/Artist/Beta/01 - One.flac",
+                    &root,
+                    "Artist",
+                    "Beta",
+                    Some(2010),
+                    Some(1),
+                ),
+            ],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+
+        let ordered = collect_artist_paths_for_queue(&library, "Artist", LibrarySortMode::Year);
+        assert_eq!(
+            ordered,
+            vec![
+                p("/music/Artist/Beta/01 - One.flac"),
+                p("/music/Artist/Alpha/01 - One.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_artist_paths_for_queue_respects_title_sort_mode() {
+        let root = p("/music");
+        let library = LibrarySnapshot {
+            roots: vec![root.clone()],
+            tracks: vec![
+                library_track(
+                    "/music/Artist/Alpha/01 - One.flac",
+                    &root,
+                    "Artist",
+                    "Alpha",
+                    Some(2020),
+                    Some(1),
+                ),
+                library_track(
+                    "/music/Artist/Beta/01 - One.flac",
+                    &root,
+                    "Artist",
+                    "Beta",
+                    Some(2010),
+                    Some(1),
+                ),
+            ],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+
+        let ordered = collect_artist_paths_for_queue(&library, "Artist", LibrarySortMode::Title);
+        assert_eq!(
+            ordered,
+            vec![
+                p("/music/Artist/Alpha/01 - One.flac"),
+                p("/music/Artist/Beta/01 - One.flac"),
+            ]
+        );
     }
 
     #[test]

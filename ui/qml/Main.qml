@@ -1117,6 +1117,13 @@ Kirigami.ApplicationWindow {
         if (selectedQueueIndices.length > 0) {
             const indices = selectedQueueIndices.slice()
             indices.sort(function(a, b) { return b - a })
+            if (uiBridge.queueLength > 0 && indices.length >= uiBridge.queueLength) {
+                requestPlaylistViewportRestoreWindow(700)
+                uiBridge.clearQueue()
+                setSelectedQueueIndices([])
+                queueSelectionAnchorIndex = -1
+                return
+            }
             requestPlaylistViewportRestoreWindow(Math.max(700, indices.length * 120))
             for (let i = 0; i < indices.length; ++i) {
                 uiBridge.removeAt(indices[i])
