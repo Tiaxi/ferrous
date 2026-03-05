@@ -186,6 +186,7 @@ pub struct BridgeSnapshot {
     pub library_artist_count: usize,
     pub library_album_count: usize,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
+    pub queue_included: bool,
     pub queue: Vec<PathBuf>,
     pub selected_queue_index: Option<usize>,
     pub settings: BridgeSettings,
@@ -319,7 +320,7 @@ enum SearchFallbackOutcome {
 }
 
 impl BridgeState {
-    fn snapshot(&self, include_tree: bool) -> BridgeSnapshot {
+    fn snapshot(&self, include_tree: bool, include_queue: bool) -> BridgeSnapshot {
         BridgeSnapshot {
             playback: self.playback.clone(),
             analysis: self.analysis.clone(),
@@ -332,7 +333,12 @@ impl BridgeState {
             } else {
                 None
             },
-            queue: self.queue.clone(),
+            queue_included: include_queue,
+            queue: if include_queue {
+                self.queue.clone()
+            } else {
+                Vec::new()
+            },
             selected_queue_index: self.selected_queue_index,
             settings: self.settings.clone(),
         }
@@ -480,14 +486,21 @@ fn run_bridge_loop(
     let mut last_snapshot_emit = Instant::now();
     let mut snapshot_dirty = false;
     let mut include_tree_in_next_snapshot = true;
+    let mut include_queue_in_next_snapshot = true;
     let tree_emit_interval = scan_tree_emit_interval();
     let tree_emit_min_track_delta = scan_tree_emit_min_track_delta();
     let mut last_tree_emit_at: Option<Instant> = None;
     let mut last_tree_emit_track_count = 0usize;
 
-    if send_snapshot_event(&event_tx, &state, include_tree_in_next_snapshot) {
+    if send_snapshot_event(
+        &event_tx,
+        &state,
+        include_tree_in_next_snapshot,
+        include_queue_in_next_snapshot,
+    ) {
         prof_snapshots_sent += 1;
         include_tree_in_next_snapshot = false;
+        include_queue_in_next_snapshot = false;
         last_tree_emit_at = Some(Instant::now());
         last_tree_emit_track_count = state.library.tracks.len();
     } else {
@@ -501,6 +514,7 @@ fn run_bridge_loop(
                     Ok(cmd) => {
                         let rebuild_tree =
                             command_requires_tree_rebuild(&cmd, state.settings.library_sort_mode);
+                        let refresh_queue_snapshot = command_requires_queue_snapshot(&cmd);
                         let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
                         let mut command_context = BridgeCommandContext {
                             playback: &playback,
@@ -519,12 +533,17 @@ fn run_bridge_loop(
                         }
                         if changed {
                             snapshot_dirty = true;
+                            if refresh_queue_snapshot {
+                                include_queue_in_next_snapshot = true;
+                            }
                         }
                         if force_snapshot && running {
+                            let include_queue = include_queue_in_next_snapshot || force_snapshot;
                             if send_snapshot_event(
                                 &event_tx,
                                 &state,
                                 include_tree_in_next_snapshot,
+                                include_queue,
                             ) {
                                 prof_snapshots_sent += 1;
                                 if include_tree_in_next_snapshot {
@@ -532,6 +551,9 @@ fn run_bridge_loop(
                                     last_tree_emit_track_count = state.library.tracks.len();
                                 }
                                 include_tree_in_next_snapshot = false;
+                                if include_queue {
+                                    include_queue_in_next_snapshot = false;
+                                }
                                 snapshot_dirty = false;
                             } else {
                                 prof_snapshots_dropped += 1;
@@ -564,6 +586,9 @@ fn run_bridge_loop(
         let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
         let changed = playback_changed || analysis_changed || metadata_changed || library_changed;
         if library_changed {
+            if !state.queue.is_empty() {
+                include_queue_in_next_snapshot = true;
+            }
             let now = Instant::now();
             let track_delta = state
                 .library
@@ -585,13 +610,22 @@ fn run_bridge_loop(
             snapshot_dirty = true;
         }
         if snapshot_dirty && last_snapshot_emit.elapsed() >= snapshot_interval {
-            if send_snapshot_event(&event_tx, &state, include_tree_in_next_snapshot) {
+            let include_queue = include_queue_in_next_snapshot;
+            if send_snapshot_event(
+                &event_tx,
+                &state,
+                include_tree_in_next_snapshot,
+                include_queue,
+            ) {
                 prof_snapshots_sent += 1;
                 if include_tree_in_next_snapshot {
                     last_tree_emit_at = Some(Instant::now());
                     last_tree_emit_track_count = state.library.tracks.len();
                 }
                 include_tree_in_next_snapshot = false;
+                if include_queue {
+                    include_queue_in_next_snapshot = false;
+                }
                 snapshot_dirty = false;
             } else {
                 prof_snapshots_dropped += 1;
@@ -721,6 +755,7 @@ fn send_snapshot_event(
     event_tx: &Sender<BridgeEvent>,
     state: &BridgeState,
     include_tree: bool,
+    include_queue: bool,
 ) -> bool {
     // Drop stale snapshot updates when the consumer is behind; next snapshot will replace it.
     if event_tx.is_full() {
@@ -728,7 +763,7 @@ fn send_snapshot_event(
     }
     try_send_event(
         event_tx,
-        BridgeEvent::Snapshot(Box::new(state.snapshot(include_tree))),
+        BridgeEvent::Snapshot(Box::new(state.snapshot(include_tree, include_queue))),
     )
     .is_ok()
 }
@@ -849,6 +884,26 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
         }
         BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk) => true,
         BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { .. }) => true,
+        _ => false,
+    }
+}
+
+fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
+    match cmd {
+        BridgeCommand::Queue(_) => true,
+        BridgeCommand::Library(library_cmd) => matches!(
+            library_cmd,
+            BridgeLibraryCommand::AddTrack(_)
+                | BridgeLibraryCommand::PlayTrack(_)
+                | BridgeLibraryCommand::ReplaceWithAlbum(_)
+                | BridgeLibraryCommand::AppendAlbum(_)
+                | BridgeLibraryCommand::ReplaceAlbumByKey { .. }
+                | BridgeLibraryCommand::AppendAlbumByKey { .. }
+                | BridgeLibraryCommand::ReplaceArtistByKey { .. }
+                | BridgeLibraryCommand::AppendArtistByKey { .. }
+                | BridgeLibraryCommand::ReplaceAllTracks
+                | BridgeLibraryCommand::AppendAllTracks
+        ),
         _ => false,
     }
 }

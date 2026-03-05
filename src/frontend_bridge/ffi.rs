@@ -207,8 +207,12 @@ impl FfiRuntime {
         if let Some(snapshot) = latest_snapshot {
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
             self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
-            let queue_section = self.queue_section_for_snapshot(&snapshot);
-            self.push_binary_event(encode_binary_snapshot(&snapshot, &queue_section));
+            let queue_section = if snapshot.queue_included {
+                Some(self.queue_section_for_snapshot(&snapshot))
+            } else {
+                None
+            };
+            self.push_binary_event(encode_binary_snapshot(&snapshot, queue_section.as_ref()));
         }
     }
 
@@ -771,15 +775,19 @@ impl<'a> BinaryReader<'a> {
     }
 }
 
-fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_section: &QueueSectionData) -> Vec<u8> {
-    let sections: Vec<(u16, Vec<u8>)> = vec![
+fn encode_binary_snapshot(
+    snapshot: &BridgeSnapshot,
+    queue_section: Option<&QueueSectionData>,
+) -> Vec<u8> {
+    let mut sections: Vec<(u16, Vec<u8>)> = vec![
         (SECTION_PLAYBACK, encode_playback_section(snapshot)),
-        (SECTION_QUEUE, encode_queue_section(snapshot, queue_section)),
         (SECTION_LIBRARY_META, encode_library_meta_section(snapshot)),
         (SECTION_METADATA, encode_metadata_section(snapshot)),
         (SECTION_SETTINGS, encode_settings_section(snapshot)),
     ];
-
+    if let Some(section) = queue_section {
+        sections.insert(1, (SECTION_QUEUE, encode_queue_section(snapshot, section)));
+    }
     encode_packet(sections)
 }
 
@@ -862,7 +870,6 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     let current_queue_index = snapshot
         .playback
         .current_queue_index
-        .filter(|idx| *idx < snapshot.queue.len())
         .map_or(-1, |idx| idx as i32);
     let current_path = snapshot
         .playback
@@ -1321,6 +1328,7 @@ mod tests {
             library_artist_count: 1,
             library_album_count: 1,
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
+            queue_included: true,
             queue: vec![PathBuf::from("/music/a.flac")],
             selected_queue_index: Some(0),
             settings: super::super::BridgeSettings {
@@ -1601,7 +1609,7 @@ mod tests {
     fn snapshot_packet_contract_has_expected_shape() {
         let snapshot = sample_snapshot();
         let queue_section = compute_queue_section_data(&snapshot);
-        let packet = encode_binary_snapshot(&snapshot, &queue_section);
+        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
         let (magic, total_len, mask) = parse_packet_header(&packet);
         assert_eq!(magic, SNAPSHOT_MAGIC);
         assert_eq!(total_len as usize, packet.len());
@@ -1613,6 +1621,20 @@ mod tests {
         assert_ne!(mask & SECTION_SETTINGS, 0);
         assert_eq!(mask & SECTION_ERROR, 0);
         assert_eq!(mask & SECTION_STOPPED, 0);
+    }
+
+    #[test]
+    fn snapshot_packet_can_omit_queue_section() {
+        let mut snapshot = sample_snapshot();
+        snapshot.queue_included = false;
+        snapshot.queue.clear();
+
+        let packet = encode_binary_snapshot(&snapshot, None);
+        let (_, total_len, mask) = parse_packet_header(&packet);
+        assert_eq!(total_len as usize, packet.len());
+        assert_ne!(mask & SECTION_PLAYBACK, 0);
+        assert_eq!(mask & SECTION_QUEUE, 0);
+        assert_ne!(mask & SECTION_METADATA, 0);
     }
 
     #[test]

@@ -170,6 +170,7 @@ Kirigami.ApplicationWindow {
         function replaceWithPaths(paths) {}
         function appendPaths(paths) {}
         function libraryAlbumCoverAt(index) { return "" }
+        function queueTrackNumberAt(index) { return null }
         function queuePathAt(index) { return "" }
         function addLibraryRoot(path) {}
         function removeLibraryRoot(path) {}
@@ -248,8 +249,7 @@ Kirigami.ApplicationWindow {
     }
 
     readonly property int playlistOrderColumnWidth: {
-        const queueRows = uiBridge.queueRows || []
-        const maxIndex = Math.max(0, queueRows.length - 1)
+        const maxIndex = Math.max(0, uiBridge.queueLength - 1)
         const widestOrderText = playlistOrderText(maxIndex)
         const valueWidth = playlistOrderFontMetrics.boundingRect(widestOrderText).width
         const headerWidth = playlistOrderFontMetrics.boundingRect("#").width
@@ -261,12 +261,7 @@ Kirigami.ApplicationWindow {
         if (index === undefined || index === null || index < 0) {
             return "--"
         }
-        const rows = uiBridge.queueRows || []
-        if (index >= rows.length) {
-            return "--"
-        }
-        const rowData = rows[index] || {}
-        return metadataTrackNumberText(rowData.trackNumber)
+        return metadataTrackNumberText(uiBridge.queueTrackNumberAt(index))
     }
 
     FontMetrics {

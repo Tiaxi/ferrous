@@ -1239,6 +1239,18 @@ QString BridgeClient::queuePathAt(int index) const {
     return m_queuePaths[index];
 }
 
+QVariant BridgeClient::queueTrackNumberAt(int index) const {
+    if (index < 0 || index >= m_queueRows.size()) {
+        return {};
+    }
+    const QVariantMap row = m_queueRows[index].toMap();
+    const QVariant trackNumber = row.value(QStringLiteral("trackNumber"));
+    if (!trackNumber.isValid() || trackNumber.isNull()) {
+        return {};
+    }
+    return trackNumber;
+}
+
 void BridgeClient::addLibraryRoot(const QString &path) {
     const QString normalized = normalizeLocalPathArg(path);
     if (normalized.isEmpty()) {
@@ -2065,8 +2077,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     int playing = snapshot.playback.present ? snapshot.playback.currentQueueIndex : m_playingQueueIndex;
 
     const int qlen = snapshot.queue.present ? snapshot.queue.len : m_queueLength;
-    const double queueDurationSecs = snapshot.queue.present ? snapshot.queue.totalDurationSeconds : 0.0;
-    const int queueUnknownDurationCount = std::max(0, snapshot.queue.present ? snapshot.queue.unknownDurationCount : 0);
     const int selected = snapshot.queue.present ? snapshot.queue.selectedIndex : m_selectedQueueIndex;
 
     const QString metadataSourcePath = snapshot.metadata.present ? snapshot.metadata.sourcePath : QString{};
@@ -2087,6 +2097,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     bool changed = false;
+    bool queueModelChanged = false;
 
     if (m_playbackState != nextState) {
         m_playbackState = nextState;
@@ -2151,16 +2162,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
     }
 
-    QString nextQueueDurationText = formatSeconds(queueDurationSecs);
-    if (queueUnknownDurationCount > 0) {
-        nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
-    }
-    if (m_queueDurationText != nextQueueDurationText) {
-        m_queueDurationText = nextQueueDurationText;
-        changed = true;
-    }
-
     if (snapshot.queue.present) {
+        QString nextQueueDurationText = formatSeconds(snapshot.queue.totalDurationSeconds);
+        const int queueUnknownDurationCount = std::max(0, snapshot.queue.unknownDurationCount);
+        if (queueUnknownDurationCount > 0) {
+            nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
+        }
+        if (m_queueDurationText != nextQueueDurationText) {
+            m_queueDurationText = nextQueueDurationText;
+            changed = true;
+        }
+
         QStringList items;
         QVariantList rows;
         QStringList paths;
@@ -2198,10 +2210,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (m_queueItems != items) {
             m_queueItems = items;
             changed = true;
+            queueModelChanged = true;
         }
         if (m_queueRows != rows) {
             m_queueRows = rows;
             changed = true;
+            queueModelChanged = true;
         }
         if (m_queuePaths != paths) {
             m_queuePaths = paths;
@@ -2209,6 +2223,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 ? (m_queueVersion + 1)
                 : 1;
             changed = true;
+            queueModelChanged = true;
         }
     }
 
@@ -2462,6 +2477,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!qFuzzyCompare(m_libraryScanEtaSeconds + 2.0, etaSeconds + 2.0)) {
         m_libraryScanEtaSeconds = etaSeconds;
         changed = true;
+    }
+
+    if (queueModelChanged) {
+        emit queueChanged();
     }
 
     return changed;

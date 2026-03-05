@@ -31,8 +31,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(int queueVersion READ queueVersion NOTIFY snapshotChanged)
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
-    Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
-    Q_PROPERTY(QVariantList queueRows READ queueRows NOTIFY snapshotChanged)
+    Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY queueChanged)
+    Q_PROPERTY(QVariantList queueRows READ queueRows NOTIFY queueChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY snapshotChanged)
@@ -172,6 +172,7 @@ public:
     Q_INVOKABLE QString libraryAlbumCoverAt(int index) const;
     Q_INVOKABLE QString libraryThumbnailSource(const QString &path) const;
     Q_INVOKABLE QString queuePathAt(int index) const;
+    Q_INVOKABLE QVariant queueTrackNumberAt(int index) const;
     Q_INVOKABLE void addLibraryRoot(const QString &path);
     Q_INVOKABLE void removeLibraryRoot(const QString &path);
     Q_INVOKABLE void rescanLibraryRoot(const QString &path);
@@ -191,6 +192,7 @@ public:
 
 signals:
     void snapshotChanged();
+    void queueChanged();
     void analysisChanged();
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
