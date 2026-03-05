@@ -273,7 +273,16 @@ impl SearchWorkerPreparedCache {
                 return Arc::clone(prepared);
             }
         }
+        let started = Instant::now();
         let prepared = Arc::new(prepare_search_library(library.as_ref()));
+        if search_profile_enabled() {
+            eprintln!(
+                "[search-worker] cache rebuild roots={} tracks={} elapsed_ms={}",
+                prepared.roots.len(),
+                prepared.tracks.len(),
+                started.elapsed().as_millis()
+            );
+        }
         self.source_library = Some(Arc::clone(library));
         self.prepared = Some(Arc::clone(&prepared));
         prepared
@@ -620,17 +629,37 @@ fn run_search_worker(
         return;
     };
     let mut prepared_cache = SearchWorkerPreparedCache::default();
+    let profile_search = search_profile_enabled();
     loop {
         while let Ok(next) = query_rx.try_recv() {
             query = next;
         }
 
+        let query_started = Instant::now();
         let prepared = prepared_cache.prepared_for(&query.library);
         match build_search_results_frame(&query, prepared.as_ref(), &query_rx) {
             SearchBuildOutcome::Frame(frame) => {
+                if profile_search {
+                    eprintln!(
+                        "[search-worker] seq={} chars={} tracks={} rows={} elapsed_ms={}",
+                        query.seq,
+                        query.query.chars().count(),
+                        prepared.tracks.len(),
+                        frame.rows.len(),
+                        query_started.elapsed().as_millis()
+                    );
+                }
                 let _ = results_tx.send(frame);
             }
             SearchBuildOutcome::Cancelled(next) => {
+                if profile_search {
+                    eprintln!(
+                        "[search-worker] cancel seq={} -> {} elapsed_ms={}",
+                        query.seq,
+                        next.seq,
+                        query_started.elapsed().as_millis()
+                    );
+                }
                 query = next;
                 continue;
             }
@@ -686,6 +715,45 @@ fn flush_pending_search_results_event(
         }
         Err(TrySendError::Disconnected(_)) => false,
     }
+}
+
+fn search_profile_enabled() -> bool {
+    std::env::var_os("FERROUS_SEARCH_PROFILE").is_some()
+}
+
+fn search_fallback_limit() -> usize {
+    std::env::var("FERROUS_SEARCH_FALLBACK_LIMIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(420, |v| v.clamp(64, 5_000))
+}
+
+fn search_artist_row_limit() -> usize {
+    std::env::var("FERROUS_SEARCH_ARTIST_LIMIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(32, |v| v.clamp(8, 400))
+}
+
+fn search_album_row_limit() -> usize {
+    std::env::var("FERROUS_SEARCH_ALBUM_LIMIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(64, |v| v.clamp(8, 800))
+}
+
+fn search_track_row_limit() -> usize {
+    std::env::var("FERROUS_SEARCH_TRACK_LIMIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(128, |v| v.clamp(16, 2_000))
+}
+
+fn search_cancel_poll_rows() -> usize {
+    std::env::var("FERROUS_SEARCH_CANCEL_POLL_ROWS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map_or(128, |v| v.clamp(16, 4_096))
 }
 
 fn scan_tree_emit_interval() -> Duration {
@@ -1276,12 +1344,18 @@ fn build_search_results_frame(
 
     // In-memory search is deterministic and responsive while library scans are writing to SQLite.
     // Optional FTS can be enabled explicitly for experimentation.
+    let fallback_limit = search_fallback_limit();
     let use_fts = std::env::var_os("FERROUS_SEARCH_USE_FTS").is_some();
     let hits = if use_fts {
-        match search_tracks_fts(query_text, 500) {
+        match search_tracks_fts(query_text, fallback_limit) {
             Ok(rows) if !rows.is_empty() => rows,
             Ok(_) | Err(_) => {
-                match search_tracks_fallback_prepared(query_text, prepared, 500, query_rx) {
+                match search_tracks_fallback_prepared(
+                    query_text,
+                    prepared,
+                    fallback_limit,
+                    query_rx,
+                ) {
                     SearchFallbackOutcome::Hits(rows) => rows,
                     SearchFallbackOutcome::Cancelled(next) => {
                         return SearchBuildOutcome::Cancelled(next)
@@ -1290,7 +1364,7 @@ fn build_search_results_frame(
             }
         }
     } else {
-        match search_tracks_fallback_prepared(query_text, prepared, 500, query_rx) {
+        match search_tracks_fallback_prepared(query_text, prepared, fallback_limit, query_rx) {
             SearchFallbackOutcome::Hits(rows) => rows,
             SearchFallbackOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
         }
@@ -1481,9 +1555,9 @@ fn build_search_results_frame(
     artist_rows.sort_by(search_row_cmp);
     album_rows.sort_by(search_row_cmp);
     track_rows.sort_by(search_row_cmp);
-    artist_rows.truncate(40);
-    album_rows.truncate(80);
-    track_rows.truncate(160);
+    artist_rows.truncate(search_artist_row_limit());
+    album_rows.truncate(search_album_row_limit());
+    track_rows.truncate(search_track_row_limit());
 
     let mut rows = Vec::with_capacity(artist_rows.len() + album_rows.len() + track_rows.len());
     rows.extend(artist_rows);
@@ -1639,8 +1713,9 @@ fn search_tracks_fallback_prepared(
     let capped_limit = limit.clamp(1, 5_000);
     let mut heap =
         std::collections::BinaryHeap::<FallbackRankedHit>::with_capacity(capped_limit + 1);
+    let cancel_poll_rows = search_cancel_poll_rows();
     for (index, track) in prepared.tracks.iter().enumerate() {
-        if index % 256 == 0 {
+        if index % cancel_poll_rows == 0 {
             if let Some(next) = poll_latest_search_query(query_rx) {
                 return SearchFallbackOutcome::Cancelled(next);
             }

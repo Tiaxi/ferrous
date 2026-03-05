@@ -185,7 +185,7 @@ BridgeClient::BridgeClient(QObject *parent)
     });
 
     m_globalSearchDebounceTimer.setSingleShot(true);
-    m_globalSearchDebounceTimer.setInterval(readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 120));
+    m_globalSearchDebounceTimer.setInterval(readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 90));
     connect(&m_globalSearchDebounceTimer, &QTimer::timeout, this, &BridgeClient::flushGlobalSearchQuery);
 
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
@@ -922,6 +922,7 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
         if (changed) {
             emit globalSearchResultsChanged();
         }
+        m_globalSearchSentAtMs.clear();
         logDiagnostic(QStringLiteral("search"), QStringLiteral("clear query"));
         m_globalSearchDebounceTimer.stop();
         flushGlobalSearchQuery();
@@ -1057,6 +1058,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
     if (m_latestGlobalSearchSeqSent != 0
         && frame.seq != m_latestGlobalSearchSeqSent
         && !isNewerSeq(frame.seq, m_latestGlobalSearchSeqSent)) {
+        m_globalSearchSentAtMs.remove(frame.seq);
         logDiagnostic(
             QStringLiteral("search"),
             QStringLiteral("drop stale frame seq=%1 latestSent=%2")
@@ -1067,6 +1069,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
     if (m_globalSearchSeq != 0
         && frame.seq != m_globalSearchSeq
         && !isNewerSeq(frame.seq, m_globalSearchSeq)) {
+        m_globalSearchSentAtMs.remove(frame.seq);
         logDiagnostic(
             QStringLiteral("search"),
             QStringLiteral("drop non-new frame seq=%1 current=%2")
@@ -1141,13 +1144,18 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         return false;
     }
 
+    const qint64 sentAtMs = m_globalSearchSentAtMs.take(frame.seq);
+    const qint64 latencyMs = sentAtMs > 0
+        ? (QDateTime::currentMSecsSinceEpoch() - sentAtMs)
+        : -1;
     logDiagnostic(
         QStringLiteral("search"),
-        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4")
+        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5")
             .arg(frame.seq)
             .arg(artistRows.size())
             .arg(albumRows.size())
-            .arg(trackRows.size()));
+            .arg(trackRows.size())
+            .arg(latencyMs));
     m_globalSearchSeq = frame.seq;
     m_globalSearchArtistResults = std::move(artistRows);
     m_globalSearchAlbumResults = std::move(albumRows);
@@ -1166,6 +1174,10 @@ void BridgeClient::flushGlobalSearchQuery() {
     }
     const quint32 seq = m_nextGlobalSearchSeq++;
     m_latestGlobalSearchSeqSent = seq;
+    m_globalSearchSentAtMs.insert(seq, QDateTime::currentMSecsSinceEpoch());
+    if (m_globalSearchSentAtMs.size() > 256) {
+        m_globalSearchSentAtMs.clear();
+    }
     m_lastGlobalSearchQuerySent = m_pendingGlobalSearchQuery;
     const QString trimmedQuery = m_pendingGlobalSearchQuery.trimmed();
     QString preview = trimmedQuery;
