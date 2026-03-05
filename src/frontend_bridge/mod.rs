@@ -566,8 +566,8 @@ fn run_bridge_loop(
                 .tracks
                 .len()
                 .saturating_sub(last_tree_emit_track_count);
-            let scan_emit_due = last_tree_emit_at
-                .map_or(true, |last| now.duration_since(last) >= tree_emit_interval);
+            let scan_emit_due =
+                last_tree_emit_at.is_none_or(|last| now.duration_since(last) >= tree_emit_interval);
             let should_emit_tree = !state.library.scan_in_progress
                 || last_tree_emit_at.is_none()
                 || (scan_emit_due && track_delta >= tree_emit_min_track_delta);

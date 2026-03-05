@@ -749,16 +749,16 @@ impl<'a> BinaryReader<'a> {
 }
 
 fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_duration: (f64, usize)) -> Vec<u8> {
-    let mut sections: Vec<(u16, Vec<u8>)> = Vec::new();
-
-    sections.push((SECTION_PLAYBACK, encode_playback_section(snapshot)));
-    sections.push((
-        SECTION_QUEUE,
-        encode_queue_section(snapshot, queue_duration),
-    ));
-    sections.push((SECTION_LIBRARY_META, encode_library_meta_section(snapshot)));
-    sections.push((SECTION_METADATA, encode_metadata_section(snapshot)));
-    sections.push((SECTION_SETTINGS, encode_settings_section(snapshot)));
+    let sections: Vec<(u16, Vec<u8>)> = vec![
+        (SECTION_PLAYBACK, encode_playback_section(snapshot)),
+        (
+            SECTION_QUEUE,
+            encode_queue_section(snapshot, queue_duration),
+        ),
+        (SECTION_LIBRARY_META, encode_library_meta_section(snapshot)),
+        (SECTION_METADATA, encode_metadata_section(snapshot)),
+        (SECTION_SETTINGS, encode_settings_section(snapshot)),
+    ];
 
     encode_packet(sections)
 }

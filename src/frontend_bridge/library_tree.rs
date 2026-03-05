@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use crate::library::{LibrarySnapshot, LibraryTrack};
@@ -223,10 +224,10 @@ fn section_row_key(
     format!("section|{root_path}|{artist_name}|{folder_name}|{section_name}")
 }
 
-pub fn build_library_tree_flat_binary(
+pub fn build_library_tree_flat_binary<S: BuildHasher>(
     library: &LibrarySnapshot,
     sort_mode: LibrarySortMode,
-    expanded_keys: Option<&HashSet<String>>,
+    expanded_keys: Option<&HashSet<String, S>>,
 ) -> Vec<u8> {
     let rows = build_library_tree_flat_rows(library, sort_mode, expanded_keys);
     encode_flat_rows(&rows)
@@ -279,7 +280,10 @@ pub fn compute_artist_album_counts(library: &LibrarySnapshot) -> (usize, usize) 
     (artists.len(), albums.len())
 }
 
-pub fn retain_valid_expanded_keys(library: &LibrarySnapshot, expanded_keys: &mut HashSet<String>) {
+pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
+    library: &LibrarySnapshot,
+    expanded_keys: &mut HashSet<String, S>,
+) {
     if expanded_keys.is_empty() {
         return;
     }
@@ -290,7 +294,7 @@ pub fn retain_valid_expanded_keys(library: &LibrarySnapshot, expanded_keys: &mut
         return;
     }
 
-    let mut valid = HashSet::new();
+    let mut valid: HashSet<String> = HashSet::new();
     for track in &library.tracks {
         let Some(root) = pick_root_for_track(&roots, track) else {
             continue;
@@ -330,10 +334,10 @@ pub fn retain_valid_expanded_keys(library: &LibrarySnapshot, expanded_keys: &mut
     expanded_keys.retain(|key| valid.contains(key));
 }
 
-fn build_library_tree_flat_rows(
+fn build_library_tree_flat_rows<S: BuildHasher>(
     library: &LibrarySnapshot,
     sort_mode: LibrarySortMode,
-    expanded_keys: Option<&HashSet<String>>,
+    expanded_keys: Option<&HashSet<String, S>>,
 ) -> Vec<FlatTreeRow> {
     let roots = library.roots.clone();
     if roots.is_empty() {
@@ -444,7 +448,7 @@ fn build_library_tree_flat_rows(
 
     for (_, root_builder) in builders {
         let root_depth = if multi_root { 0 } else { u16::MAX };
-        let artist_depth = if multi_root { 1 } else { 0 };
+        let artist_depth = u16::from(multi_root);
         let root_path = root_builder.root_path.to_string_lossy().to_string();
         let artist_rows = build_artist_rows_flat(
             &root_builder,
@@ -466,12 +470,12 @@ fn build_library_tree_flat_rows(
     rows
 }
 
-fn build_artist_rows_flat(
+fn build_artist_rows_flat<S: BuildHasher>(
     root: &RootNodeBuilder,
     root_path: &str,
     sort_mode: LibrarySortMode,
     artist_depth: u16,
-    expanded_keys: Option<&HashSet<String>>,
+    expanded_keys: Option<&HashSet<String, S>>,
 ) -> Vec<FlatTreeRow> {
     let lazy_hydration = expanded_keys.is_some();
     let mut artists = root.artists.values().cloned().collect::<Vec<_>>();
@@ -481,7 +485,7 @@ fn build_artist_rows_flat(
     for artist in artists {
         let album_count = artist.albums.len();
         let artist_key = artist_row_key(root_path, &artist.artist_name);
-        let artist_expanded = expanded_keys.map_or(true, |keys| keys.contains(&artist_key));
+        let artist_expanded = expanded_keys.is_none_or(|keys| keys.contains(&artist_key));
         let loose_tracks = if artist_expanded {
             order_tracks(&artist.loose_tracks)
         } else {
@@ -557,7 +561,7 @@ fn build_artist_rows_flat(
                 album_play_paths,
             ));
 
-            let album_expanded = expanded_keys.map_or(true, |keys| keys.contains(&album_key));
+            let album_expanded = expanded_keys.is_none_or(|keys| keys.contains(&album_key));
             if lazy_hydration && !album_expanded {
                 continue;
             }
@@ -1169,7 +1173,11 @@ mod tests {
             ..LibrarySnapshot::default()
         };
 
-        let tree = build_library_tree_flat_binary(&library, LibrarySortMode::Year, None);
+        let tree = build_library_tree_flat_binary(
+            &library,
+            LibrarySortMode::Year,
+            Option::<&HashSet<String>>::None,
+        );
         let rows = decode_rows(&tree);
         assert!(!rows.is_empty());
         assert_eq!(rows[0].row_type, ROW_TYPE_ARTIST);
@@ -1206,7 +1214,11 @@ mod tests {
             ..LibrarySnapshot::default()
         };
 
-        let tree = build_library_tree_flat_binary(&library, LibrarySortMode::Year, None);
+        let tree = build_library_tree_flat_binary(
+            &library,
+            LibrarySortMode::Year,
+            Option::<&HashSet<String>>::None,
+        );
         let rows = decode_rows(&tree);
         let root_rows = rows
             .iter()
@@ -1246,7 +1258,11 @@ mod tests {
             ..LibrarySnapshot::default()
         };
 
-        let tree = build_library_tree_flat_binary(&library, LibrarySortMode::Year, None);
+        let tree = build_library_tree_flat_binary(
+            &library,
+            LibrarySortMode::Year,
+            Option::<&HashSet<String>>::None,
+        );
         let rows = decode_rows(&tree);
         let artist_keys = rows
             .iter()
@@ -1362,7 +1378,11 @@ mod tests {
             )],
             ..LibrarySnapshot::default()
         };
-        let bytes = build_library_tree_flat_binary(&library, LibrarySortMode::Year, None);
+        let bytes = build_library_tree_flat_binary(
+            &library,
+            LibrarySortMode::Year,
+            Option::<&HashSet<String>>::None,
+        );
         let rows = decode_rows(&bytes);
         let track_row = rows
             .iter()

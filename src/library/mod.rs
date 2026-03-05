@@ -357,6 +357,12 @@ fn build_fts_query(raw: &str) -> Option<String> {
     }
 }
 
+/// Search library tracks through the `SQLite` FTS index.
+///
+/// # Errors
+///
+/// Returns an error when the library database cannot be opened, the query
+/// cannot be prepared, or `SQLite` fails while executing it.
 pub fn search_tracks_fts(raw_query: &str, limit: usize) -> Result<Vec<LibrarySearchTrack>, String> {
     let Some(query) = build_fts_query(raw_query) else {
         return Ok(Vec::new());
@@ -627,7 +633,7 @@ fn scan_worker_count() -> usize {
         }
     }
     let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     if cores <= 2 {
         return cores.clamp(1, MAX_SCAN_WORKERS);
