@@ -63,6 +63,12 @@ QString normalizeLocalPathArg(const QString &path) {
     return trimmed;
 }
 
+QString canonicalizeSearchQuery(const QString &query) {
+    // Keep UI and backend semantics aligned: backend splits on whitespace.
+    // Canonicalization avoids duplicate sends from trailing/multiple spaces.
+    return query.simplified();
+}
+
 int readEnvMillis(const char *key, int fallback) {
     bool ok = false;
     const int value = qEnvironmentVariableIntValue(key, &ok);
@@ -188,7 +194,7 @@ BridgeClient::BridgeClient(QObject *parent)
     m_globalSearchDebounceMs = readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 90);
     m_globalSearchShortDebounceMs = readEnvMillis(
         "FERROUS_UI_SEARCH_DEBOUNCE_SHORT_MS",
-        std::max(180, m_globalSearchDebounceMs + 90));
+        std::max(220, m_globalSearchDebounceMs + 130));
     {
         bool ok = false;
         const int value =
@@ -904,8 +910,8 @@ void BridgeClient::setLibrarySortMode(int mode) {
 }
 
 void BridgeClient::setGlobalSearchQuery(const QString &query) {
-    const QString nextQuery = query;
-    const int trimmedChars = nextQuery.trimmed().size();
+    const QString nextQuery = canonicalizeSearchQuery(query);
+    const int trimmedChars = nextQuery.size();
     const int nextDebounceMs =
         trimmedChars <= m_globalSearchShortDebounceChars
         ? m_globalSearchShortDebounceMs

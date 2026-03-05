@@ -739,7 +739,7 @@ fn search_fallback_limit_short() -> usize {
     std::env::var("FERROUS_SEARCH_FALLBACK_LIMIT_SHORT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(160, |v| v.clamp(64, 5_000))
+        .map_or(128, |v| v.clamp(64, 5_000))
 }
 
 fn search_artist_row_limit() -> usize {
@@ -781,7 +781,7 @@ fn search_track_row_limit_short() -> usize {
     std::env::var("FERROUS_SEARCH_TRACK_LIMIT_SHORT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(96, |v| v.clamp(16, 2_000))
+        .map_or(80, |v| v.clamp(16, 2_000))
 }
 
 fn search_cancel_poll_rows() -> usize {
