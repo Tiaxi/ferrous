@@ -1244,10 +1244,15 @@ Kirigami.ApplicationWindow {
         }
         if (globalSearchDialog.visible && !root.globalSearchOpening && globalSearchQueryField) {
             const hasSelection = (globalSearchQueryField.selectedText || "").length > 0
+            const initial = root.globalSearchOpenInitialText || ""
+            const current = globalSearchQueryField.text || ""
             if (hasSelection) {
                 globalSearchQueryField.text = openingText
+            } else if (initial.length > 0 && current.startsWith(initial)) {
+                const alreadyTyped = current.slice(initial.length)
+                globalSearchQueryField.text = alreadyTyped + openingText
             } else {
-                globalSearchQueryField.text = (globalSearchQueryField.text || "") + openingText
+                globalSearchQueryField.text = current + openingText
             }
             globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
             root.focusGlobalSearchQueryField(false)
@@ -1997,9 +2002,17 @@ Kirigami.ApplicationWindow {
             if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
                 globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
                 root.pendingGlobalSearchPrefillText = ""
-            } else if ((globalSearchQueryField.text || "").length > 0
-                    && (globalSearchQueryField.text || "") === (root.globalSearchOpenInitialText || "")) {
-                globalSearchQueryField.selectAll()
+            } else if ((globalSearchQueryField.text || "").length > 0) {
+                const initial = root.globalSearchOpenInitialText || ""
+                const current = globalSearchQueryField.text || ""
+                if (initial.length > 0
+                        && current !== initial
+                        && current.startsWith(initial)) {
+                    globalSearchQueryField.text = current.slice(initial.length)
+                    globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+                } else if (current === initial) {
+                    globalSearchQueryField.selectAll()
+                }
             }
             uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
         }
