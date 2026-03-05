@@ -36,6 +36,7 @@ Kirigami.ApplicationWindow {
     property bool pendingLibraryAnchorValid: false
     property int lastSeenQueueVersion: -1
     property int lastCenteredQueueIndex: -2
+    property string lastAutoCenterPlaybackState: ""
     property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
     property bool positionSmoothingPrimed: false
@@ -3799,6 +3800,7 @@ Kirigami.ApplicationWindow {
                                 readonly property string artistValue: rowData.artist || ""
                                 readonly property string albumValue: rowData.album || ""
                                 readonly property string lengthTextValue: rowData.lengthText || "--:--"
+                                readonly property bool isCurrentQueueRow: index === uiBridge.playingQueueIndex
                                 readonly property bool draggableQueueItem: true
                                 readonly property int queueRowIndex: index
                                 width: Math.max(
@@ -3822,18 +3824,27 @@ Kirigami.ApplicationWindow {
                                     anchors.rightMargin: 8
                                     spacing: 6
                                     Label {
-                                        text: uiBridge.playbackState !== "Stopped"
-                                            && index === uiBridge.playingQueueIndex
-                                            ? "▶"
-                                            : ""
+                                        text: {
+                                            if (!playlistRow.isCurrentQueueRow) {
+                                                return ""
+                                            }
+                                            if (uiBridge.playbackState === "Paused") {
+                                                return "⏸"
+                                            }
+                                            if (uiBridge.playbackState === "Stopped") {
+                                                return "■"
+                                            }
+                                            return "▶"
+                                        }
                                         Layout.preferredWidth: root.playlistIndicatorColumnWidth
                                         horizontalAlignment: Text.AlignHCenter
                                         font.bold: true
                                         color: root.isQueueIndexSelected(index)
                                             ? Kirigami.Theme.highlightedTextColor
-                                            : ((uiBridge.playbackState !== "Stopped"
-                                                && index === uiBridge.playingQueueIndex)
-                                                ? Kirigami.Theme.positiveTextColor
+                                            : (playlistRow.isCurrentQueueRow
+                                                ? (uiBridge.playbackState === "Playing"
+                                                    ? Kirigami.Theme.positiveTextColor
+                                                    : Kirigami.Theme.disabledTextColor)
                                                 : Kirigami.Theme.textColor)
                                     }
                                     Label {
@@ -3996,19 +4007,21 @@ Kirigami.ApplicationWindow {
                             target: uiBridge
                             function onSnapshotChanged() {
                                 if (!root.autoCenterQueueSelection) {
+                                    root.lastAutoCenterPlaybackState = uiBridge.playbackState
                                     return
                                 }
-                                const hasPlayingIndex = uiBridge.playbackState !== "Stopped"
-                                    && uiBridge.playingQueueIndex >= 0
-                                const targetIndex = hasPlayingIndex
-                                    ? uiBridge.playingQueueIndex
-                                    : uiBridge.selectedQueueIndex
+                                const playbackState = uiBridge.playbackState || ""
+                                const targetIndex = uiBridge.playingQueueIndex
+                                if (playbackState === "Stopped"
+                                        && root.lastAutoCenterPlaybackState !== "Stopped") {
+                                    root.lastAutoCenterPlaybackState = playbackState
+                                    return
+                                }
                                 if (targetIndex >= 0 && targetIndex !== root.lastCenteredQueueIndex) {
                                     playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
                                     root.lastCenteredQueueIndex = targetIndex
-                                } else if (targetIndex < 0) {
-                                    root.lastCenteredQueueIndex = -2
                                 }
+                                root.lastAutoCenterPlaybackState = playbackState
                             }
                         }
                     }
@@ -4425,6 +4438,7 @@ Kirigami.ApplicationWindow {
     Component.onCompleted: {
         root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
         root.lastSeenQueueVersion = uiBridge.queueVersion
+        root.lastAutoCenterPlaybackState = uiBridge.playbackState
         root.displayedPositionSeconds = uiBridge.positionSeconds
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
         root.positionSmoothingAnchorSeconds = uiBridge.positionSeconds

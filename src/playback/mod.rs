@@ -638,6 +638,7 @@ mod backend {
         repeat_mode: RepeatMode,
         shuffle_enabled: bool,
         shuffle_history: Vec<usize>,
+        shuffle_forward: Vec<usize>,
         shuffle_pool: Vec<usize>,
         rng_state: u64,
     }
@@ -650,6 +651,7 @@ mod backend {
                 repeat_mode: RepeatMode::Off,
                 shuffle_enabled: false,
                 shuffle_history: Vec::new(),
+                shuffle_forward: Vec::new(),
                 shuffle_pool: Vec::new(),
                 rng_state: 0,
             }
@@ -658,7 +660,7 @@ mod backend {
         fn set_queue(&mut self, queue: Vec<PathBuf>) {
             self.queue = queue;
             self.current_idx = 0;
-            self.shuffle_history.clear();
+            self.clear_shuffle_navigation();
             self.rebuild_shuffle_pool();
         }
 
@@ -670,7 +672,7 @@ mod backend {
         fn clear(&mut self) {
             self.queue.clear();
             self.current_idx = 0;
-            self.shuffle_history.clear();
+            self.clear_shuffle_navigation();
             self.shuffle_pool.clear();
         }
 
@@ -689,7 +691,7 @@ mod backend {
         fn set_current(&mut self, idx: usize) -> Option<PathBuf> {
             if idx < self.queue.len() {
                 self.current_idx = idx;
-                self.shuffle_history.clear();
+                self.clear_shuffle_navigation();
                 self.rebuild_shuffle_pool();
                 self.current()
             } else {
@@ -704,7 +706,7 @@ mod backend {
             self.queue.remove(idx);
             if self.queue.is_empty() {
                 self.current_idx = 0;
-                self.shuffle_history.clear();
+                self.clear_shuffle_navigation();
                 self.shuffle_pool.clear();
                 return None;
             }
@@ -713,7 +715,7 @@ mod backend {
             } else if idx == self.current_idx && self.current_idx >= self.queue.len() {
                 self.current_idx = self.queue.len().saturating_sub(1);
             }
-            self.shuffle_history.clear();
+            self.clear_shuffle_navigation();
             self.rebuild_shuffle_pool();
             self.current()
         }
@@ -731,7 +733,7 @@ mod backend {
             } else if from > self.current_idx && to <= self.current_idx {
                 self.current_idx += 1;
             }
-            self.shuffle_history.clear();
+            self.clear_shuffle_navigation();
             self.rebuild_shuffle_pool();
         }
 
@@ -744,7 +746,7 @@ mod backend {
                 return;
             }
             self.shuffle_enabled = enabled;
-            self.shuffle_history.clear();
+            self.clear_shuffle_navigation();
             if enabled {
                 self.rebuild_shuffle_pool();
             } else {
@@ -758,7 +760,7 @@ mod backend {
             }
 
             if self.shuffle_enabled {
-                return self.advance_shuffle(self.repeat_mode == RepeatMode::All);
+                return self.advance_shuffle_or_forward(self.repeat_mode == RepeatMode::All);
             }
 
             if self.current_idx + 1 < self.queue.len() {
@@ -781,8 +783,8 @@ mod backend {
             if self.shuffle_enabled {
                 if let Some(prev_idx) = self.shuffle_history.pop() {
                     let old_idx = self.current_idx;
-                    if old_idx != prev_idx && !self.shuffle_pool.contains(&old_idx) {
-                        self.shuffle_pool.push(old_idx);
+                    if old_idx != prev_idx {
+                        self.shuffle_forward.push(old_idx);
                     }
                     self.current_idx = prev_idx;
                     return self.current();
@@ -811,7 +813,7 @@ mod backend {
             if self.shuffle_enabled {
                 // When repeat-all is enabled, keep drawing from refreshed pools forever.
                 // With repeat-off, stop once current shuffle pool is exhausted.
-                return self.advance_shuffle(self.repeat_mode == RepeatMode::All);
+                return self.advance_shuffle_or_forward(self.repeat_mode == RepeatMode::All);
             }
             if self.current_idx + 1 < self.queue.len() {
                 self.current_idx += 1;
@@ -833,6 +835,11 @@ mod backend {
                     self.shuffle_pool.push(i);
                 }
             }
+        }
+
+        fn clear_shuffle_navigation(&mut self) {
+            self.shuffle_history.clear();
+            self.shuffle_forward.clear();
         }
 
         fn ensure_rng_seed(&mut self) {
@@ -858,7 +865,18 @@ mod backend {
             (self.rng_state % (max as u64)) as usize
         }
 
-        fn advance_shuffle(&mut self, allow_repeat_cycle: bool) -> Option<PathBuf> {
+        fn advance_shuffle_or_forward(&mut self, allow_repeat_cycle: bool) -> Option<PathBuf> {
+            if let Some(next_idx) = self.shuffle_forward.pop() {
+                if next_idx != self.current_idx {
+                    self.shuffle_history.push(self.current_idx);
+                }
+                self.current_idx = next_idx;
+                return self.current();
+            }
+            self.advance_shuffle_random(allow_repeat_cycle)
+        }
+
+        fn advance_shuffle_random(&mut self, allow_repeat_cycle: bool) -> Option<PathBuf> {
             if self.queue.is_empty() {
                 return None;
             }
@@ -882,6 +900,7 @@ mod backend {
             let pick = self.next_rand(self.shuffle_pool.len());
             let next_idx = self.shuffle_pool.remove(pick);
             if next_idx != self.current_idx {
+                self.shuffle_forward.clear();
                 self.shuffle_history.push(self.current_idx);
             }
             self.current_idx = next_idx;
@@ -1720,6 +1739,7 @@ mod backend {
             let next = queue.next_manual().expect("shuffle next");
             assert_ne!(next, a);
             assert_eq!(queue.previous_manual().as_ref(), Some(&a));
+            assert_eq!(queue.next_manual().as_ref(), Some(&next));
         }
 
         #[test]

@@ -2098,6 +2098,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     bool changed = false;
     bool queueModelChanged = false;
+    const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
 
     if (m_playbackState != nextState) {
         m_playbackState = nextState;
@@ -2241,14 +2242,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         changed = true;
     }
 
-    if (m_currentTrackPath != currentPath) {
+    const bool currentPathChanged = m_currentTrackPath != currentPath;
+    if (currentPathChanged) {
         m_currentTrackPath = currentPath;
         changed = true;
     }
 
-    if (isStopped) {
-        playing = -1;
-    } else if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
+    if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
         playing = m_queuePaths.indexOf(currentPath);
     }
     if (m_playingQueueIndex != playing) {
@@ -2261,7 +2261,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     QString nextTrackAlbum = m_currentTrackAlbum;
     QString nextTrackGenre = m_currentTrackGenre;
     QVariant nextTrackYear = m_currentTrackYear;
-    if (!isStopped && !currentPath.isEmpty()) {
+    const bool stoppedTrackAdvanced = isStopped && hadTrackContextPath && currentPathChanged;
+    if (!currentPath.isEmpty() && (!isStopped || stoppedTrackAdvanced)) {
         int detailIndex = playing;
         if (detailIndex < 0 && !m_queuePaths.isEmpty()) {
             detailIndex = m_queuePaths.indexOf(currentPath);
