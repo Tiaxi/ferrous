@@ -58,6 +58,28 @@ public:
         bool operator!=(const SearchDisplayRow &other) const {
             return !(*this == other);
         }
+
+        bool equivalentForView(const SearchDisplayRow &other) const {
+            return kind == other.kind
+                && rowType == other.rowType
+                && sectionTitle == other.sectionTitle
+                && label == other.label
+                && artist == other.artist
+                && album == other.album
+                && genre == other.genre
+                && coverPath == other.coverPath
+                && coverUrl == other.coverUrl
+                && artistKey == other.artistKey
+                && albumKey == other.albumKey
+                && sectionKey == other.sectionKey
+                && trackKey == other.trackKey
+                && trackPath == other.trackPath
+                && year == other.year
+                && trackNumber == other.trackNumber
+                && count == other.count
+                && lengthSeconds == other.lengthSeconds
+                && lengthText == other.lengthText;
+        }
     };
 
     enum Role {

@@ -134,6 +134,24 @@ void GlobalSearchResultsModel::replaceRows(QVector<SearchDisplayRow> rows) {
         endInsertRows();
         return;
     }
+    if (m_rows.size() == rows.size()) {
+        bool anyViewDiff = false;
+        for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
+            const qsizetype idx = static_cast<qsizetype>(i);
+            if (!m_rows[idx].equivalentForView(rows[idx])) {
+                anyViewDiff = true;
+                break;
+            }
+        }
+        if (!anyViewDiff) {
+            for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
+                const qsizetype idx = static_cast<qsizetype>(i);
+                m_rows[idx].score = rows[idx].score;
+            }
+            return;
+        }
+    }
+
     if (m_rows == rows) {
         return;
     }
@@ -170,7 +188,8 @@ void GlobalSearchResultsModel::replaceRows(QVector<SearchDisplayRow> rows) {
     int runStart = -1;
     for (int i = 0; i < overlap; ++i) {
         const qsizetype idx = static_cast<qsizetype>(i);
-        if (m_rows[idx] == rows[idx]) {
+        if (m_rows[idx].equivalentForView(rows[idx])) {
+            m_rows[idx].score = rows[idx].score;
             if (runStart >= 0) {
                 changedRuns.emplace_back(runStart, i - 1);
                 runStart = -1;
