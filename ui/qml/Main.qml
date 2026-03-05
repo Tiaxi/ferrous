@@ -2464,27 +2464,31 @@ Kirigami.ApplicationWindow {
                 Layout.fillHeight: true
                 clip: true
 
-                Item {
-                    anchors.fill: parent
-
-                    TextArea {
-                        id: diagnosticsTextArea
-                        anchors.fill: parent
-                        text: uiBridge.diagnosticsText || ""
-                        readOnly: true
-                        selectByMouse: true
-                        wrapMode: TextEdit.NoWrap
-                        font.family: "Monospace"
-                        persistentSelection: true
-                    }
+                TextArea {
+                    id: diagnosticsTextArea
+                    text: uiBridge.diagnosticsText || ""
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.NoWrap
+                    font.family: "Monospace"
+                    persistentSelection: true
 
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.RightButton
+                        propagateComposedEvents: true
+                        cursorShape: Qt.IBeamCursor
+                        onPressed: function(mouse) {
+                            if (mouse.button !== Qt.RightButton) {
+                                mouse.accepted = false
+                            }
+                        }
                         onClicked: function(mouse) {
                             if (mouse.button === Qt.RightButton) {
                                 diagnosticsTextArea.forceActiveFocus()
                                 diagnosticsContextMenu.popup()
+                            } else {
+                                mouse.accepted = false
                             }
                         }
                     }
