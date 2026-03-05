@@ -242,9 +242,7 @@ Kirigami.ApplicationWindow {
         if (index === undefined || index === null || index < 0) {
             return "--"
         }
-        const queueLength = Number(uiBridge.queueLength || 0)
-        const digits = Math.max(2, String(Math.max(1, Math.floor(queueLength))).length)
-        return String(index + 1).padStart(digits, "0")
+        return String(index + 1)
     }
 
     readonly property int playlistOrderColumnWidth: {
@@ -255,6 +253,7 @@ Kirigami.ApplicationWindow {
         const headerWidth = playlistOrderFontMetrics.boundingRect("#").width
         return Math.max(28, Math.ceil(Math.max(valueWidth, headerWidth) + 10))
     }
+    readonly property int playlistIndicatorColumnWidth: 18
 
     function queueTrackNumberText(index) {
         if (index === undefined || index === null || index < 0) {
@@ -3469,6 +3468,8 @@ Kirigami.ApplicationWindow {
                                     readonly property bool isTrackRow: rowTypeResolved === "track"
                                     readonly property bool hasChildren: !isTrackRow && (count || 0) > 0
                                     readonly property string selectionKeyResolved: selectionKey || ""
+                                    readonly property string artistResolved: artist || ""
+                                    readonly property string nameResolved: name || ""
                                     readonly property string trackPathResolved: trackPath || ""
                                     readonly property string openPathResolved: openPath || ""
                                     readonly property var playPathsResolved: playPaths || []
@@ -3706,7 +3707,7 @@ Kirigami.ApplicationWindow {
                                 anchors.rightMargin: 8 + (playlistView ? playlistView.reservedRightPadding : 0)
                                 Label {
                                     text: "▶"
-                                    Layout.preferredWidth: 24
+                                    Layout.preferredWidth: root.playlistIndicatorColumnWidth
                                     horizontalAlignment: Text.AlignHCenter
                                 }
                                 Label {
@@ -3740,6 +3741,7 @@ Kirigami.ApplicationWindow {
                             }
 
                             delegate: Rectangle {
+                                id: playlistRow
                                 readonly property var rowData: (modelData && typeof modelData === "object")
                                     ? modelData
                                     : ({})
@@ -3747,10 +3749,18 @@ Kirigami.ApplicationWindow {
                                 readonly property string artistValue: rowData.artist || ""
                                 readonly property string albumValue: rowData.album || ""
                                 readonly property string lengthTextValue: rowData.lengthText || "--:--"
+                                readonly property bool draggableQueueItem: true
+                                readonly property int queueRowIndex: index
                                 width: Math.max(
                                     0,
                                     ListView.view.width - (playlistView.reservedRightPadding || 0))
                                 height: 24
+                                Drag.active: playlistRowMouseArea.drag.active
+                                Drag.source: playlistRow
+                                Drag.hotSpot.x: width * 0.5
+                                Drag.hotSpot.y: height * 0.5
+                                Drag.dragType: Drag.Automatic
+                                Drag.supportedActions: Qt.MoveAction
                                 color: root.isQueueIndexSelected(index)
                                     ? Kirigami.Theme.highlightColor
                                     : (index % 2 === 0 ? Kirigami.Theme.backgroundColor
@@ -3766,7 +3776,7 @@ Kirigami.ApplicationWindow {
                                             && index === uiBridge.playingQueueIndex
                                             ? "▶"
                                             : ""
-                                        Layout.preferredWidth: 24
+                                        Layout.preferredWidth: root.playlistIndicatorColumnWidth
                                         horizontalAlignment: Text.AlignHCenter
                                         font.bold: true
                                         color: root.isQueueIndexSelected(index)
@@ -3819,8 +3829,15 @@ Kirigami.ApplicationWindow {
                                 }
 
                                 MouseArea {
+                                    id: playlistRowMouseArea
                                     anchors.fill: parent
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    drag.target: (pressedButtons & Qt.LeftButton) ? playlistDragProxy : null
+                                    drag.smoothed: false
+                                    onReleased: {
+                                        playlistDragProxy.x = 0
+                                        playlistDragProxy.y = 0
+                                    }
                                     onPressed: function(mouse) {
                                         root.handleQueueRowSelection(
                                             index,
@@ -3838,6 +3855,15 @@ Kirigami.ApplicationWindow {
                                             uiBridge.playAt(index)
                                         }
                                     }
+                                }
+
+                                Item {
+                                    id: playlistDragProxy
+                                    x: 0
+                                    y: 0
+                                    width: 1
+                                    height: 1
+                                    visible: false
                                 }
                             }
 
@@ -3934,18 +3960,78 @@ Kirigami.ApplicationWindow {
                     DropArea {
                         id: playlistDropArea
                         anchors.fill: parent
+                        property bool queueReorderDragActive: false
+                        property int queueDropInsertIndex: -1
+                        property real queueDropIndicatorY: 0
+
+                        function updateQueueDropIndicator(dropY) {
+                            const rowHeight = 24
+                            const yInList = dropY - playlistView.y + playlistView.contentY
+                            let insertIndex = Math.floor((yInList + rowHeight * 0.5) / rowHeight)
+                            insertIndex = Math.max(0, Math.min(uiBridge.queueLength, insertIndex))
+                            queueDropInsertIndex = insertIndex
+
+                            const contentLineY = insertIndex * rowHeight
+                            const viewLineY = playlistView.y + contentLineY - playlistView.contentY
+                            const minY = playlistView.y
+                            const maxY = playlistView.y + playlistView.height - 2
+                            queueDropIndicatorY = Math.max(minY, Math.min(maxY, viewLineY))
+                        }
+
+                        onEntered: function(drop) {
+                            queueReorderDragActive = !!(drop.source && drop.source.draggableQueueItem)
+                            if (queueReorderDragActive) {
+                                updateQueueDropIndicator(drop.y)
+                            } else {
+                                queueDropInsertIndex = -1
+                            }
+                        }
+
+                        onPositionChanged: function(drop) {
+                            if (queueReorderDragActive) {
+                                updateQueueDropIndicator(drop.y)
+                            }
+                        }
+
+                        onExited: {
+                            queueReorderDragActive = false
+                            queueDropInsertIndex = -1
+                        }
 
                         onDropped: function(drop) {
                             const src = drop.source
-                            if (!src || !src.draggableLibraryItem) {
+                            if (!src) {
+                                return
+                            }
+                            if (src.draggableQueueItem) {
+                                const from = src.queueRowIndex !== undefined ? src.queueRowIndex : -1
+                                if (from < 0 || uiBridge.queueLength <= 1) {
+                                    return
+                                }
+                                let insertIndex = queueDropInsertIndex
+                                if (insertIndex < 0) {
+                                    updateQueueDropIndicator(drop.y)
+                                    insertIndex = queueDropInsertIndex
+                                }
+                                let to = insertIndex > from ? insertIndex - 1 : insertIndex
+                                to = Math.max(0, Math.min(uiBridge.queueLength - 1, to))
+                                if (to !== from) {
+                                    uiBridge.moveQueue(from, to)
+                                }
+                                queueReorderDragActive = false
+                                queueDropInsertIndex = -1
+                                drop.acceptProposedAction()
+                                return
+                            }
+                            if (!src.draggableLibraryItem) {
                                 return
                             }
                             const rowMap = {
                                 selectionKey: src.selectionKeyResolved || "",
                                 sourceIndex: src.sourceIndexResolved !== undefined ? src.sourceIndexResolved : -1,
                                 rowType: src.rowTypeResolved || "",
-                                artist: src.artist || "",
-                                name: src.name || "",
+                                artist: src.artistResolved || "",
+                                name: src.nameResolved || "",
                                 title: src.rowTitle || "",
                                 trackPath: src.trackPathResolved || "",
                                 openPath: src.openPathResolved || "",
@@ -3954,6 +4040,8 @@ Kirigami.ApplicationWindow {
                             const rows = root.rowsForLibraryAction(rowMap)
                             if (rows.length > 0) {
                                 root.appendLibraryRows(rows)
+                                queueReorderDragActive = false
+                                queueDropInsertIndex = -1
                                 drop.acceptProposedAction()
                             }
                         }
@@ -3962,9 +4050,37 @@ Kirigami.ApplicationWindow {
                     Rectangle {
                         anchors.fill: parent
                         color: "transparent"
-                        border.width: playlistDropArea.containsDrag ? 2 : 0
+                        border.width: playlistDropArea.containsDrag
+                            && !playlistDropArea.queueReorderDragActive
+                            ? 2
+                            : 0
                         border.color: Kirigami.Theme.highlightColor
                         visible: playlistDropArea.containsDrag
+                            && !playlistDropArea.queueReorderDragActive
+                    }
+
+                    Rectangle {
+                        x: playlistView.x + 4
+                        width: Math.max(0, playlistView.width - (playlistView.reservedRightPadding || 0) - 8)
+                        height: 2
+                        y: playlistDropArea.queueDropIndicatorY
+                        radius: 1
+                        color: Kirigami.Theme.highlightColor
+                        visible: playlistDropArea.containsDrag
+                            && playlistDropArea.queueReorderDragActive
+                            && playlistDropArea.queueDropInsertIndex >= 0
+                    }
+
+                    Rectangle {
+                        x: playlistView.x + 4
+                        y: playlistDropArea.queueDropIndicatorY - 2
+                        width: 6
+                        height: 6
+                        radius: 3
+                        color: Kirigami.Theme.highlightColor
+                        visible: playlistDropArea.containsDrag
+                            && playlistDropArea.queueReorderDragActive
+                            && playlistDropArea.queueDropInsertIndex >= 0
                     }
                 }
 
