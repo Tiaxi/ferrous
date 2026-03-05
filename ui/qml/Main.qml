@@ -1198,12 +1198,7 @@ Kirigami.ApplicationWindow {
             focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
             return
         }
-        root.globalSearchOpening = true
-        root.globalSearchIgnoreRefocusFind = true
-        root.pendingGlobalSearchPrefillText = ""
-        root.globalSearchOpenInitialText = globalSearchQueryField
-            ? (globalSearchQueryField.text || "")
-            : ""
+        beginGlobalSearchOpen()
         globalSearchDialog.open()
         Qt.callLater(function() {
             if (globalSearchDialog.visible) {
@@ -1224,6 +1219,68 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    function beginGlobalSearchOpen() {
+        root.globalSearchOpening = true
+        root.globalSearchIgnoreRefocusFind = true
+        root.pendingGlobalSearchPrefillText = ""
+        root.globalSearchOpenInitialText = globalSearchQueryField
+            ? (globalSearchQueryField.text || "")
+            : ""
+    }
+
+    function endGlobalSearchOpen(closeDialog) {
+        root.globalSearchOpening = false
+        root.globalSearchIgnoreRefocusFind = false
+        globalSearchOpenSettleTimer.stop()
+        root.pendingGlobalSearchPrefillText = ""
+        root.globalSearchOpenInitialText = ""
+        if (closeDialog) {
+            uiBridge.setGlobalSearchQuery("")
+        }
+    }
+
+    function isGlobalSearchPrintableChar(text) {
+        return text.length === 1
+            && text !== "\n"
+            && text !== "\r"
+            && text !== "\t"
+    }
+
+    function trimInitialSearchPrefix(currentText, initialText) {
+        const current = currentText || ""
+        const initial = initialText || ""
+        if (initial.length > 0 && current !== initial && current.startsWith(initial)) {
+            return current.slice(initial.length)
+        }
+        return current
+    }
+
+    function applyGlobalSearchOpenText() {
+        if (!globalSearchQueryField) {
+            return
+        }
+        if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
+            globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
+            root.pendingGlobalSearchPrefillText = ""
+            return
+        }
+
+        const current = globalSearchQueryField.text || ""
+        const initial = root.globalSearchOpenInitialText || ""
+        if (current.length <= 0) {
+            return
+        }
+        const trimmed = trimInitialSearchPrefix(current, initial)
+        if (trimmed !== current) {
+            globalSearchQueryField.text = trimmed
+            globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+            return
+        }
+        if (current === initial) {
+            globalSearchQueryField.selectAll()
+        }
+    }
+
     function tryCaptureGlobalSearchPrefill(event) {
         const shouldCapture = root.globalSearchOpening
             || (globalSearchDialog.visible
@@ -1236,23 +1293,17 @@ Kirigami.ApplicationWindow {
             return false
         }
         const openingText = event.text || ""
-        if (openingText.length !== 1
-                || openingText === "\n"
-                || openingText === "\r"
-                || openingText === "\t") {
+        if (!isGlobalSearchPrintableChar(openingText)) {
             return false
         }
         if (globalSearchDialog.visible && !root.globalSearchOpening && globalSearchQueryField) {
             const hasSelection = (globalSearchQueryField.selectedText || "").length > 0
-            const initial = root.globalSearchOpenInitialText || ""
             const current = globalSearchQueryField.text || ""
             if (hasSelection) {
                 globalSearchQueryField.text = openingText
-            } else if (initial.length > 0 && current.startsWith(initial)) {
-                const alreadyTyped = current.slice(initial.length)
-                globalSearchQueryField.text = alreadyTyped + openingText
             } else {
-                globalSearchQueryField.text = current + openingText
+                const alreadyTyped = trimInitialSearchPrefix(current, root.globalSearchOpenInitialText || "")
+                globalSearchQueryField.text = alreadyTyped + openingText
             }
             globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
             root.focusGlobalSearchQueryField(false)
@@ -1999,30 +2050,11 @@ Kirigami.ApplicationWindow {
             globalSearchOpenSettleTimer.restart()
             root.syncGlobalSearchSelectionAfterResultsChange()
             root.focusGlobalSearchQueryField(false)
-            if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
-                globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
-                root.pendingGlobalSearchPrefillText = ""
-            } else if ((globalSearchQueryField.text || "").length > 0) {
-                const initial = root.globalSearchOpenInitialText || ""
-                const current = globalSearchQueryField.text || ""
-                if (initial.length > 0
-                        && current !== initial
-                        && current.startsWith(initial)) {
-                    globalSearchQueryField.text = current.slice(initial.length)
-                    globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
-                } else if (current === initial) {
-                    globalSearchQueryField.selectAll()
-                }
-            }
+            root.applyGlobalSearchOpenText()
             uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
         }
         onClosed: {
-            root.globalSearchOpening = false
-            root.globalSearchIgnoreRefocusFind = false
-            globalSearchOpenSettleTimer.stop()
-            root.pendingGlobalSearchPrefillText = ""
-            root.globalSearchOpenInitialText = ""
-            uiBridge.setGlobalSearchQuery("")
+            root.endGlobalSearchOpen(true)
         }
 
         contentItem: ColumnLayout {
