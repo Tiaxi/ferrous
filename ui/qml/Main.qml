@@ -897,6 +897,18 @@ Kirigami.ApplicationWindow {
         })
     }
 
+    function focusLibraryViewForNavigation() {
+        if (!libraryAlbumView) {
+            return
+        }
+        libraryAlbumView.forceActiveFocus()
+        Qt.callLater(function() {
+            if (libraryAlbumView) {
+                libraryAlbumView.forceActiveFocus()
+            }
+        })
+    }
+
     function selectLibraryRelative(delta) {
         if (libraryModel.count <= 0) {
             return
@@ -1238,11 +1250,7 @@ Kirigami.ApplicationWindow {
         }
         requestLibraryRevealForSearchRow(row)
         globalSearchDialog.close()
-        Qt.callLater(function() {
-            if (libraryAlbumView) {
-                libraryAlbumView.forceActiveFocus()
-            }
-        })
+        Qt.callLater(root.focusLibraryViewForNavigation)
     }
 
     function ensureLibraryKeyExpanded(key) {
@@ -1283,6 +1291,7 @@ Kirigami.ApplicationWindow {
         const index = libraryModel.indexForSelectionKey(pendingLibraryRevealSelectionKey)
         if (index >= 0) {
             selectLibraryIndex(index)
+            focusLibraryViewForNavigation()
             pendingLibraryRevealSelectionKey = ""
             pendingLibraryRevealExpandKeys = []
             pendingLibraryRevealAttempts = 0
