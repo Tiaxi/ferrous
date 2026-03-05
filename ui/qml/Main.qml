@@ -59,6 +59,10 @@ Kirigami.ApplicationWindow {
     property bool globalSearchOpening: false
     property bool globalSearchIgnoreRefocusFind: false
     property string pendingGlobalSearchPrefillText: ""
+    Keys.priority: Keys.BeforeItem
+    Keys.onPressed: function(event) {
+        root.tryCaptureGlobalSearchPrefill(event)
+    }
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -1038,17 +1042,8 @@ Kirigami.ApplicationWindow {
     }
 
     function handleLibraryKeyPress(event) {
-        if (root.globalSearchOpening) {
-            const openingText = event.text || ""
-            if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) === 0
-                    && openingText.length === 1
-                    && openingText !== "\n"
-                    && openingText !== "\r"
-                    && openingText !== "\t") {
-                root.pendingGlobalSearchPrefillText += openingText
-                event.accepted = true
-                return
-            }
+        if (root.tryCaptureGlobalSearchPrefill(event)) {
+            return
         }
         if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
             return
@@ -1203,7 +1198,7 @@ Kirigami.ApplicationWindow {
 
     function openGlobalSearch() {
         if (globalSearchDialog.visible) {
-            focusGlobalSearchQueryField(true)
+            focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
             return
         }
         root.globalSearchOpening = true
@@ -1227,6 +1222,29 @@ Kirigami.ApplicationWindow {
         } else {
             globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
         }
+    }
+
+    function tryCaptureGlobalSearchPrefill(event) {
+        const shouldCapture = root.globalSearchOpening
+            || (globalSearchDialog.visible
+                && root.globalSearchIgnoreRefocusFind
+                && (!globalSearchQueryField || !globalSearchQueryField.activeFocus))
+        if (!shouldCapture) {
+            return false
+        }
+        if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
+            return false
+        }
+        const openingText = event.text || ""
+        if (openingText.length !== 1
+                || openingText === "\n"
+                || openingText === "\r"
+                || openingText === "\t") {
+            return false
+        }
+        root.pendingGlobalSearchPrefillText += openingText
+        event.accepted = true
+        return true
     }
 
     function openDiagnostics() {
@@ -1969,7 +1987,7 @@ Kirigami.ApplicationWindow {
                 globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
                 root.pendingGlobalSearchPrefillText = ""
             } else if ((globalSearchQueryField.text || "").length > 0) {
-                globalSearchQueryField.selectAll()
+                globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
             }
             uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
         }
