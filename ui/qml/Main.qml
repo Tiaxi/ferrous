@@ -55,6 +55,7 @@ Kirigami.ApplicationWindow {
     property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
     property int globalSearchSelectedDisplayIndex: -1
+    property var globalSearchContextRowData: ({})
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -1149,7 +1150,7 @@ Kirigami.ApplicationWindow {
             return false
         }
         globalSearchSelectedDisplayIndex = index
-        if (globalSearchResultsView) {
+        if (globalSearchResultsView && index >= 0 && index < globalSearchRowCount()) {
             globalSearchResultsView.positionViewAtIndex(index, ListView.Contain)
         }
         return true
@@ -2024,6 +2025,7 @@ Kirigami.ApplicationWindow {
                     anchors.fill: parent
                     clip: true
                     model: uiBridge.globalSearchModel || []
+                    reuseItems: true
                     spacing: 0
                     boundsBehavior: Flickable.StopAtBounds
                     readonly property int reservedRightPadding: (globalSearchResultsScrollBar.visible
@@ -2344,7 +2346,7 @@ Kirigami.ApplicationWindow {
                             onClicked: function(mouse) {
                                 root.selectGlobalSearchDisplayIndex(index)
                                 if (mouse.button === Qt.RightButton) {
-                                    globalSearchContextMenu.rowData = globalSearchModelApi
+                                    root.globalSearchContextRowData = globalSearchModelApi
                                         ? globalSearchModelApi.rowDataAt(index)
                                         : ({})
                                     globalSearchContextMenu.popup()
@@ -2362,34 +2364,35 @@ Kirigami.ApplicationWindow {
                             }
                         }
 
-                        Menu {
-                            id: globalSearchContextMenu
-                            property var rowData: ({})
+                    }
+                }
 
-                            MenuItem {
-                                text: "Play"
-                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                                onTriggered: root.activateGlobalSearchRow(globalSearchContextMenu.rowData)
-                            }
-                            MenuItem {
-                                text: "Queue"
-                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                                onTriggered: root.queueGlobalSearchRow(globalSearchContextMenu.rowData)
-                            }
-                            MenuSeparator {}
-                            MenuItem {
-                                text: "Open in " + uiBridge.fileBrowserName
-                                visible: (globalSearchContextMenu.rowData.rowType || "") !== "track"
-                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                                onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
-                            }
-                            MenuItem {
-                                text: "Open containing folder"
-                                visible: (globalSearchContextMenu.rowData.rowType || "") === "track"
-                                enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                                onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
-                            }
-                        }
+                Menu {
+                    id: globalSearchContextMenu
+                    property var rowData: root.globalSearchContextRowData || ({})
+
+                    MenuItem {
+                        text: "Play"
+                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                        onTriggered: root.activateGlobalSearchRow(globalSearchContextMenu.rowData)
+                    }
+                    MenuItem {
+                        text: "Queue"
+                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                        onTriggered: root.queueGlobalSearchRow(globalSearchContextMenu.rowData)
+                    }
+                    MenuSeparator {}
+                    MenuItem {
+                        text: "Open in " + uiBridge.fileBrowserName
+                        visible: (globalSearchContextMenu.rowData.rowType || "") !== "track"
+                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                        onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
+                    }
+                    MenuItem {
+                        text: "Open containing folder"
+                        visible: (globalSearchContextMenu.rowData.rowType || "") === "track"
+                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
+                        onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
                     }
                 }
             }
