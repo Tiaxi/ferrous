@@ -348,50 +348,106 @@ void BridgeClient::searchApplyWorkerLoop() {
         if (decodedOk) {
             QElapsedTimer materializeTimer;
             materializeTimer.start();
-            out.artistRows.reserve(decoded.rows.size());
-            out.albumRows.reserve(decoded.rows.size());
-            out.trackRows.reserve(decoded.rows.size());
+            QVector<GlobalSearchResultsModel::SearchDisplayRow> artistRows;
+            QVector<GlobalSearchResultsModel::SearchDisplayRow> albumRows;
+            QVector<GlobalSearchResultsModel::SearchDisplayRow> trackRows;
+            artistRows.reserve(decoded.rows.size());
+            albumRows.reserve(decoded.rows.size());
+            trackRows.reserve(decoded.rows.size());
+            if (m_publishLegacySearchLists) {
+                out.artistRows.reserve(decoded.rows.size());
+                out.albumRows.reserve(decoded.rows.size());
+                out.trackRows.reserve(decoded.rows.size());
+            }
             for (const auto &row : decoded.rows) {
-                QVariantMap item;
-                item.insert(QStringLiteral("rowType"), row.rowType);
-                item.insert(QStringLiteral("score"), row.score);
-                item.insert(QStringLiteral("label"), row.label);
-                item.insert(QStringLiteral("artist"), row.artist);
-                item.insert(QStringLiteral("album"), row.album);
-                item.insert(QStringLiteral("genre"), row.genre);
-                item.insert(QStringLiteral("count"), row.count);
-                item.insert(QStringLiteral("coverPath"), row.coverPath);
-                item.insert(QStringLiteral("coverUrl"), searchCoverUrlFast(row.coverPath));
-                item.insert(QStringLiteral("artistKey"), row.artistKey);
-                item.insert(QStringLiteral("albumKey"), row.albumKey);
-                item.insert(QStringLiteral("sectionKey"), row.sectionKey);
-                item.insert(QStringLiteral("trackKey"), row.trackKey);
-                item.insert(QStringLiteral("trackPath"), row.trackPath);
-                if (row.year != std::numeric_limits<int>::min()) {
-                    item.insert(QStringLiteral("year"), row.year);
-                } else {
-                    item.insert(QStringLiteral("year"), QVariant{});
-                }
-                if (row.trackNumber > 0) {
-                    item.insert(QStringLiteral("trackNumber"), row.trackNumber);
-                } else {
-                    item.insert(QStringLiteral("trackNumber"), QVariant{});
-                }
-                item.insert(QStringLiteral("lengthSeconds"), row.lengthSeconds);
-                item.insert(
-                    QStringLiteral("lengthText"),
-                    row.lengthSeconds >= 0.0f
-                        ? BridgeClient::formatDurationCompact(static_cast<double>(row.lengthSeconds))
-                        : QStringLiteral("--:--"));
+                QString rowTypeLabel;
                 switch (row.rowType) {
                 case BinaryBridgeCodec::SearchRowArtist:
-                    out.artistRows.push_back(std::move(item));
+                    rowTypeLabel = QStringLiteral("artist");
                     break;
                 case BinaryBridgeCodec::SearchRowAlbum:
-                    out.albumRows.push_back(std::move(item));
+                    rowTypeLabel = QStringLiteral("album");
                     break;
                 case BinaryBridgeCodec::SearchRowTrack:
-                    out.trackRows.push_back(std::move(item));
+                    rowTypeLabel = QStringLiteral("track");
+                    break;
+                default:
+                    break;
+                }
+                if (rowTypeLabel.isEmpty()) {
+                    continue;
+                }
+
+                GlobalSearchResultsModel::SearchDisplayRow item;
+                item.kind = QStringLiteral("item");
+                item.rowType = rowTypeLabel;
+                item.score = row.score;
+                item.label = row.label;
+                item.artist = row.artist;
+                item.album = row.album;
+                item.genre = row.genre;
+                item.coverPath = row.coverPath;
+                item.coverUrl = searchCoverUrlFast(row.coverPath);
+                item.artistKey = row.artistKey;
+                item.albumKey = row.albumKey;
+                item.sectionKey = row.sectionKey;
+                item.trackKey = row.trackKey;
+                item.trackPath = row.trackPath;
+                item.year = row.year;
+                item.trackNumber = row.trackNumber;
+                item.count = row.count;
+                item.lengthSeconds = row.lengthSeconds;
+                item.lengthText = row.lengthSeconds >= 0.0f
+                    ? BridgeClient::formatDurationCompact(static_cast<double>(row.lengthSeconds))
+                    : QStringLiteral("--:--");
+
+                QVariantMap legacyItem;
+                if (m_publishLegacySearchLists) {
+                    legacyItem.insert(QStringLiteral("rowType"), row.rowType);
+                    legacyItem.insert(QStringLiteral("score"), row.score);
+                    legacyItem.insert(QStringLiteral("label"), row.label);
+                    legacyItem.insert(QStringLiteral("artist"), row.artist);
+                    legacyItem.insert(QStringLiteral("album"), row.album);
+                    legacyItem.insert(QStringLiteral("genre"), row.genre);
+                    legacyItem.insert(QStringLiteral("count"), row.count);
+                    legacyItem.insert(QStringLiteral("coverPath"), row.coverPath);
+                    legacyItem.insert(QStringLiteral("coverUrl"), item.coverUrl);
+                    legacyItem.insert(QStringLiteral("artistKey"), row.artistKey);
+                    legacyItem.insert(QStringLiteral("albumKey"), row.albumKey);
+                    legacyItem.insert(QStringLiteral("sectionKey"), row.sectionKey);
+                    legacyItem.insert(QStringLiteral("trackKey"), row.trackKey);
+                    legacyItem.insert(QStringLiteral("trackPath"), row.trackPath);
+                    if (row.year != std::numeric_limits<int>::min()) {
+                        legacyItem.insert(QStringLiteral("year"), row.year);
+                    } else {
+                        legacyItem.insert(QStringLiteral("year"), QVariant{});
+                    }
+                    if (row.trackNumber > 0) {
+                        legacyItem.insert(QStringLiteral("trackNumber"), row.trackNumber);
+                    } else {
+                        legacyItem.insert(QStringLiteral("trackNumber"), QVariant{});
+                    }
+                    legacyItem.insert(QStringLiteral("lengthSeconds"), row.lengthSeconds);
+                    legacyItem.insert(QStringLiteral("lengthText"), item.lengthText);
+                }
+                switch (row.rowType) {
+                case BinaryBridgeCodec::SearchRowArtist:
+                    artistRows.push_back(std::move(item));
+                    if (m_publishLegacySearchLists) {
+                        out.artistRows.push_back(std::move(legacyItem));
+                    }
+                    break;
+                case BinaryBridgeCodec::SearchRowAlbum:
+                    albumRows.push_back(std::move(item));
+                    if (m_publishLegacySearchLists) {
+                        out.albumRows.push_back(std::move(legacyItem));
+                    }
+                    break;
+                case BinaryBridgeCodec::SearchRowTrack:
+                    trackRows.push_back(std::move(item));
+                    if (m_publishLegacySearchLists) {
+                        out.trackRows.push_back(std::move(legacyItem));
+                    }
                     break;
                 default:
                     break;
@@ -400,40 +456,34 @@ void BridgeClient::searchApplyWorkerLoop() {
             const auto appendSection = [&out](
                                            const QString &title,
                                            const QString &rowType,
-                                           const QVariantList &sourceRows) {
+                                           const QVector<GlobalSearchResultsModel::SearchDisplayRow> &sourceRows) {
                 if (sourceRows.isEmpty()) {
                     return;
                 }
-                QVariantMap sectionRow;
-                sectionRow.insert(QStringLiteral("kind"), QStringLiteral("section"));
-                sectionRow.insert(QStringLiteral("sectionTitle"), title);
-                sectionRow.insert(QStringLiteral("rowType"), rowType);
+                GlobalSearchResultsModel::SearchDisplayRow sectionRow;
+                sectionRow.kind = QStringLiteral("section");
+                sectionRow.sectionTitle = title;
+                sectionRow.rowType = rowType;
                 out.displayRows.push_back(std::move(sectionRow));
 
-                QVariantMap columnsRow;
-                columnsRow.insert(QStringLiteral("kind"), QStringLiteral("columns"));
-                columnsRow.insert(QStringLiteral("rowType"), rowType);
+                GlobalSearchResultsModel::SearchDisplayRow columnsRow;
+                columnsRow.kind = QStringLiteral("columns");
+                columnsRow.rowType = rowType;
                 out.displayRows.push_back(std::move(columnsRow));
 
-                for (const QVariant &sourceVar : sourceRows) {
-                    const QVariantMap source = sourceVar.toMap();
-                    QVariantMap item;
-                    item.insert(QStringLiteral("kind"), QStringLiteral("item"));
-                    item.insert(QStringLiteral("rowType"), rowType);
-                    for (auto it = source.constBegin(); it != source.constEnd(); ++it) {
-                        if (it.key() == QStringLiteral("rowType")) {
-                            continue;
-                        }
-                        item.insert(it.key(), it.value());
-                    }
-                    out.displayRows.push_back(std::move(item));
+                out.displayRows.reserve(out.displayRows.size() + sourceRows.size());
+                for (const auto &source : sourceRows) {
+                    out.displayRows.push_back(source);
                 }
             };
+            out.artistCount = artistRows.size();
+            out.albumCount = albumRows.size();
+            out.trackCount = trackRows.size();
             out.displayRows.reserve(
-                out.artistRows.size() + out.albumRows.size() + out.trackRows.size() + 6);
-            appendSection(QStringLiteral("Artists"), QStringLiteral("artist"), out.artistRows);
-            appendSection(QStringLiteral("Albums"), QStringLiteral("album"), out.albumRows);
-            appendSection(QStringLiteral("Tracks"), QStringLiteral("track"), out.trackRows);
+                artistRows.size() + albumRows.size() + trackRows.size() + 6);
+            appendSection(QStringLiteral("Artists"), QStringLiteral("artist"), artistRows);
+            appendSection(QStringLiteral("Albums"), QStringLiteral("album"), albumRows);
+            appendSection(QStringLiteral("Tracks"), QStringLiteral("track"), trackRows);
             out.materializeMs = materializeTimer.elapsed();
         }
 
@@ -1307,50 +1357,106 @@ QString BridgeClient::resolveDiagnosticsLogPath() {
 bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame) {
     SearchWorkerOutputFrame out;
     out.seq = frame.seq;
-    out.artistRows.reserve(frame.rows.size());
-    out.albumRows.reserve(frame.rows.size());
-    out.trackRows.reserve(frame.rows.size());
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> artistRows;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> albumRows;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> trackRows;
+    artistRows.reserve(frame.rows.size());
+    albumRows.reserve(frame.rows.size());
+    trackRows.reserve(frame.rows.size());
+    if (m_publishLegacySearchLists) {
+        out.artistRows.reserve(frame.rows.size());
+        out.albumRows.reserve(frame.rows.size());
+        out.trackRows.reserve(frame.rows.size());
+    }
     for (const auto &row : frame.rows) {
-        QVariantMap item;
-        item.insert(QStringLiteral("rowType"), row.rowType);
-        item.insert(QStringLiteral("score"), row.score);
-        item.insert(QStringLiteral("label"), row.label);
-        item.insert(QStringLiteral("artist"), row.artist);
-        item.insert(QStringLiteral("album"), row.album);
-        item.insert(QStringLiteral("genre"), row.genre);
-        item.insert(QStringLiteral("count"), row.count);
-        item.insert(QStringLiteral("coverPath"), row.coverPath);
-        item.insert(QStringLiteral("coverUrl"), searchCoverUrlFast(row.coverPath));
-        item.insert(QStringLiteral("artistKey"), row.artistKey);
-        item.insert(QStringLiteral("albumKey"), row.albumKey);
-        item.insert(QStringLiteral("sectionKey"), row.sectionKey);
-        item.insert(QStringLiteral("trackKey"), row.trackKey);
-        item.insert(QStringLiteral("trackPath"), row.trackPath);
-        if (row.year != std::numeric_limits<int>::min()) {
-            item.insert(QStringLiteral("year"), row.year);
-        } else {
-            item.insert(QStringLiteral("year"), QVariant{});
-        }
-        if (row.trackNumber > 0) {
-            item.insert(QStringLiteral("trackNumber"), row.trackNumber);
-        } else {
-            item.insert(QStringLiteral("trackNumber"), QVariant{});
-        }
-        item.insert(QStringLiteral("lengthSeconds"), row.lengthSeconds);
-        item.insert(
-            QStringLiteral("lengthText"),
-            row.lengthSeconds >= 0.0f
-                ? formatDurationCompact(static_cast<double>(row.lengthSeconds))
-                : QStringLiteral("--:--"));
+        QString rowTypeLabel;
         switch (row.rowType) {
         case BinaryBridgeCodec::SearchRowArtist:
-            out.artistRows.push_back(std::move(item));
+            rowTypeLabel = QStringLiteral("artist");
             break;
         case BinaryBridgeCodec::SearchRowAlbum:
-            out.albumRows.push_back(std::move(item));
+            rowTypeLabel = QStringLiteral("album");
             break;
         case BinaryBridgeCodec::SearchRowTrack:
-            out.trackRows.push_back(std::move(item));
+            rowTypeLabel = QStringLiteral("track");
+            break;
+        default:
+            break;
+        }
+        if (rowTypeLabel.isEmpty()) {
+            continue;
+        }
+
+        GlobalSearchResultsModel::SearchDisplayRow item;
+        item.kind = QStringLiteral("item");
+        item.rowType = rowTypeLabel;
+        item.score = row.score;
+        item.label = row.label;
+        item.artist = row.artist;
+        item.album = row.album;
+        item.genre = row.genre;
+        item.coverPath = row.coverPath;
+        item.coverUrl = searchCoverUrlFast(row.coverPath);
+        item.artistKey = row.artistKey;
+        item.albumKey = row.albumKey;
+        item.sectionKey = row.sectionKey;
+        item.trackKey = row.trackKey;
+        item.trackPath = row.trackPath;
+        item.year = row.year;
+        item.trackNumber = row.trackNumber;
+        item.count = row.count;
+        item.lengthSeconds = row.lengthSeconds;
+        item.lengthText = row.lengthSeconds >= 0.0f
+            ? formatDurationCompact(static_cast<double>(row.lengthSeconds))
+            : QStringLiteral("--:--");
+
+        QVariantMap legacyItem;
+        if (m_publishLegacySearchLists) {
+            legacyItem.insert(QStringLiteral("rowType"), row.rowType);
+            legacyItem.insert(QStringLiteral("score"), row.score);
+            legacyItem.insert(QStringLiteral("label"), row.label);
+            legacyItem.insert(QStringLiteral("artist"), row.artist);
+            legacyItem.insert(QStringLiteral("album"), row.album);
+            legacyItem.insert(QStringLiteral("genre"), row.genre);
+            legacyItem.insert(QStringLiteral("count"), row.count);
+            legacyItem.insert(QStringLiteral("coverPath"), row.coverPath);
+            legacyItem.insert(QStringLiteral("coverUrl"), item.coverUrl);
+            legacyItem.insert(QStringLiteral("artistKey"), row.artistKey);
+            legacyItem.insert(QStringLiteral("albumKey"), row.albumKey);
+            legacyItem.insert(QStringLiteral("sectionKey"), row.sectionKey);
+            legacyItem.insert(QStringLiteral("trackKey"), row.trackKey);
+            legacyItem.insert(QStringLiteral("trackPath"), row.trackPath);
+            if (row.year != std::numeric_limits<int>::min()) {
+                legacyItem.insert(QStringLiteral("year"), row.year);
+            } else {
+                legacyItem.insert(QStringLiteral("year"), QVariant{});
+            }
+            if (row.trackNumber > 0) {
+                legacyItem.insert(QStringLiteral("trackNumber"), row.trackNumber);
+            } else {
+                legacyItem.insert(QStringLiteral("trackNumber"), QVariant{});
+            }
+            legacyItem.insert(QStringLiteral("lengthSeconds"), row.lengthSeconds);
+            legacyItem.insert(QStringLiteral("lengthText"), item.lengthText);
+        }
+        switch (row.rowType) {
+        case BinaryBridgeCodec::SearchRowArtist:
+            artistRows.push_back(std::move(item));
+            if (m_publishLegacySearchLists) {
+                out.artistRows.push_back(std::move(legacyItem));
+            }
+            break;
+        case BinaryBridgeCodec::SearchRowAlbum:
+            albumRows.push_back(std::move(item));
+            if (m_publishLegacySearchLists) {
+                out.albumRows.push_back(std::move(legacyItem));
+            }
+            break;
+        case BinaryBridgeCodec::SearchRowTrack:
+            trackRows.push_back(std::move(item));
+            if (m_publishLegacySearchLists) {
+                out.trackRows.push_back(std::move(legacyItem));
+            }
             break;
         default:
             break;
@@ -1359,40 +1465,34 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
     const auto appendSection = [&out](
                                    const QString &title,
                                    const QString &rowType,
-                                   const QVariantList &sourceRows) {
+                                   const QVector<GlobalSearchResultsModel::SearchDisplayRow> &sourceRows) {
         if (sourceRows.isEmpty()) {
             return;
         }
-        QVariantMap sectionRow;
-        sectionRow.insert(QStringLiteral("kind"), QStringLiteral("section"));
-        sectionRow.insert(QStringLiteral("sectionTitle"), title);
-        sectionRow.insert(QStringLiteral("rowType"), rowType);
+        GlobalSearchResultsModel::SearchDisplayRow sectionRow;
+        sectionRow.kind = QStringLiteral("section");
+        sectionRow.sectionTitle = title;
+        sectionRow.rowType = rowType;
         out.displayRows.push_back(std::move(sectionRow));
 
-        QVariantMap columnsRow;
-        columnsRow.insert(QStringLiteral("kind"), QStringLiteral("columns"));
-        columnsRow.insert(QStringLiteral("rowType"), rowType);
+        GlobalSearchResultsModel::SearchDisplayRow columnsRow;
+        columnsRow.kind = QStringLiteral("columns");
+        columnsRow.rowType = rowType;
         out.displayRows.push_back(std::move(columnsRow));
 
-        for (const QVariant &sourceVar : sourceRows) {
-            const QVariantMap source = sourceVar.toMap();
-            QVariantMap item;
-            item.insert(QStringLiteral("kind"), QStringLiteral("item"));
-            item.insert(QStringLiteral("rowType"), rowType);
-            for (auto it = source.constBegin(); it != source.constEnd(); ++it) {
-                if (it.key() == QStringLiteral("rowType")) {
-                    continue;
-                }
-                item.insert(it.key(), it.value());
-            }
-            out.displayRows.push_back(std::move(item));
+        out.displayRows.reserve(out.displayRows.size() + sourceRows.size());
+        for (const auto &source : sourceRows) {
+            out.displayRows.push_back(source);
         }
     };
+    out.artistCount = artistRows.size();
+    out.albumCount = albumRows.size();
+    out.trackCount = trackRows.size();
     out.displayRows.reserve(
-        out.artistRows.size() + out.albumRows.size() + out.trackRows.size() + 6);
-    appendSection(QStringLiteral("Artists"), QStringLiteral("artist"), out.artistRows);
-    appendSection(QStringLiteral("Albums"), QStringLiteral("album"), out.albumRows);
-    appendSection(QStringLiteral("Tracks"), QStringLiteral("track"), out.trackRows);
+        artistRows.size() + albumRows.size() + trackRows.size() + 6);
+    appendSection(QStringLiteral("Artists"), QStringLiteral("artist"), artistRows);
+    appendSection(QStringLiteral("Albums"), QStringLiteral("album"), albumRows);
+    appendSection(QStringLiteral("Tracks"), QStringLiteral("track"), trackRows);
     return applyPreparedSearchResultsFrame(std::move(out));
 }
 
@@ -1440,9 +1540,9 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
 
     QElapsedTimer modelApplyTimer;
     modelApplyTimer.start();
-    const int artistCount = frame.artistRows.size();
-    const int albumCount = frame.albumRows.size();
-    const int trackCount = frame.trackRows.size();
+    const int artistCount = frame.artistCount;
+    const int albumCount = frame.albumCount;
+    const int trackCount = frame.trackCount;
     m_globalSearchSeq = frame.seq;
     m_globalSearchArtistCount = artistCount;
     m_globalSearchAlbumCount = albumCount;

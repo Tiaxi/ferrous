@@ -196,7 +196,10 @@ private:
         QVariantList artistRows;
         QVariantList albumRows;
         QVariantList trackRows;
-        QVector<QVariantMap> displayRows;
+        int artistCount{0};
+        int albumCount{0};
+        int trackCount{0};
+        QVector<GlobalSearchResultsModel::SearchDisplayRow> displayRows;
         QString decodeError;
         qint64 ffiPoppedAtMs{0};
         qint64 ffiPopMs{0};

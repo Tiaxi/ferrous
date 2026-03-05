@@ -1,6 +1,7 @@
 #include "GlobalSearchResultsModel.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace {
 constexpr auto kItemKind = "item";
@@ -20,15 +21,69 @@ QVariant GlobalSearchResultsModel::data(const QModelIndex &index, int role) cons
     if (!index.isValid() || index.row() < 0 || index.row() >= static_cast<int>(m_rows.size())) {
         return {};
     }
-    const QVariantMap &row = m_rows[static_cast<qsizetype>(index.row())];
+    const SearchDisplayRow &row = m_rows[static_cast<qsizetype>(index.row())];
     if (role == Qt::DisplayRole) {
-        return row.value(QStringLiteral("label"));
+        return row.label;
     }
-    const QString key = roleKeyForRole(role);
-    if (key.isEmpty()) {
+    switch (role) {
+    case KindRole:
+        return row.kind;
+    case RowTypeRole:
+        return row.rowType;
+    case SectionTitleRole:
+        return row.sectionTitle;
+    case ScoreRole:
+        if (row.kind != QLatin1String(kItemKind)) {
+            return {};
+        }
+        return row.score;
+    case LabelRole:
+        return row.label;
+    case ArtistRole:
+        return row.artist;
+    case AlbumRole:
+        return row.album;
+    case GenreRole:
+        return row.genre;
+    case CoverPathRole:
+        return row.coverPath;
+    case CoverUrlRole:
+        return row.coverUrl;
+    case ArtistKeyRole:
+        return row.artistKey;
+    case AlbumKeyRole:
+        return row.albumKey;
+    case SectionKeyRole:
+        return row.sectionKey;
+    case TrackKeyRole:
+        return row.trackKey;
+    case TrackPathRole:
+        return row.trackPath;
+    case YearRole:
+        if (row.year == std::numeric_limits<int>::min()) {
+            return {};
+        }
+        return row.year;
+    case TrackNumberRole:
+        if (row.trackNumber <= 0) {
+            return {};
+        }
+        return row.trackNumber;
+    case CountRole:
+        if (row.kind != QLatin1String(kItemKind)) {
+            return {};
+        }
+        return row.count;
+    case LengthSecondsRole:
+        if (row.kind != QLatin1String(kItemKind)) {
+            return {};
+        }
+        return row.lengthSeconds;
+    case LengthTextRole:
+        return row.lengthText;
+    default:
         return {};
     }
-    return row.value(key);
 }
 
 QHash<int, QByteArray> GlobalSearchResultsModel::roleNames() const {
@@ -56,7 +111,7 @@ QHash<int, QByteArray> GlobalSearchResultsModel::roleNames() const {
     };
 }
 
-void GlobalSearchResultsModel::replaceRows(QVector<QVariantMap> rows) {
+void GlobalSearchResultsModel::replaceRows(QVector<SearchDisplayRow> rows) {
     if (m_rows.isEmpty() && rows.isEmpty()) {
         return;
     }
@@ -78,36 +133,96 @@ void GlobalSearchResultsModel::replaceRows(QVector<QVariantMap> rows) {
         endInsertRows();
         return;
     }
-    if (m_rows.size() == rows.size()) {
-        if (m_rows == rows) {
-            return;
-        }
-        m_rows = std::move(rows);
-        if (!m_rows.isEmpty()) {
-            emit dataChanged(
-                index(0, 0),
-                index(static_cast<int>(m_rows.size()) - 1, 0));
-        }
+    if (m_rows == rows) {
         return;
     }
-    beginResetModel();
-    m_rows = std::move(rows);
-    endResetModel();
+
+    const int oldSize = static_cast<int>(m_rows.size());
+    const int newSize = static_cast<int>(rows.size());
+    const int overlap = std::min(oldSize, newSize);
+
+    if (newSize < oldSize) {
+        beginRemoveRows(QModelIndex{}, newSize, oldSize - 1);
+        m_rows.resize(newSize);
+        endRemoveRows();
+    }
+
+    int firstChanged = -1;
+    int lastChanged = -1;
+    for (int i = 0; i < overlap; ++i) {
+        const qsizetype idx = static_cast<qsizetype>(i);
+        if (m_rows[idx] == rows[idx]) {
+            continue;
+        }
+        m_rows[idx] = rows[idx];
+        if (firstChanged < 0) {
+            firstChanged = i;
+        }
+        lastChanged = i;
+    }
+    if (firstChanged >= 0) {
+        emit dataChanged(index(firstChanged, 0), index(lastChanged, 0));
+    }
+
+    if (newSize > oldSize) {
+        beginInsertRows(QModelIndex{}, oldSize, newSize - 1);
+        m_rows.reserve(newSize);
+        for (int i = oldSize; i < newSize; ++i) {
+            m_rows.push_back(rows[static_cast<qsizetype>(i)]);
+        }
+        endInsertRows();
+    }
 }
 
 QVariantMap GlobalSearchResultsModel::rowDataAt(int index) const {
     if (index < 0 || index >= static_cast<int>(m_rows.size())) {
         return {};
     }
-    return m_rows[static_cast<qsizetype>(index)];
+    const SearchDisplayRow &row = m_rows[static_cast<qsizetype>(index)];
+    QVariantMap out;
+    if (!row.kind.isEmpty()) {
+        out.insert(QStringLiteral("kind"), row.kind);
+    }
+    if (!row.rowType.isEmpty()) {
+        out.insert(QStringLiteral("rowType"), row.rowType);
+    }
+    if (!row.sectionTitle.isEmpty()) {
+        out.insert(QStringLiteral("sectionTitle"), row.sectionTitle);
+    }
+    if (row.kind != QLatin1String(kItemKind)) {
+        return out;
+    }
+
+    out.insert(QStringLiteral("score"), row.score);
+    out.insert(QStringLiteral("label"), row.label);
+    out.insert(QStringLiteral("artist"), row.artist);
+    out.insert(QStringLiteral("album"), row.album);
+    out.insert(QStringLiteral("genre"), row.genre);
+    out.insert(QStringLiteral("count"), row.count);
+    out.insert(QStringLiteral("coverPath"), row.coverPath);
+    out.insert(QStringLiteral("coverUrl"), row.coverUrl);
+    out.insert(QStringLiteral("artistKey"), row.artistKey);
+    out.insert(QStringLiteral("albumKey"), row.albumKey);
+    out.insert(QStringLiteral("sectionKey"), row.sectionKey);
+    out.insert(QStringLiteral("trackKey"), row.trackKey);
+    out.insert(QStringLiteral("trackPath"), row.trackPath);
+    if (row.year != std::numeric_limits<int>::min()) {
+        out.insert(QStringLiteral("year"), row.year);
+    }
+    if (row.trackNumber > 0) {
+        out.insert(QStringLiteral("trackNumber"), row.trackNumber);
+    }
+    out.insert(QStringLiteral("lengthSeconds"), row.lengthSeconds);
+    out.insert(QStringLiteral("lengthText"), row.lengthText);
+    return out;
 }
 
 bool GlobalSearchResultsModel::isSelectableIndex(int index) const {
     if (index < 0 || index >= static_cast<int>(m_rows.size())) {
         return false;
     }
-    const QVariantMap &row = m_rows[static_cast<qsizetype>(index)];
-    return row.value(QStringLiteral("kind")).toString() == QString::fromUtf8(kItemKind);
+    const SearchDisplayRow &row = m_rows[static_cast<qsizetype>(index)];
+    return row.kind == QLatin1String(kItemKind);
 }
 
 int GlobalSearchResultsModel::nextSelectableIndex(int startIndex, int step, bool wrap) const {
@@ -129,51 +244,4 @@ int GlobalSearchResultsModel::nextSelectableIndex(int startIndex, int step, bool
         }
     }
     return -1;
-}
-
-QString GlobalSearchResultsModel::roleKeyForRole(int role) {
-    switch (role) {
-    case KindRole:
-        return QStringLiteral("kind");
-    case RowTypeRole:
-        return QStringLiteral("rowType");
-    case SectionTitleRole:
-        return QStringLiteral("sectionTitle");
-    case ScoreRole:
-        return QStringLiteral("score");
-    case LabelRole:
-        return QStringLiteral("label");
-    case ArtistRole:
-        return QStringLiteral("artist");
-    case AlbumRole:
-        return QStringLiteral("album");
-    case GenreRole:
-        return QStringLiteral("genre");
-    case CoverPathRole:
-        return QStringLiteral("coverPath");
-    case CoverUrlRole:
-        return QStringLiteral("coverUrl");
-    case ArtistKeyRole:
-        return QStringLiteral("artistKey");
-    case AlbumKeyRole:
-        return QStringLiteral("albumKey");
-    case SectionKeyRole:
-        return QStringLiteral("sectionKey");
-    case TrackKeyRole:
-        return QStringLiteral("trackKey");
-    case TrackPathRole:
-        return QStringLiteral("trackPath");
-    case YearRole:
-        return QStringLiteral("year");
-    case TrackNumberRole:
-        return QStringLiteral("trackNumber");
-    case CountRole:
-        return QStringLiteral("count");
-    case LengthSecondsRole:
-        return QStringLiteral("lengthSeconds");
-    case LengthTextRole:
-        return QStringLiteral("lengthText");
-    default:
-        return {};
-    }
 }
