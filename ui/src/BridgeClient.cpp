@@ -332,12 +332,25 @@ void BridgeClient::queuePreparedSearchResultsFrame(SearchWorkerOutputFrame frame
 }
 
 void BridgeClient::scheduleSearchApplyDispatch() {
-    if (!m_searchApplyDispatchTimer.isActive()) {
-        m_searchApplyDispatchTimer.start();
+    const int nextDelayMs = searchApplyDispatchDelayMs();
+    if (m_searchApplyDispatchTimer.isActive()) {
+        const int remaining = m_searchApplyDispatchTimer.remainingTime();
+        // If typing is still active, prefer a later dispatch window for coalescing.
+        if (nextDelayMs <= remaining) {
+            return;
+        }
     }
+    m_searchApplyDispatchTimer.start(nextDelayMs);
 }
 
 void BridgeClient::dispatchPendingSearchApplyFrame() {
+    // While the query debounce is active, user input is still in flight.
+    // Delay apply to allow superseded frames to coalesce away.
+    if (m_globalSearchDebounceTimer.isActive()) {
+        scheduleSearchApplyDispatch();
+        return;
+    }
+
     SearchWorkerOutputFrame frame;
     {
         std::lock_guard<std::mutex> lock(m_searchOutputMutex);
@@ -361,6 +374,17 @@ void BridgeClient::dispatchPendingSearchApplyFrame() {
             m_searchApplyDispatchTimer.start();
         }
     }
+}
+
+int BridgeClient::searchApplyDispatchDelayMs() const {
+    int delayMs = m_searchApplyDispatchMs;
+    if (m_globalSearchDebounceTimer.isActive()) {
+        const int remaining = m_globalSearchDebounceTimer.remainingTime();
+        if (remaining > 0) {
+            delayMs = std::max(delayMs, remaining + 6);
+        }
+    }
+    return std::clamp(delayMs, m_searchApplyDispatchMs, 220);
 }
 
 void BridgeClient::searchApplyWorkerLoop() {

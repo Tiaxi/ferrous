@@ -218,6 +218,7 @@ private:
     void queuePreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
     void scheduleSearchApplyDispatch();
     void dispatchPendingSearchApplyFrame();
+    int searchApplyDispatchDelayMs() const;
     bool applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
