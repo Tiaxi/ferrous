@@ -2043,11 +2043,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     const QString nextState = playbackStateText(snapshot.playback.state, m_playbackState);
+    const bool isStopped = nextState == QStringLiteral("Stopped");
     const double pos = snapshot.playback.present ? snapshot.playback.positionSeconds : m_positionSeconds;
     const double dur = snapshot.playback.present ? snapshot.playback.durationSeconds : m_durationSeconds;
     const int repeatMode = std::clamp(snapshot.playback.present ? snapshot.playback.repeatMode : m_repeatMode, 0, 2);
     const bool shuffleEnabled = snapshot.playback.present ? snapshot.playback.shuffleEnabled : m_shuffleEnabled;
-    const QString currentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
+    const QString playbackCurrentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
+    const QString currentPath = isStopped && playbackCurrentPath.trimmed().isEmpty()
+        ? m_currentTrackPath
+        : playbackCurrentPath;
     int playing = snapshot.playback.present ? snapshot.playback.currentQueueIndex : m_playingQueueIndex;
 
     const int qlen = snapshot.queue.present ? snapshot.queue.len : m_queueLength;
@@ -2169,6 +2173,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                     ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
                     : QStringLiteral("--:--"));
             row.insert(QStringLiteral("path"), track.path);
+            if (track.trackNumber > 0) {
+                row.insert(QStringLiteral("trackNumber"), track.trackNumber);
+            } else {
+                row.insert(QStringLiteral("trackNumber"), QVariant{});
+            }
             if (track.year != std::numeric_limits<int>::min()) {
                 row.insert(QStringLiteral("year"), track.year);
             } else {
@@ -2212,7 +2221,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         changed = true;
     }
 
-    if (nextState == QStringLiteral("Stopped")) {
+    if (isStopped) {
         playing = -1;
     } else if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
         playing = m_queuePaths.indexOf(currentPath);
@@ -2222,12 +2231,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         changed = true;
     }
 
-    QString nextTrackTitle;
-    QString nextTrackArtist;
-    QString nextTrackAlbum;
-    QString nextTrackGenre;
-    QVariant nextTrackYear;
-    if (nextState != QStringLiteral("Stopped") && !currentPath.isEmpty()) {
+    QString nextTrackTitle = m_currentTrackTitle;
+    QString nextTrackArtist = m_currentTrackArtist;
+    QString nextTrackAlbum = m_currentTrackAlbum;
+    QString nextTrackGenre = m_currentTrackGenre;
+    QVariant nextTrackYear = m_currentTrackYear;
+    if (!isStopped && !currentPath.isEmpty()) {
         int detailIndex = playing;
         if (detailIndex < 0 && !m_queuePaths.isEmpty()) {
             detailIndex = m_queuePaths.indexOf(currentPath);
@@ -2302,7 +2311,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     QString currentCover = metadataCoverUrl;
-    if (currentCover.isEmpty() && !currentPath.isEmpty()) {
+    if (isStopped) {
+        currentCover = m_currentTrackCoverPath;
+    } else if (currentCover.isEmpty() && !currentPath.isEmpty()) {
         const auto cached = m_trackCoverByPath.constFind(currentPath);
         if (cached != m_trackCoverByPath.constEnd()) {
             currentCover = cached.value();

@@ -78,6 +78,7 @@ struct DecodedQueueTrack {
     QString album;
     QString genre;
     int year{std::numeric_limits<int>::min()};
+    int trackNumber{0};
     float lengthSeconds{-1.0f};
     QString path;
 };

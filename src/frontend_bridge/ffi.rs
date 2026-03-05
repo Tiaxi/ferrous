@@ -68,6 +68,7 @@ struct EncodedQueueTrack {
     album: String,
     genre: String,
     year: Option<i32>,
+    track_number: Option<u32>,
     length_seconds: Option<f32>,
     path: String,
 }
@@ -890,6 +891,7 @@ fn fallback_queue_section(snapshot: &BridgeSnapshot) -> QueueSectionData {
             album: String::new(),
             genre: String::new(),
             year: None,
+            track_number: None,
             length_seconds: None,
             path: path_str,
         });
@@ -940,6 +942,7 @@ fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
                 album: track.album.clone(),
                 genre: track.genre.clone(),
                 year: track.year,
+                track_number: track.track_no,
                 length_seconds: track.duration_secs.and_then(|value| {
                     if value.is_finite() && value >= 0.0 {
                         Some(value)
@@ -959,6 +962,7 @@ fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
             album: String::new(),
             genre: String::new(),
             year: None,
+            track_number: None,
             length_seconds: None,
             path: path_str,
         });
@@ -987,6 +991,7 @@ fn encode_queue_section(snapshot: &BridgeSnapshot, queue_section: &QueueSectionD
         push_u16_string(&mut out, &track.album);
         push_u16_string(&mut out, &track.genre);
         push_i32(&mut out, track.year.unwrap_or(i32::MIN));
+        push_u16(&mut out, track.track_number.map_or(0, clamp_u32_to_u16));
         push_f32(&mut out, track.length_seconds.unwrap_or(-1.0));
         push_u16_string(&mut out, &track.path);
     }
@@ -1357,6 +1362,13 @@ mod tests {
         f32::from_le_bytes(bytes[start..end].try_into().expect("f32 bytes"))
     }
 
+    fn read_u16(bytes: &[u8], offset: &mut usize) -> u16 {
+        let start = *offset;
+        let end = start + 2;
+        *offset = end;
+        u16::from_le_bytes(bytes[start..end].try_into().expect("u16 bytes"))
+    }
+
     fn read_f64(bytes: &[u8], offset: &mut usize) -> f64 {
         let start = *offset;
         let end = start + 8;
@@ -1520,6 +1532,7 @@ mod tests {
         assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Album");
         assert_eq!(read_u16_string(&encoded, &mut offset), "Rock");
         assert_eq!(read_i32(&encoded, &mut offset), 2020);
+        assert_eq!(read_u16(&encoded, &mut offset), 1);
         assert!((read_f32(&encoded, &mut offset) - 180.0).abs() < 0.001);
         assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.flac");
         assert_eq!(offset, encoded.len());

@@ -104,6 +104,7 @@ Sections (each prefixed with [u32 section_length], only present if bit set in ma
       [u16 album_len] [album_bytes...]
       [u16 genre_len] [genre_bytes...]
       [i32 year] (i32::MIN when unknown)
+      [u16 track_number] (0 when unknown)
       [f32 length_secs] (-1 when unknown)
       [u16 path_len] [path_bytes...]
 

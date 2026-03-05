@@ -227,13 +227,54 @@ Kirigami.ApplicationWindow {
             + ":" + secs.toString().padStart(2, "0")
     }
 
-    function queueIndexText(index) {
-        const digits = Math.max(2, String(Math.max(1, uiBridge.queueLength)).length)
-        return (index + 1).toString().padStart(digits, "0")
+    function metadataTrackNumberText(trackNumber) {
+        if (trackNumber === undefined || trackNumber === null) {
+            return "--"
+        }
+        const value = Number(trackNumber)
+        if (!isFinite(value) || value <= 0) {
+            return "--"
+        }
+        return Math.floor(value).toString().padStart(2, "0")
+    }
+
+    function playlistOrderText(index) {
+        if (index === undefined || index === null || index < 0) {
+            return "--"
+        }
+        const queueLength = Number(uiBridge.queueLength || 0)
+        const digits = Math.max(2, String(Math.max(1, Math.floor(queueLength))).length)
+        return String(index + 1).padStart(digits, "0")
+    }
+
+    readonly property int playlistOrderColumnWidth: {
+        const queueRows = uiBridge.queueRows || []
+        const maxIndex = Math.max(0, queueRows.length - 1)
+        const widestOrderText = playlistOrderText(maxIndex)
+        const valueWidth = playlistOrderFontMetrics.boundingRect(widestOrderText).width
+        const headerWidth = playlistOrderFontMetrics.boundingRect("#").width
+        return Math.max(28, Math.ceil(Math.max(valueWidth, headerWidth) + 10))
+    }
+
+    function queueTrackNumberText(index) {
+        if (index === undefined || index === null || index < 0) {
+            return "--"
+        }
+        const rows = uiBridge.queueRows || []
+        if (index >= rows.length) {
+            return "--"
+        }
+        const rowData = rows[index] || {}
+        return metadataTrackNumberText(rowData.trackNumber)
     }
 
     FontMetrics {
         id: menuFontMetrics
+        font: root.font
+    }
+
+    FontMetrics {
+        id: playlistOrderFontMetrics
         font: root.font
     }
 
@@ -2947,7 +2988,28 @@ Kirigami.ApplicationWindow {
                             Rectangle {
                                 id: nowPlayingCard
                                 Layout.fillWidth: true
+                                readonly property bool hasTrackContext: {
+                                    const hasResolvedMetadata = (uiBridge.currentTrackTitle || "").trim().length > 0
+                                        || (uiBridge.currentTrackArtist || "").trim().length > 0
+                                        || (uiBridge.currentTrackAlbum || "").trim().length > 0
+                                    const playbackState = (uiBridge.playbackState || "").trim()
+                                    const hasActivePath = playbackState !== "Stopped"
+                                        && (uiBridge.currentTrackPath || "").trim().length > 0
+                                    return hasResolvedMetadata || hasActivePath
+                                }
+                                readonly property string marqueeResetKey: {
+                                    return (uiBridge.currentTrackPath || "")
+                                        + "|"
+                                        + (uiBridge.currentTrackTitle || "")
+                                        + "|"
+                                        + (uiBridge.currentTrackArtist || "")
+                                        + "|"
+                                        + (uiBridge.currentTrackAlbum || "")
+                                }
                                 readonly property string resolvedTitle: {
+                                    if (!hasTrackContext) {
+                                        return "No track loaded"
+                                    }
                                     const explicitTitle = (uiBridge.currentTrackTitle || "").trim()
                                     if (explicitTitle.length > 0) {
                                         return explicitTitle
@@ -2962,31 +3024,46 @@ Kirigami.ApplicationWindow {
                                     return "Nothing playing"
                                 }
                                 readonly property string resolvedArtist: {
+                                    if (!hasTrackContext) {
+                                        return "—"
+                                    }
                                     const artistValue = (uiBridge.currentTrackArtist || "").trim()
                                     return artistValue.length > 0 ? artistValue : "Unknown artist"
                                 }
                                 readonly property string resolvedAlbum: {
+                                    if (!hasTrackContext) {
+                                        return "—"
+                                    }
                                     const albumValue = (uiBridge.currentTrackAlbum || "").trim()
                                     return albumValue.length > 0 ? albumValue : "Unknown album"
                                 }
                                 readonly property string resolvedGenre: {
+                                    if (!hasTrackContext) {
+                                        return "—"
+                                    }
                                     const genreValue = (uiBridge.currentTrackGenre || "").trim()
                                     return genreValue.length > 0 ? genreValue : "Unknown genre"
                                 }
                                 readonly property string resolvedTrackNumber: {
+                                    if (!hasTrackContext) {
+                                        return "—"
+                                    }
                                     if (uiBridge.playingQueueIndex !== undefined
                                             && uiBridge.playingQueueIndex !== null
                                             && uiBridge.playingQueueIndex >= 0) {
-                                        return root.queueIndexText(uiBridge.playingQueueIndex)
+                                        return root.queueTrackNumberText(uiBridge.playingQueueIndex)
                                     }
                                     if (uiBridge.selectedQueueIndex !== undefined
                                             && uiBridge.selectedQueueIndex !== null
                                             && uiBridge.selectedQueueIndex >= 0) {
-                                        return root.queueIndexText(uiBridge.selectedQueueIndex)
+                                        return root.queueTrackNumberText(uiBridge.selectedQueueIndex)
                                     }
                                     return "--"
                                 }
                                 readonly property string resolvedYear: {
+                                    if (!hasTrackContext) {
+                                        return "—"
+                                    }
                                     const yearValue = uiBridge.currentTrackYear
                                     if (yearValue !== undefined && yearValue !== null && String(yearValue).length > 0) {
                                         return String(yearValue)
@@ -3014,13 +3091,68 @@ Kirigami.ApplicationWindow {
                                             color: Kirigami.Theme.disabledTextColor
                                             font.pixelSize: 12
                                         }
-                                        Label {
+                                        Item {
+                                            id: titleMarquee
                                             Layout.fillWidth: true
-                                            text: nowPlayingCard.resolvedTitle
-                                            elide: Text.ElideRight
-                                            font.weight: Font.DemiBold
-                                            font.pixelSize: 12
-                                            color: Kirigami.Theme.textColor
+                                            Layout.preferredHeight: 18
+                                            clip: true
+                                            property string resetKey: nowPlayingCard.marqueeResetKey
+                                            property real overflowPx: Math.max(0, titleInfoText.implicitWidth - width)
+                                            property real offsetPx: 0
+                                            onOverflowPxChanged: {
+                                                if (overflowPx <= 1) {
+                                                    offsetPx = 0
+                                                } else if (offsetPx > overflowPx) {
+                                                    offsetPx = overflowPx
+                                                }
+                                            }
+                                            onResetKeyChanged: {
+                                                offsetPx = 0
+                                                if (titleMarqueeAnimation.running) {
+                                                    titleMarqueeAnimation.restart()
+                                                }
+                                            }
+
+                                            Text {
+                                                id: titleInfoText
+                                                anchors.verticalCenter: titleMarquee.verticalCenter
+                                                x: -titleMarquee.offsetPx
+                                                text: nowPlayingCard.resolvedTitle
+                                                font.weight: Font.DemiBold
+                                                font.pixelSize: 12
+                                                color: Kirigami.Theme.textColor
+                                                textFormat: Text.PlainText
+                                            }
+
+                                            SequentialAnimation {
+                                                id: titleMarqueeAnimation
+                                                running: titleMarquee.visible
+                                                    && titleMarquee.overflowPx > 1
+                                                    && root.visible
+                                                loops: Animation.Infinite
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: titleMarquee
+                                                    property: "offsetPx"
+                                                    to: titleMarquee.overflowPx
+                                                    duration: Math.max(900, titleMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: titleMarquee.offsetPx = titleMarquee.overflowPx
+                                                }
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: titleMarquee
+                                                    property: "offsetPx"
+                                                    to: 0
+                                                    duration: Math.max(900, titleMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: titleMarquee.offsetPx = 0
+                                                }
+                                            }
                                         }
                                     }
 
@@ -3034,12 +3166,67 @@ Kirigami.ApplicationWindow {
                                             color: Kirigami.Theme.disabledTextColor
                                             font.pixelSize: 12
                                         }
-                                        Label {
+                                        Item {
+                                            id: artistMarquee
                                             Layout.fillWidth: true
-                                            text: nowPlayingCard.resolvedArtist
-                                            elide: Text.ElideRight
-                                            color: Kirigami.Theme.textColor
-                                            font.pixelSize: 12
+                                            Layout.preferredHeight: 18
+                                            clip: true
+                                            property string resetKey: nowPlayingCard.marqueeResetKey
+                                            property real overflowPx: Math.max(0, artistInfoText.implicitWidth - width)
+                                            property real offsetPx: 0
+                                            onOverflowPxChanged: {
+                                                if (overflowPx <= 1) {
+                                                    offsetPx = 0
+                                                } else if (offsetPx > overflowPx) {
+                                                    offsetPx = overflowPx
+                                                }
+                                            }
+                                            onResetKeyChanged: {
+                                                offsetPx = 0
+                                                if (artistMarqueeAnimation.running) {
+                                                    artistMarqueeAnimation.restart()
+                                                }
+                                            }
+
+                                            Text {
+                                                id: artistInfoText
+                                                anchors.verticalCenter: artistMarquee.verticalCenter
+                                                x: -artistMarquee.offsetPx
+                                                text: nowPlayingCard.resolvedArtist
+                                                color: Kirigami.Theme.textColor
+                                                font.pixelSize: 12
+                                                textFormat: Text.PlainText
+                                            }
+
+                                            SequentialAnimation {
+                                                id: artistMarqueeAnimation
+                                                running: artistMarquee.visible
+                                                    && artistMarquee.overflowPx > 1
+                                                    && root.visible
+                                                loops: Animation.Infinite
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: artistMarquee
+                                                    property: "offsetPx"
+                                                    to: artistMarquee.overflowPx
+                                                    duration: Math.max(900, artistMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: artistMarquee.offsetPx = artistMarquee.overflowPx
+                                                }
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: artistMarquee
+                                                    property: "offsetPx"
+                                                    to: 0
+                                                    duration: Math.max(900, artistMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: artistMarquee.offsetPx = 0
+                                                }
+                                            }
                                         }
                                     }
 
@@ -3053,12 +3240,67 @@ Kirigami.ApplicationWindow {
                                             color: Kirigami.Theme.disabledTextColor
                                             font.pixelSize: 12
                                         }
-                                        Label {
+                                        Item {
+                                            id: albumMarquee
                                             Layout.fillWidth: true
-                                            text: nowPlayingCard.resolvedAlbum
-                                            elide: Text.ElideRight
-                                            color: Kirigami.Theme.textColor
-                                            font.pixelSize: 12
+                                            Layout.preferredHeight: 18
+                                            clip: true
+                                            property string resetKey: nowPlayingCard.marqueeResetKey
+                                            property real overflowPx: Math.max(0, albumInfoText.implicitWidth - width)
+                                            property real offsetPx: 0
+                                            onOverflowPxChanged: {
+                                                if (overflowPx <= 1) {
+                                                    offsetPx = 0
+                                                } else if (offsetPx > overflowPx) {
+                                                    offsetPx = overflowPx
+                                                }
+                                            }
+                                            onResetKeyChanged: {
+                                                offsetPx = 0
+                                                if (albumMarqueeAnimation.running) {
+                                                    albumMarqueeAnimation.restart()
+                                                }
+                                            }
+
+                                            Text {
+                                                id: albumInfoText
+                                                anchors.verticalCenter: albumMarquee.verticalCenter
+                                                x: -albumMarquee.offsetPx
+                                                text: nowPlayingCard.resolvedAlbum
+                                                color: Kirigami.Theme.textColor
+                                                font.pixelSize: 12
+                                                textFormat: Text.PlainText
+                                            }
+
+                                            SequentialAnimation {
+                                                id: albumMarqueeAnimation
+                                                running: albumMarquee.visible
+                                                    && albumMarquee.overflowPx > 1
+                                                    && root.visible
+                                                loops: Animation.Infinite
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: albumMarquee
+                                                    property: "offsetPx"
+                                                    to: albumMarquee.overflowPx
+                                                    duration: Math.max(900, albumMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: albumMarquee.offsetPx = albumMarquee.overflowPx
+                                                }
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: albumMarquee
+                                                    property: "offsetPx"
+                                                    to: 0
+                                                    duration: Math.max(900, albumMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: albumMarquee.offsetPx = 0
+                                                }
+                                            }
                                         }
                                     }
 
@@ -3110,12 +3352,67 @@ Kirigami.ApplicationWindow {
                                             color: Kirigami.Theme.disabledTextColor
                                             font.pixelSize: 12
                                         }
-                                        Label {
+                                        Item {
+                                            id: genreMarquee
                                             Layout.fillWidth: true
-                                            text: nowPlayingCard.resolvedGenre
-                                            elide: Text.ElideRight
-                                            color: Kirigami.Theme.textColor
-                                            font.pixelSize: 12
+                                            Layout.preferredHeight: 18
+                                            clip: true
+                                            property string resetKey: nowPlayingCard.marqueeResetKey
+                                            property real overflowPx: Math.max(0, genreInfoText.implicitWidth - width)
+                                            property real offsetPx: 0
+                                            onOverflowPxChanged: {
+                                                if (overflowPx <= 1) {
+                                                    offsetPx = 0
+                                                } else if (offsetPx > overflowPx) {
+                                                    offsetPx = overflowPx
+                                                }
+                                            }
+                                            onResetKeyChanged: {
+                                                offsetPx = 0
+                                                if (genreMarqueeAnimation.running) {
+                                                    genreMarqueeAnimation.restart()
+                                                }
+                                            }
+
+                                            Text {
+                                                id: genreInfoText
+                                                anchors.verticalCenter: genreMarquee.verticalCenter
+                                                x: -genreMarquee.offsetPx
+                                                text: nowPlayingCard.resolvedGenre
+                                                color: Kirigami.Theme.textColor
+                                                font.pixelSize: 12
+                                                textFormat: Text.PlainText
+                                            }
+
+                                            SequentialAnimation {
+                                                id: genreMarqueeAnimation
+                                                running: genreMarquee.visible
+                                                    && genreMarquee.overflowPx > 1
+                                                    && root.visible
+                                                loops: Animation.Infinite
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: genreMarquee
+                                                    property: "offsetPx"
+                                                    to: genreMarquee.overflowPx
+                                                    duration: Math.max(900, genreMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: genreMarquee.offsetPx = genreMarquee.overflowPx
+                                                }
+                                                PauseAnimation { duration: 1400 }
+                                                NumberAnimation {
+                                                    target: genreMarquee
+                                                    property: "offsetPx"
+                                                    to: 0
+                                                    duration: Math.max(900, genreMarquee.overflowPx * 24)
+                                                    easing.type: Easing.Linear
+                                                }
+                                                ScriptAction {
+                                                    script: genreMarquee.offsetPx = 0
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3406,7 +3703,7 @@ Kirigami.ApplicationWindow {
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 8
-                                anchors.rightMargin: 8
+                                anchors.rightMargin: 8 + (playlistView ? playlistView.reservedRightPadding : 0)
                                 Label {
                                     text: "▶"
                                     Layout.preferredWidth: 24
@@ -3414,7 +3711,7 @@ Kirigami.ApplicationWindow {
                                 }
                                 Label {
                                     text: "#"
-                                    Layout.preferredWidth: 34
+                                    Layout.preferredWidth: root.playlistOrderColumnWidth
                                     horizontalAlignment: Text.AlignRight
                                 }
                                 Label { text: "Title"; Layout.fillWidth: true }
@@ -3434,6 +3731,13 @@ Kirigami.ApplicationWindow {
                             Layout.fillHeight: true
                             clip: true
                             model: uiBridge.queueRows
+                            property real reservedRightPadding: playlistVerticalScrollBar.visible
+                                ? (playlistVerticalScrollBar.width + 6)
+                                : 0
+                            ScrollBar.vertical: ScrollBar {
+                                id: playlistVerticalScrollBar
+                                policy: ScrollBar.AsNeeded
+                            }
 
                             delegate: Rectangle {
                                 readonly property var rowData: (modelData && typeof modelData === "object")
@@ -3443,7 +3747,9 @@ Kirigami.ApplicationWindow {
                                 readonly property string artistValue: rowData.artist || ""
                                 readonly property string albumValue: rowData.album || ""
                                 readonly property string lengthTextValue: rowData.lengthText || "--:--"
-                                width: ListView.view.width
+                                width: Math.max(
+                                    0,
+                                    ListView.view.width - (playlistView.reservedRightPadding || 0))
                                 height: 24
                                 color: root.isQueueIndexSelected(index)
                                     ? Kirigami.Theme.highlightColor
@@ -3471,8 +3777,8 @@ Kirigami.ApplicationWindow {
                                                 : Kirigami.Theme.textColor)
                                     }
                                     Label {
-                                        text: root.queueIndexText(index)
-                                        Layout.preferredWidth: 34
+                                        text: root.playlistOrderText(index)
+                                        Layout.preferredWidth: root.playlistOrderColumnWidth
                                         horizontalAlignment: Text.AlignRight
                                         color: root.isQueueIndexSelected(index)
                                             ? Kirigami.Theme.highlightedTextColor
