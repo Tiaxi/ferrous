@@ -5,6 +5,16 @@
 - Use a concise justification tied to the exact cargo action.
 - Prefer a reusable approval prefix for cargo workflows when appropriate.
 
+## Validation Rule
+- Use `./scripts/run-tests.sh` as the default validation entrypoint for this repository.
+- Choose test scope based on the change surface:
+  - Rust/backend-only changes: `./scripts/run-tests.sh --rust-only`
+  - UI/QML-only changes: `./scripts/run-tests.sh --ui-only`
+  - Cross-cutting changes (or uncertainty about impact): `./scripts/run-tests.sh`
+- Keep strict checks enabled by default. Do not use `--no-clippy` or `--no-audit` unless explicitly justified.
+- Use `--no-configure` / `--no-build` only when reusing a known-good UI build directory.
+- Use `--coverage` only when a coverage gate is intentionally part of the task.
+
 ## Commit Policy
 - Autonomous commits are allowed in this repository.
 - Commit when all of the following are true:
