@@ -11,6 +11,8 @@ pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub genre: String,
+    pub year: Option<i32>,
     pub sample_rate_hz: Option<u32>,
     pub bitrate_kbps: Option<u32>,
     pub channels: Option<u8>,
@@ -71,6 +73,10 @@ impl MetadataService {
                                 || "Unknown album".to_string(),
                                 std::borrow::Cow::into_owned,
                             );
+                            metadata.genre = tag
+                                .genre()
+                                .map_or_else(String::new, std::borrow::Cow::into_owned);
+                            metadata.year = tag.date().map(|v| i32::from(v.year));
 
                             if let Some(pic) = tag.pictures().first() {
                                 if let Ok(img) = image::load_from_memory(pic.data()) {

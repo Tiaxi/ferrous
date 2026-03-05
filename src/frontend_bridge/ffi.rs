@@ -48,11 +48,28 @@ struct AnalysisEmitState {
 }
 
 #[derive(Default)]
-struct QueueDurationCache {
+struct QueueSectionCache {
     library_ptr: usize,
     queue_paths: Vec<PathBuf>,
+    queue_section: QueueSectionData,
+}
+
+#[derive(Debug, Clone, Default)]
+struct QueueSectionData {
     total_duration_secs: f64,
     unknown_duration_count: usize,
+    tracks: Vec<EncodedQueueTrack>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EncodedQueueTrack {
+    title: String,
+    artist: String,
+    album: String,
+    genre: String,
+    year: Option<i32>,
+    length_seconds: Option<f32>,
+    path: String,
 }
 
 struct LibraryTreeFrame {
@@ -68,7 +85,7 @@ struct SearchResultsFrame {
 struct FfiRuntime {
     bridge: FrontendBridgeHandle,
     analysis_state: AnalysisEmitState,
-    queue_duration_cache: QueueDurationCache,
+    queue_section_cache: QueueSectionCache,
     pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
     pending_library_trees: VecDeque<LibraryTreeFrame>,
@@ -83,7 +100,7 @@ impl FfiRuntime {
         let runtime = Self {
             bridge,
             analysis_state: AnalysisEmitState::default(),
-            queue_duration_cache: QueueDurationCache::default(),
+            queue_section_cache: QueueSectionCache::default(),
             pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
             pending_library_trees: VecDeque::with_capacity(MAX_PENDING_LIBRARY_TREES),
@@ -189,8 +206,8 @@ impl FfiRuntime {
         if let Some(snapshot) = latest_snapshot {
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
             self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
-            let queue_duration = self.queue_duration_for_snapshot(&snapshot);
-            self.push_binary_event(encode_binary_snapshot(&snapshot, queue_duration));
+            let queue_section = self.queue_section_for_snapshot(&snapshot);
+            self.push_binary_event(encode_binary_snapshot(&snapshot, &queue_section));
         }
     }
 
@@ -210,32 +227,29 @@ impl FfiRuntime {
         self.pending_search_results.pop_front()
     }
 
-    fn queue_duration_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> (f64, usize) {
+    fn queue_section_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> QueueSectionData {
         if snapshot.queue.is_empty() {
-            return (0.0, 0);
-        }
-        // Queue duration lookups against a rapidly mutating scan snapshot are expensive and
-        // not essential for transport/visual responsiveness; skip until the scan settles.
-        if snapshot.library.scan_in_progress {
-            return (0.0, snapshot.queue.len());
+            return QueueSectionData::default();
         }
 
         let library_ptr = std::sync::Arc::as_ptr(&snapshot.library) as usize;
-        if self.queue_duration_cache.library_ptr == library_ptr
-            && self.queue_duration_cache.queue_paths == snapshot.queue
+        if self.queue_section_cache.library_ptr == library_ptr
+            && self.queue_section_cache.queue_paths == snapshot.queue
         {
-            return (
-                self.queue_duration_cache.total_duration_secs,
-                self.queue_duration_cache.unknown_duration_count,
-            );
+            return self.queue_section_cache.queue_section.clone();
         }
 
-        let (total_duration_secs, unknown_duration_count) = compute_queue_total_duration(snapshot);
-        self.queue_duration_cache.library_ptr = library_ptr;
-        self.queue_duration_cache.queue_paths = snapshot.queue.clone();
-        self.queue_duration_cache.total_duration_secs = total_duration_secs;
-        self.queue_duration_cache.unknown_duration_count = unknown_duration_count;
-        (total_duration_secs, unknown_duration_count)
+        // During scan, prefer lightweight fallback queue rows and unknown duration markers.
+        // Once scan settles, rows are enriched from indexed library metadata.
+        let queue_section = if snapshot.library.scan_in_progress {
+            fallback_queue_section(snapshot)
+        } else {
+            compute_queue_section_data(snapshot)
+        };
+        self.queue_section_cache.library_ptr = library_ptr;
+        self.queue_section_cache.queue_paths = snapshot.queue.clone();
+        self.queue_section_cache.queue_section = queue_section.clone();
+        queue_section
     }
 }
 
@@ -748,13 +762,10 @@ impl<'a> BinaryReader<'a> {
     }
 }
 
-fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_duration: (f64, usize)) -> Vec<u8> {
+fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_section: &QueueSectionData) -> Vec<u8> {
     let sections: Vec<(u16, Vec<u8>)> = vec![
         (SECTION_PLAYBACK, encode_playback_section(snapshot)),
-        (
-            SECTION_QUEUE,
-            encode_queue_section(snapshot, queue_duration),
-        ),
+        (SECTION_QUEUE, encode_queue_section(snapshot, queue_section)),
         (SECTION_LIBRARY_META, encode_library_meta_section(snapshot)),
         (SECTION_METADATA, encode_metadata_section(snapshot)),
         (SECTION_SETTINGS, encode_settings_section(snapshot)),
@@ -862,58 +873,122 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     out
 }
 
-fn compute_queue_total_duration(snapshot: &BridgeSnapshot) -> (f64, usize) {
-    let mut queue_path_counts: HashMap<&std::path::Path, usize> =
-        HashMap::with_capacity(snapshot.queue.len());
-    for path in &snapshot.queue {
-        let entry = queue_path_counts.entry(path.as_path()).or_insert(0);
-        *entry = entry.saturating_add(1);
-    }
-    if queue_path_counts.is_empty() {
-        return (0.0, 0);
-    }
-
-    let mut total_duration_secs = 0.0;
-    let mut known_duration_count = 0usize;
-    for track in &snapshot.library.tracks {
-        let Some(count) = queue_path_counts.remove(track.path.as_path()) else {
-            continue;
-        };
-        if let Some(duration_secs) = track.duration_secs {
-            let duration = f64::from(duration_secs);
-            if duration.is_finite() && duration > 0.0 {
-                total_duration_secs += duration * (count as f64);
-                known_duration_count = known_duration_count.saturating_add(count);
-            }
-        }
-        if queue_path_counts.is_empty() {
-            break;
-        }
-    }
-
-    let unknown_duration_count = snapshot.queue.len().saturating_sub(known_duration_count);
-    (total_duration_secs, unknown_duration_count)
+fn path_title_fallback(path: &std::path::Path, path_str: &str) -> String {
+    path.file_name().map_or_else(
+        || path_str.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
-fn encode_queue_section(snapshot: &BridgeSnapshot, queue_duration: (f64, usize)) -> Vec<u8> {
-    let mut out = Vec::new();
-    let selected_index = snapshot.selected_queue_index.map_or(-1, |idx| idx as i32);
-    let (total_duration_secs, unknown_duration_count) = queue_duration;
+fn fallback_queue_section(snapshot: &BridgeSnapshot) -> QueueSectionData {
+    let mut tracks = Vec::with_capacity(snapshot.queue.len());
+    for path in &snapshot.queue {
+        let path_str = path.to_string_lossy().to_string();
+        tracks.push(EncodedQueueTrack {
+            title: path_title_fallback(path, &path_str),
+            artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            year: None,
+            length_seconds: None,
+            path: path_str,
+        });
+    }
+    QueueSectionData {
+        total_duration_secs: 0.0,
+        unknown_duration_count: snapshot.queue.len(),
+        tracks,
+    }
+}
 
-    push_u32(&mut out, snapshot.queue.len() as u32);
-    push_i32(&mut out, selected_index);
-    push_f64(&mut out, total_duration_secs);
-    push_u32(&mut out, unknown_duration_count as u32);
-    push_u32(&mut out, snapshot.queue.len() as u32);
+fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
+    let mut by_path: HashMap<&std::path::Path, &crate::library::LibraryTrack> =
+        HashMap::with_capacity(snapshot.library.tracks.len());
+    for track in &snapshot.library.tracks {
+        by_path.insert(track.path.as_path(), track);
+    }
+
+    let mut tracks = Vec::with_capacity(snapshot.queue.len());
+    let mut total_duration_secs = 0.0;
+    let mut unknown_duration_count = 0usize;
 
     for path in &snapshot.queue {
         let path_str = path.to_string_lossy().to_string();
-        let title = path.file_name().map_or_else(
-            || path_str.clone(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        push_u16_string(&mut out, &title);
-        push_u16_string(&mut out, &path_str);
+        let fallback_title = path_title_fallback(path, &path_str);
+
+        if let Some(track) = by_path.get(path.as_path()) {
+            let duration_for_sum = track.duration_secs.and_then(|value| {
+                if value.is_finite() && value > 0.0 {
+                    Some(value)
+                } else {
+                    None
+                }
+            });
+            if let Some(value) = duration_for_sum {
+                total_duration_secs += f64::from(value);
+            } else {
+                unknown_duration_count = unknown_duration_count.saturating_add(1);
+            }
+
+            tracks.push(EncodedQueueTrack {
+                title: if track.title.trim().is_empty() {
+                    fallback_title
+                } else {
+                    track.title.clone()
+                },
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                genre: track.genre.clone(),
+                year: track.year,
+                length_seconds: track.duration_secs.and_then(|value| {
+                    if value.is_finite() && value >= 0.0 {
+                        Some(value)
+                    } else {
+                        None
+                    }
+                }),
+                path: path_str,
+            });
+            continue;
+        }
+
+        unknown_duration_count = unknown_duration_count.saturating_add(1);
+        tracks.push(EncodedQueueTrack {
+            title: fallback_title,
+            artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            year: None,
+            length_seconds: None,
+            path: path_str,
+        });
+    }
+
+    QueueSectionData {
+        total_duration_secs,
+        unknown_duration_count,
+        tracks,
+    }
+}
+
+fn encode_queue_section(snapshot: &BridgeSnapshot, queue_section: &QueueSectionData) -> Vec<u8> {
+    let mut out = Vec::new();
+    let selected_index = snapshot.selected_queue_index.map_or(-1, |idx| idx as i32);
+
+    push_u32(&mut out, snapshot.queue.len() as u32);
+    push_i32(&mut out, selected_index);
+    push_f64(&mut out, queue_section.total_duration_secs);
+    push_u32(&mut out, queue_section.unknown_duration_count as u32);
+    push_u32(&mut out, queue_section.tracks.len() as u32);
+
+    for track in &queue_section.tracks {
+        push_u16_string(&mut out, &track.title);
+        push_u16_string(&mut out, &track.artist);
+        push_u16_string(&mut out, &track.album);
+        push_u16_string(&mut out, &track.genre);
+        push_i32(&mut out, track.year.unwrap_or(i32::MIN));
+        push_f32(&mut out, track.length_seconds.unwrap_or(-1.0));
+        push_u16_string(&mut out, &track.path);
     }
 
     out
@@ -963,6 +1038,8 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u16_string(&mut out, &snapshot.metadata.title);
     push_u16_string(&mut out, &snapshot.metadata.artist);
     push_u16_string(&mut out, &snapshot.metadata.album);
+    push_u16_string(&mut out, &snapshot.metadata.genre);
+    push_i32(&mut out, snapshot.metadata.year.unwrap_or(i32::MIN));
     push_u32(&mut out, snapshot.metadata.sample_rate_hz.unwrap_or(0));
     push_u32(&mut out, snapshot.metadata.bitrate_kbps.unwrap_or(0));
     push_u16(&mut out, snapshot.metadata.channels.map_or(0, u16::from));
@@ -1204,6 +1281,8 @@ mod tests {
                 title: "Sample Track".to_string(),
                 artist: "Sample Artist".to_string(),
                 album: "Sample Album".to_string(),
+                genre: "Rock".to_string(),
+                year: Some(2020),
                 sample_rate_hz: Some(48_000),
                 bitrate_kbps: Some(320),
                 channels: Some(2),
@@ -1255,6 +1334,47 @@ mod tests {
         out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
         out.extend_from_slice(payload);
         out
+    }
+
+    fn read_u32(bytes: &[u8], offset: &mut usize) -> u32 {
+        let start = *offset;
+        let end = start + 4;
+        *offset = end;
+        u32::from_le_bytes(bytes[start..end].try_into().expect("u32 bytes"))
+    }
+
+    fn read_i32(bytes: &[u8], offset: &mut usize) -> i32 {
+        let start = *offset;
+        let end = start + 4;
+        *offset = end;
+        i32::from_le_bytes(bytes[start..end].try_into().expect("i32 bytes"))
+    }
+
+    fn read_f32(bytes: &[u8], offset: &mut usize) -> f32 {
+        let start = *offset;
+        let end = start + 4;
+        *offset = end;
+        f32::from_le_bytes(bytes[start..end].try_into().expect("f32 bytes"))
+    }
+
+    fn read_f64(bytes: &[u8], offset: &mut usize) -> f64 {
+        let start = *offset;
+        let end = start + 8;
+        *offset = end;
+        f64::from_le_bytes(bytes[start..end].try_into().expect("f64 bytes"))
+    }
+
+    fn read_u16_string(bytes: &[u8], offset: &mut usize) -> String {
+        let len = {
+            let start = *offset;
+            let end = start + 2;
+            *offset = end;
+            u16::from_le_bytes(bytes[start..end].try_into().expect("u16 bytes")) as usize
+        };
+        let start = *offset;
+        let end = start + len;
+        *offset = end;
+        String::from_utf8_lossy(&bytes[start..end]).to_string()
     }
 
     #[test]
@@ -1384,9 +1504,64 @@ mod tests {
     }
 
     #[test]
+    fn queue_section_encodes_enriched_track_rows() {
+        let snapshot = sample_snapshot();
+        let queue_section = compute_queue_section_data(&snapshot);
+        let encoded = encode_queue_section(&snapshot, &queue_section);
+
+        let mut offset = 0usize;
+        assert_eq!(read_u32(&encoded, &mut offset), 1);
+        assert_eq!(read_i32(&encoded, &mut offset), 0);
+        assert!((read_f64(&encoded, &mut offset) - 180.0).abs() < 0.001);
+        assert_eq!(read_u32(&encoded, &mut offset), 0);
+        assert_eq!(read_u32(&encoded, &mut offset), 1);
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Track");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Artist");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Album");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Rock");
+        assert_eq!(read_i32(&encoded, &mut offset), 2020);
+        assert!((read_f32(&encoded, &mut offset) - 180.0).abs() < 0.001);
+        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.flac");
+        assert_eq!(offset, encoded.len());
+    }
+
+    #[test]
+    fn metadata_section_encodes_genre_and_year() {
+        let snapshot = sample_snapshot();
+        let encoded = encode_metadata_section(&snapshot);
+
+        let mut offset = 0usize;
+        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.flac");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Track");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Artist");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Album");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "Rock");
+        assert_eq!(read_i32(&encoded, &mut offset), 2020);
+        assert_eq!(read_u32(&encoded, &mut offset), 48_000);
+        assert_eq!(read_u32(&encoded, &mut offset), 320);
+        let channels = {
+            let start = offset;
+            let end = start + 2;
+            offset = end;
+            u16::from_le_bytes(encoded[start..end].try_into().expect("channels"))
+        };
+        assert_eq!(channels, 2);
+        let bit_depth = {
+            let start = offset;
+            let end = start + 2;
+            offset = end;
+            u16::from_le_bytes(encoded[start..end].try_into().expect("bit depth"))
+        };
+        assert_eq!(bit_depth, 24);
+        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.cover.png");
+        assert_eq!(offset, encoded.len());
+    }
+
+    #[test]
     fn snapshot_packet_contract_has_expected_shape() {
         let snapshot = sample_snapshot();
-        let packet = encode_binary_snapshot(&snapshot, compute_queue_total_duration(&snapshot));
+        let queue_section = compute_queue_section_data(&snapshot);
+        let packet = encode_binary_snapshot(&snapshot, &queue_section);
         let (magic, total_len, mask) = parse_packet_header(&packet);
         assert_eq!(magic, SNAPSHOT_MAGIC);
         assert_eq!(total_len as usize, packet.len());

@@ -62,7 +62,6 @@ Kirigami.ApplicationWindow {
     property string globalSearchOpenInitialText: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
-        && active
     readonly property var uiBridge: bridge ? bridge : bridgeFallback
     readonly property var globalSearchModelApi: (uiBridge
         && uiBridge.globalSearchModel
@@ -89,10 +88,16 @@ Kirigami.ApplicationWindow {
         property int queueVersion: 0
         property string queueDurationText: "00:00"
         property var queueItems: []
+        property var queueRows: []
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
         property string currentTrackPath: ""
         property string currentTrackCoverPath: ""
+        property string currentTrackTitle: ""
+        property string currentTrackArtist: ""
+        property string currentTrackAlbum: ""
+        property string currentTrackGenre: ""
+        property var currentTrackYear: null
         property var waveformPeaksPacked: ""
         property bool spectrogramReset: false
         property real dbRange: 90
@@ -220,6 +225,11 @@ Kirigami.ApplicationWindow {
         }
         return minutes.toString().padStart(2, "0")
             + ":" + secs.toString().padStart(2, "0")
+    }
+
+    function queueIndexText(index) {
+        const digits = Math.max(2, String(Math.max(1, uiBridge.queueLength)).length)
+        return (index + 1).toString().padStart(digits, "0")
     }
 
     FontMetrics {
@@ -2934,6 +2944,183 @@ Kirigami.ApplicationWindow {
                             anchors.margins: 6
                             spacing: 6
 
+                            Rectangle {
+                                id: nowPlayingCard
+                                Layout.fillWidth: true
+                                readonly property string resolvedTitle: {
+                                    const explicitTitle = (uiBridge.currentTrackTitle || "").trim()
+                                    if (explicitTitle.length > 0) {
+                                        return explicitTitle
+                                    }
+                                    const pathValue = (uiBridge.currentTrackPath || "").trim()
+                                    if (pathValue.length > 0) {
+                                        const normalized = pathValue.replace(/\\/g, "/")
+                                        const parts = normalized.split("/")
+                                        const tail = parts.length > 0 ? parts[parts.length - 1] : ""
+                                        return tail.length > 0 ? tail : pathValue
+                                    }
+                                    return "Nothing playing"
+                                }
+                                readonly property string resolvedArtist: {
+                                    const artistValue = (uiBridge.currentTrackArtist || "").trim()
+                                    return artistValue.length > 0 ? artistValue : "Unknown artist"
+                                }
+                                readonly property string resolvedAlbum: {
+                                    const albumValue = (uiBridge.currentTrackAlbum || "").trim()
+                                    return albumValue.length > 0 ? albumValue : "Unknown album"
+                                }
+                                readonly property string resolvedGenre: {
+                                    const genreValue = (uiBridge.currentTrackGenre || "").trim()
+                                    return genreValue.length > 0 ? genreValue : "Unknown genre"
+                                }
+                                readonly property string resolvedTrackNumber: {
+                                    if (uiBridge.playingQueueIndex !== undefined
+                                            && uiBridge.playingQueueIndex !== null
+                                            && uiBridge.playingQueueIndex >= 0) {
+                                        return root.queueIndexText(uiBridge.playingQueueIndex)
+                                    }
+                                    if (uiBridge.selectedQueueIndex !== undefined
+                                            && uiBridge.selectedQueueIndex !== null
+                                            && uiBridge.selectedQueueIndex >= 0) {
+                                        return root.queueIndexText(uiBridge.selectedQueueIndex)
+                                    }
+                                    return "--"
+                                }
+                                readonly property string resolvedYear: {
+                                    const yearValue = uiBridge.currentTrackYear
+                                    if (yearValue !== undefined && yearValue !== null && String(yearValue).length > 0) {
+                                        return String(yearValue)
+                                    }
+                                    return "----"
+                                }
+                                implicitHeight: nowPlayingColumn.implicitHeight + 12
+                                radius: 6
+                                color: Kirigami.Theme.alternateBackgroundColor
+                                border.color: Qt.rgba(0, 0, 0, 0.16)
+
+                                ColumnLayout {
+                                    id: nowPlayingColumn
+                                    anchors.fill: parent
+                                    anchors.margins: 6
+                                    spacing: 2
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Label {
+                                            text: "Title:"
+                                            Layout.preferredWidth: 44
+                                            horizontalAlignment: Text.AlignRight
+                                            color: Kirigami.Theme.disabledTextColor
+                                            font.pixelSize: 11
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: nowPlayingCard.resolvedTitle
+                                            elide: Text.ElideRight
+                                            font.bold: true
+                                            font.pixelSize: 11
+                                            color: Kirigami.Theme.textColor
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Label {
+                                            text: "Artist:"
+                                            Layout.preferredWidth: 44
+                                            horizontalAlignment: Text.AlignRight
+                                            color: Kirigami.Theme.disabledTextColor
+                                            font.pixelSize: 11
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: nowPlayingCard.resolvedArtist
+                                            elide: Text.ElideRight
+                                            color: Kirigami.Theme.textColor
+                                            font.pixelSize: 11
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Label {
+                                            text: "Album:"
+                                            Layout.preferredWidth: 44
+                                            horizontalAlignment: Text.AlignRight
+                                            color: Kirigami.Theme.disabledTextColor
+                                            font.pixelSize: 11
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: nowPlayingCard.resolvedAlbum
+                                            elide: Text.ElideRight
+                                            color: Kirigami.Theme.textColor
+                                            font.pixelSize: 11
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Label {
+                                            text: "Track:"
+                                            Layout.preferredWidth: 44
+                                            horizontalAlignment: Text.AlignRight
+                                            color: Kirigami.Theme.disabledTextColor
+                                            font.pixelSize: 11
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: nowPlayingCard.resolvedTrackNumber
+                                            elide: Text.ElideRight
+                                            color: Kirigami.Theme.textColor
+                                            font.pixelSize: 11
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Label {
+                                            text: "Year:"
+                                            Layout.preferredWidth: 44
+                                            horizontalAlignment: Text.AlignRight
+                                            color: Kirigami.Theme.disabledTextColor
+                                            font.pixelSize: 11
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: nowPlayingCard.resolvedYear
+                                            elide: Text.ElideRight
+                                            color: Kirigami.Theme.textColor
+                                            font.pixelSize: 11
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Label {
+                                            text: "Genre:"
+                                            Layout.preferredWidth: 44
+                                            horizontalAlignment: Text.AlignRight
+                                            color: Kirigami.Theme.disabledTextColor
+                                            font.pixelSize: 11
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: nowPlayingCard.resolvedGenre
+                                            elide: Text.ElideRight
+                                            color: Kirigami.Theme.textColor
+                                            font.pixelSize: 11
+                                        }
+                                    }
+                                }
+                            }
+
                             Label {
                                 Layout.fillWidth: true
                                 readonly property int scanBacklog: Math.max(
@@ -3220,9 +3407,24 @@ Kirigami.ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.leftMargin: 8
                                 anchors.rightMargin: 8
-                                Label { text: "#"; Layout.preferredWidth: 24 }
+                                Label {
+                                    text: "▶"
+                                    Layout.preferredWidth: 24
+                                    horizontalAlignment: Text.AlignHCenter
+                                }
+                                Label {
+                                    text: "#"
+                                    Layout.preferredWidth: 34
+                                    horizontalAlignment: Text.AlignRight
+                                }
                                 Label { text: "Title"; Layout.fillWidth: true }
-                                Label { text: "Length"; Layout.preferredWidth: 72 }
+                                Label { text: "Artist"; Layout.preferredWidth: 170 }
+                                Label { text: "Album"; Layout.preferredWidth: 190 }
+                                Label {
+                                    text: "Length"
+                                    Layout.preferredWidth: 76
+                                    horizontalAlignment: Text.AlignRight
+                                }
                             }
                         }
 
@@ -3231,9 +3433,16 @@ Kirigami.ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
-                            model: uiBridge.queueItems
+                            model: uiBridge.queueRows
 
                             delegate: Rectangle {
+                                readonly property var rowData: (modelData && typeof modelData === "object")
+                                    ? modelData
+                                    : ({})
+                                readonly property string titleValue: rowData.title || ""
+                                readonly property string artistValue: rowData.artist || ""
+                                readonly property string albumValue: rowData.album || ""
+                                readonly property string lengthTextValue: rowData.lengthText || "--:--"
                                 width: ListView.view.width
                                 height: 24
                                 color: root.isQueueIndexSelected(index)
@@ -3245,14 +3454,15 @@ Kirigami.ApplicationWindow {
                                     anchors.fill: parent
                                     anchors.leftMargin: 8
                                     anchors.rightMargin: 8
+                                    spacing: 6
                                     Label {
-                                        text: (uiBridge.playbackState !== "Stopped"
-                                                && index === uiBridge.playingQueueIndex)
-                                            ? "▶"
-                                            : (index + 1).toString().padStart(2, "0")
-                                        Layout.preferredWidth: 24
-                                        font.bold: uiBridge.playbackState !== "Stopped"
+                                        text: uiBridge.playbackState !== "Stopped"
                                             && index === uiBridge.playingQueueIndex
+                                            ? "▶"
+                                            : ""
+                                        Layout.preferredWidth: 24
+                                        horizontalAlignment: Text.AlignHCenter
+                                        font.bold: true
                                         color: root.isQueueIndexSelected(index)
                                             ? Kirigami.Theme.highlightedTextColor
                                             : ((uiBridge.playbackState !== "Stopped"
@@ -3261,7 +3471,15 @@ Kirigami.ApplicationWindow {
                                                 : Kirigami.Theme.textColor)
                                     }
                                     Label {
-                                        text: modelData
+                                        text: root.queueIndexText(index)
+                                        Layout.preferredWidth: 34
+                                        horizontalAlignment: Text.AlignRight
+                                        color: root.isQueueIndexSelected(index)
+                                            ? Kirigami.Theme.highlightedTextColor
+                                            : Kirigami.Theme.textColor
+                                    }
+                                    Label {
+                                        text: titleValue
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                         color: root.isQueueIndexSelected(index)
@@ -3269,8 +3487,24 @@ Kirigami.ApplicationWindow {
                                             : Kirigami.Theme.textColor
                                     }
                                     Label {
-                                        text: ""
-                                        Layout.preferredWidth: 72
+                                        text: artistValue
+                                        Layout.preferredWidth: 170
+                                        elide: Text.ElideRight
+                                        color: root.isQueueIndexSelected(index)
+                                            ? Kirigami.Theme.highlightedTextColor
+                                            : Kirigami.Theme.textColor
+                                    }
+                                    Label {
+                                        text: albumValue
+                                        Layout.preferredWidth: 190
+                                        elide: Text.ElideRight
+                                        color: root.isQueueIndexSelected(index)
+                                            ? Kirigami.Theme.highlightedTextColor
+                                            : Kirigami.Theme.textColor
+                                    }
+                                    Label {
+                                        text: lengthTextValue
+                                        Layout.preferredWidth: 76
                                         horizontalAlignment: Text.AlignRight
                                         color: root.isQueueIndexSelected(index)
                                             ? Kirigami.Theme.highlightedTextColor

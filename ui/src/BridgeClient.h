@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QVariant>
 #include <QVariantMap>
 #include <QVariantList>
 
@@ -31,10 +32,16 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int queueVersion READ queueVersion NOTIFY snapshotChanged)
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY snapshotChanged)
+    Q_PROPERTY(QVariantList queueRows READ queueRows NOTIFY snapshotChanged)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackGenre READ currentTrackGenre NOTIFY snapshotChanged)
+    Q_PROPERTY(QVariant currentTrackYear READ currentTrackYear NOTIFY snapshotChanged)
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
     Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY analysisChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
@@ -86,10 +93,16 @@ public:
     int queueVersion() const;
     QString queueDurationText() const;
     QStringList queueItems() const;
+    QVariantList queueRows() const;
     int selectedQueueIndex() const;
     int playingQueueIndex() const;
     QString currentTrackPath() const;
     QString currentTrackCoverPath() const;
+    QString currentTrackTitle() const;
+    QString currentTrackArtist() const;
+    QString currentTrackAlbum() const;
+    QString currentTrackGenre() const;
+    QVariant currentTrackYear() const;
     QByteArray waveformPeaksPacked() const;
     bool spectrogramReset() const;
     int sampleRateHz() const;
@@ -251,11 +264,17 @@ private:
     int m_queueVersion{0};
     QString m_queueDurationText{"00:00"};
     QStringList m_queueItems;
+    QVariantList m_queueRows;
     QStringList m_queuePaths;
     int m_selectedQueueIndex{-1};
     int m_playingQueueIndex{-1};
     QString m_currentTrackPath;
     QString m_currentTrackCoverPath;
+    QString m_currentTrackTitle;
+    QString m_currentTrackArtist;
+    QString m_currentTrackAlbum;
+    QString m_currentTrackGenre;
+    QVariant m_currentTrackYear;
     QByteArray m_waveformPeaksPacked;
     QByteArray m_spectrogramRowsPacked;
     int m_spectrogramPackedRows{0};

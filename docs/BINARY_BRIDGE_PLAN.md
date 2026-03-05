@@ -98,7 +98,14 @@ Sections (each prefixed with [u32 section_length], only present if bit set in ma
   Bit 1: Queue
     [u32 queue_len] [i32 selected_index] [f64 total_duration_secs]
     [u32 unknown_duration_count] [u32 track_count]
-    Per track: [u16 title_len] [title_bytes...] [u16 path_len] [path_bytes...]
+    Per track:
+      [u16 title_len] [title_bytes...]
+      [u16 artist_len] [artist_bytes...]
+      [u16 album_len] [album_bytes...]
+      [u16 genre_len] [genre_bytes...]
+      [i32 year] (i32::MIN when unknown)
+      [f32 length_secs] (-1 when unknown)
+      [u16 path_len] [path_bytes...]
 
   Bit 2: Library Meta
     [u32 root_count] [u32 track_count] [u8 scan_in_progress] [i32 sort_mode]
@@ -129,6 +136,8 @@ Sections (each prefixed with [u32 section_length], only present if bit set in ma
     [u16 title_len] [title_bytes...]
     [u16 artist_len] [artist_bytes...]
     [u16 album_len] [album_bytes...]
+    [u16 genre_len] [genre_bytes...]
+    [i32 year] (i32::MIN when unknown)
     [u32 sample_rate_hz] [u32 bitrate_kbps] [u16 channels] [u16 bit_depth]
     [u16 cover_path_len] [cover_path_bytes...]
 

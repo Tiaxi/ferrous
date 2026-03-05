@@ -721,6 +721,10 @@ QStringList BridgeClient::queueItems() const {
     return m_queueItems;
 }
 
+QVariantList BridgeClient::queueRows() const {
+    return m_queueRows;
+}
+
 int BridgeClient::selectedQueueIndex() const {
     return m_selectedQueueIndex;
 }
@@ -735,6 +739,26 @@ QString BridgeClient::currentTrackPath() const {
 
 QString BridgeClient::currentTrackCoverPath() const {
     return m_currentTrackCoverPath;
+}
+
+QString BridgeClient::currentTrackTitle() const {
+    return m_currentTrackTitle;
+}
+
+QString BridgeClient::currentTrackArtist() const {
+    return m_currentTrackArtist;
+}
+
+QString BridgeClient::currentTrackAlbum() const {
+    return m_currentTrackAlbum;
+}
+
+QString BridgeClient::currentTrackGenre() const {
+    return m_currentTrackGenre;
+}
+
+QVariant BridgeClient::currentTrackYear() const {
+    return m_currentTrackYear;
 }
 
 QByteArray BridgeClient::waveformPeaksPacked() const {
@@ -2033,6 +2057,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 
     const QString metadataSourcePath = snapshot.metadata.present ? snapshot.metadata.sourcePath : QString{};
     const QString metadataCoverPath = snapshot.metadata.present ? snapshot.metadata.coverPath : QString{};
+    const QString metadataGenre = snapshot.metadata.present ? snapshot.metadata.genre : QString{};
+    const int metadataYear = snapshot.metadata.present
+        ? snapshot.metadata.year
+        : std::numeric_limits<int>::min();
     QString metadataCoverUrl;
     if (!metadataCoverPath.trimmed().isEmpty() && metadataSourcePath == currentPath) {
         const QUrl maybeUrl(metadataCoverPath);
@@ -2120,15 +2148,40 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 
     if (snapshot.queue.present) {
         QStringList items;
+        QVariantList rows;
         QStringList paths;
         items.reserve(snapshot.queue.tracks.size());
+        rows.reserve(snapshot.queue.tracks.size());
         paths.reserve(snapshot.queue.tracks.size());
         for (const auto &track : snapshot.queue.tracks) {
+            const QString title = track.title.trimmed().isEmpty() ? track.path : track.title;
             paths.push_back(track.path);
-            items.push_back(track.title.isEmpty() ? track.path : track.title);
+            items.push_back(title);
+
+            QVariantMap row;
+            row.insert(QStringLiteral("title"), title);
+            row.insert(QStringLiteral("artist"), track.artist);
+            row.insert(QStringLiteral("album"), track.album);
+            row.insert(QStringLiteral("genre"), track.genre);
+            row.insert(
+                QStringLiteral("lengthText"),
+                track.lengthSeconds >= 0.0f
+                    ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
+                    : QStringLiteral("--:--"));
+            row.insert(QStringLiteral("path"), track.path);
+            if (track.year != std::numeric_limits<int>::min()) {
+                row.insert(QStringLiteral("year"), track.year);
+            } else {
+                row.insert(QStringLiteral("year"), QVariant{});
+            }
+            rows.push_back(row);
         }
         if (m_queueItems != items) {
             m_queueItems = items;
+            changed = true;
+        }
+        if (m_queueRows != rows) {
+            m_queueRows = rows;
             changed = true;
         }
         if (m_queuePaths != paths) {
@@ -2166,6 +2219,85 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_playingQueueIndex != playing) {
         m_playingQueueIndex = playing;
+        changed = true;
+    }
+
+    QString nextTrackTitle;
+    QString nextTrackArtist;
+    QString nextTrackAlbum;
+    QString nextTrackGenre;
+    QVariant nextTrackYear;
+    if (nextState != QStringLiteral("Stopped") && !currentPath.isEmpty()) {
+        int detailIndex = playing;
+        if (detailIndex < 0 && !m_queuePaths.isEmpty()) {
+            detailIndex = m_queuePaths.indexOf(currentPath);
+        }
+
+        if (snapshot.queue.present
+            && detailIndex >= 0
+            && detailIndex < snapshot.queue.tracks.size()) {
+            const auto &track = snapshot.queue.tracks[detailIndex];
+            nextTrackTitle = track.title;
+            nextTrackArtist = track.artist;
+            nextTrackAlbum = track.album;
+            nextTrackGenre = track.genre;
+            if (track.year != std::numeric_limits<int>::min()) {
+                nextTrackYear = track.year;
+            }
+        } else if (detailIndex >= 0 && detailIndex < m_queueRows.size()) {
+            const QVariantMap row = m_queueRows[detailIndex].toMap();
+            nextTrackTitle = row.value(QStringLiteral("title")).toString();
+            nextTrackArtist = row.value(QStringLiteral("artist")).toString();
+            nextTrackAlbum = row.value(QStringLiteral("album")).toString();
+            nextTrackGenre = row.value(QStringLiteral("genre")).toString();
+            const QVariant rowYear = row.value(QStringLiteral("year"));
+            if (rowYear.isValid() && !rowYear.isNull()) {
+                nextTrackYear = rowYear;
+            }
+        }
+
+        if (snapshot.metadata.present && metadataSourcePath == currentPath) {
+            if (!snapshot.metadata.title.trimmed().isEmpty()) {
+                nextTrackTitle = snapshot.metadata.title;
+            }
+            if (!snapshot.metadata.artist.trimmed().isEmpty()) {
+                nextTrackArtist = snapshot.metadata.artist;
+            }
+            if (!snapshot.metadata.album.trimmed().isEmpty()) {
+                nextTrackAlbum = snapshot.metadata.album;
+            }
+            if (!metadataGenre.trimmed().isEmpty()) {
+                nextTrackGenre = metadataGenre;
+            }
+            if (metadataYear != std::numeric_limits<int>::min()) {
+                nextTrackYear = metadataYear;
+            }
+        }
+
+        if (nextTrackTitle.trimmed().isEmpty()) {
+            const QFileInfo info(currentPath);
+            const QString fallbackTitle = info.fileName();
+            nextTrackTitle = fallbackTitle.isEmpty() ? currentPath : fallbackTitle;
+        }
+    }
+    if (m_currentTrackTitle != nextTrackTitle) {
+        m_currentTrackTitle = nextTrackTitle;
+        changed = true;
+    }
+    if (m_currentTrackArtist != nextTrackArtist) {
+        m_currentTrackArtist = nextTrackArtist;
+        changed = true;
+    }
+    if (m_currentTrackAlbum != nextTrackAlbum) {
+        m_currentTrackAlbum = nextTrackAlbum;
+        changed = true;
+    }
+    if (m_currentTrackGenre != nextTrackGenre) {
+        m_currentTrackGenre = nextTrackGenre;
+        changed = true;
+    }
+    if (m_currentTrackYear != nextTrackYear) {
+        m_currentTrackYear = nextTrackYear;
         changed = true;
     }
 

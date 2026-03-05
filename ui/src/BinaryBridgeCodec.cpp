@@ -198,12 +198,28 @@ bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
     tracks.reserve(static_cast<int>(trackCount));
     for (quint32 i = 0; i < trackCount; ++i) {
         QString title;
+        QString artist;
+        QString album;
+        QString genre;
+        qint32 year = std::numeric_limits<int>::min();
+        float lengthSeconds = -1.0f;
         QString path;
-        if (!reader.readUtf8U16(&title) || !reader.readUtf8U16(&path)) {
+        if (!reader.readUtf8U16(&title)
+            || !reader.readUtf8U16(&artist)
+            || !reader.readUtf8U16(&album)
+            || !reader.readUtf8U16(&genre)
+            || !reader.readI32(&year)
+            || !reader.readF32(&lengthSeconds)
+            || !reader.readUtf8U16(&path)) {
             return false;
         }
         DecodedQueueTrack item;
         item.title = title;
+        item.artist = artist;
+        item.album = album;
+        item.genre = genre;
+        item.year = year;
+        item.lengthSeconds = lengthSeconds;
         item.path = path;
         tracks.push_back(std::move(item));
     }
@@ -300,6 +316,8 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
         || !reader.readUtf8U16(&out->title)
         || !reader.readUtf8U16(&out->artist)
         || !reader.readUtf8U16(&out->album)
+        || !reader.readUtf8U16(&out->genre)
+        || !reader.readI32(&out->year)
         || !reader.readU32(&sampleRateHz)
         || !reader.readU32(&bitrateKbps)
         || !reader.readU16(&channels)

@@ -74,6 +74,11 @@ struct DecodedPlayback {
 
 struct DecodedQueueTrack {
     QString title;
+    QString artist;
+    QString album;
+    QString genre;
+    int year{std::numeric_limits<int>::min()};
+    float lengthSeconds{-1.0f};
     QString path;
 };
 
@@ -110,6 +115,8 @@ struct DecodedMetadata {
     QString title;
     QString artist;
     QString album;
+    QString genre;
+    int year{std::numeric_limits<int>::min()};
     int sampleRateHz{0};
     int bitrateKbps{0};
     int channels{0};
