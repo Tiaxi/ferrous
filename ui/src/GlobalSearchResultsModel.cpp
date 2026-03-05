@@ -57,6 +57,27 @@ QHash<int, QByteArray> GlobalSearchResultsModel::roleNames() const {
 }
 
 void GlobalSearchResultsModel::replaceRows(QVector<QVariantMap> rows) {
+    if (m_rows.isEmpty() && rows.isEmpty()) {
+        return;
+    }
+    if (rows.isEmpty()) {
+        beginRemoveRows(
+            QModelIndex{},
+            0,
+            static_cast<int>(m_rows.size()) - 1);
+        m_rows.clear();
+        endRemoveRows();
+        return;
+    }
+    if (m_rows.isEmpty()) {
+        beginInsertRows(
+            QModelIndex{},
+            0,
+            static_cast<int>(rows.size()) - 1);
+        m_rows = std::move(rows);
+        endInsertRows();
+        return;
+    }
     if (m_rows.size() == rows.size()) {
         if (m_rows == rows) {
             return;
