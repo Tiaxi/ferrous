@@ -205,6 +205,23 @@ Kirigami.ApplicationWindow {
         return Math.max(140, Math.ceil(maxPx))
     }
 
+    function formatSeekTime(seconds) {
+        if (!isFinite(seconds) || seconds < 0) {
+            return "00:00"
+        }
+        const totalSeconds = Math.floor(seconds)
+        const hours = Math.floor(totalSeconds / 3600)
+        const minutes = Math.floor((totalSeconds % 3600) / 60)
+        const secs = totalSeconds % 60
+        if (hours > 0) {
+            return hours.toString()
+                + ":" + minutes.toString().padStart(2, "0")
+                + ":" + secs.toString().padStart(2, "0")
+        }
+        return minutes.toString().padStart(2, "0")
+            + ":" + secs.toString().padStart(2, "0")
+    }
+
     FontMetrics {
         id: menuFontMetrics
         font: root.font
@@ -2773,6 +2790,42 @@ Kirigami.ApplicationWindow {
                         radius: 1
                         color: "#2f7cd6"
                         border.color: "#1f5aa7"
+                    }
+
+                    Item {
+                        id: seekDragOverlay
+                        visible: seekSlider.pressed && seekSlider.durationKnown
+                        z: 20
+                        property real playheadX: seekSlider.leftPadding
+                            + seekSlider.stableVisualPosition * seekSlider.availableWidth
+                        property real leftCandidateX: playheadX - width - 8
+                        property real rightCandidateX: playheadX + 8
+                        width: dragTimeLabel.implicitWidth + 14
+                        height: Math.max(18, seekSlider.availableHeight - 4)
+                        y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
+                        x: {
+                            const minX = 2
+                            const maxX = seekSlider.width - width - 2
+                            if (leftCandidateX >= minX) {
+                                return Math.min(maxX, leftCandidateX)
+                            }
+                            return Math.max(minX, Math.min(maxX, rightCandidateX))
+                        }
+
+                        Rectangle {
+                            id: bubbleRect
+                            anchors.fill: parent
+                            radius: 2
+                            color: Qt.rgba(52 / 255, 137 / 255, 235 / 255, 0.76)
+                            border.color: Qt.rgba(198 / 255, 229 / 255, 1.0, 0.52)
+
+                            Label {
+                                id: dragTimeLabel
+                                anchors.centerIn: parent
+                                text: root.formatSeekTime(seekSlider.value)
+                                color: "white"
+                            }
+                        }
                     }
                 }
 
