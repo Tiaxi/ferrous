@@ -59,10 +59,7 @@ Kirigami.ApplicationWindow {
     property bool globalSearchOpening: false
     property bool globalSearchIgnoreRefocusFind: false
     property string pendingGlobalSearchPrefillText: ""
-    Keys.priority: Keys.BeforeItem
-    Keys.onPressed: function(event) {
-        root.tryCaptureGlobalSearchPrefill(event)
-    }
+    property string globalSearchOpenInitialText: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -1204,6 +1201,9 @@ Kirigami.ApplicationWindow {
         root.globalSearchOpening = true
         root.globalSearchIgnoreRefocusFind = true
         root.pendingGlobalSearchPrefillText = ""
+        root.globalSearchOpenInitialText = globalSearchQueryField
+            ? (globalSearchQueryField.text || "")
+            : ""
         globalSearchDialog.open()
         Qt.callLater(function() {
             if (globalSearchDialog.visible) {
@@ -1997,7 +1997,8 @@ Kirigami.ApplicationWindow {
             if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
                 globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
                 root.pendingGlobalSearchPrefillText = ""
-            } else if ((globalSearchQueryField.text || "").length > 0) {
+            } else if ((globalSearchQueryField.text || "").length > 0
+                    && (globalSearchQueryField.text || "") === (root.globalSearchOpenInitialText || "")) {
                 globalSearchQueryField.selectAll()
             }
             uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
@@ -2007,6 +2008,7 @@ Kirigami.ApplicationWindow {
             root.globalSearchIgnoreRefocusFind = false
             globalSearchOpenSettleTimer.stop()
             root.pendingGlobalSearchPrefillText = ""
+            root.globalSearchOpenInitialText = ""
             uiBridge.setGlobalSearchQuery("")
         }
 
