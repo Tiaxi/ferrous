@@ -15,6 +15,18 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+#[cfg(feature = "profiling-logs")]
+macro_rules! profile_eprintln {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "profiling-logs"))]
+macro_rules! profile_eprintln {
+    ($($arg:tt)*) => {};
+}
+
 #[derive(Debug, Clone)]
 pub enum AnalysisCommand {
     SetTrack {
@@ -69,6 +81,10 @@ struct WaveformCacheEntry {
 }
 
 impl AnalysisEngine {
+    #[cfg_attr(
+        not(feature = "profiling-logs"),
+        allow(unused_variables, unused_assignments)
+    )]
     pub fn new() -> (Self, Receiver<AnalysisEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<AnalysisCommand>();
         // Bounded PCM queue to prevent unbounded backlog under decode bursts.
@@ -100,12 +116,18 @@ impl AnalysisEngine {
             let mut pcm_fifo: VecDeque<f32> = VecDeque::with_capacity(48_000);
             let mut last_tick_time = std::time::Instant::now();
             let mut sample_credit = 0.0f64;
-            let profile_enabled = std::env::var_os("FERROUS_PROFILE").is_some();
+            let profile_enabled =
+                cfg!(feature = "profiling-logs") && std::env::var_os("FERROUS_PROFILE").is_some();
             let mut prof_last = std::time::Instant::now();
+            #[allow(unused_variables, unused_assignments)]
             let mut prof_pcm = 0usize;
+            #[allow(unused_variables, unused_assignments)]
             let mut prof_rows = 0usize;
+            #[allow(unused_variables, unused_assignments)]
             let mut prof_ticks = 0usize;
+            #[allow(unused_variables, unused_assignments)]
             let mut prof_in_samples = 0usize;
+            #[allow(unused_variables, unused_assignments)]
             let mut prof_out_samples = 0usize;
             let mut ticks_without_row = 0usize;
 
@@ -375,7 +397,7 @@ impl AnalysisEngine {
                         );
 
                         if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
-                            eprintln!(
+                            profile_eprintln!(
                                 "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_samples={} fft={} hop={}",
                                 prof_ticks,
                                 prof_pcm,
@@ -761,14 +783,17 @@ impl StftComputer {
         rows
     }
 
+    #[allow(dead_code)]
     fn pending_len(&self) -> usize {
         self.pending_available()
     }
 
+    #[allow(dead_code)]
     fn fft_size(&self) -> usize {
         self.fft_size
     }
 
+    #[allow(dead_code)]
     fn hop_size(&self) -> usize {
         self.hop_size
     }

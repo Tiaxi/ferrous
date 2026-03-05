@@ -9,6 +9,7 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+option(FERROUS_ENABLE_PROFILE_LOGS "Compile profiling log output into binaries" OFF)
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
@@ -25,9 +26,13 @@ qt_policy(SET QTP0004 NEW)
 
 set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
+set(FERROUS_RUST_FEATURES "gst")
+if(FERROUS_ENABLE_PROFILE_LOGS)
+    set(FERROUS_RUST_FEATURES "gst,profiling-logs")
+endif()
 
 add_custom_target(ferrous_rust_bridge ALL
-    COMMAND /bin/zsh -lc "if [ -f \"$HOME/.cargo/env\" ]; then source \"$HOME/.cargo/env\"; fi; cargo build --release --features gst --lib"
+    COMMAND /bin/zsh -lc "if [ -f \"$HOME/.cargo/env\" ]; then source \"$HOME/.cargo/env\"; fi; cargo build --release --features ${FERROUS_RUST_FEATURES} --lib"
     WORKING_DIRECTORY "${FERROUS_ROOT_DIR}"
     BYPRODUCTS "${FERROUS_RUST_STATIC_LIB}"
     COMMENT "Building Rust static library for in-process bridge"
@@ -73,6 +78,10 @@ target_link_libraries(ferrous PRIVATE
     pthread
 )
 
+if(FERROUS_ENABLE_PROFILE_LOGS)
+    target_compile_definitions(ferrous PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
+endif()
+
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
 
@@ -96,6 +105,9 @@ if(BUILD_TESTING)
         Qt6::Test
         KF6::Kirigami
     )
+    if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_compile_definitions(ferrous_qml_smoke_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
+    endif()
     set_target_properties(ferrous_qml_smoke_tests PROPERTIES
         QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )

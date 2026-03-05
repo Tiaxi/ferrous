@@ -1188,7 +1188,13 @@ Kirigami.ApplicationWindow {
 
     function openDiagnostics() {
         diagnosticsDialog.open()
-        uiBridge.reloadDiagnosticsFromDisk()
+    }
+
+    function refreshDiagnosticsTextView() {
+        if (!diagnosticsTextArea) {
+            return
+        }
+        diagnosticsTextArea.text = uiBridge.diagnosticsText || ""
     }
 
     function requestLibraryRevealForSearchRow(row) {
@@ -2406,7 +2412,15 @@ Kirigami.ApplicationWindow {
         standardButtons: Dialog.Close
         width: Math.min(980, root.width - 80)
         height: Math.min(680, root.height - 80)
-        onOpened: uiBridge.reloadDiagnosticsFromDisk()
+        onOpened: {
+            uiBridge.reloadDiagnosticsFromDisk()
+            root.refreshDiagnosticsTextView()
+        }
+        onClosed: {
+            if (diagnosticsTextArea) {
+                diagnosticsTextArea.text = ""
+            }
+        }
 
         contentItem: ColumnLayout {
             spacing: 8
@@ -2434,11 +2448,17 @@ Kirigami.ApplicationWindow {
                 Layout.fillWidth: true
                 Button {
                     text: "Reload"
-                    onClicked: uiBridge.reloadDiagnosticsFromDisk()
+                    onClicked: {
+                        uiBridge.reloadDiagnosticsFromDisk()
+                        root.refreshDiagnosticsTextView()
+                    }
                 }
                 Button {
                     text: "Clear"
-                    onClicked: uiBridge.clearDiagnostics()
+                    onClicked: {
+                        uiBridge.clearDiagnostics()
+                        root.refreshDiagnosticsTextView()
+                    }
                 }
                 Item { Layout.fillWidth: true }
                 Button {
@@ -2459,7 +2479,7 @@ Kirigami.ApplicationWindow {
 
                 TextArea {
                     id: diagnosticsTextArea
-                    text: uiBridge.diagnosticsText || ""
+                    text: ""
                     readOnly: true
                     selectByMouse: true
                     wrapMode: TextEdit.NoWrap

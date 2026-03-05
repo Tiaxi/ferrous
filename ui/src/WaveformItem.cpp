@@ -17,11 +17,13 @@ WaveformItem::WaveformItem(QQuickItem *parent)
     if (useFboTarget) {
         setRenderTarget(QQuickPaintedItem::FramebufferObject);
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
     if (m_profileEnabled) {
         m_profileLast = std::chrono::steady_clock::now();
     }
+#endif
 }
 
 QByteArray WaveformItem::peaksData() const {
@@ -100,6 +102,7 @@ void WaveformItem::paint(QPainter *painter) {
         }
     }
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
         const auto paint_end = std::chrono::steady_clock::now();
         m_profilePaints += 1;
@@ -118,4 +121,5 @@ void WaveformItem::paint(QPainter *painter) {
             m_profilePaintMs = 0.0;
         }
     }
+#endif
 }

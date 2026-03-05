@@ -56,15 +56,20 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     if (useFboTarget) {
         setRenderTarget(QQuickPaintedItem::FramebufferObject);
     }
-    m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS")
+    m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    m_forceFpsOverlay = m_forceFpsOverlay
         || qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
+#endif
     m_showFpsOverlay = m_forceFpsOverlay;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
     if (m_profileEnabled) {
         m_profileLast = std::chrono::steady_clock::now();
     }
+#endif
     rebuildPalette();
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
     bindWindowFpsTracking(window());
@@ -296,6 +301,7 @@ void SpectrogramItem::paint(QPainter *painter) {
 
     drawFpsOverlay(painter);
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
         const auto paint_end = std::chrono::steady_clock::now();
         m_profilePaints += 1;
@@ -315,6 +321,7 @@ void SpectrogramItem::paint(QPainter *painter) {
             m_profilePaintMs = 0.0;
         }
     }
+#endif
 }
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {

@@ -25,6 +25,14 @@
 #include <QUrlQuery>
 #include <QtEndian>
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+#define FERROUS_PROFILE_LOG_DIAGNOSTIC(category, message) logDiagnostic(category, message)
+#else
+#define FERROUS_PROFILE_LOG_DIAGNOSTIC(category, message) \
+    do {                                                  \
+    } while (false)
+#endif
+
 namespace {
 constexpr quint8 kAnalysisFrameMagic = 0xA1;
 constexpr quint8 kAnalysisFlagWaveform = 0x01;
@@ -1300,7 +1308,9 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
             emit globalSearchResultsChanged();
         }
         m_globalSearchSentAtMs.clear();
-        logDiagnostic(QStringLiteral("search"), QStringLiteral("clear query"));
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("search"),
+            QStringLiteral("clear query"));
         m_globalSearchDebounceTimer.stop();
         flushGlobalSearchQuery();
         return;
@@ -1419,8 +1429,6 @@ void BridgeClient::appendDiagnosticLine(const QString &line) {
             m_diagnosticsLines.begin(),
             m_diagnosticsLines.begin() + removeCount);
     }
-    rebuildDiagnosticsText();
-    emit diagnosticsChanged();
 }
 
 void BridgeClient::rebuildDiagnosticsText() {
@@ -1577,7 +1585,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     m_searchFramesReceived++;
     if (!frame.decodeError.isEmpty()) {
         m_searchFramesDecodeErrors++;
-        logDiagnostic(
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
             QStringLiteral("search"),
             QStringLiteral("decode error seq=%1 error=%2")
                 .arg(frame.seq)
@@ -1590,7 +1598,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
         && !isNewerSeq(frame.seq, m_latestGlobalSearchSeqSent)) {
         m_searchFramesDroppedStale++;
         m_globalSearchSentAtMs.remove(frame.seq);
-        logDiagnostic(
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
             QStringLiteral("search"),
             QStringLiteral("drop stale frame seq=%1 latestSent=%2 dropped=%3")
                 .arg(frame.seq)
@@ -1603,7 +1611,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
         && !isNewerSeq(frame.seq, m_globalSearchSeq)) {
         m_searchFramesDroppedStale++;
         m_globalSearchSentAtMs.remove(frame.seq);
-        logDiagnostic(
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
             QStringLiteral("search"),
             QStringLiteral("drop non-new frame seq=%1 current=%2 dropped=%3")
                 .arg(frame.seq)
@@ -1647,7 +1655,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 latencyMs = sentAtMs > 0 ? (nowMs - sentAtMs) : -1;
     const qint64 queueDelayMs = frame.ffiPoppedAtMs > 0 ? (nowMs - frame.ffiPoppedAtMs) : -1;
-    logDiagnostic(
+    FERROUS_PROFILE_LOG_DIAGNOSTIC(
         QStringLiteral("search"),
         QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5 ffiPopMs=%6 decodeMs=%7 materializeMs=%8 modelApplyMs=%9 queueDelayMs=%10 workerMs=%11 coalesced=%12 coalescedUi=%13 recv=%14 applied=%15 dropped=%16 decodeErr=%17")
             .arg(frame.seq)
@@ -1672,11 +1680,15 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
 
 void BridgeClient::flushGlobalSearchQuery() {
     if (m_ffiBridge == nullptr) {
-        logDiagnostic(QStringLiteral("search"), QStringLiteral("skip send: bridge unavailable"));
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("search"),
+            QStringLiteral("skip send: bridge unavailable"));
         return;
     }
     if (m_pendingGlobalSearchQuery == m_lastGlobalSearchQuerySent) {
-        logDiagnostic(QStringLiteral("search"), QStringLiteral("skip duplicate query"));
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("search"),
+            QStringLiteral("skip duplicate query"));
         return;
     }
     const quint32 seq = m_nextGlobalSearchSeq++;
@@ -1691,7 +1703,7 @@ void BridgeClient::flushGlobalSearchQuery() {
     if (preview.size() > 64) {
         preview = preview.left(64) + QStringLiteral("...");
     }
-    logDiagnostic(
+    FERROUS_PROFILE_LOG_DIAGNOSTIC(
         QStringLiteral("search"),
         QStringLiteral("send query seq=%1 chars=%2 text=\"%3\"")
             .arg(seq)

@@ -29,3 +29,4 @@ walkdir = "2"
 [features]
 default = []
 gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio"]
+profiling-logs = []

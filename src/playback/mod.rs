@@ -5,6 +5,18 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::analysis::AnalysisCommand;
 
+#[cfg(feature = "profiling-logs")]
+macro_rules! profile_eprintln {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "profiling-logs"))]
+macro_rules! profile_eprintln {
+    ($($arg:tt)*) => {};
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PlaybackState {
     #[default]
@@ -1402,6 +1414,10 @@ mod backend {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "profiling-logs"),
+        allow(unused_variables, unused_assignments)
+    )]
     fn build_analysis_audio_sink(
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<Vec<f32>>,
@@ -1480,10 +1496,14 @@ mod backend {
             gst_app::AppSinkCallbacks::builder()
                 .new_sample({
                     let mut last_rate_hz: u32 = 0;
-                    let profile_enabled = std::env::var_os("FERROUS_PROFILE").is_some();
+                    let profile_enabled = cfg!(feature = "profiling-logs")
+                        && std::env::var_os("FERROUS_PROFILE").is_some();
                     let mut prof_last = std::time::Instant::now();
+                    #[allow(unused_variables, unused_assignments)]
                     let mut prof_sent = 0usize;
+                    #[allow(unused_variables, unused_assignments)]
                     let mut prof_dropped = 0usize;
+                    #[allow(unused_variables, unused_assignments)]
                     let mut prof_samples = 0usize;
                     move |sink| {
                         if let Ok(sample) = sink.pull_sample() {
@@ -1527,9 +1547,12 @@ mod backend {
                             }
                         }
                         if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
-                            eprintln!(
+                            profile_eprintln!(
                                 "[gst] pcm_chunks sent/s={} dropped/s={} samples/s={} rate={}Hz",
-                                prof_sent, prof_dropped, prof_samples, last_rate_hz
+                                prof_sent,
+                                prof_dropped,
+                                prof_samples,
+                                last_rate_hz
                             );
                             prof_last = std::time::Instant::now();
                             prof_sent = 0;

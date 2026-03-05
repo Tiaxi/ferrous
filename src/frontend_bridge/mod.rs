@@ -22,6 +22,18 @@ use crate::playback::{
 pub mod ffi;
 pub mod library_tree;
 
+#[cfg(feature = "profiling-logs")]
+macro_rules! profile_eprintln {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "profiling-logs"))]
+macro_rules! profile_eprintln {
+    ($($arg:tt)*) => {};
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LibrarySortMode {
     #[default]
@@ -267,16 +279,21 @@ struct SearchWorkerPreparedCache {
 }
 
 impl SearchWorkerPreparedCache {
+    #[cfg_attr(
+        not(feature = "profiling-logs"),
+        allow(unused_variables, unused_assignments)
+    )]
     fn prepared_for(&mut self, library: &Arc<LibrarySnapshot>) -> Arc<PreparedSearchLibrary> {
         if let (Some(source), Some(prepared)) = (&self.source_library, &self.prepared) {
             if Arc::ptr_eq(source, library) {
                 return Arc::clone(prepared);
             }
         }
+        #[allow(unused_variables)]
         let started = Instant::now();
         let prepared = Arc::new(prepare_search_library(library.as_ref()));
         if search_profile_enabled() {
-            eprintln!(
+            profile_eprintln!(
                 "[search-worker] cache rebuild roots={} tracks={} elapsed_ms={}",
                 prepared.roots.len(),
                 prepared.tracks.len(),
@@ -401,6 +418,10 @@ impl FrontendBridgeHandle {
     }
 }
 
+#[cfg_attr(
+    not(feature = "profiling-logs"),
+    allow(unused_variables, unused_assignments)
+)]
 fn run_bridge_loop(
     cmd_rx: Receiver<BridgeCommand>,
     event_tx: Sender<BridgeEvent>,
@@ -440,9 +461,12 @@ fn run_bridge_loop(
         .unwrap_or_else(Instant::now);
     let idle_poll_interval = Duration::from_millis(250);
     let mut last_idle_poll = Instant::now();
-    let profile_enabled = std::env::var_os("FERROUS_PROFILE").is_some();
+    let profile_enabled =
+        cfg!(feature = "profiling-logs") && std::env::var_os("FERROUS_PROFILE").is_some();
     let mut profile_last = Instant::now();
+    #[allow(unused_variables, unused_assignments)]
     let mut prof_snapshots_sent = 0usize;
+    #[allow(unused_variables, unused_assignments)]
     let mut prof_snapshots_dropped = 0usize;
     let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SNAPSHOT_MS")
         .ok()
@@ -575,14 +599,17 @@ fn run_bridge_loop(
         let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
 
         if profile_enabled && profile_last.elapsed() >= Duration::from_secs(1) {
+            #[allow(unused_variables)]
             let rss_kb = current_rss_kb();
+            #[allow(unused_variables)]
             let spectro_rows = state.analysis.spectrogram_rows.len();
+            #[allow(unused_variables)]
             let spectro_bins = state
                 .analysis
                 .spectrogram_rows
                 .first()
                 .map_or(0, std::vec::Vec::len);
-            eprintln!(
+            profile_eprintln!(
                 "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} spectro_rows={} spectro_bins={} sent_snap/s={} drop_snap/s={}",
                 rss_kb,
                 playback_rx.len(),
@@ -621,6 +648,10 @@ fn run_bridge_loop(
     let _ = try_send_event(&event_tx, BridgeEvent::Stopped);
 }
 
+#[cfg_attr(
+    not(feature = "profiling-logs"),
+    allow(unused_variables, unused_assignments)
+)]
 fn run_search_worker(
     query_rx: Receiver<SearchWorkerQuery>,
     results_tx: Sender<BridgeSearchResultsFrame>,
@@ -635,12 +666,13 @@ fn run_search_worker(
             query = next;
         }
 
+        #[allow(unused_variables)]
         let query_started = Instant::now();
         let prepared = prepared_cache.prepared_for(&query.library);
         match build_search_results_frame(&query, prepared.as_ref(), &query_rx) {
             SearchBuildOutcome::Frame(frame) => {
                 if profile_search {
-                    eprintln!(
+                    profile_eprintln!(
                         "[search-worker] seq={} chars={} tracks={} rows={} elapsed_ms={}",
                         query.seq,
                         query.query.chars().count(),
@@ -653,7 +685,7 @@ fn run_search_worker(
             }
             SearchBuildOutcome::Cancelled(next) => {
                 if profile_search {
-                    eprintln!(
+                    profile_eprintln!(
                         "[search-worker] cancel seq={} -> {} elapsed_ms={}",
                         query.seq,
                         next.seq,
@@ -718,7 +750,7 @@ fn flush_pending_search_results_event(
 }
 
 fn search_profile_enabled() -> bool {
-    std::env::var_os("FERROUS_SEARCH_PROFILE").is_some()
+    cfg!(feature = "profiling-logs") && std::env::var_os("FERROUS_SEARCH_PROFILE").is_some()
 }
 
 fn search_fallback_limit() -> usize {
