@@ -14,8 +14,10 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QMetaObject>
 #include <QProcess>
 #include <QSet>
 #include <QTextStream>
@@ -67,6 +69,19 @@ QString canonicalizeSearchQuery(const QString &query) {
     // Keep UI and backend semantics aligned: backend splits on whitespace.
     // Canonicalization avoids duplicate sends from trailing/multiple spaces.
     return query.simplified();
+}
+
+QString searchCoverUrlFast(const QString &path) {
+    if (path.isEmpty()) {
+        return {};
+    }
+    if (path.startsWith(QStringLiteral("qrc:/")) || path.startsWith(QStringLiteral(":/"))) {
+        return path;
+    }
+    if (path.startsWith(QStringLiteral("file://"))) {
+        return path;
+    }
+    return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded);
 }
 
 int readEnvMillis(const char *key, int fallback) {
@@ -207,6 +222,7 @@ BridgeClient::BridgeClient(QObject *parent)
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
+    startSearchApplyWorker();
     startInProcessBridge();
 }
 
@@ -214,6 +230,7 @@ BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
     m_analysisNotifyTimer.stop();
     m_globalSearchDebounceTimer.stop();
+    stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
         ferrous_ffi_bridge_destroy(m_ffiBridge);
         m_ffiBridge = nullptr;
@@ -236,6 +253,156 @@ bool BridgeClient::startInProcessBridge() {
     logDiagnostic(QStringLiteral("bridge"), QStringLiteral("in-process bridge created"));
     requestSnapshot();
     return true;
+}
+
+void BridgeClient::startSearchApplyWorker() {
+    std::lock_guard<std::mutex> lock(m_searchApplyMutex);
+    if (m_searchApplyThread.joinable()) {
+        return;
+    }
+    m_searchApplyStop = false;
+    m_searchApplyThread = std::thread([this]() {
+        searchApplyWorkerLoop();
+    });
+}
+
+void BridgeClient::stopSearchApplyWorker() {
+    {
+        std::lock_guard<std::mutex> lock(m_searchApplyMutex);
+        m_searchApplyStop = true;
+        m_searchPendingInputFrame.reset();
+    }
+    m_searchApplyCv.notify_all();
+    if (m_searchApplyThread.joinable()) {
+        m_searchApplyThread.join();
+    }
+}
+
+void BridgeClient::enqueueSearchFrame(quint32 seq, QByteArray payload, qint64 ffiPopMs) {
+    {
+        std::lock_guard<std::mutex> lock(m_searchApplyMutex);
+        if (m_searchPendingInputFrame.has_value()) {
+            m_searchInputCoalescedDrops++;
+        }
+        m_searchPendingInputFrame = SearchWorkerInputFrame{
+            seq,
+            std::move(payload),
+            QDateTime::currentMSecsSinceEpoch(),
+            ffiPopMs,
+        };
+    }
+    m_searchApplyCv.notify_one();
+}
+
+void BridgeClient::searchApplyWorkerLoop() {
+    for (;;) {
+        SearchWorkerInputFrame input;
+        quint64 coalescedInputDrops = 0;
+        {
+            std::unique_lock<std::mutex> lock(m_searchApplyMutex);
+            m_searchApplyCv.wait(lock, [this]() {
+                return m_searchApplyStop || m_searchPendingInputFrame.has_value();
+            });
+            if (m_searchApplyStop) {
+                return;
+            }
+            if (!m_searchPendingInputFrame.has_value()) {
+                continue;
+            }
+            input = std::move(*m_searchPendingInputFrame);
+            m_searchPendingInputFrame.reset();
+            coalescedInputDrops = m_searchInputCoalescedDrops;
+            m_searchInputCoalescedDrops = 0;
+        }
+
+        QElapsedTimer workerTimer;
+        workerTimer.start();
+
+        BinaryBridgeCodec::DecodedSearchResults decoded;
+        QString decodeError;
+        QElapsedTimer decodeTimer;
+        decodeTimer.start();
+        const bool decodedOk =
+            BinaryBridgeCodec::decodeSearchResultsFrame(input.payload, &decoded, &decodeError);
+        const qint64 decodeMs = decodeTimer.elapsed();
+        if (decodedOk && input.seq != 0) {
+            decoded.seq = input.seq;
+        }
+
+        SearchWorkerOutputFrame out;
+        out.seq = decoded.seq;
+        out.decodeError = decodedOk ? QString{} : decodeError;
+        out.ffiPoppedAtMs = input.ffiPoppedAtMs;
+        out.ffiPopMs = input.ffiPopMs;
+        out.decodeMs = decodeMs;
+        out.coalescedInputDrops = coalescedInputDrops;
+
+        if (decodedOk) {
+            QElapsedTimer materializeTimer;
+            materializeTimer.start();
+            out.artistRows.reserve(decoded.rows.size());
+            out.albumRows.reserve(decoded.rows.size());
+            out.trackRows.reserve(decoded.rows.size());
+            for (const auto &row : decoded.rows) {
+                QVariantMap item;
+                item.insert(QStringLiteral("rowType"), row.rowType);
+                item.insert(QStringLiteral("score"), row.score);
+                item.insert(QStringLiteral("label"), row.label);
+                item.insert(QStringLiteral("artist"), row.artist);
+                item.insert(QStringLiteral("album"), row.album);
+                item.insert(QStringLiteral("genre"), row.genre);
+                item.insert(QStringLiteral("count"), row.count);
+                item.insert(QStringLiteral("coverPath"), row.coverPath);
+                item.insert(QStringLiteral("coverUrl"), searchCoverUrlFast(row.coverPath));
+                item.insert(QStringLiteral("artistKey"), row.artistKey);
+                item.insert(QStringLiteral("albumKey"), row.albumKey);
+                item.insert(QStringLiteral("sectionKey"), row.sectionKey);
+                item.insert(QStringLiteral("trackKey"), row.trackKey);
+                item.insert(QStringLiteral("trackPath"), row.trackPath);
+                if (row.year != std::numeric_limits<int>::min()) {
+                    item.insert(QStringLiteral("year"), row.year);
+                } else {
+                    item.insert(QStringLiteral("year"), QVariant{});
+                }
+                if (row.trackNumber > 0) {
+                    item.insert(QStringLiteral("trackNumber"), row.trackNumber);
+                } else {
+                    item.insert(QStringLiteral("trackNumber"), QVariant{});
+                }
+                item.insert(QStringLiteral("lengthSeconds"), row.lengthSeconds);
+                item.insert(
+                    QStringLiteral("lengthText"),
+                    row.lengthSeconds >= 0.0f
+                        ? BridgeClient::formatDurationCompact(static_cast<double>(row.lengthSeconds))
+                        : QStringLiteral("--:--"));
+                switch (row.rowType) {
+                case BinaryBridgeCodec::SearchRowArtist:
+                    out.artistRows.push_back(std::move(item));
+                    break;
+                case BinaryBridgeCodec::SearchRowAlbum:
+                    out.albumRows.push_back(std::move(item));
+                    break;
+                case BinaryBridgeCodec::SearchRowTrack:
+                    out.trackRows.push_back(std::move(item));
+                    break;
+                default:
+                    break;
+                }
+            }
+            out.materializeMs = materializeTimer.elapsed();
+        }
+
+        out.workerTotalMs = workerTimer.elapsed();
+        QMetaObject::invokeMethod(
+            this,
+            [this, frame = std::move(out)]() mutable {
+                const bool changed = applyPreparedSearchResultsFrame(frame);
+                if (changed) {
+                    emit globalSearchResultsChanged();
+                }
+            },
+            Qt::QueuedConnection);
+    }
 }
 
 void BridgeClient::pollInProcessBridge() {
@@ -281,10 +448,11 @@ void BridgeClient::pollInProcessBridge() {
         applyLibraryTreeFrame(versionInt, treeBytes);
     }
 
-    bool anySearchChanged = false;
     int processedSearchFrames = 0;
     constexpr int kMaxSearchFramesPerPass = 4;
     while (processedSearchFrames < kMaxSearchFramesPerPass) {
+        QElapsedTimer popTimer;
+        popTimer.start();
         std::size_t len = 0;
         std::uint32_t seq = 0;
         std::uint8_t *searchPtr = ferrous_ffi_bridge_pop_search_results(
@@ -299,20 +467,7 @@ void BridgeClient::pollInProcessBridge() {
             reinterpret_cast<const char *>(searchPtr),
             static_cast<qsizetype>(len));
         ferrous_ffi_bridge_free_search_results(searchPtr, len);
-
-        BinaryBridgeCodec::DecodedSearchResults decoded;
-        QString decodeError;
-        if (!BinaryBridgeCodec::decodeSearchResultsFrame(payload, &decoded, &decodeError)) {
-            logDiagnostic(
-                QStringLiteral("search"),
-                QStringLiteral("decode error: %1").arg(decodeError));
-            emit bridgeError(QStringLiteral("invalid search frame: %1").arg(decodeError));
-            continue;
-        }
-        if (seq != 0) {
-            decoded.seq = seq;
-        }
-        anySearchChanged |= processSearchResultsFrame(decoded);
+        enqueueSearchFrame(seq, payload, popTimer.elapsed());
     }
 
     int processedEvents = 0;
@@ -343,9 +498,6 @@ void BridgeClient::pollInProcessBridge() {
 
     if (anySnapshotChanged) {
         scheduleSnapshotChanged();
-    }
-    if (anySearchChanged) {
-        emit globalSearchResultsChanged();
     }
 }
 
@@ -1079,36 +1231,11 @@ QString BridgeClient::resolveDiagnosticsLogPath() {
 }
 
 bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame) {
-    if (m_latestGlobalSearchSeqSent != 0
-        && frame.seq != m_latestGlobalSearchSeqSent
-        && !isNewerSeq(frame.seq, m_latestGlobalSearchSeqSent)) {
-        m_globalSearchSentAtMs.remove(frame.seq);
-        logDiagnostic(
-            QStringLiteral("search"),
-            QStringLiteral("drop stale frame seq=%1 latestSent=%2")
-                .arg(frame.seq)
-                .arg(m_latestGlobalSearchSeqSent));
-        return false;
-    }
-    if (m_globalSearchSeq != 0
-        && frame.seq != m_globalSearchSeq
-        && !isNewerSeq(frame.seq, m_globalSearchSeq)) {
-        m_globalSearchSentAtMs.remove(frame.seq);
-        logDiagnostic(
-            QStringLiteral("search"),
-            QStringLiteral("drop non-new frame seq=%1 current=%2")
-                .arg(frame.seq)
-                .arg(m_globalSearchSeq));
-        return false;
-    }
-
-    QVariantList artistRows;
-    QVariantList albumRows;
-    QVariantList trackRows;
-    artistRows.reserve(frame.rows.size());
-    albumRows.reserve(frame.rows.size());
-    trackRows.reserve(frame.rows.size());
-
+    SearchWorkerOutputFrame out;
+    out.seq = frame.seq;
+    out.artistRows.reserve(frame.rows.size());
+    out.albumRows.reserve(frame.rows.size());
+    out.trackRows.reserve(frame.rows.size());
     for (const auto &row : frame.rows) {
         QVariantMap item;
         item.insert(QStringLiteral("rowType"), row.rowType);
@@ -1119,9 +1246,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         item.insert(QStringLiteral("genre"), row.genre);
         item.insert(QStringLiteral("count"), row.count);
         item.insert(QStringLiteral("coverPath"), row.coverPath);
-        item.insert(
-            QStringLiteral("coverUrl"),
-            row.coverPath.isEmpty() ? QString{} : libraryThumbnailSource(row.coverPath));
+        item.insert(QStringLiteral("coverUrl"), searchCoverUrlFast(row.coverPath));
         item.insert(QStringLiteral("artistKey"), row.artistKey);
         item.insert(QStringLiteral("albumKey"), row.albumKey);
         item.insert(QStringLiteral("sectionKey"), row.sectionKey);
@@ -1145,45 +1270,95 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
                 : QStringLiteral("--:--"));
         switch (row.rowType) {
         case BinaryBridgeCodec::SearchRowArtist:
-            artistRows.push_back(item);
+            out.artistRows.push_back(std::move(item));
             break;
         case BinaryBridgeCodec::SearchRowAlbum:
-            albumRows.push_back(item);
+            out.albumRows.push_back(std::move(item));
             break;
         case BinaryBridgeCodec::SearchRowTrack:
-            trackRows.push_back(item);
+            out.trackRows.push_back(std::move(item));
             break;
         default:
             break;
         }
     }
+    return applyPreparedSearchResultsFrame(out);
+}
 
-    if (m_globalSearchSeq == frame.seq
-        && m_globalSearchArtistResults == artistRows
-        && m_globalSearchAlbumResults == albumRows
-        && m_globalSearchTrackResults == trackRows) {
+bool BridgeClient::applyPreparedSearchResultsFrame(const SearchWorkerOutputFrame &frame) {
+    m_searchFramesReceived++;
+    if (!frame.decodeError.isEmpty()) {
+        m_searchFramesDecodeErrors++;
         logDiagnostic(
             QStringLiteral("search"),
-            QStringLiteral("frame seq=%1 unchanged").arg(frame.seq));
+            QStringLiteral("decode error seq=%1 error=%2")
+                .arg(frame.seq)
+                .arg(frame.decodeError));
+        emit bridgeError(QStringLiteral("invalid search frame: %1").arg(frame.decodeError));
+        return false;
+    }
+    if (m_latestGlobalSearchSeqSent != 0
+        && frame.seq != m_latestGlobalSearchSeqSent
+        && !isNewerSeq(frame.seq, m_latestGlobalSearchSeqSent)) {
+        m_searchFramesDroppedStale++;
+        m_globalSearchSentAtMs.remove(frame.seq);
+        logDiagnostic(
+            QStringLiteral("search"),
+            QStringLiteral("drop stale frame seq=%1 latestSent=%2 dropped=%3")
+                .arg(frame.seq)
+                .arg(m_latestGlobalSearchSeqSent)
+                .arg(m_searchFramesDroppedStale));
+        return false;
+    }
+    if (m_globalSearchSeq != 0
+        && frame.seq != m_globalSearchSeq
+        && !isNewerSeq(frame.seq, m_globalSearchSeq)) {
+        m_searchFramesDroppedStale++;
+        m_globalSearchSentAtMs.remove(frame.seq);
+        logDiagnostic(
+            QStringLiteral("search"),
+            QStringLiteral("drop non-new frame seq=%1 current=%2 dropped=%3")
+                .arg(frame.seq)
+                .arg(m_globalSearchSeq)
+                .arg(m_searchFramesDroppedStale));
+        return false;
+    }
+    if (frame.seq != 0 && frame.seq == m_globalSearchSeq) {
         return false;
     }
 
+    QElapsedTimer modelApplyTimer;
+    modelApplyTimer.start();
+    m_globalSearchSeq = frame.seq;
+    m_globalSearchArtistResults = frame.artistRows;
+    m_globalSearchAlbumResults = frame.albumRows;
+    m_globalSearchTrackResults = frame.trackRows;
+    const qint64 modelApplyMs = modelApplyTimer.elapsed();
+    m_searchFramesApplied++;
+
     const qint64 sentAtMs = m_globalSearchSentAtMs.take(frame.seq);
-    const qint64 latencyMs = sentAtMs > 0
-        ? (QDateTime::currentMSecsSinceEpoch() - sentAtMs)
-        : -1;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 latencyMs = sentAtMs > 0 ? (nowMs - sentAtMs) : -1;
+    const qint64 queueDelayMs = frame.ffiPoppedAtMs > 0 ? (nowMs - frame.ffiPoppedAtMs) : -1;
     logDiagnostic(
         QStringLiteral("search"),
-        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5")
+        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5 ffiPopMs=%6 decodeMs=%7 materializeMs=%8 modelApplyMs=%9 queueDelayMs=%10 workerMs=%11 coalesced=%12 recv=%13 applied=%14 dropped=%15 decodeErr=%16")
             .arg(frame.seq)
-            .arg(artistRows.size())
-            .arg(albumRows.size())
-            .arg(trackRows.size())
-            .arg(latencyMs));
-    m_globalSearchSeq = frame.seq;
-    m_globalSearchArtistResults = std::move(artistRows);
-    m_globalSearchAlbumResults = std::move(albumRows);
-    m_globalSearchTrackResults = std::move(trackRows);
+            .arg(frame.artistRows.size())
+            .arg(frame.albumRows.size())
+            .arg(frame.trackRows.size())
+            .arg(latencyMs)
+            .arg(frame.ffiPopMs)
+            .arg(frame.decodeMs)
+            .arg(frame.materializeMs)
+            .arg(modelApplyMs)
+            .arg(queueDelayMs)
+            .arg(frame.workerTotalMs)
+            .arg(frame.coalescedInputDrops)
+            .arg(m_searchFramesReceived)
+            .arg(m_searchFramesApplied)
+            .arg(m_searchFramesDroppedStale)
+            .arg(m_searchFramesDecodeErrors));
     return true;
 }
 

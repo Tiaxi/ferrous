@@ -136,9 +136,9 @@ impl FfiRuntime {
         if bytes.is_empty() {
             return;
         }
-        while self.pending_search_results.len() >= MAX_PENDING_SEARCH_RESULTS {
-            self.pending_search_results.pop_front();
-        }
+        // Search result frames are superseded by newer seq values.
+        // Keep latest-only to avoid backlogging stale UI apply work.
+        self.pending_search_results.clear();
         self.pending_search_results
             .push_back(SearchResultsFrame { seq, bytes });
     }

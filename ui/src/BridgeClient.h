@@ -9,6 +9,11 @@
 #include <QVariantMap>
 #include <QVariantList>
 
+#include <condition_variable>
+#include <mutex>
+#include <optional>
+#include <thread>
+
 #include "BinaryBridgeCodec.h"
 
 struct FerrousFfiBridge;
@@ -170,7 +175,33 @@ signals:
     void bridgeError(const QString &message);
 
 private:
+    struct SearchWorkerInputFrame {
+        quint32 seq{0};
+        QByteArray payload;
+        qint64 ffiPoppedAtMs{0};
+        qint64 ffiPopMs{0};
+    };
+
+    struct SearchWorkerOutputFrame {
+        quint32 seq{0};
+        QVariantList artistRows;
+        QVariantList albumRows;
+        QVariantList trackRows;
+        QString decodeError;
+        qint64 ffiPoppedAtMs{0};
+        qint64 ffiPopMs{0};
+        qint64 decodeMs{0};
+        qint64 materializeMs{0};
+        qint64 workerTotalMs{0};
+        quint64 coalescedInputDrops{0};
+    };
+
     bool startInProcessBridge();
+    void startSearchApplyWorker();
+    void stopSearchApplyWorker();
+    void searchApplyWorkerLoop();
+    void enqueueSearchFrame(quint32 seq, QByteArray payload, qint64 ffiPopMs);
+    bool applyPreparedSearchResultsFrame(const SearchWorkerOutputFrame &frame);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
@@ -270,6 +301,16 @@ private:
     QTimer m_snapshotNotifyTimer;
     QTimer m_analysisNotifyTimer;
     QTimer m_globalSearchDebounceTimer;
+    std::thread m_searchApplyThread;
+    std::mutex m_searchApplyMutex;
+    std::condition_variable m_searchApplyCv;
+    bool m_searchApplyStop{false};
+    std::optional<SearchWorkerInputFrame> m_searchPendingInputFrame;
+    quint64 m_searchInputCoalescedDrops{0};
+    quint64 m_searchFramesReceived{0};
+    quint64 m_searchFramesApplied{0};
+    quint64 m_searchFramesDroppedStale{0};
+    quint64 m_searchFramesDecodeErrors{0};
     QByteArray m_analysisBuffer;
     qsizetype m_analysisBufferReadOffset{0};
     bool m_hasAnalysisFrameSeq{false};
