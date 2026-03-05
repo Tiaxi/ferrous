@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1939,28 +1939,57 @@ fn choose_most_common_genre(counts: &HashMap<String, usize>) -> String {
 }
 
 fn find_cover_path_for_album(album_path: &PathBuf) -> Option<String> {
+    fn image_candidates(dir: &Path) -> Vec<String> {
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            let ext = ext.to_ascii_lowercase();
+            if ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "webp" || ext == "bmp" {
+                candidates.push(path.to_string_lossy().to_string());
+            }
+        }
+        candidates.sort_unstable();
+        candidates
+    }
+
+    let direct = image_candidates(album_path);
+    if let Some(path) = direct.into_iter().next() {
+        return Some(path);
+    }
+
     let Ok(read_dir) = std::fs::read_dir(album_path) else {
         return None;
     };
-    let mut candidates = Vec::new();
+    let mut section_dirs = Vec::new();
     for entry in read_dir.flatten() {
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
-            continue;
-        };
-        let ext = ext.to_ascii_lowercase();
-        if ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "webp" || ext == "bmp" {
-            candidates.push(path.to_string_lossy().to_string());
+        if path.is_dir() {
+            section_dirs.push(path);
         }
     }
-    if candidates.is_empty() {
-        return None;
+    section_dirs.sort_by(|a, b| {
+        a.file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default()
+            .cmp(b.file_name().and_then(|v| v.to_str()).unwrap_or_default())
+    });
+    for section_dir in section_dirs {
+        let section_candidates = image_candidates(&section_dir);
+        if let Some(path) = section_candidates.into_iter().next() {
+            return Some(path);
+        }
     }
-    candidates.sort_unstable();
-    candidates.into_iter().next()
+
+    None
 }
 
 fn cached_album_cover_path(

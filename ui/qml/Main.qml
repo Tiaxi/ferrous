@@ -56,6 +56,8 @@ Kirigami.ApplicationWindow {
     property int pendingSearchOpenAttempts: 0
     property int globalSearchSelectedDisplayIndex: -1
     property var globalSearchContextRowData: ({})
+    property bool globalSearchOpening: false
+    property string pendingGlobalSearchPrefillText: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
@@ -1028,6 +1030,18 @@ Kirigami.ApplicationWindow {
     }
 
     function handleLibraryKeyPress(event) {
+        if (root.globalSearchOpening) {
+            const openingText = event.text || ""
+            if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) === 0
+                    && openingText.length === 1
+                    && openingText !== "\n"
+                    && openingText !== "\r"
+                    && openingText !== "\t") {
+                root.pendingGlobalSearchPrefillText += openingText
+                event.accepted = true
+                return
+            }
+        }
         if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
             return
         }
@@ -1151,7 +1165,20 @@ Kirigami.ApplicationWindow {
         }
         globalSearchSelectedDisplayIndex = index
         if (globalSearchResultsView && index >= 0 && index < globalSearchRowCount()) {
-            globalSearchResultsView.positionViewAtIndex(index, ListView.Contain)
+            const firstSelectable = searchFirstSelectableIndex()
+            if (index === firstSelectable && globalSearchModelApi) {
+                let headerIndex = index
+                while (headerIndex > 0) {
+                    const candidate = globalSearchModelApi.rowDataAt(headerIndex - 1)
+                    if (!candidate || (candidate.kind || "") === "item") {
+                        break
+                    }
+                    headerIndex -= 1
+                }
+                globalSearchResultsView.positionViewAtIndex(headerIndex, ListView.Beginning)
+            } else {
+                globalSearchResultsView.positionViewAtIndex(index, ListView.Contain)
+            }
         }
         return true
     }
@@ -1171,7 +1198,14 @@ Kirigami.ApplicationWindow {
             focusGlobalSearchQueryField(true)
             return
         }
+        root.globalSearchOpening = true
+        root.pendingGlobalSearchPrefillText = ""
         globalSearchDialog.open()
+        Qt.callLater(function() {
+            if (globalSearchDialog.visible) {
+                root.focusGlobalSearchQueryField(false)
+            }
+        })
     }
 
     function focusGlobalSearchQueryField(selectAll) {
@@ -1917,14 +1951,20 @@ Kirigami.ApplicationWindow {
         width: Math.min(1080, root.width - 80)
         height: Math.min(720, root.height - 80)
         onOpened: {
+            root.globalSearchOpening = false
             root.syncGlobalSearchSelectionAfterResultsChange()
             root.focusGlobalSearchQueryField(false)
-            if ((globalSearchQueryField.text || "").length > 0) {
+            if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
+                globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
+                root.pendingGlobalSearchPrefillText = ""
+            } else if ((globalSearchQueryField.text || "").length > 0) {
                 globalSearchQueryField.selectAll()
             }
             uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
         }
         onClosed: {
+            root.globalSearchOpening = false
+            root.pendingGlobalSearchPrefillText = ""
             uiBridge.setGlobalSearchQuery("")
         }
 
