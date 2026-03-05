@@ -1987,7 +1987,7 @@ Kirigami.ApplicationWindow {
                 globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
                 root.pendingGlobalSearchPrefillText = ""
             } else if ((globalSearchQueryField.text || "").length > 0) {
-                globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+                globalSearchQueryField.selectAll()
             }
             uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
         }
