@@ -200,6 +200,7 @@ bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
         QString title;
         QString artist;
         QString album;
+        QString coverPath;
         QString genre;
         qint32 year = std::numeric_limits<int>::min();
         quint16 trackNumber = 0;
@@ -208,6 +209,7 @@ bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
         if (!reader.readUtf8U16(&title)
             || !reader.readUtf8U16(&artist)
             || !reader.readUtf8U16(&album)
+            || !reader.readUtf8U16(&coverPath)
             || !reader.readUtf8U16(&genre)
             || !reader.readI32(&year)
             || !reader.readU16(&trackNumber)
@@ -219,6 +221,7 @@ bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
         item.title = title;
         item.artist = artist;
         item.album = album;
+        item.coverPath = coverPath;
         item.genre = genre;
         item.year = year;
         item.trackNumber = static_cast<int>(trackNumber);

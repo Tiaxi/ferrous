@@ -2,6 +2,10 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{select, tick, unbounded, Receiver, Sender};
@@ -80,6 +84,12 @@ struct WaveformCacheEntry {
     peaks: Vec<f32>,
 }
 
+#[derive(Debug, Clone)]
+struct WaveformDecodeJob {
+    track_token: u64,
+    path: PathBuf,
+}
+
 impl AnalysisEngine {
     #[cfg_attr(
         not(feature = "profiling-logs"),
@@ -92,6 +102,40 @@ impl AnalysisEngine {
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
 
         let waveform_tx = cmd_tx.clone();
+        let (waveform_job_tx, waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = Arc::new(AtomicU64::new(0));
+        {
+            let waveform_tx = waveform_tx.clone();
+            let waveform_decode_active_token = Arc::clone(&waveform_decode_active_token);
+            let _ = std::thread::Builder::new()
+                .name("ferrous-waveform-decode".to_string())
+                .spawn(move || {
+                    while let Ok(mut job) = waveform_job_rx.recv() {
+                        while let Ok(next_job) = waveform_job_rx.try_recv() {
+                            job = next_job;
+                        }
+                        let track_token = job.track_token;
+                        let _ = decode_waveform_peaks_stream(
+                            &job.path,
+                            1024,
+                            |peaks, done| {
+                                if waveform_decode_active_token.load(Ordering::Relaxed)
+                                    != track_token
+                                {
+                                    return false;
+                                }
+                                let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
+                                    track_token,
+                                    peaks,
+                                    done,
+                                });
+                                true
+                            },
+                            || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
+                        );
+                    }
+                });
+        }
         let _ = std::thread::Builder::new()
             .name("ferrous-analysis".to_string())
             .spawn(move || {
@@ -142,6 +186,7 @@ impl AnalysisEngine {
                             } => {
                                 active_track_token = active_track_token.wrapping_add(1);
                                 let track_token = active_track_token;
+                                waveform_decode_active_token.store(track_token, Ordering::Relaxed);
                                 active_track_stamp = source_stamp(&path);
                                 active_track_path = Some(path.clone());
 
@@ -206,18 +251,9 @@ impl AnalysisEngine {
                                         true,
                                     );
                                 } else {
-                                    let tx = waveform_tx.clone();
-                                    let _ = std::thread::Builder::new()
-                                        .name("ferrous-waveform-decode".to_string())
-                                        .spawn(move || {
-                                        let _ =
-                                            decode_waveform_peaks_stream(&path, 1024, |peaks, done| {
-                                                let _ = tx.send(AnalysisCommand::WaveformProgress {
-                                                    track_token,
-                                                    peaks,
-                                                    done,
-                                                });
-                                            });
+                                    let _ = waveform_job_tx.send(WaveformDecodeJob {
+                                        track_token,
+                                        path,
                                     });
                                 }
                             }
@@ -876,14 +912,19 @@ fn blackman_harris_window(size: usize) -> Vec<f32> {
         .collect()
 }
 
-fn decode_waveform_peaks_stream<F>(
+fn decode_waveform_peaks_stream<F, C>(
     path: &Path,
     max_points: usize,
     mut on_update: F,
+    mut is_cancelled: C,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<f32>, bool),
+    F: FnMut(Vec<f32>, bool) -> bool,
+    C: FnMut() -> bool,
 {
+    if is_cancelled() {
+        return Ok(());
+    }
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -920,6 +961,9 @@ where
 
     let mut packet_counter = 0usize;
     loop {
+        if is_cancelled() {
+            return Ok(());
+        }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
@@ -960,6 +1004,9 @@ where
         let samples = buf.samples();
         let frame_width = channels.saturating_mul(sample_stride).max(1);
         for base in (0..samples.len()).step_by(frame_width) {
+            if base.is_multiple_of(4096) && is_cancelled() {
+                return Ok(());
+            }
             let amp = samples[base].abs();
             if amp > bucket_peak {
                 bucket_peak = amp;
@@ -988,7 +1035,9 @@ where
                 if peaks.len() >= 12
                     && last_preview_emit.elapsed() >= std::time::Duration::from_millis(240)
                 {
-                    on_update(peaks.clone(), false);
+                    if !on_update(peaks.clone(), false) {
+                        return Ok(());
+                    }
                     last_preview_emit = std::time::Instant::now();
                 }
             }
@@ -1014,7 +1063,9 @@ where
         peaks = reduced;
     }
 
-    on_update(peaks, true);
+    if !is_cancelled() {
+        let _ = on_update(peaks, true);
+    }
     Ok(())
 }
 

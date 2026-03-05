@@ -19,6 +19,7 @@ struct TrackLeaf {
     title: String,
     file_stem: String,
     album_tag: String,
+    cover_path: String,
     year: Option<i32>,
     track_no: Option<u32>,
 }
@@ -385,6 +386,7 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
                 .file_stem()
                 .map_or_else(String::new, |s| s.to_string_lossy().into_owned()),
             album_tag: track.album.trim().to_string(),
+            cover_path: track.cover_path.clone(),
             year: track.year,
             track_no: track.track_no,
         };
@@ -683,7 +685,8 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
         .collect::<Vec<_>>();
     sections.sort_by(|a, b| natural_cmp(&a.name, &b.name));
 
-    let cover_path = select_album_cover(&album.folder_path, &sections);
+    let cover_path = resolve_album_cover(&all_tracks)
+        .or_else(|| select_album_cover(&album.folder_path, &sections));
 
     ResolvedAlbum {
         title,
@@ -754,6 +757,14 @@ fn resolve_album_year(all_tracks: &[TrackLeaf]) -> Option<i32> {
         b_count.cmp(a_count).then_with(|| a_year.cmp(b_year))
     });
     items.first().map(|(year, _)| *year)
+}
+
+fn resolve_album_cover(all_tracks: &[TrackLeaf]) -> Option<String> {
+    all_tracks
+        .iter()
+        .map(|track| track.cover_path.trim())
+        .find(|path| !path.is_empty())
+        .map(ToString::to_string)
 }
 
 fn select_album_cover(album_path: &Path, sections: &[ResolvedSection]) -> Option<String> {
@@ -1123,6 +1134,7 @@ mod tests {
             title: title.to_string(),
             artist: String::new(),
             album: album.to_string(),
+            cover_path: String::new(),
             genre: String::new(),
             year,
             track_no,
@@ -1141,6 +1153,7 @@ mod tests {
                     title: "A".to_string(),
                     file_stem: "01".to_string(),
                     album_tag: "Tag".to_string(),
+                    cover_path: String::new(),
                     year: Some(2024),
                     track_no: Some(1),
                 },
@@ -1149,6 +1162,7 @@ mod tests {
                     title: "B".to_string(),
                     file_stem: "02".to_string(),
                     album_tag: "Tag".to_string(),
+                    cover_path: String::new(),
                     year: Some(2023),
                     track_no: Some(2),
                 },
@@ -1194,6 +1208,7 @@ mod tests {
                     title: "Track A".to_string(),
                     artist: String::new(),
                     album: "Album".to_string(),
+                    cover_path: String::new(),
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1205,6 +1220,7 @@ mod tests {
                     title: "Track B".to_string(),
                     artist: String::new(),
                     album: "Album".to_string(),
+                    cover_path: String::new(),
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1238,6 +1254,7 @@ mod tests {
                     title: "Track A".to_string(),
                     artist: String::new(),
                     album: "Album A".to_string(),
+                    cover_path: String::new(),
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1249,6 +1266,7 @@ mod tests {
                     title: "Track B".to_string(),
                     artist: String::new(),
                     album: "Album B".to_string(),
+                    cover_path: String::new(),
                     genre: String::new(),
                     year: Some(2021),
                     track_no: Some(1),
@@ -1347,6 +1365,7 @@ mod tests {
                 title: "One".to_string(),
                 file_stem: "1".to_string(),
                 album_tag: String::new(),
+                cover_path: String::new(),
                 year: None,
                 track_no: Some(1),
             },
@@ -1355,6 +1374,7 @@ mod tests {
                 title: "Ten".to_string(),
                 file_stem: "10".to_string(),
                 album_tag: String::new(),
+                cover_path: String::new(),
                 year: None,
                 track_no: Some(10),
             },

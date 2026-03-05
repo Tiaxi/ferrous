@@ -173,6 +173,14 @@ QString findTrackCoverUrl(const QString &trackPath) {
     return QUrl::fromLocalFile(coverPath).toString();
 }
 
+QString trackDirectoryPath(const QString &trackPath) {
+    if (trackPath.trimmed().isEmpty()) {
+        return {};
+    }
+    const QFileInfo info(trackPath);
+    return info.absoluteDir().absolutePath();
+}
+
 QString playbackStateText(int state, const QString &fallback) {
     switch (state) {
     case 0:
@@ -196,7 +204,7 @@ BridgeClient::BridgeClient(QObject *parent)
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("BridgeClient started"));
 
     m_snapshotNotifyTimer.setSingleShot(true);
-    m_snapshotNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_SNAPSHOT_NOTIFY_MS", 100));
+    m_snapshotNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_SNAPSHOT_NOTIFY_MS", 33));
     connect(&m_snapshotNotifyTimer, &QTimer::timeout, this, [this]() {
         if (m_snapshotChangedPending) {
             m_snapshotChangedPending = false;
@@ -248,6 +256,7 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
     startSearchApplyWorker();
+    startCoverLookupWorker();
     startInProcessBridge();
 }
 
@@ -256,6 +265,7 @@ BridgeClient::~BridgeClient() {
     m_analysisNotifyTimer.stop();
     m_globalSearchDebounceTimer.stop();
     m_searchApplyDispatchTimer.stop();
+    stopCoverLookupWorker();
     stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
         ferrous_ffi_bridge_destroy(m_ffiBridge);
@@ -306,6 +316,118 @@ void BridgeClient::stopSearchApplyWorker() {
     m_searchApplyCv.notify_all();
     if (m_searchApplyThread.joinable()) {
         m_searchApplyThread.join();
+    }
+}
+
+void BridgeClient::startCoverLookupWorker() {
+    std::lock_guard<std::mutex> lock(m_coverLookupMutex);
+    if (m_coverLookupThread.joinable()) {
+        return;
+    }
+    m_coverLookupStop = false;
+    m_coverLookupThread = std::thread([this]() {
+        coverLookupWorkerLoop();
+    });
+}
+
+void BridgeClient::stopCoverLookupWorker() {
+    {
+        std::lock_guard<std::mutex> lock(m_coverLookupMutex);
+        m_coverLookupStop = true;
+        m_coverLookupPendingPath.reset();
+        m_coverLookupInFlightPath.clear();
+    }
+    m_coverLookupCv.notify_all();
+    if (m_coverLookupThread.joinable()) {
+        m_coverLookupThread.join();
+    }
+}
+
+void BridgeClient::requestTrackCoverLookup(const QString &trackPath) {
+    const QString normalizedPath = trackPath.trimmed();
+    if (normalizedPath.isEmpty()) {
+        return;
+    }
+    if (m_trackCoverByPath.contains(normalizedPath)) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_coverLookupMutex);
+        if (m_coverLookupPendingPath.has_value() && *m_coverLookupPendingPath == normalizedPath) {
+            return;
+        }
+        if (m_coverLookupInFlightPath == normalizedPath) {
+            return;
+        }
+        m_coverLookupPendingPath = normalizedPath;
+    }
+    m_coverLookupCv.notify_one();
+}
+
+void BridgeClient::coverLookupWorkerLoop() {
+    for (;;) {
+        QString trackPath;
+        {
+            std::unique_lock<std::mutex> lock(m_coverLookupMutex);
+            m_coverLookupCv.wait(lock, [this]() {
+                return m_coverLookupStop || m_coverLookupPendingPath.has_value();
+            });
+            if (m_coverLookupStop) {
+                return;
+            }
+            if (!m_coverLookupPendingPath.has_value()) {
+                continue;
+            }
+            trackPath = std::move(*m_coverLookupPendingPath);
+            m_coverLookupPendingPath.reset();
+            m_coverLookupInFlightPath = trackPath;
+        }
+
+        const QString coverUrl = findTrackCoverUrl(trackPath);
+
+        {
+            std::lock_guard<std::mutex> lock(m_coverLookupMutex);
+            if (m_coverLookupInFlightPath == trackPath) {
+                m_coverLookupInFlightPath.clear();
+            }
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [this, trackPath, coverUrl]() {
+                applyTrackCoverLookupResult(trackPath, coverUrl);
+            },
+            Qt::QueuedConnection);
+    }
+}
+
+void BridgeClient::applyTrackCoverLookupResult(const QString &trackPath, const QString &coverUrl) {
+    if (trackPath.trimmed().isEmpty()) {
+        return;
+    }
+    cacheTrackCoverForPath(trackPath, coverUrl);
+    if (m_currentTrackPath == trackPath && m_currentTrackCoverPath != coverUrl) {
+        m_currentTrackCoverPath = coverUrl;
+        scheduleSnapshotChanged();
+    }
+}
+
+void BridgeClient::cacheTrackCoverForPath(const QString &trackPath, const QString &coverUrl) {
+    const QString normalizedPath = trackPath.trimmed();
+    if (normalizedPath.isEmpty()) {
+        return;
+    }
+    m_trackCoverByPath.insert(normalizedPath, coverUrl);
+    const QString dirPath = trackDirectoryPath(normalizedPath);
+    if (!dirPath.isEmpty()) {
+        m_trackCoverByDirectory.insert(dirPath, coverUrl);
+    }
+    if (m_trackCoverByPath.size() > 4096) {
+        m_trackCoverByPath.clear();
+        m_trackCoverByPath.insert(normalizedPath, coverUrl);
+    }
+    if (!dirPath.isEmpty() && m_trackCoverByDirectory.size() > 2048) {
+        m_trackCoverByDirectory.clear();
+        m_trackCoverByDirectory.insert(dirPath, coverUrl);
     }
 }
 
@@ -2026,21 +2148,12 @@ void BridgeClient::applyLibraryTreeFrame(int version, const QByteArray &treeByte
     m_libraryAlbumCoverPaths.clear();
     m_libraryAlbumTrackPaths.clear();
     m_trackCoverByPath.clear();
-
-    bool coverChanged = false;
+    m_trackCoverByDirectory.clear();
     if (!m_currentTrackPath.isEmpty()) {
-        const QString refreshedCover = findTrackCoverUrl(m_currentTrackPath);
-        m_trackCoverByPath.insert(m_currentTrackPath, refreshedCover);
-        if (m_currentTrackCoverPath != refreshedCover) {
-            m_currentTrackCoverPath = refreshedCover;
-            coverChanged = true;
-        }
+        requestTrackCoverLookup(m_currentTrackPath);
     }
 
     emit libraryTreeFrameReceived(version, treeBytes);
-    if (coverChanged) {
-        scheduleSnapshotChanged();
-    }
 }
 
 bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
@@ -2183,6 +2296,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         paths.reserve(snapshot.queue.tracks.size());
         for (const auto &track : snapshot.queue.tracks) {
             const QString title = track.title.trimmed().isEmpty() ? track.path : track.title;
+            const QString coverUrl = searchCoverUrlFast(track.coverPath);
             paths.push_back(track.path);
             items.push_back(title);
 
@@ -2190,6 +2304,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             row.insert(QStringLiteral("title"), title);
             row.insert(QStringLiteral("artist"), track.artist);
             row.insert(QStringLiteral("album"), track.album);
+            row.insert(QStringLiteral("coverPath"), coverUrl);
             row.insert(QStringLiteral("genre"), track.genre);
             row.insert(
                 QStringLiteral("lengthText"),
@@ -2208,6 +2323,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 row.insert(QStringLiteral("year"), QVariant{});
             }
             rows.push_back(row);
+            if (!track.path.trimmed().isEmpty() && !coverUrl.isEmpty()) {
+                cacheTrackCoverForPath(track.path, coverUrl);
+            }
         }
         if (m_queueItems != items) {
             m_queueItems = items;
@@ -2262,6 +2380,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     QString nextTrackAlbum = m_currentTrackAlbum;
     QString nextTrackGenre = m_currentTrackGenre;
     QVariant nextTrackYear = m_currentTrackYear;
+    QString queueTrackCover;
     const bool stoppedTrackAdvanced = isStopped && hadTrackContextPath && currentPathChanged;
     if (!currentPath.isEmpty() && (!isStopped || stoppedTrackAdvanced)) {
         int detailIndex = playing;
@@ -2277,6 +2396,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackArtist = track.artist;
             nextTrackAlbum = track.album;
             nextTrackGenre = track.genre;
+            queueTrackCover = searchCoverUrlFast(track.coverPath);
             if (track.year != std::numeric_limits<int>::min()) {
                 nextTrackYear = track.year;
             }
@@ -2286,6 +2406,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackArtist = row.value(QStringLiteral("artist")).toString();
             nextTrackAlbum = row.value(QStringLiteral("album")).toString();
             nextTrackGenre = row.value(QStringLiteral("genre")).toString();
+            queueTrackCover = row.value(QStringLiteral("coverPath")).toString();
             const QVariant rowYear = row.value(QStringLiteral("year"));
             if (rowYear.isValid() && !rowYear.isNull()) {
                 nextTrackYear = rowYear;
@@ -2338,6 +2459,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     QString currentCover = metadataCoverUrl;
+    if (currentCover.isEmpty() && !queueTrackCover.isEmpty()) {
+        currentCover = queueTrackCover;
+    }
     if (isStopped && !stoppedTrackAdvanced) {
         currentCover = m_currentTrackCoverPath;
     } else if (currentCover.isEmpty() && !currentPath.isEmpty()) {
@@ -2345,13 +2469,18 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (cached != m_trackCoverByPath.constEnd()) {
             currentCover = cached.value();
         } else {
-            currentCover = findTrackCoverUrl(currentPath);
-            m_trackCoverByPath.insert(currentPath, currentCover);
-            if (m_trackCoverByPath.size() > 4096) {
-                m_trackCoverByPath.clear();
-                m_trackCoverByPath.insert(currentPath, currentCover);
+            const QString dirPath = trackDirectoryPath(currentPath);
+            const auto dirCached = m_trackCoverByDirectory.constFind(dirPath);
+            if (!dirPath.isEmpty() && dirCached != m_trackCoverByDirectory.constEnd()) {
+                currentCover = dirCached.value();
+                cacheTrackCoverForPath(currentPath, currentCover);
+            } else {
+                requestTrackCoverLookup(currentPath);
             }
         }
+    }
+    if (!currentPath.isEmpty() && !currentCover.isEmpty()) {
+        cacheTrackCoverForPath(currentPath, currentCover);
     }
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;

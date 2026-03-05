@@ -42,7 +42,10 @@ impl MetadataService {
         let _ = std::thread::Builder::new()
             .name("ferrous-metadata".to_string())
             .spawn(move || {
-                while let Ok(path) = req_rx.recv() {
+                while let Ok(mut path) = req_rx.recv() {
+                    while let Ok(newer_path) = req_rx.try_recv() {
+                        path = newer_path;
+                    }
                     let mut metadata = TrackMetadata {
                         source_path: Some(path.to_string_lossy().to_string()),
                         title: path

@@ -78,6 +78,7 @@ struct DecodedQueueTrack {
     QString title;
     QString artist;
     QString album;
+    QString coverPath;
     QString genre;
     int year{std::numeric_limits<int>::min()};
     int trackNumber{0};

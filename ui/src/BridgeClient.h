@@ -237,6 +237,12 @@ private:
     void dispatchPendingSearchApplyFrame();
     int searchApplyDispatchDelayMs() const;
     bool applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
+    void startCoverLookupWorker();
+    void stopCoverLookupWorker();
+    void requestTrackCoverLookup(const QString &trackPath);
+    void coverLookupWorkerLoop();
+    void applyTrackCoverLookupResult(const QString &trackPath, const QString &coverUrl);
+    void cacheTrackCoverForPath(const QString &trackPath, const QString &coverUrl);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
@@ -298,6 +304,7 @@ private:
     QStringList m_libraryAlbumCoverPaths;
     QList<QStringList> m_libraryAlbumTrackPaths;
     QHash<QString, QString> m_trackCoverByPath;
+    QHash<QString, QString> m_trackCoverByDirectory;
     mutable QHash<QString, QString> m_libraryThumbnailSourceCache;
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
@@ -358,6 +365,12 @@ private:
     std::mutex m_searchOutputMutex;
     std::optional<SearchWorkerOutputFrame> m_searchPendingOutputFrame;
     quint64 m_searchOutputCoalescedDrops{0};
+    std::thread m_coverLookupThread;
+    std::mutex m_coverLookupMutex;
+    std::condition_variable m_coverLookupCv;
+    bool m_coverLookupStop{false};
+    std::optional<QString> m_coverLookupPendingPath;
+    QString m_coverLookupInFlightPath;
     quint64 m_searchFramesReceived{0};
     quint64 m_searchFramesApplied{0};
     quint64 m_searchFramesDroppedStale{0};

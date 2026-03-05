@@ -17,6 +17,7 @@ pub struct LibraryTrack {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub cover_path: String,
     pub genre: String,
     pub year: Option<i32>,
     pub track_no: Option<u32>,
@@ -297,6 +298,7 @@ fn apply_pending_upserts_for_root(
             title: indexed.title,
             artist: indexed.artist,
             album: indexed.album,
+            cover_path: indexed.cover_path,
             genre: indexed.genre,
             year: indexed.year,
             track_no: indexed.track_no,
@@ -438,6 +440,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             title TEXT NOT NULL,
             artist TEXT NOT NULL,
             album TEXT NOT NULL,
+            cover_path TEXT NOT NULL DEFAULT '',
             genre TEXT NOT NULL DEFAULT '',
             year INTEGER,
             track_no INTEGER,
@@ -456,6 +459,10 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE tracks ADD COLUMN cover_path TEXT NOT NULL DEFAULT ''",
         [],
     );
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
@@ -527,7 +534,7 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
 
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, root_path, title, artist, album, genre, year, track_no, duration_secs
+        SELECT path, root_path, title, artist, album, cover_path, genre, year, track_no, duration_secs
         FROM tracks
         ORDER BY
             root_path COLLATE NOCASE,
@@ -541,14 +548,15 @@ fn load_snapshot(conn: &Connection, snapshot: &mut LibrarySnapshot) {
                 title: row.get::<_, String>(2)?,
                 artist: row.get::<_, String>(3)?,
                 album: row.get::<_, String>(4)?,
-                genre: row.get::<_, String>(5)?,
+                cover_path: row.get::<_, String>(5)?,
+                genre: row.get::<_, String>(6)?,
                 year: row
-                    .get::<_, Option<i64>>(6)?
+                    .get::<_, Option<i64>>(7)?
                     .and_then(|v| i32::try_from(v).ok()),
                 track_no: row
-                    .get::<_, Option<i64>>(7)?
+                    .get::<_, Option<i64>>(8)?
                     .and_then(|v| u32::try_from(v).ok()),
-                duration_secs: row.get::<_, Option<f32>>(8)?,
+                duration_secs: row.get::<_, Option<f32>>(9)?,
             })
         }) {
             for row in rows.flatten() {
@@ -709,6 +717,7 @@ where
                 title,
                 artist,
                 album,
+                cover_path,
                 genre,
                 year,
                 track_no,
@@ -717,12 +726,13 @@ where
                 size_bytes,
                 indexed_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(path) DO UPDATE SET
                 root_path=excluded.root_path,
                 title=excluded.title,
                 artist=excluded.artist,
                 album=excluded.album,
+                cover_path=excluded.cover_path,
                 genre=excluded.genre,
                 year=excluded.year,
                 track_no=excluded.track_no,
@@ -826,6 +836,7 @@ where
                 indexed.title.as_str(),
                 indexed.artist.as_str(),
                 indexed.album.as_str(),
+                indexed.cover_path.as_str(),
                 indexed.genre.as_str(),
                 indexed.year.map(i64::from),
                 indexed.track_no.map(i64::from),
@@ -980,6 +991,7 @@ struct IndexedTrack {
     title: String,
     artist: String,
     album: String,
+    cover_path: String,
     genre: String,
     year: Option<i32>,
     track_no: Option<u32>,
@@ -995,6 +1007,7 @@ fn read_track_info(path: &Path) -> IndexedTrack {
             .to_owned(),
         artist: String::new(),
         album: String::new(),
+        cover_path: String::new(),
         genre: String::new(),
         year: None,
         track_no: None,
@@ -1020,7 +1033,58 @@ fn read_track_info(path: &Path) -> IndexedTrack {
         }
         out.duration_secs = Some(tagged.properties().duration().as_secs_f32());
     }
+    out.cover_path = find_cover_path_for_track(path);
     out
+}
+
+fn find_cover_path_for_track(path: &Path) -> String {
+    let Some(dir) = path.parent() else {
+        return String::new();
+    };
+    find_image_in_dir(dir).unwrap_or_default()
+}
+
+fn find_image_in_dir(dir: &Path) -> Option<String> {
+    let mut candidates = vec![
+        "cover.jpg",
+        "cover.jpeg",
+        "cover.png",
+        "folder.jpg",
+        "folder.jpeg",
+        "folder.png",
+        "front.jpg",
+        "front.png",
+    ]
+    .into_iter()
+    .map(|name| dir.join(name))
+    .collect::<Vec<_>>();
+
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        let ext = ext.to_ascii_lowercase();
+        if (ext == "jpg" || ext == "jpeg" || ext == "png")
+            && !candidates.iter().any(|candidate| candidate == &path)
+        {
+            candidates.push(path);
+        }
+    }
+
+    candidates.into_iter().find_map(|candidate| {
+        if candidate.is_file() {
+            Some(candidate.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 fn unix_ts_i64() -> i64 {
@@ -1144,6 +1208,32 @@ mod tests {
         assert!(!paths.iter().any(|p| p.ends_with("notes.txt")));
         assert_eq!(last.discovered, 3);
         assert_eq!(last.processed, 3);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_root_persists_cover_path_from_album_directory() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+
+        let root = test_dir("cover-path");
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mp3 = root.join("song.mp3");
+        let cover = root.join("cover.jpg");
+        write_stub(&mp3, b"not-real-mp3");
+        write_stub(&cover, b"not-real-jpg");
+
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("scan");
+
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(
+            snapshot.tracks[0].cover_path,
+            cover.to_string_lossy().to_string()
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -66,6 +66,7 @@ struct EncodedQueueTrack {
     title: String,
     artist: String,
     album: String,
+    cover_path: String,
     genre: String,
     year: Option<i32>,
     track_number: Option<u32>,
@@ -904,6 +905,7 @@ fn fallback_queue_section(snapshot: &BridgeSnapshot) -> QueueSectionData {
             title: path_title_fallback(path, &path_str),
             artist: String::new(),
             album: String::new(),
+            cover_path: String::new(),
             genre: String::new(),
             year: None,
             track_number: None,
@@ -955,6 +957,7 @@ fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
                 },
                 artist: track.artist.clone(),
                 album: track.album.clone(),
+                cover_path: track.cover_path.clone(),
                 genre: track.genre.clone(),
                 year: track.year,
                 track_number: track.track_no,
@@ -975,6 +978,7 @@ fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
             title: fallback_title,
             artist: String::new(),
             album: String::new(),
+            cover_path: String::new(),
             genre: String::new(),
             year: None,
             track_number: None,
@@ -1004,6 +1008,7 @@ fn encode_queue_section(snapshot: &BridgeSnapshot, queue_section: &QueueSectionD
         push_u16_string(&mut out, &track.title);
         push_u16_string(&mut out, &track.artist);
         push_u16_string(&mut out, &track.album);
+        push_u16_string(&mut out, &track.cover_path);
         push_u16_string(&mut out, &track.genre);
         push_i32(&mut out, track.year.unwrap_or(i32::MIN));
         push_u16(&mut out, track.track_number.map_or(0, clamp_u32_to_u16));
@@ -1318,6 +1323,7 @@ mod tests {
                     title: "Sample Track".to_string(),
                     artist: "Sample Artist".to_string(),
                     album: "Sample Album".to_string(),
+                    cover_path: "/music/a.cover.png".to_string(),
                     genre: "Rock".to_string(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1565,6 +1571,7 @@ mod tests {
         assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Track");
         assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Artist");
         assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Album");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.cover.png");
         assert_eq!(read_u16_string(&encoded, &mut offset), "Rock");
         assert_eq!(read_i32(&encoded, &mut offset), 2020);
         assert_eq!(read_u16(&encoded, &mut offset), 1);
