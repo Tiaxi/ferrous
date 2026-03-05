@@ -3012,14 +3012,14 @@ Kirigami.ApplicationWindow {
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
                                             color: Kirigami.Theme.disabledTextColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedTitle
                                             elide: Text.ElideRight
-                                            font.bold: true
-                                            font.pixelSize: 11
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: 12
                                             color: Kirigami.Theme.textColor
                                         }
                                     }
@@ -3032,14 +3032,14 @@ Kirigami.ApplicationWindow {
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
                                             color: Kirigami.Theme.disabledTextColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedArtist
                                             elide: Text.ElideRight
                                             color: Kirigami.Theme.textColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                     }
 
@@ -3051,14 +3051,14 @@ Kirigami.ApplicationWindow {
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
                                             color: Kirigami.Theme.disabledTextColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedAlbum
                                             elide: Text.ElideRight
                                             color: Kirigami.Theme.textColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                     }
 
@@ -3070,14 +3070,14 @@ Kirigami.ApplicationWindow {
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
                                             color: Kirigami.Theme.disabledTextColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedTrackNumber
                                             elide: Text.ElideRight
                                             color: Kirigami.Theme.textColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                     }
 
@@ -3089,14 +3089,14 @@ Kirigami.ApplicationWindow {
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
                                             color: Kirigami.Theme.disabledTextColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedYear
                                             elide: Text.ElideRight
                                             color: Kirigami.Theme.textColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                     }
 
@@ -3108,14 +3108,14 @@ Kirigami.ApplicationWindow {
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
                                             color: Kirigami.Theme.disabledTextColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedGenre
                                             elide: Text.ElideRight
                                             color: Kirigami.Theme.textColor
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
                                     }
                                 }
