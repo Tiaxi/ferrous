@@ -97,9 +97,37 @@ cargo install cargo-llvm-cov
 Optional runtime tuning:
 
 - `FERROUS_BRIDGE_SNAPSHOT_MS`: controls bridge snapshot cadence (default `16`, range `8..1000`).
-- `FERROUS_UI_PAINT_IMAGE=1`: force `QQuickPaintedItem` image target (default uses framebuffer object target).
+- `FERROUS_UI_PAINT_FBO=1`: force `QQuickPaintedItem` framebuffer target (default uses image target).
 - `FERROUS_UI_SHOW_FPS=1`: show spectrogram FPS overlay.
-- `FERROUS_PROFILE_UI=1`: print per-second UI paint cost counters (`[ui-spectrogram]`, `[ui-waveform]`).
+- `FERROUS_UI_SEARCH_DEBOUNCE_MS`: search debounce in milliseconds (default `90`).
+
+### Profiling logs (compile-time gated)
+
+Profiling prints are compiled out by default. Runtime env vars such as
+`FERROUS_PROFILE_UI`, `FERROUS_PROFILE`, and `FERROUS_SEARCH_PROFILE`
+only produce output when profiling logs are compiled in.
+
+Enable profiling logs for the UI build:
+
+```bash
+cmake -S ui -B ui/build -G Ninja -DFERROUS_ENABLE_PROFILE_LOGS=ON
+cmake --build ui/build -j
+```
+
+Enable profiling logs for direct Rust runs:
+
+```bash
+cargo run --bin native_frontend --features "gst profiling-logs"
+```
+
+With a profile-enabled build, typical runtime toggles are:
+
+- `FERROUS_PROFILE_UI=1`: per-second UI paint counters (`[ui-spectrogram]`, `[ui-waveform]`).
+- `FERROUS_PROFILE=1`: bridge/playback/analysis profiling logs.
+- `FERROUS_SEARCH_PROFILE=1`: search-worker and search-apply profiling logs.
+
+Diagnostics log UI no longer live-rebinds large text while closed; use the
+Diagnostics dialog `Reload` button to refresh text from disk.
 
 Roadmap and engineering plans live under `docs/`:
 

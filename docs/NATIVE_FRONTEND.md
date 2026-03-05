@@ -66,6 +66,17 @@ cmake --build build
 ./build/ferrous
 ```
 
+Enable compile-time profiling logs in the UI binary:
+
+```bash
+cd ui
+cmake -B build -G Ninja -DFERROUS_ENABLE_PROFILE_LOGS=ON
+cmake --build build
+```
+
+`FERROUS_PROFILE_UI`, `FERROUS_PROFILE`, and `FERROUS_SEARCH_PROFILE`
+only emit profiling logs when `FERROUS_ENABLE_PROFILE_LOGS=ON` was used at configure time.
+
 One-command dev path from repo root:
 
 ```bash
@@ -76,6 +87,12 @@ Build-only check:
 
 ```bash
 ./scripts/run-ui.sh --no-run
+```
+
+Backend-only run with profiling logs compiled in:
+
+```bash
+cargo run --release --bin native_frontend --features "gst profiling-logs"
 ```
 
 Notes:
