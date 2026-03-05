@@ -64,6 +64,8 @@ Kirigami.ApplicationWindow {
     property var globalSearchContextRowData: ({})
     property bool globalSearchOpening: false
     property bool globalSearchIgnoreRefocusFind: false
+    readonly property real snappyScrollFlickDeceleration: 18000
+    readonly property real snappyScrollMaxFlickVelocity: 1400
     property string pendingGlobalSearchPrefillText: ""
     property string globalSearchOpenInitialText: ""
     readonly property bool visualFeedsEnabled: visible
@@ -716,6 +718,35 @@ Kirigami.ApplicationWindow {
         }
         pendingLibraryAnchorValid = false
         libraryModel.toggleKey(key)
+    }
+
+    function stepScrollView(view, wheel, rowHeight, rowsPerStep) {
+        if (!view || !wheel) {
+            return
+        }
+        const maxY = Math.max(0, view.contentHeight - view.height)
+        if (maxY <= 0) {
+            return
+        }
+        let deltaY = 0
+        if (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0) {
+            deltaY = wheel.angleDelta.y
+        } else if (wheel.pixelDelta && wheel.pixelDelta.y !== undefined && wheel.pixelDelta.y !== 0) {
+            deltaY = wheel.pixelDelta.y
+        }
+        if (deltaY === 0) {
+            return
+        }
+        const rowPx = Math.max(8, rowHeight || 24)
+        const rows = Math.max(1, rowsPerStep || 1)
+        const stepPx = rowPx * rows
+        const notches = (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0)
+            ? Math.max(1, Math.round(Math.abs(wheel.angleDelta.y) / 120))
+            : Math.max(1, Math.round(Math.abs(deltaY) / stepPx))
+        const direction = deltaY > 0 ? -1 : 1
+        const targetY = view.contentY + (direction * notches * stepPx)
+        view.contentY = Math.max(0, Math.min(maxY, targetY))
+        wheel.accepted = true
     }
 
     function captureLibraryViewAnchor() {
@@ -2223,6 +2254,19 @@ Kirigami.ApplicationWindow {
                                 anchors.fill: parent
                                 clip: true
                                 model: uiBridge.libraryRoots
+                                boundsBehavior: Flickable.StopAtBounds
+                                boundsMovement: Flickable.StopAtBounds
+                                flickDeceleration: root.snappyScrollFlickDeceleration
+                                maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
+                                pixelAligned: true
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.NoButton
+                                    preventStealing: true
+                                    onWheel: function(wheel) {
+                                        root.stepScrollView(parent, wheel, 30, 3)
+                                    }
+                                }
                                 delegate: RowLayout {
                                     width: ListView.view.width
                                     spacing: 6
@@ -2439,12 +2483,25 @@ Kirigami.ApplicationWindow {
                     reuseItems: true
                     spacing: 0
                     boundsBehavior: Flickable.StopAtBounds
+                    boundsMovement: Flickable.StopAtBounds
+                    flickDeceleration: root.snappyScrollFlickDeceleration
+                    maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
+                    pixelAligned: true
                     readonly property int reservedRightPadding: (globalSearchResultsScrollBar.visible
                         ? globalSearchResultsScrollBar.width + 8
                         : 8)
                     ScrollBar.vertical: ScrollBar {
                         id: globalSearchResultsScrollBar
                         policy: ScrollBar.AsNeeded
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.NoButton
+                        preventStealing: true
+                        onWheel: function(wheel) {
+                            root.stepScrollView(globalSearchResultsView, wheel, 24, 3)
+                        }
                     }
 
                     Keys.onPressed: function(event) {
@@ -3674,10 +3731,20 @@ Kirigami.ApplicationWindow {
                                 reuseItems: true
                                 cacheBuffer: 200
                                 boundsBehavior: Flickable.StopAtBounds
-                                flickDeceleration: 2600
-                                maximumFlickVelocity: 5200
+                                boundsMovement: Flickable.StopAtBounds
+                                flickDeceleration: root.snappyScrollFlickDeceleration
+                                maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
+                                pixelAligned: true
                                 ScrollBar.vertical: ScrollBar {
                                     policy: ScrollBar.AlwaysOn
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.NoButton
+                                    preventStealing: true
+                                    onWheel: function(wheel) {
+                                        root.stepScrollView(libraryAlbumView, wheel, 24, 3)
+                                    }
                                 }
                                 Keys.onPressed: function(event) {
                                     root.handleLibraryKeyPress(event)
@@ -3958,6 +4025,11 @@ Kirigami.ApplicationWindow {
                             clip: true
                             activeFocusOnTab: true
                             model: uiBridge.queueRows
+                            boundsBehavior: Flickable.StopAtBounds
+                            boundsMovement: Flickable.StopAtBounds
+                            flickDeceleration: root.snappyScrollFlickDeceleration
+                            maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
+                            pixelAligned: true
                             property real reservedRightPadding: playlistVerticalScrollBar.visible
                                 ? (playlistVerticalScrollBar.width + 6)
                                 : 0
@@ -3971,6 +4043,14 @@ Kirigami.ApplicationWindow {
                             ScrollBar.vertical: ScrollBar {
                                 id: playlistVerticalScrollBar
                                 policy: ScrollBar.AsNeeded
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.NoButton
+                                preventStealing: true
+                                onWheel: function(wheel) {
+                                    root.stepScrollView(playlistView, wheel, 24, 3)
+                                }
                             }
 
                             delegate: Rectangle {
