@@ -158,6 +158,7 @@ struct DecodedSearchRow {
     QString coverPath;
     QString artistKey;
     QString albumKey;
+    QString sectionKey;
     QString trackKey;
     QString trackPath;
 };

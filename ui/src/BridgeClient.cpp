@@ -1097,6 +1097,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
             row.coverPath.isEmpty() ? QString{} : libraryThumbnailSource(row.coverPath));
         item.insert(QStringLiteral("artistKey"), row.artistKey);
         item.insert(QStringLiteral("albumKey"), row.albumKey);
+        item.insert(QStringLiteral("sectionKey"), row.sectionKey);
         item.insert(QStringLiteral("trackKey"), row.trackKey);
         item.insert(QStringLiteral("trackPath"), row.trackPath);
         if (row.year != std::numeric_limits<int>::min()) {

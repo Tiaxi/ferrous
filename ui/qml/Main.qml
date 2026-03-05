@@ -874,10 +874,27 @@ Kirigami.ApplicationWindow {
             return false
         }
         setLibrarySingleSelection(index, rowMap)
-        if (libraryAlbumView) {
-            libraryAlbumView.positionViewAtIndex(index, ListView.Contain)
-        }
+        scrollLibrarySelectionKeyIntoView(rowMap.selectionKey || "")
         return true
+    }
+
+    function scrollLibrarySelectionKeyIntoView(selectionKey) {
+        if (!libraryAlbumView || !selectionKey || selectionKey.length === 0) {
+            return
+        }
+        const immediateIndex = libraryModel.indexForSelectionKey(selectionKey)
+        if (immediateIndex >= 0) {
+            libraryAlbumView.positionViewAtIndex(immediateIndex, ListView.Contain)
+        }
+        Qt.callLater(function() {
+            if (!libraryAlbumView) {
+                return
+            }
+            const delayedIndex = libraryModel.indexForSelectionKey(selectionKey)
+            if (delayedIndex >= 0) {
+                libraryAlbumView.positionViewAtIndex(delayedIndex, ListView.Contain)
+            }
+        })
     }
 
     function selectLibraryRelative(delta) {
@@ -1197,6 +1214,9 @@ Kirigami.ApplicationWindow {
         }
         if ((row.albumKey || "").length > 0) {
             expandKeys.push(row.albumKey)
+        }
+        if ((row.sectionKey || "").length > 0) {
+            expandKeys.push(row.sectionKey)
         }
         pendingLibraryRevealExpandKeys = expandKeys
         pendingLibraryRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")

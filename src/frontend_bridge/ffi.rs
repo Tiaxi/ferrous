@@ -798,6 +798,7 @@ fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
         push_u16_string(&mut out, &row.cover_path);
         push_u16_string(&mut out, &row.artist_key);
         push_u16_string(&mut out, &row.album_key);
+        push_u16_string(&mut out, &row.section_key);
         push_u16_string(&mut out, &row.track_key);
         push_u16_string(&mut out, &row.track_path);
     }

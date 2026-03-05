@@ -616,6 +616,7 @@ bool decodeSearchResultsFrame(
         QString coverPath;
         QString artistKey;
         QString albumKey;
+        QString sectionKey;
         QString trackKey;
         QString trackPath;
 
@@ -632,6 +633,7 @@ bool decodeSearchResultsFrame(
             || !reader.readUtf8U16(&coverPath)
             || !reader.readUtf8U16(&artistKey)
             || !reader.readUtf8U16(&albumKey)
+            || !reader.readUtf8U16(&sectionKey)
             || !reader.readUtf8U16(&trackKey)
             || !reader.readUtf8U16(&trackPath)) {
             if (errorMessage) {
@@ -663,6 +665,7 @@ bool decodeSearchResultsFrame(
         row.coverPath = coverPath;
         row.artistKey = artistKey;
         row.albumKey = albumKey;
+        row.sectionKey = sectionKey;
         row.trackKey = trackKey;
         row.trackPath = trackPath;
         rows.push_back(std::move(row));

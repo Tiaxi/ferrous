@@ -158,6 +158,7 @@ pub struct BridgeSearchResultRow {
     pub cover_path: String,
     pub artist_key: String,
     pub album_key: String,
+    pub section_key: String,
     pub track_key: String,
     pub track_path: String,
 }
@@ -1156,6 +1157,7 @@ struct TreePathContext {
     artist_key: String,
     album_folder: Option<String>,
     album_key: Option<String>,
+    section_key: Option<String>,
     album_path: Option<PathBuf>,
     track_key: String,
     is_main_level_album_track: bool,
@@ -1339,6 +1341,7 @@ fn build_search_results_frame(
             }),
             artist_key: context.artist_key.clone(),
             album_key: album_key.unwrap_or_default(),
+            section_key: context.section_key.unwrap_or_default(),
             track_key: context.track_key,
             track_path: hit.path.to_string_lossy().to_string(),
         });
@@ -1360,6 +1363,7 @@ fn build_search_results_frame(
             cover_path: String::new(),
             artist_key,
             album_key: String::new(),
+            section_key: String::new(),
             track_key: String::new(),
             track_path: String::new(),
         })
@@ -1398,6 +1402,7 @@ fn build_search_results_frame(
                     .unwrap_or_default(),
                 artist_key: stats.artist_key.clone(),
                 album_key,
+                section_key: String::new(),
                 track_key: String::new(),
                 track_path: String::new(),
             })
@@ -1694,6 +1699,7 @@ fn derive_tree_path_context(
             artist_key,
             album_folder: None,
             album_key: None,
+            section_key: None,
             album_path: None,
             track_key,
             is_main_level_album_track: false,
@@ -1703,6 +1709,14 @@ fn derive_tree_path_context(
 
     let album_folder = components[1].clone();
     let album_key = format!("album|{root_key}|{artist_name}|{album_folder}");
+    let section_key = if components.len() >= 4 {
+        Some(format!(
+            "section|{root_key}|{artist_name}|{album_folder}|{}",
+            components[2]
+        ))
+    } else {
+        None
+    };
     let is_main_level_album_track = components.len() == 3;
     let is_disc_section_album_track =
         components.len() == 4 && is_main_album_disc_section(&components[2]);
@@ -1711,6 +1725,7 @@ fn derive_tree_path_context(
         artist_key,
         album_folder: Some(album_folder.clone()),
         album_key: Some(album_key),
+        section_key,
         album_path: Some(root.join(&artist_name).join(album_folder)),
         track_key,
         is_main_level_album_track,
