@@ -54,12 +54,23 @@ Kirigami.ApplicationWindow {
     property string pendingSearchOpenSelectionKey: ""
     property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
-    property var globalSearchDisplayRows: []
     property int globalSearchSelectedDisplayIndex: -1
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
         && active
     readonly property var uiBridge: bridge ? bridge : bridgeFallback
+    readonly property var globalSearchModelApi: (uiBridge
+        && uiBridge.globalSearchModel
+        && uiBridge.globalSearchModel.nextSelectableIndex)
+        ? uiBridge.globalSearchModel
+        : globalSearchModelFallback
+
+    QtObject {
+        id: globalSearchModelFallback
+        function rowDataAt(index) { return ({}) }
+        function isSelectableIndex(index) { return false }
+        function nextSelectableIndex(startIndex, step, wrap) { return -1 }
+    }
 
     QtObject {
         id: bridgeFallback
@@ -106,6 +117,7 @@ Kirigami.ApplicationWindow {
         property var globalSearchAlbumResults: []
         property var globalSearchTrackResults: []
         property int globalSearchSeq: 0
+        property var globalSearchModel: null
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property bool connected: false
@@ -1067,41 +1079,15 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    function rebuildGlobalSearchDisplayRows() {
-        const rows = []
-        const appendSection = function(title, rowType, sourceRows) {
-            if (!sourceRows || sourceRows.length === 0) {
-                return
-            }
-            rows.push({
-                kind: "section",
-                sectionTitle: title,
-                rowType: rowType
-            })
-            rows.push({
-                kind: "columns",
-                rowType: rowType
-            })
-            for (let i = 0; i < sourceRows.length; ++i) {
-                const source = sourceRows[i]
-                const item = { kind: "item", rowType: rowType }
-                for (const key in source) {
-                    if (key === "rowType") {
-                        continue
-                    }
-                    item[key] = source[key]
-                }
-                rows.push(item)
-            }
-        }
-        appendSection("Artists", "artist", uiBridge.globalSearchArtistResults || [])
-        appendSection("Albums", "album", uiBridge.globalSearchAlbumResults || [])
-        appendSection("Tracks", "track", uiBridge.globalSearchTrackResults || [])
-        globalSearchDisplayRows = rows
+    function globalSearchRowCount() {
+        return globalSearchResultsView ? (globalSearchResultsView.count || 0) : 0
+    }
+
+    function syncGlobalSearchSelectionAfterResultsChange() {
         const firstIndex = nextSearchSelectableIndex(-1, 1, false)
         if (globalSearchSelectedDisplayIndex < 0 || !isSearchRowSelectable(globalSearchSelectedDisplayIndex)) {
             globalSearchSelectedDisplayIndex = firstIndex
-        } else if (globalSearchSelectedDisplayIndex >= globalSearchDisplayRows.length) {
+        } else if (globalSearchSelectedDisplayIndex >= globalSearchRowCount()) {
             globalSearchSelectedDisplayIndex = firstIndex
         }
     }
@@ -1111,40 +1097,22 @@ Kirigami.ApplicationWindow {
     }
 
     function searchLastSelectableIndex() {
-        return nextSearchSelectableIndex(globalSearchDisplayRows.length, -1, false)
+        return nextSearchSelectableIndex(globalSearchRowCount(), -1, false)
     }
 
     function isSearchRowSelectable(index) {
-        if (index < 0 || index >= globalSearchDisplayRows.length) {
-            return false
-        }
-        const row = globalSearchDisplayRows[index]
-        return row && row.kind === "item"
+        return globalSearchModelApi ? !!globalSearchModelApi.isSelectableIndex(index) : false
     }
 
     function nextSearchSelectableIndex(startIndex, step, wrap) {
-        if (globalSearchDisplayRows.length === 0) {
+        if (!globalSearchModelApi) {
             return -1
         }
-        const direction = step < 0 ? -1 : 1
-        let index = startIndex
-        for (let i = 0; i < globalSearchDisplayRows.length; ++i) {
-            index += direction
-            if (index < 0 || index >= globalSearchDisplayRows.length) {
-                if (!wrap) {
-                    return -1
-                }
-                index = direction > 0 ? 0 : globalSearchDisplayRows.length - 1
-            }
-            if (isSearchRowSelectable(index)) {
-                return index
-            }
-        }
-        return -1
+        return globalSearchModelApi.nextSelectableIndex(startIndex, step, wrap)
     }
 
     function moveGlobalSearchSelectionByPage(direction) {
-        if (globalSearchDisplayRows.length === 0) {
+        if (globalSearchRowCount() === 0) {
             return false
         }
         const stepDir = direction < 0 ? -1 : 1
@@ -1188,7 +1156,10 @@ Kirigami.ApplicationWindow {
         if (!isSearchRowSelectable(globalSearchSelectedDisplayIndex)) {
             return null
         }
-        return globalSearchDisplayRows[globalSearchSelectedDisplayIndex]
+        const row = globalSearchModelApi
+            ? globalSearchModelApi.rowDataAt(globalSearchSelectedDisplayIndex)
+            : null
+        return row || null
     }
 
     function openGlobalSearch() {
@@ -1936,7 +1907,7 @@ Kirigami.ApplicationWindow {
         width: Math.min(1080, root.width - 80)
         height: Math.min(720, root.height - 80)
         onOpened: {
-            root.rebuildGlobalSearchDisplayRows()
+            root.syncGlobalSearchSelectionAfterResultsChange()
             root.focusGlobalSearchQueryField(false)
             if ((globalSearchQueryField.text || "").length > 0) {
                 globalSearchQueryField.selectAll()
@@ -2049,7 +2020,7 @@ Kirigami.ApplicationWindow {
                     id: globalSearchResultsView
                     anchors.fill: parent
                     clip: true
-                    model: root.globalSearchDisplayRows
+                    model: uiBridge.globalSearchModel || []
                     spacing: 0
                     boundsBehavior: Flickable.StopAtBounds
                     readonly property int reservedRightPadding: (globalSearchResultsScrollBar.visible
@@ -2126,28 +2097,45 @@ Kirigami.ApplicationWindow {
                     }
 
                     delegate: Rectangle {
-                        readonly property var rowData: (modelData && typeof modelData === "object")
-                            ? modelData
-                            : ({})
-                        readonly property string kind: rowData.kind || ""
-                        readonly property string rowType: rowData.rowType || ""
-                        readonly property string sectionTitle: rowData.sectionTitle || ""
-                        readonly property string label: rowData.label || ""
-                        readonly property string artist: rowData.artist || ""
-                        readonly property string album: rowData.album || ""
-                        readonly property string genre: rowData.genre || ""
-                        readonly property string coverUrl: rowData.coverUrl || ""
-                        readonly property string lengthText: rowData.lengthText || ""
-                        readonly property var year: rowData.year
-                        readonly property var trackNumber: rowData.trackNumber
-                        readonly property var count: rowData.count
+                        readonly property string rowKind: kind || ""
+                        readonly property string rowTypeValue: rowType || ""
+                        readonly property string sectionTitleValue: sectionTitle || ""
+                        readonly property string labelValue: label || ""
+                        readonly property string artistValue: artist || ""
+                        readonly property string albumValue: album || ""
+                        readonly property string genreValue: genre || ""
+                        readonly property string coverUrlValue: coverUrl || ""
+                        readonly property string lengthTextValue: lengthText || ""
+                        readonly property var yearValue: year
+                        readonly property var trackNumberValue: trackNumber
+                        readonly property var countValue: count
+                        readonly property var rowData: ({
+                            kind: rowKind,
+                            rowType: rowTypeValue,
+                            sectionTitle: sectionTitleValue,
+                            label: labelValue,
+                            artist: artistValue,
+                            album: albumValue,
+                            genre: genreValue,
+                            coverUrl: coverUrlValue,
+                            lengthText: lengthTextValue,
+                            year: yearValue,
+                            trackNumber: trackNumberValue,
+                            count: countValue,
+                            artistKey: artistKey || "",
+                            albumKey: albumKey || "",
+                            sectionKey: sectionKey || "",
+                            trackKey: trackKey || "",
+                            trackPath: trackPath || "",
+                            coverPath: coverPath || ""
+                        })
                         width: Math.max(
                             0,
                             ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                        height: kind === "section" ? 30 : 24
-                        color: kind === "section"
+                        height: rowKind === "section" ? 30 : 24
+                        color: rowKind === "section"
                             ? Kirigami.Theme.alternateBackgroundColor
-                            : (kind === "columns"
+                            : (rowKind === "columns"
                                 ? Qt.rgba(0, 0, 0, 0.05)
                                 : (index === root.globalSearchSelectedDisplayIndex
                                     ? Kirigami.Theme.highlightColor
@@ -2162,21 +2150,21 @@ Kirigami.ApplicationWindow {
                             spacing: 8
 
                             Label {
-                                visible: kind === "section"
+                                visible: rowKind === "section"
                                 Layout.fillWidth: true
-                                text: sectionTitle || ""
+                                text: sectionTitleValue || ""
                                 font.bold: true
                             }
 
                             RowLayout {
-                                visible: kind === "columns" && rowType === "artist"
+                                visible: rowKind === "columns" && rowTypeValue === "artist"
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Label { text: "Name"; Layout.fillWidth: true; font.bold: true }
                             }
 
                             RowLayout {
-                                visible: kind === "columns" && rowType === "album"
+                                visible: rowKind === "columns" && rowTypeValue === "album"
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Label { text: ""; Layout.preferredWidth: 26; font.bold: true }
@@ -2189,7 +2177,7 @@ Kirigami.ApplicationWindow {
                             }
 
                             RowLayout {
-                                visible: kind === "columns" && rowType === "track"
+                                visible: rowKind === "columns" && rowTypeValue === "track"
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Label { text: "#"; Layout.preferredWidth: 34; font.bold: true }
@@ -2208,12 +2196,12 @@ Kirigami.ApplicationWindow {
                             }
 
                             RowLayout {
-                                visible: kind === "item" && rowType === "artist"
+                                visible: rowKind === "item" && rowTypeValue === "artist"
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Label {
                                     Layout.fillWidth: true
-                                    text: label || ""
+                                    text: labelValue || ""
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
                                         ? Kirigami.Theme.highlightedTextColor
@@ -2222,7 +2210,7 @@ Kirigami.ApplicationWindow {
                             }
 
                             RowLayout {
-                                visible: kind === "item" && rowType === "album"
+                                visible: rowKind === "item" && rowTypeValue === "album"
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Item {
@@ -2230,7 +2218,7 @@ Kirigami.ApplicationWindow {
                                     Layout.preferredHeight: 20
                                     Image {
                                         anchors.fill: parent
-                                        source: coverUrl || ""
+                                        source: coverUrlValue || ""
                                         fillMode: Image.PreserveAspectFit
                                         asynchronous: true
                                         cache: true
@@ -2239,7 +2227,7 @@ Kirigami.ApplicationWindow {
                                     }
                                 }
                                 Label {
-                                    text: label || ""
+                                    text: labelValue || ""
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2247,7 +2235,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: artist || ""
+                                    text: artistValue || ""
                                     Layout.preferredWidth: 170
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2255,7 +2243,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: year !== undefined && year !== null ? year : ""
+                                    text: yearValue !== undefined && yearValue !== null ? yearValue : ""
                                     Layout.preferredWidth: 52
                                     horizontalAlignment: Text.AlignRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2263,7 +2251,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: genre || ""
+                                    text: genreValue || ""
                                     Layout.preferredWidth: 120
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2271,7 +2259,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: count !== undefined ? count : ""
+                                    text: countValue !== undefined ? countValue : ""
                                     Layout.preferredWidth: 34
                                     horizontalAlignment: Text.AlignRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2279,7 +2267,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: lengthText || "--:--"
+                                    text: lengthTextValue || "--:--"
                                     Layout.preferredWidth: 76
                                     horizontalAlignment: Text.AlignRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2289,12 +2277,12 @@ Kirigami.ApplicationWindow {
                             }
 
                             RowLayout {
-                                visible: kind === "item" && rowType === "track"
+                                visible: rowKind === "item" && rowTypeValue === "track"
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Label {
-                                    text: trackNumber !== undefined && trackNumber !== null
-                                        ? String(trackNumber).padStart(2, "0")
+                                    text: trackNumberValue !== undefined && trackNumberValue !== null
+                                        ? String(trackNumberValue).padStart(2, "0")
                                         : ""
                                     Layout.preferredWidth: 34
                                     horizontalAlignment: Text.AlignRight
@@ -2303,7 +2291,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: label || ""
+                                    text: labelValue || ""
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2311,7 +2299,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: artist || ""
+                                    text: artistValue || ""
                                     Layout.preferredWidth: 160
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2323,7 +2311,7 @@ Kirigami.ApplicationWindow {
                                     Layout.preferredHeight: 18
                                     Image {
                                         anchors.fill: parent
-                                        source: coverUrl || ""
+                                        source: coverUrlValue || ""
                                         fillMode: Image.PreserveAspectFit
                                         asynchronous: true
                                         cache: true
@@ -2332,7 +2320,7 @@ Kirigami.ApplicationWindow {
                                     }
                                 }
                                 Label {
-                                    text: album || ""
+                                    text: albumValue || ""
                                     Layout.preferredWidth: 182
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2340,7 +2328,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: year !== undefined && year !== null ? year : ""
+                                    text: yearValue !== undefined && yearValue !== null ? yearValue : ""
                                     Layout.preferredWidth: 52
                                     horizontalAlignment: Text.AlignRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2348,7 +2336,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: genre || ""
+                                    text: genreValue || ""
                                     Layout.preferredWidth: 112
                                     elide: Text.ElideRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2356,7 +2344,7 @@ Kirigami.ApplicationWindow {
                                         : Kirigami.Theme.textColor
                                 }
                                 Label {
-                                    text: lengthText || "--:--"
+                                    text: lengthTextValue || "--:--"
                                     Layout.preferredWidth: 76
                                     horizontalAlignment: Text.AlignRight
                                     color: index === root.globalSearchSelectedDisplayIndex
@@ -2368,7 +2356,7 @@ Kirigami.ApplicationWindow {
 
                         MouseArea {
                             anchors.fill: parent
-                            enabled: kind === "item"
+                            enabled: rowKind === "item"
                             acceptedButtons: Qt.LeftButton | Qt.RightButton
                             onClicked: function(mouse) {
                                 root.selectGlobalSearchDisplayIndex(index)
@@ -3518,7 +3506,7 @@ Kirigami.ApplicationWindow {
             applyAnalysisDelta()
         }
         function onGlobalSearchResultsChanged() {
-            root.rebuildGlobalSearchDisplayRows()
+            root.syncGlobalSearchSelectionAfterResultsChange()
         }
         function onBridgeError(message) {
             if (message.indexOf("[analysis]") !== -1
@@ -3554,6 +3542,6 @@ Kirigami.ApplicationWindow {
         root.positionSmoothingTrackPath = uiBridge.currentTrackPath
         root.syncQueueSelectionToCurrentQueue()
         root.syncLibrarySelectionToVisibleRows()
-        root.rebuildGlobalSearchDisplayRows()
+        root.syncGlobalSearchSelectionAfterResultsChange()
     }
 }

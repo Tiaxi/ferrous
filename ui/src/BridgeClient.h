@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "BinaryBridgeCodec.h"
+#include "GlobalSearchResultsModel.h"
 
 struct FerrousFfiBridge;
 
@@ -63,6 +64,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QVariantList globalSearchAlbumResults READ globalSearchAlbumResults NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QVariantList globalSearchTrackResults READ globalSearchTrackResults NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(quint32 globalSearchSeq READ globalSearchSeq NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(QObject* globalSearchModel READ globalSearchModel CONSTANT)
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
@@ -114,6 +116,7 @@ public:
     QVariantList globalSearchAlbumResults() const;
     QVariantList globalSearchTrackResults() const;
     quint32 globalSearchSeq() const;
+    QObject *globalSearchModel() const;
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
     bool connected() const;
@@ -187,6 +190,7 @@ private:
         QVariantList artistRows;
         QVariantList albumRows;
         QVariantList trackRows;
+        QVector<QVariantMap> displayRows;
         QString decodeError;
         qint64 ffiPoppedAtMs{0};
         qint64 ffiPopMs{0};
@@ -201,7 +205,7 @@ private:
     void stopSearchApplyWorker();
     void searchApplyWorkerLoop();
     void enqueueSearchFrame(quint32 seq, QByteArray payload, qint64 ffiPopMs);
-    bool applyPreparedSearchResultsFrame(const SearchWorkerOutputFrame &frame);
+    bool applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
@@ -276,6 +280,7 @@ private:
     QVariantList m_globalSearchAlbumResults;
     QVariantList m_globalSearchTrackResults;
     quint32 m_globalSearchSeq{0};
+    GlobalSearchResultsModel m_globalSearchModel;
     quint32 m_nextGlobalSearchSeq{1};
     quint32 m_latestGlobalSearchSeqSent{0};
     QHash<quint32, qint64> m_globalSearchSentAtMs;

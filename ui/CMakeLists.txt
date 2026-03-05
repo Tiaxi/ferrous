@@ -39,6 +39,7 @@ qt_add_executable(ferrous
     src/DiagnosticsLog.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
+    src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/SpectrogramItem.cpp
     src/WaveformItem.cpp
