@@ -1817,6 +1817,7 @@ Kirigami.ApplicationWindow {
         albumArtZoom = 1.0
         albumArtPanX = 0.0
         albumArtPanY = 0.0
+        albumArtViewer.initialViewPending = true
         albumArtViewer.open()
     }
 
@@ -4370,6 +4371,7 @@ Kirigami.ApplicationWindow {
     Popup {
         id: albumArtViewer
         parent: Overlay.overlay
+        property bool initialViewPending: false
         x: 0
         y: 0
         width: root.width
@@ -4417,11 +4419,27 @@ Kirigami.ApplicationWindow {
                 && p.x <= xOff + albumArtImageFull.paintedWidth
                 && p.y <= yOff + albumArtImageFull.paintedHeight
         }
-        onOpened: {
+        function applyInitialView() {
+            if (!initialViewPending) {
+                return
+            }
+            if (albumArtViewport.width <= 0 || albumArtViewport.height <= 0) {
+                return
+            }
+            if (albumArtImageFull.status === Image.Loading) {
+                return
+            }
             root.albumArtZoom = 1.0
             root.albumArtPanX = 0.0
             root.albumArtPanY = 0.0
+            clampPan()
+            initialViewPending = false
         }
+        onOpened: {
+            applyInitialView()
+        }
+        onWidthChanged: applyInitialView()
+        onHeightChanged: applyInitialView()
 
         MouseArea {
             id: albumArtDismissArea
@@ -4453,13 +4471,28 @@ Kirigami.ApplicationWindow {
             id: albumArtViewport
             z: 1
             anchors.fill: parent
-            anchors.margins: 20
+            anchors.margins: 0
             clip: true
+            onWidthChanged: albumArtViewer.applyInitialView()
+            onHeightChanged: albumArtViewer.applyInitialView()
 
             Item {
                 id: albumArtTransform
-                width: albumArtViewport.width * 0.92
-                height: albumArtViewport.height * 0.92
+                readonly property real nativeWidth: albumArtImageFull.sourceSize.width > 0
+                    ? albumArtImageFull.sourceSize.width
+                    : albumArtViewport.width
+                readonly property real nativeHeight: albumArtImageFull.sourceSize.height > 0
+                    ? albumArtImageFull.sourceSize.height
+                    : albumArtViewport.height
+                readonly property real fitScale: {
+                    const w = nativeWidth > 0 ? nativeWidth : 1
+                    const h = nativeHeight > 0 ? nativeHeight : 1
+                    const scaleX = albumArtViewport.width / w
+                    const scaleY = albumArtViewport.height / h
+                    return Math.min(1.0, scaleX, scaleY)
+                }
+                width: Math.max(1, nativeWidth * fitScale)
+                height: Math.max(1, nativeHeight * fitScale)
                 x: (albumArtViewport.width - width) / 2 + root.albumArtPanX
                 y: (albumArtViewport.height - height) / 2 + root.albumArtPanY
                 scale: root.albumArtZoom
@@ -4473,6 +4506,7 @@ Kirigami.ApplicationWindow {
                     smooth: true
                     asynchronous: true
                     cache: true
+                    onStatusChanged: albumArtViewer.applyInitialView()
                 }
             }
 
