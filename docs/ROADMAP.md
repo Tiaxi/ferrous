@@ -5,7 +5,7 @@ Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`)
 
 ## Product Direction
 
-- Frontend strategy selected: `Qt6/QML + Kirigami` (KDE-native).
+- Frontend strategy selected: `Qt6/QML + Kirigami` (KDE-first).
 - Legacy `eframe/egui` UI has been removed after migration cutover.
 - Rust playback/analysis/library services remain the core backend.
 
@@ -42,7 +42,7 @@ Current issue summary:
 
 Decision:
 - Keep Rust backend.
-- Replace high-rate JSON data path with native/binary UI data flow.
+- Replace high-rate JSON data path with binary UI data flow.
 - Keep JSON/command bridge only for low-rate control/state until in-process FFI path is in place.
 
 ### Phase P0: Stabilize Current Path During Development
@@ -54,13 +54,13 @@ Decision:
 - [x] Reduce spectrogram UI paint cadence and cap history width.
 - [x] Add backend snapshot emission pacing (fixed UI rate instead of per-tick flood).
 - [x] Smooth playback control path (single-shot seek on release, volume ramping to avoid zipper noise/pops).
-- [x] Revert temporary spectrogram quality caps after native C++ path stabilization (higher bin/row throughput restored).
+- [x] Revert temporary spectrogram quality caps after C++ path stabilization (higher bin/row throughput restored).
 
 Acceptance criteria:
 - App remains interactive during playback (no 40s+ UI lockups).
 - Memory usage remains bounded during long playback sessions.
 
-### Phase P1: Native Spectrogram Render Path (C++ Item)
+### Phase P1: Spectrogram Render Path (C++ Item)
 
 - [x] Replace QML `Canvas` spectrogram with C++ render item (`QQuickPaintedItem` baseline landed).
 - [x] Move palette mapping + bin projection to C++ (no per-frame JS loops).
@@ -109,13 +109,13 @@ Acceptance criteria:
   - library queries/selections
   - analysis snapshots (waveform/spectrogram)
   - settings read/write
-- [x] Add minimal Kirigami app shell scaffold with native window, menu bar, and status/footer area.
+- [x] Add minimal Kirigami app shell scaffold with Qt window, menu bar, and status/footer area.
 - [x] Add build documentation for KDE dev environment and runtime dependencies.
 
 Acceptance criteria:
 - Kirigami shell launches and can call Rust backend (`Play/Pause/Stop` roundtrip works).
 
-## Milestone B: Native Main Layout Skeleton
+## Milestone B: Main Layout Skeleton
 
 - [x] Implement split layout in QML matching current Ferrous/DeaDBeeF structure:
   - top controls row
@@ -123,16 +123,16 @@ Acceptance criteria:
   - right playlist pane
   - bottom spectrogram pane
   - footer status line
-- [x] Recreate top control semantics with native KDE look/behavior.
+- [x] Recreate top control semantics with KDE look/behavior.
 - [x] Implement centralized action/shortcut map in UI shell (`Space`, media controls, etc.).
 
 Acceptance criteria:
 - [x] Layout parity exists with placeholder/static content.
-- [x] Native menu/shortcuts are wired and functional.
+- [x] Menu/shortcuts are wired and functional.
 
 ## Milestone C: Playlist + Playback UI Migration
 
-- [x] Implement native playlist table (header + rows + selection + double-click play).
+- [x] Implement playlist table (header + rows + selection + double-click play).
 - [x] Wire queue reordering, remove, clear, and play-at operations.
 - [x] Implement waveform seekbar in UI with current behavior.
 - [x] Implement volume control UX in UI.
@@ -176,7 +176,7 @@ Acceptance criteria:
 ## Post-Migration Parity/Feature Backlog
 
 ### Core UX / Interaction
-- [x] Implement full native top menu actions (`File/Edit/View/Playback/Help`).
+- [x] Implement full top menu actions (`File/Edit/View/Playback/Help`).
 - [x] Add playlist and library context menus for common actions.
 - [x] Add drag-and-drop from library to playlist.
 - [x] Add multi-select in playlist and library views.
@@ -207,11 +207,11 @@ Acceptance criteria:
 - [x] Add optimization planning document and prioritized backlog (`docs/OPTIMIZATION_PLAN.md`).
 - [x] Implement test plan phase 1 (backend/FFI unit tests + UI smoke test scaffold).
 - [x] Implement test plan phase 2 (FFI integration tests + initial bridge mode parity test).
-- [x] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior): expanded process-vs-FFI parity coverage for queue transition flows, stop/restart, play-at edge errors, successful seek path invariants, playback-state transitions (`pause`/`play`/`next`/`prev`), and invalid-seek error parity in `src/bin/native_frontend.rs`; added deterministic bridge queue/play-at/seek-clamp/remove integration test, non-`gst` bridge natural-handoff integration test, no-early-metadata-switch handoff timing regression test, seek-event no-early-waveform-switch regression test, track-change metadata-transition regression test, deterministic `gst` natural-handoff gating regressions, playback seek-boundary/natural-handoff regression unit tests, and additional playback/queue branch-coverage unit tests.
+- [x] Implement test plan phase 3 (broaden backend/integration regression coverage for playback behavior): expanded process-vs-FFI parity coverage for queue transition flows, stop/restart, play-at edge errors, successful seek path invariants, playback-state transitions (`pause`/`play`/`next`/`prev`), and invalid-seek error parity in `src/bin/frontend_cli.rs`; added deterministic bridge queue/play-at/seek-clamp/remove integration test, non-`gst` bridge natural-handoff integration test, no-early-metadata-switch handoff timing regression test, seek-event no-early-waveform-switch regression test, track-change metadata-transition regression test, deterministic `gst` natural-handoff gating regressions, playback seek-boundary/natural-handoff regression unit tests, and additional playback/queue branch-coverage unit tests.
 - [x] Add strict lint/security verification steps (`cargo clippy -- -D clippy::pedantic`, `cargo audit`) to regular verification script.
 - [x] Add optional coverage gate wiring (`cargo llvm-cov` + minimum line threshold) to regular verification script and docs.
 - [x] Burn down current strict `clippy::pedantic` backlog so regular verification passes without `--no-clippy`.
-- [x] Burn down temporary pedantic-lint baseline allow lists in `src/lib.rs` and `src/bin/native_frontend.rs` (current strict pedantic runs clean without clippy allow lists).
+- [x] Burn down temporary pedantic-lint baseline allow lists in `src/lib.rs` and `src/bin/frontend_cli.rs` (current strict pedantic runs clean without clippy allow lists).
 - [x] Mitigate `cargo audit` warning `RUSTSEC-2024-0436` (`paste` unmaintained) via `.cargo/audit.toml` ignore policy; revisit on dependency upgrades.
 - [ ] Execute optimization backlog phase P0 from `docs/OPTIMIZATION_PLAN.md` (typed low-rate in-process path, remove internal JSON churn). Deferred until test coverage phases are complete.
 - [x] Add integration tests for queue transitions, gapless handoff, seek behavior (including deterministic `gst`-path natural-handoff gating regression coverage).

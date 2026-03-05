@@ -173,8 +173,8 @@ int main(int argc, char *argv[]) {
     BridgeClient bridge;
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    qmlRegisterType<SpectrogramItem>("FerrousNative", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousNative", 1, 0, "WaveformItem");
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
 
@@ -185,6 +185,6 @@ int main(int argc, char *argv[]) {
         []() { QCoreApplication::exit(1); },
         Qt::QueuedConnection);
 
-    engine.loadFromModule("FerrousNative", "Main");
+    engine.loadFromModule("FerrousUi", "Main");
     return app.exec();
 }

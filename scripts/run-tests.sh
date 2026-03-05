@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 UI_DIR="${REPO_ROOT}/ui"
-BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${FERROUS_NATIVE_BUILD_DIR:-${UI_DIR}/build}}"
+BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${UI_DIR}/build}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 
 RUN_RUST=1
@@ -53,8 +53,6 @@ Environment:
   FERROUS_COVERAGE_MIN    Minimum line coverage percent for gate (default: 35)
   FERROUS_UI_BUILD_DIR
                           UI build dir (default: ui/build)
-  FERROUS_NATIVE_BUILD_DIR
-                          Backward-compatible alias for FERROUS_UI_BUILD_DIR
   CMAKE_GENERATOR         CMake generator (default: Ninja)
 USAGE
 }

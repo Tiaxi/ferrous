@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 UI_DIR="${REPO_ROOT}/ui"
-BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${FERROUS_NATIVE_BUILD_DIR:-${UI_DIR}/build}}"
+BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${UI_DIR}/build}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 
@@ -103,7 +103,6 @@ Options:
 
 Environment:
   FERROUS_UI_BUILD_DIR     Override build dir (default: ${UI_DIR}/build)
-  FERROUS_NATIVE_BUILD_DIR Backward-compatible alias for FERROUS_UI_BUILD_DIR
   XDG_DATA_HOME            Base path for DB cleanup target (default: \$HOME/.local/share)
   XDG_CACHE_HOME           Base path for thumbnail cleanup target (default: \$HOME/.cache)
   CMAKE_BUILD_TYPE         Build type for single-config generators (default: RelWithDebInfo)

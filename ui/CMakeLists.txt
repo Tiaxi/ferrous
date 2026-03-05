@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FerrousNativeUi LANGUAGES CXX)
+project(FerrousUi LANGUAGES CXX)
 
 include(CTest)
 
@@ -54,7 +54,7 @@ target_include_directories(ferrous PRIVATE src)
 add_dependencies(ferrous ferrous_rust_bridge)
 
 qt_add_qml_module(ferrous
-    URI FerrousNative
+    URI FerrousUi
     VERSION 1.0
     NO_IMPORT_SCAN
     QML_FILES

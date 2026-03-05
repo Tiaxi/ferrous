@@ -31,4 +31,4 @@ No long-lived bridge subprocess is started in this path.
 ## Notes for Contributors
 
 - Prefer validating changes against the UI launcher path first.
-- Keep `src/bin/native_frontend.rs` as CLI/debug tooling.
+- Keep `src/bin/frontend_cli.rs` as CLI/debug tooling.

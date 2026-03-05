@@ -60,7 +60,7 @@ Cleanup-only utility mode (no configure/build/run):
 Backend CLI/debug shell:
 
 ```bash
-cargo run --bin native_frontend --features gst
+cargo run --bin frontend_cli --features gst
 ```
 
 Run project tests (Rust + UI smoke test):
@@ -117,7 +117,7 @@ cmake --build ui/build -j
 Enable profiling logs for direct Rust runs:
 
 ```bash
-cargo run --bin native_frontend --features "gst profiling-logs"
+cargo run --bin frontend_cli --features "gst profiling-logs"
 ```
 
 With a profile-enabled build, typical runtime toggles are:
@@ -139,7 +139,7 @@ Roadmap and engineering plans live under `docs/`:
 ## Project layout
 
 - `ui/`: Qt6/QML + Kirigami frontend (primary UI path)
-- `src/bin/native_frontend.rs`: backend CLI/debug entrypoint
+- `src/bin/frontend_cli.rs`: backend CLI/debug entrypoint
 - `src/playback/`: playback engine command/event model (`gst` + stub backends)
 - `src/analysis/`: waveform/spectrogram worker
 - `src/metadata/`: track metadata + cover art extraction

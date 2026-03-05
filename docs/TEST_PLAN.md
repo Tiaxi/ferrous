@@ -38,7 +38,7 @@ This plan tracks test coverage additions for safe optimization/refactoring.
   - Phase 2 implemented:
     - End-to-end tests now drive exported `ferrous_ffi_bridge_*` functions for snapshot/error/stopped flow.
   - Phase 3 implemented:
-    - `src/bin/native_frontend.rs` parity tests confirm process-style command parsing path and in-process FFI path produce matching outcomes for:
+    - `src/bin/frontend_cli.rs` parity tests confirm process-style command parsing path and in-process FFI path produce matching outcomes for:
       - queue replacement via album paths
       - queue transition sequence (`select_queue`, `move_queue`, `remove_at`) including resulting queue order
       - stop/restart sequence (`stop` -> `play`) parity

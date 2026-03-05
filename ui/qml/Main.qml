@@ -4,7 +4,7 @@ import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import QtQml 2.15
 import Qt.labs.platform 1.1 as Platform
-import FerrousNative 1.0
+import FerrousUi 1.0
 import org.kde.kirigami 2.20 as Kirigami
 
 Kirigami.ApplicationWindow {

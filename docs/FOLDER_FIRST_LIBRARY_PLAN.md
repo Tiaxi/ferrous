@@ -3,7 +3,7 @@
 ## Summary
 Build a read-only, folder-structure-based library over configurable root folders (initially empty).
 Single-root view keeps artists at top level; multi-root view shows roots first.
-Album title/year come from metadata with deterministic fallbacks, disc/subfolder sections are preserved, loose tracks are shown directly under artist, and context menus include native file-browser actions (`Open in Dolphin` on the current KDE setup).
+Album title/year come from metadata with deterministic fallbacks, disc/subfolder sections are preserved, loose tracks are shown directly under artist, and context menus include desktop file-browser actions (`Open in Dolphin` on the current KDE setup).
 
 ## Functional Spec
 1. Library roots are user-configurable in Settings, support many entries, persist across restarts, and start empty.

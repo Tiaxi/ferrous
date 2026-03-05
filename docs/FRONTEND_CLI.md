@@ -9,8 +9,8 @@ Build a Kirigami frontend on top of the existing Rust backend (playback, analysi
 ## Current Bootstrap State
 
 - A typed Rust bridge API exists in `src/frontend_bridge/mod.rs`.
-- A second app entrypoint exists at `src/bin/native_frontend.rs`.
-- `native_frontend` supports interactive CLI mode for backend debugging.
+- A second app entrypoint exists at `src/bin/frontend_cli.rs`.
+- `frontend_cli` supports interactive CLI mode for backend debugging.
 - The Kirigami shell in `ui/` uses the in-process Rust FFI bridge (binary protocol).
 
 ## Engineering Plans
@@ -44,7 +44,7 @@ Package names differ by distro. Install the Qt6 + Kirigami/KF6 development meta-
 ## Running current bootstrap
 
 ```bash
-cargo run --release --bin native_frontend --features gst
+cargo run --release --bin frontend_cli --features gst
 ```
 
 Commands in bootstrap shell:
@@ -92,10 +92,10 @@ Build-only check:
 Backend-only run with profiling logs compiled in:
 
 ```bash
-cargo run --release --bin native_frontend --features "gst profiling-logs"
+cargo run --release --bin frontend_cli --features "gst profiling-logs"
 ```
 
 Notes:
 
 - The UI shell runs against the in-process Rust bridge.
-- `native_frontend` remains a CLI/debug tool; the UI does not launch it as a subprocess.
+- `frontend_cli` remains a CLI/debug tool; the UI does not launch it as a subprocess.

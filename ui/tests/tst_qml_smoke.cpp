@@ -199,8 +199,8 @@ private slots:
 };
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
-    qmlRegisterType<SpectrogramItem>("FerrousNative", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousNative", 1, 0, "WaveformItem");
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
 
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;

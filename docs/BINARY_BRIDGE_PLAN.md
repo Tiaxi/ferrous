@@ -8,7 +8,7 @@ Completely remove JSON from the Rust↔Qt bridge and replace with a zero-overhea
 
 The current bridge uses JSON for all communication between the Rust backend and the Qt/QML UI. In in-process mode (the default), `ferrous_ffi_bridge_poll()` is called from a 16ms timer on the UI thread. This call path builds the full library tree JSON (`build_library_tree_json()` iterating 30k tracks), serializes it, and the Qt side then parses it back with `QJsonDocument::fromJson()`, converts to `QVariantList`, and finally parses into `TreeNode` structs. This causes 50-120ms UI freezes on startup, sort changes, and scan completion.
 
-The out-of-process bridge (`FERROUS_BRIDGE_MODE=process` / `native_frontend --json-bridge`) is a legacy debug path not used in production. It is removed as part of this plan.
+The out-of-process bridge (`FERROUS_BRIDGE_MODE=process` / `frontend_cli --json-bridge`) is a legacy debug path not used in production. It is removed as part of this plan.
 
 ---
 
@@ -73,7 +73,7 @@ These survive the binary switch but are individually <5ms (well under one frame)
 | JSON snapshot encoding (`ffi.rs`) | ~250 lines |
 | JSON command parsing (`ffi.rs`) | ~300 lines |
 | JSON tree builder (`library_tree.rs`) | ~220 lines |
-| Out-of-process bridge (`native_frontend.rs`) | ~600 lines |
+| Out-of-process bridge (`frontend_cli.rs`) | ~600 lines |
 | JSON processing (`BridgeClient.cpp`) | ~500 lines |
 | Legacy tree parsers (`LibraryTreeModel.cpp`) | ~100 lines |
 | **Total** | **~1970 lines** |
@@ -207,7 +207,7 @@ Sections (each prefixed with [u32 section_length], only present if bit set in ma
 - Replace `build_library_tree_json()` → `build_library_tree_flat_binary()` returning `Vec<u8>`
 - Same tree-building logic (artist grouping, album resolving, sorting), binary output format
 
-#### [MODIFY] `src/bin/native_frontend.rs`
+#### [MODIFY] `src/bin/frontend_cli.rs`
 - Remove `run_json_bridge()` and all JSON helpers (~600 lines)
 - Remove `--json-bridge` flag handling
 - Keep `run_interactive_cli()` (uses `FrontendBridgeHandle` directly, no JSON)
@@ -240,7 +240,7 @@ Sections (each prefixed with [u32 section_length], only present if bit set in ma
 
 ### Docs & Scripts
 
-- Update `docs/NATIVE_FRONTEND.md` — remove `--json-bridge` references
+- Update `docs/FRONTEND_CLI.md` — remove `--json-bridge` references
 - Update `docs/MIGRATION_NOTES.md` — remove `FERROUS_BRIDGE_MODE=process` references
 - Update `ui/README.md` — remove process bridge documentation
 - Update `scripts/run-ui.sh` — remove process bridge fallback logic
@@ -263,4 +263,4 @@ Sections (each prefixed with [u32 section_length], only present if bit set in ma
 2. Add/remove library roots, rescan — no freeze
 3. Change sort mode — instant response
 4. All playback controls, queue operations, volume, seek — work correctly
-5. Verify `native_frontend` interactive CLI still works
+5. Verify `frontend_cli` interactive CLI still works
