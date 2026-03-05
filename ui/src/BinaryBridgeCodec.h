@@ -58,6 +58,8 @@ enum CommandId : quint16 {
     CmdShutdown = 33,
     CmdSetNodeExpanded = 34,
     CmdSetSearchQuery = 35,
+    CmdReplaceAllTracks = 36,
+    CmdAppendAllTracks = 37,
 };
 
 struct DecodedPlayback {

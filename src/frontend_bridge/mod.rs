@@ -113,6 +113,8 @@ pub enum BridgeLibraryCommand {
     AppendAlbumByKey { artist: String, album: String },
     ReplaceArtistByKey { artist: String },
     AppendArtistByKey { artist: String },
+    ReplaceAllTracks,
+    AppendAllTracks,
     SetNodeExpanded { key: String, expanded: bool },
     SetSearchQuery { seq: u32, query: String },
 }
@@ -1332,6 +1334,42 @@ fn handle_library_command(
                     };
                     track_artist == artist
                 })
+                .map(|track| track.path.clone())
+                .collect();
+            if paths.is_empty() {
+                return false;
+            }
+            if state.queue.is_empty() {
+                state.queue.extend(paths);
+                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+            } else {
+                state.queue.extend(paths.clone());
+                playback.command(PlaybackCommand::AddToQueue(paths));
+            }
+            true
+        }
+        BridgeLibraryCommand::ReplaceAllTracks => {
+            let paths: Vec<PathBuf> = state
+                .library
+                .tracks
+                .iter()
+                .map(|track| track.path.clone())
+                .collect();
+            if paths.is_empty() {
+                return false;
+            }
+            state.queue = paths;
+            state.selected_queue_index = Some(0);
+            playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+            playback.command(PlaybackCommand::PlayAt(0));
+            playback.command(PlaybackCommand::Play);
+            true
+        }
+        BridgeLibraryCommand::AppendAllTracks => {
+            let paths: Vec<PathBuf> = state
+                .library
+                .tracks
+                .iter()
                 .map(|track| track.path.clone())
                 .collect();
             if paths.is_empty() {

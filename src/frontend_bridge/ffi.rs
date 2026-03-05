@@ -685,6 +685,14 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::SetSearchQuery { seq, query })
         }
+        36 => {
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAllTracks)
+        }
+        37 => {
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAllTracks)
+        }
         _ => return Err(format!("unknown binary command id {cmd_id}")),
     };
 
@@ -1503,6 +1511,25 @@ mod tests {
                 assert_eq!(seq, 42);
                 assert_eq!(q, query);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_supports_all_library_track_commands() {
+        let cmd = parse_binary_command(&encode_command(36, &[]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAllTracks) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_binary_command(&encode_command(37, &[]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAllTracks) => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

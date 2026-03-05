@@ -165,6 +165,8 @@ Kirigami.ApplicationWindow {
         function appendAlbumByKey(artist, album) {}
         function replaceArtistByName(artist) {}
         function appendArtistByName(artist) {}
+        function replaceAllLibraryTracks() {}
+        function appendAllLibraryTracks() {}
         function replaceWithPaths(paths) {}
         function appendPaths(paths) {}
         function libraryAlbumCoverAt(index) { return "" }
@@ -515,6 +517,24 @@ Kirigami.ApplicationWindow {
             trackPath: selectedLibraryTrackPath,
             playPaths: selectedLibraryPlayPaths
         }])
+    }
+
+    function canPlayAllLibraryTracks() {
+        return uiBridge.libraryTrackCount > 0
+    }
+
+    function playAllLibraryTracks() {
+        if (!canPlayAllLibraryTracks()) {
+            return
+        }
+        uiBridge.replaceAllLibraryTracks()
+    }
+
+    function appendAllLibraryTracks() {
+        if (!canPlayAllLibraryTracks()) {
+            return
+        }
+        uiBridge.appendAllLibraryTracks()
     }
 
     function repeatModeText(mode) {
@@ -1654,6 +1674,18 @@ Kirigami.ApplicationWindow {
         onTriggered: root.appendLibrarySelection()
     }
     Action {
+        id: playAllLibraryTracksAction
+        text: "Play All Library Tracks"
+        enabled: root.canPlayAllLibraryTracks()
+        onTriggered: root.playAllLibraryTracks()
+    }
+    Action {
+        id: appendAllLibraryTracksAction
+        text: "Queue All Library Tracks"
+        enabled: root.canPlayAllLibraryTracks()
+        onTriggered: root.appendAllLibraryTracks()
+    }
+    Action {
         id: scanMusicAction
         text: "Scan Music Folder"
         shortcut: "Ctrl+R"
@@ -1835,6 +1867,8 @@ Kirigami.ApplicationWindow {
             width: root.menuPopupWidth([
                 { label: playLibrarySelectionAction.text, shortcut: "" },
                 { label: appendLibrarySelectionAction.text, shortcut: "" },
+                { label: playAllLibraryTracksAction.text, shortcut: "" },
+                { label: appendAllLibraryTracksAction.text, shortcut: "" },
                 { label: scanMusicAction.text, shortcut: String(scanMusicAction.shortcut) },
                 { label: scanFolderAction.text, shortcut: "" },
                 { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
@@ -1842,6 +1876,8 @@ Kirigami.ApplicationWindow {
             ])
             MenuItem { action: playLibrarySelectionAction }
             MenuItem { action: appendLibrarySelectionAction }
+            MenuItem { action: playAllLibraryTracksAction }
+            MenuItem { action: appendAllLibraryTracksAction }
             MenuSeparator {}
             MenuItem { action: scanMusicAction }
             MenuItem { action: scanFolderAction }
@@ -3417,28 +3453,44 @@ Kirigami.ApplicationWindow {
                                 }
                             }
 
-                            Label {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                readonly property int scanBacklog: Math.max(
-                                    0,
-                                    uiBridge.libraryScanDiscovered - uiBridge.libraryScanProcessed)
-                                text: "Artists: " + uiBridge.libraryArtistCount
-                                      + " | albums: " + uiBridge.libraryAlbumCount
-                                      + " | tracks: " + uiBridge.libraryTrackCount
-                                      + (uiBridge.libraryScanInProgress
-                                          ? (" | scanning " + uiBridge.libraryScanProcessed
-                                             + (scanBacklog > 0
-                                                 ? (" (+" + scanBacklog + " queued)")
-                                                 : "")
-                                             + (uiBridge.libraryScanFilesPerSecond > 0
-                                                 ? (" @ " + uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
-                                                 : "")
-                                             + (uiBridge.libraryScanEtaSeconds >= 0
-                                                 ? (" ETA " + Math.ceil(uiBridge.libraryScanEtaSeconds) + "s")
-                                                 : ""))
-                                          : "")
-                                color: Kirigami.Theme.disabledTextColor
-                                elide: Text.ElideRight
+                                spacing: 8
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    readonly property int scanBacklog: Math.max(
+                                        0,
+                                        uiBridge.libraryScanDiscovered - uiBridge.libraryScanProcessed)
+                                    text: "Artists: " + uiBridge.libraryArtistCount
+                                          + " | albums: " + uiBridge.libraryAlbumCount
+                                          + " | tracks: " + uiBridge.libraryTrackCount
+                                          + (uiBridge.libraryScanInProgress
+                                              ? (" | scanning " + uiBridge.libraryScanProcessed
+                                                 + (scanBacklog > 0
+                                                     ? (" (+" + scanBacklog + " queued)")
+                                                     : "")
+                                                 + (uiBridge.libraryScanFilesPerSecond > 0
+                                                     ? (" @ " + uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
+                                                     : "")
+                                                 + (uiBridge.libraryScanEtaSeconds >= 0
+                                                     ? (" ETA " + Math.ceil(uiBridge.libraryScanEtaSeconds) + "s")
+                                                     : ""))
+                                              : "")
+                                    color: Kirigami.Theme.disabledTextColor
+                                    elide: Text.ElideRight
+                                }
+
+                                ToolButton {
+                                    text: "Play All"
+                                    enabled: playAllLibraryTracksAction.enabled
+                                    onClicked: playAllLibraryTracksAction.trigger()
+                                }
+                                ToolButton {
+                                    text: "Queue All"
+                                    enabled: appendAllLibraryTracksAction.enabled
+                                    onClicked: appendAllLibraryTracksAction.trigger()
+                                }
                             }
 
                             ListView {
@@ -3649,6 +3701,9 @@ Kirigami.ApplicationWindow {
                                                 }
                                             }
                                         }
+                                        MenuSeparator {}
+                                        MenuItem { action: playAllLibraryTracksAction }
+                                        MenuItem { action: appendAllLibraryTracksAction }
                                         MenuSeparator {}
                                         MenuItem {
                                             text: "Open in " + uiBridge.fileBrowserName

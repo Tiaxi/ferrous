@@ -1124,6 +1124,16 @@ void BridgeClient::appendArtistByName(const QString &artist) {
         artist));
 }
 
+void BridgeClient::replaceAllLibraryTracks() {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(
+        BinaryBridgeCodec::CmdReplaceAllTracks));
+}
+
+void BridgeClient::appendAllLibraryTracks() {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(
+        BinaryBridgeCodec::CmdAppendAllTracks));
+}
+
 void BridgeClient::replaceWithPaths(const QStringList &paths) {
     QStringList sanitized;
     sanitized.reserve(paths.size());
