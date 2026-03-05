@@ -2992,10 +2992,12 @@ Kirigami.ApplicationWindow {
                     from: 0
                     to: Math.max(uiBridge.durationSeconds, 1.0)
                     readonly property bool durationKnown: uiBridge.durationSeconds > 1.0
-                    readonly property real stableVisualPosition: durationKnown ? visualPosition : 0.0
+                    readonly property bool seekAllowed: durationKnown && uiBridge.playbackState !== "Stopped"
+                    readonly property real stableVisualPosition: seekAllowed ? visualPosition : 0.0
+                    enabled: seekAllowed
                     stepSize: 0
                     onPressedChanged: {
-                        if (!pressed) {
+                        if (!pressed && seekAllowed) {
                             root.displayedPositionSeconds = value
                             root.positionSmoothingPrimed = true
                             root.positionSmoothingAnchorSeconds = value
@@ -3019,7 +3021,10 @@ Kirigami.ApplicationWindow {
                             id: waveformItem
                             anchors.fill: parent
                             anchors.margins: 1
-                            peaksData: uiBridge.waveformPeaksPacked
+                            visible: uiBridge.playbackState !== "Stopped"
+                            peaksData: uiBridge.playbackState === "Stopped"
+                                       ? ""
+                                       : uiBridge.waveformPeaksPacked
                             positionSeconds: root.displayedPositionSeconds
                             durationSeconds: uiBridge.durationSeconds
                         }
@@ -3028,11 +3033,13 @@ Kirigami.ApplicationWindow {
                             anchors.left: parent.left
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
+                            visible: seekSlider.seekAllowed
                             width: Math.round(parent.width * seekSlider.stableVisualPosition)
                             color: Qt.rgba(120 / 255, 190 / 255, 1.0, 0.26)
                         }
 
                         Rectangle {
+                            visible: seekSlider.seekAllowed
                             width: 1
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
@@ -3042,6 +3049,7 @@ Kirigami.ApplicationWindow {
                     }
 
                     handle: Rectangle {
+                        visible: seekSlider.seekAllowed
                         x: seekSlider.leftPadding + seekSlider.stableVisualPosition * (seekSlider.availableWidth - width)
                         y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
                         implicitWidth: 3
@@ -3053,7 +3061,7 @@ Kirigami.ApplicationWindow {
 
                     Item {
                         id: seekDragOverlay
-                        visible: seekSlider.pressed && seekSlider.durationKnown
+                        visible: seekSlider.pressed && seekSlider.seekAllowed
                         z: 20
                         property real playheadX: seekSlider.leftPadding
                             + seekSlider.stableVisualPosition * seekSlider.availableWidth

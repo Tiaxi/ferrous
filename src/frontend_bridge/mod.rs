@@ -232,6 +232,13 @@ struct BridgeState {
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
     pending_search_results: Option<BridgeSearchResultsFrame>,
+    pending_waveform_track: Option<PendingWaveformTrack>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingWaveformTrack {
+    path: PathBuf,
+    reset_spectrogram: bool,
 }
 
 #[derive(Debug)]
@@ -2453,9 +2460,25 @@ fn pump_playback_events(
         };
         match event {
             PlaybackEvent::Snapshot(snapshot) => {
+                let next_state = snapshot.state;
                 if state.playback != snapshot {
                     state.playback = snapshot;
                     changed = true;
+                }
+                if next_state == PlaybackState::Stopped {
+                    if !state.analysis.waveform_peaks.is_empty() {
+                        state.analysis.waveform_peaks.clear();
+                        changed = true;
+                    }
+                    continue;
+                }
+                if let Some(pending) = state.pending_waveform_track.take() {
+                    if state.playback.current.as_ref() == Some(&pending.path) {
+                        analysis.command(AnalysisCommand::SetTrack {
+                            path: pending.path,
+                            reset_spectrogram: pending.reset_spectrogram,
+                        });
+                    }
                 }
             }
             PlaybackEvent::TrackChanged {
@@ -2466,10 +2489,19 @@ fn pump_playback_events(
                 state.playback.current_queue_index = Some(queue_index);
                 state.analysis.waveform_peaks.clear();
                 metadata.request(path.clone());
-                analysis.command(AnalysisCommand::SetTrack {
-                    path,
-                    reset_spectrogram: matches!(kind, TrackChangeKind::Manual),
-                });
+                let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
+                if state.playback.state == PlaybackState::Stopped {
+                    state.pending_waveform_track = Some(PendingWaveformTrack {
+                        path,
+                        reset_spectrogram,
+                    });
+                } else {
+                    state.pending_waveform_track = None;
+                    analysis.command(AnalysisCommand::SetTrack {
+                        path,
+                        reset_spectrogram,
+                    });
+                }
                 changed = true;
             }
             PlaybackEvent::Seeked => {}
@@ -3407,6 +3439,69 @@ mod tests {
                 kind: TrackChangeKind::Manual,
             })
             .expect("send track-changed event");
+        let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        assert!(changed);
+        assert!(state.analysis.waveform_peaks.is_empty());
+    }
+
+    #[test]
+    fn stopped_track_change_defers_waveform_load_until_playback_resumes() {
+        let (analysis, analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+
+        let mut state = BridgeState::default();
+        state.playback.state = PlaybackState::Stopped;
+        let path = p("/music/deferred.flac");
+
+        playback_tx
+            .send(PlaybackEvent::TrackChanged {
+                path: path.clone(),
+                queue_index: 0,
+                kind: TrackChangeKind::Manual,
+            })
+            .expect("send track-changed while stopped");
+        let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        assert!(changed);
+        assert!(state.pending_waveform_track.is_some());
+        assert!(analysis_rx
+            .recv_timeout(Duration::from_millis(120))
+            .is_err());
+
+        let mut snapshot = state.playback.clone();
+        snapshot.state = PlaybackState::Playing;
+        snapshot.current = Some(path.clone());
+        snapshot.current_queue_index = Some(0);
+        playback_tx
+            .send(PlaybackEvent::Snapshot(snapshot))
+            .expect("send resumed snapshot");
+        let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        assert!(changed);
+        assert!(state.pending_waveform_track.is_none());
+
+        let evt = analysis_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("analysis event after resume");
+        match evt {
+            AnalysisEvent::Snapshot(_) => {}
+        }
+    }
+
+    #[test]
+    fn stopped_snapshot_clears_waveform_peaks() {
+        let (analysis, _analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+
+        let mut state = BridgeState::default();
+        state.analysis.waveform_peaks = vec![0.1, 0.2, 0.3];
+
+        let mut snapshot = state.playback.clone();
+        snapshot.state = PlaybackState::Stopped;
+        playback_tx
+            .send(PlaybackEvent::Snapshot(snapshot))
+            .expect("send stopped snapshot");
+
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         assert!(changed);
         assert!(state.analysis.waveform_peaks.is_empty());
