@@ -322,6 +322,14 @@ Kirigami.ApplicationWindow {
         const headerWidth = playlistOrderFontMetrics.boundingRect("#").width
         return Math.max(28, Math.ceil(Math.max(valueWidth, headerWidth) + 10))
     }
+    readonly property int globalSearchTrackLengthColumnWidth: Math.max(
+        34,
+        Math.ceil(playlistOrderFontMetrics.boundingRect("00:00").width + 6))
+    readonly property int globalSearchTrackGenreColumnWidth: Math.max(
+        116,
+        Math.ceil(Math.max(
+            playlistOrderFontMetrics.boundingRect("Genre").width,
+            playlistOrderFontMetrics.boundingRect("Alternative country").width) + 8))
     readonly property int playlistIndicatorColumnWidth: 18
 
     function queueTrackNumberText(index) {
@@ -829,6 +837,83 @@ Kirigami.ApplicationWindow {
         const targetY = view.contentY + (direction * notches * stepPx)
         view.contentY = Math.max(0, Math.min(maxY, targetY))
         wheel.accepted = true
+    }
+
+    function stepGlobalSearchResultsView(wheel) {
+        if (!globalSearchResultsView || !wheel) {
+            return
+        }
+        let deltaY = 0
+        if (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0) {
+            deltaY = wheel.angleDelta.y
+        } else if (wheel.pixelDelta && wheel.pixelDelta.y !== undefined && wheel.pixelDelta.y !== 0) {
+            deltaY = wheel.pixelDelta.y
+        }
+        if (deltaY === 0) {
+            return
+        }
+        const maxY = Math.max(0, globalSearchResultsView.contentHeight - globalSearchResultsView.height)
+        if (maxY <= 0) {
+            return
+        }
+        const rowPx = 24
+        const stepPx = rowPx * 3
+        const notches = (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0)
+            ? Math.max(1, Math.round(Math.abs(wheel.angleDelta.y) / 120))
+            : Math.max(1, Math.round(Math.abs(deltaY) / stepPx))
+        const direction = deltaY > 0 ? -1 : 1
+        let targetY = globalSearchResultsView.contentY + (direction * notches * stepPx)
+        targetY = Math.max(0, Math.min(maxY, targetY))
+
+        if (direction > 0 && globalSearchRowCount() > 0) {
+            const lastIndex = globalSearchRowCount() - 1
+            const lastRowTop = globalSearchRowTop(lastIndex)
+            const lastRowBottom = lastRowTop + globalSearchRowHeight(lastIndex)
+            const viewportBottom = targetY + globalSearchResultsView.height
+            const lastRowPartiallyVisible = lastRowTop < viewportBottom && lastRowBottom > viewportBottom
+            if (lastRowPartiallyVisible) {
+                targetY = Math.max(0, Math.min(maxY, lastRowBottom - globalSearchResultsView.height))
+            } else if ((maxY - targetY) <= globalSearchRowHeight(lastIndex)) {
+                targetY = maxY
+            }
+        }
+
+        globalSearchResultsView.contentY = targetY
+        if (direction > 0 && globalSearchRowCount() > 0) {
+            const lastIndex = globalSearchRowCount() - 1
+            const probeX = Math.max(0, Math.min(8, globalSearchResultsView.width - 1))
+            const probeY = Math.max(0, globalSearchResultsView.height - 2)
+            const bottomIndex = globalSearchResultsView.indexAt(probeX, probeY)
+            if (bottomIndex >= lastIndex - 1
+                    || (maxY - globalSearchResultsView.contentY) <= globalSearchRowHeight(lastIndex)) {
+                globalSearchResultsView.positionViewAtIndex(lastIndex, ListView.End)
+                Qt.callLater(function() {
+                    if (globalSearchResultsView) {
+                        globalSearchResultsView.positionViewAtIndex(lastIndex, ListView.End)
+                    }
+                })
+            }
+        }
+        wheel.accepted = true
+    }
+
+    function globalSearchRowHeight(index) {
+        if (index < 0 || !globalSearchModelApi) {
+            return 24
+        }
+        const row = globalSearchModelApi.rowDataAt(index)
+        return row && (row.kind || "") === "section" ? 30 : 24
+    }
+
+    function globalSearchRowTop(index) {
+        if (index <= 0) {
+            return 0
+        }
+        let y = 0
+        for (let i = 0; i < index; ++i) {
+            y += globalSearchRowHeight(i)
+        }
+        return y
     }
 
     function captureLibraryViewAnchor() {
@@ -2047,17 +2132,6 @@ Kirigami.ApplicationWindow {
         onTriggered: root.appendAllLibraryTracks()
     }
     Action {
-        id: scanMusicAction
-        text: "Scan Music Folder"
-        shortcut: "Ctrl+R"
-        onTriggered: uiBridge.scanDefaultMusicRoot()
-    }
-    Action {
-        id: scanFolderAction
-        text: "Scan Folder..."
-        onTriggered: root.promptAddLibraryRoot("file_menu")
-    }
-    Action {
         id: preferencesAction
         text: "Preferences..."
         shortcut: StandardKey.Preferences
@@ -2096,14 +2170,8 @@ Kirigami.ApplicationWindow {
         onTriggered: root.openDiagnostics()
     }
     Action {
-        id: refreshSnapshotAction
-        text: "Refresh Snapshot"
-        shortcut: "F5"
-        onTriggered: uiBridge.requestSnapshot()
-    }
-    Action {
         id: autoCenterSelectionAction
-        text: "Auto-center Queue Selection"
+        text: "Follow Current Track in Playlist"
         checkable: true
         checked: root.autoCenterQueueSelection
         onTriggered: root.autoCenterQueueSelection = checked
@@ -2230,9 +2298,6 @@ Kirigami.ApplicationWindow {
                 { label: appendLibrarySelectionAction.text, shortcut: "" },
                 { label: playAllLibraryTracksAction.text, shortcut: "" },
                 { label: appendAllLibraryTracksAction.text, shortcut: "" },
-                { label: scanMusicAction.text, shortcut: String(scanMusicAction.shortcut) },
-                { label: scanFolderAction.text, shortcut: "" },
-                { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
                 { label: quitAction.text, shortcut: String(quitAction.shortcut) }
             ])
             enter: Transition {
@@ -2245,10 +2310,6 @@ Kirigami.ApplicationWindow {
             MenuItem { action: appendLibrarySelectionAction }
             MenuItem { action: playAllLibraryTracksAction }
             MenuItem { action: appendAllLibraryTracksAction }
-            MenuSeparator {}
-            MenuItem { action: scanMusicAction }
-            MenuItem { action: scanFolderAction }
-            MenuItem { action: refreshSnapshotAction }
             MenuSeparator {}
             MenuItem { action: quitAction }
         }
@@ -2284,8 +2345,6 @@ Kirigami.ApplicationWindow {
             title: "View"
             width: root.menuPopupWidth([
                 { label: globalSearchAction.text, shortcut: String(globalSearchAction.shortcut) },
-                { label: diagnosticsAction.text, shortcut: "" },
-                { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
                 { label: autoCenterSelectionAction.text, shortcut: "" },
                 { label: resetSpectrogramAction.text, shortcut: "" },
                 { label: showFpsOverlayAction.text, shortcut: "" }
@@ -2297,9 +2356,6 @@ Kirigami.ApplicationWindow {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
             }
             MenuItem { action: globalSearchAction }
-            MenuItem { action: diagnosticsAction }
-            MenuItem { action: refreshSnapshotAction }
-            MenuSeparator {}
             MenuItem { action: autoCenterSelectionAction }
             MenuItem { action: resetSpectrogramAction }
             MenuItem { action: showFpsOverlayAction }
@@ -2316,8 +2372,6 @@ Kirigami.ApplicationWindow {
                 { label: repeatOffAction.text, shortcut: "" },
                 { label: repeatOneAction.text, shortcut: "" },
                 { label: repeatAllAction.text, shortcut: "" },
-                { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut) },
-                { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut) },
                 { label: clearPlaylistAction.text, shortcut: "" }
             ])
             enter: Transition {
@@ -2337,14 +2391,12 @@ Kirigami.ApplicationWindow {
             MenuItem { action: repeatOneAction }
             MenuItem { action: repeatAllAction }
             MenuSeparator {}
-            MenuItem { action: moveTrackUpAction }
-            MenuItem { action: moveTrackDownAction }
-            MenuSeparator {}
             MenuItem { action: clearPlaylistAction }
         }
         Menu {
             title: "Help"
             width: root.menuPopupWidth([
+                { label: diagnosticsAction.text, shortcut: "" },
                 { label: aboutAction.text, shortcut: "" }
             ])
             enter: Transition {
@@ -2353,6 +2405,8 @@ Kirigami.ApplicationWindow {
             exit: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
             }
+            MenuItem { action: diagnosticsAction }
+            MenuSeparator {}
             MenuItem { action: aboutAction }
         }
     }
@@ -2416,10 +2470,6 @@ Kirigami.ApplicationWindow {
                             Button {
                                 text: "Rescan All"
                                 onClicked: uiBridge.rescanAllLibraryRoots()
-                            }
-                            Button {
-                                text: "Add ~/Music"
-                                onClicked: uiBridge.scanDefaultMusicRoot()
                             }
                         }
 
@@ -2526,32 +2576,19 @@ Kirigami.ApplicationWindow {
 
                         CheckBox {
                             text: "Log Scale Spectrogram"
+                            focusPolicy: Qt.NoFocus
                             checked: uiBridge.logScale
                             onToggled: uiBridge.setLogScale(checked)
                         }
                         CheckBox {
                             text: "Show Spectrogram FPS Overlay"
+                            focusPolicy: Qt.NoFocus
                             checked: uiBridge.showFps
                             onToggled: uiBridge.setShowFps(checked)
                         }
                     }
                 }
 
-                GroupBox {
-                    title: "Interface"
-                    Layout.fillWidth: true
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 8
-
-                        CheckBox {
-                            text: "Auto-center Queue Selection"
-                            checked: root.autoCenterQueueSelection
-                            onToggled: root.autoCenterQueueSelection = checked
-                        }
-                    }
-                }
             }
         }
     }
@@ -2705,7 +2742,7 @@ Kirigami.ApplicationWindow {
                         acceptedButtons: Qt.NoButton
                         preventStealing: true
                         onWheel: function(wheel) {
-                            root.stepScrollView(globalSearchResultsView, wheel, 24, 3)
+                            root.stepGlobalSearchResultsView(wheel)
                         }
                     }
 
@@ -2851,9 +2888,20 @@ Kirigami.ApplicationWindow {
                                     color: root.uiMutedTextColor
                                     horizontalAlignment: Text.AlignRight
                                 }
-                                Label { text: "Genre"; Layout.preferredWidth: 120; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label {
+                                    text: "Genre"
+                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                }
                                 Label { text: "#"; Layout.preferredWidth: 34; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
-                                Label { text: "Length"; Layout.preferredWidth: 76; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
+                                Label {
+                                    text: "Length"
+                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                    horizontalAlignment: Text.AlignRight
+                                }
                             }
 
                             RowLayout {
@@ -2878,7 +2926,12 @@ Kirigami.ApplicationWindow {
                                     color: root.uiMutedTextColor
                                     horizontalAlignment: Text.AlignRight
                                 }
-                                Label { text: "Genre"; Layout.preferredWidth: 112; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label {
+                                    text: "Genre"
+                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                }
                                 Label { text: "Length"; Layout.preferredWidth: 76; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
                             }
 
@@ -2955,7 +3008,7 @@ Kirigami.ApplicationWindow {
                                 }
                                 Label {
                                     text: lengthTextValue || "--:--"
-                                    Layout.preferredWidth: 76
+                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
                                     horizontalAlignment: Text.AlignRight
                                     color: rowTextColor
                                 }
@@ -3013,13 +3066,13 @@ Kirigami.ApplicationWindow {
                                 }
                                 Label {
                                     text: genreValue || ""
-                                    Layout.preferredWidth: 112
+                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
                                     elide: Text.ElideRight
                                     color: rowTextColor
                                 }
                                 Label {
                                     text: lengthTextValue || "--:--"
-                                    Layout.preferredWidth: 76
+                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
                                     horizontalAlignment: Text.AlignRight
                                     color: rowTextColor
                                 }
@@ -3411,8 +3464,9 @@ Kirigami.ApplicationWindow {
 
                 Label {
                     text: uiBridge.positionText + "/" + uiBridge.durationText
-                    horizontalAlignment: Text.AlignRight
-                    Layout.minimumWidth: 96
+                    horizontalAlignment: Text.AlignHCenter
+                    Layout.preferredWidth: 96
+                    Layout.alignment: Qt.AlignVCenter
                 }
 
                 ToolButton {
