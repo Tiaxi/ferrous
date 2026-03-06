@@ -2690,6 +2690,8 @@ fn pump_playback_events(
                 if next_state == PlaybackState::Stopped {
                     if !state.analysis.waveform_peaks.is_empty() {
                         state.analysis.waveform_peaks.clear();
+                        state.analysis.waveform_coverage_seconds = 0.0;
+                        state.analysis.waveform_complete = false;
                         changed = true;
                     }
                     continue;
@@ -2710,6 +2712,8 @@ fn pump_playback_events(
             } => {
                 state.playback.current_queue_index = Some(queue_index);
                 state.analysis.waveform_peaks.clear();
+                state.analysis.waveform_coverage_seconds = 0.0;
+                state.analysis.waveform_complete = false;
                 metadata.request(path.clone());
                 let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
                 if state.playback.state == PlaybackState::Stopped {
@@ -2747,6 +2751,8 @@ fn pump_analysis_events(analysis_rx: &Receiver<AnalysisEvent>, state: &mut Bridg
                 }
                 state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
                 state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
+                state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
+                state.analysis.waveform_complete = snapshot.waveform_complete;
                 if !snapshot.waveform_peaks.is_empty() {
                     state.analysis.waveform_peaks = snapshot.waveform_peaks;
                 }

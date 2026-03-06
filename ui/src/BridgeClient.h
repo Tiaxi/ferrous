@@ -49,6 +49,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY snapshotChanged)
     Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY snapshotChanged)
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
+    Q_PROPERTY(double waveformCoverageSeconds READ waveformCoverageSeconds NOTIFY analysisChanged)
+    Q_PROPERTY(bool waveformComplete READ waveformComplete NOTIFY analysisChanged)
     Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY analysisChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
@@ -116,6 +118,8 @@ public:
     int currentTrackBitDepth() const;
     int currentTrackCurrentBitrateKbps() const;
     QByteArray waveformPeaksPacked() const;
+    double waveformCoverageSeconds() const;
+    bool waveformComplete() const;
     bool spectrogramReset() const;
     int sampleRateHz() const;
     double dbRange() const;
@@ -303,6 +307,8 @@ private:
     int m_currentTrackBitDepth{0};
     int m_currentTrackCurrentBitrateKbps{0};
     QByteArray m_waveformPeaksPacked;
+    double m_waveformCoverageSeconds{0.0};
+    bool m_waveformComplete{false};
     QByteArray m_spectrogramRowsPacked;
     int m_spectrogramPackedRows{0};
     int m_spectrogramPackedBins{0};

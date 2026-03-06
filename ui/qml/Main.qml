@@ -3723,6 +3723,8 @@ Kirigami.ApplicationWindow {
                             peaksData: uiBridge.playbackState === "Stopped"
                                        ? ""
                                        : uiBridge.waveformPeaksPacked
+                            generatedSeconds: uiBridge.waveformCoverageSeconds
+                            waveformComplete: uiBridge.waveformComplete
                             positionSeconds: root.displayedPositionSeconds
                             durationSeconds: uiBridge.durationSeconds
                         }

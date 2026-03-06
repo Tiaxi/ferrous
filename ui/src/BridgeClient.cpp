@@ -38,6 +38,7 @@ constexpr quint8 kAnalysisFrameMagic = 0xA1;
 constexpr quint8 kAnalysisFlagWaveform = 0x01;
 constexpr quint8 kAnalysisFlagReset = 0x02;
 constexpr quint8 kAnalysisFlagSpectrogram = 0x04;
+constexpr quint8 kAnalysisFlagWaveformComplete = 0x08;
 constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
 constexpr int kMaxDiagnosticsLines = 2000;
 
@@ -977,6 +978,14 @@ int BridgeClient::currentTrackCurrentBitrateKbps() const {
 
 QByteArray BridgeClient::waveformPeaksPacked() const {
     return m_waveformPeaksPacked;
+}
+
+double BridgeClient::waveformCoverageSeconds() const {
+    return m_waveformCoverageSeconds;
+}
+
+bool BridgeClient::waveformComplete() const {
+    return m_waveformComplete;
 }
 
 bool BridgeClient::spectrogramReset() const {
@@ -2007,7 +2016,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const auto *data = base + readOffset + sizeof(quint32);
         readOffset += totalBytes;
 
-        if (frameBytes < 16) {
+        if (frameBytes < 20) {
             continue;
         }
         if (data[0] != kAnalysisFrameMagic) {
@@ -2016,10 +2025,11 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const quint32 sampleRate = qFromLittleEndian<quint32>(data + 1);
         const quint8 flags = data[5];
         const quint16 waveformLen = qFromLittleEndian<quint16>(data + 6);
-        const quint16 rowCount = qFromLittleEndian<quint16>(data + 8);
-        const quint16 binCount = qFromLittleEndian<quint16>(data + 10);
-        const quint32 frameSeq = qFromLittleEndian<quint32>(data + 12);
-        const qsizetype expected = 16 + static_cast<qsizetype>(waveformLen)
+        const quint32 waveformCoverageMillis = qFromLittleEndian<quint32>(data + 8);
+        const quint16 rowCount = qFromLittleEndian<quint16>(data + 12);
+        const quint16 binCount = qFromLittleEndian<quint16>(data + 14);
+        const quint32 frameSeq = qFromLittleEndian<quint32>(data + 16);
+        const qsizetype expected = 20 + static_cast<qsizetype>(waveformLen)
             + static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
         if (static_cast<qsizetype>(frameBytes) < expected) {
             continue;
@@ -2031,7 +2041,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         m_hasAnalysisFrameSeq = true;
         m_lastAnalysisFrameSeq = frameSeq;
 
-        const uchar *cursor = data + 16;
+        const uchar *cursor = data + 20;
 
         if (sampleRate > 0 && m_sampleRateHz != static_cast<int>(sampleRate)) {
             m_sampleRateHz = static_cast<int>(sampleRate);
@@ -2039,8 +2049,19 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         }
 
         const bool spectrogramReset = (flags & kAnalysisFlagReset) != 0;
+        const double waveformCoverageSeconds =
+            static_cast<double>(waveformCoverageMillis) / 1000.0;
+        const bool waveformComplete = (flags & kAnalysisFlagWaveformComplete) != 0;
         if (m_spectrogramReset != spectrogramReset) {
             m_spectrogramReset = spectrogramReset;
+            changed = true;
+        }
+        if (std::abs(m_waveformCoverageSeconds - waveformCoverageSeconds) > 0.0001) {
+            m_waveformCoverageSeconds = waveformCoverageSeconds;
+            changed = true;
+        }
+        if (m_waveformComplete != waveformComplete) {
+            m_waveformComplete = waveformComplete;
             changed = true;
         }
         if (spectrogramReset) {

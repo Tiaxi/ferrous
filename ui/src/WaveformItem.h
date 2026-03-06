@@ -9,6 +9,8 @@
 class WaveformItem : public QQuickPaintedItem {
     Q_OBJECT
     Q_PROPERTY(QByteArray peaksData READ peaksData WRITE setPeaksData NOTIFY peaksDataChanged)
+    Q_PROPERTY(double generatedSeconds READ generatedSeconds WRITE setGeneratedSeconds NOTIFY generatedSecondsChanged)
+    Q_PROPERTY(bool waveformComplete READ waveformComplete WRITE setWaveformComplete NOTIFY waveformCompleteChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
 
@@ -17,6 +19,12 @@ public:
 
     QByteArray peaksData() const;
     void setPeaksData(const QByteArray &data);
+
+    double generatedSeconds() const;
+    void setGeneratedSeconds(double value);
+
+    bool waveformComplete() const;
+    void setWaveformComplete(bool value);
 
     double positionSeconds() const;
     void setPositionSeconds(double value);
@@ -28,12 +36,16 @@ public:
 
 signals:
     void peaksDataChanged();
+    void generatedSecondsChanged();
+    void waveformCompleteChanged();
     void positionSecondsChanged();
     void durationSecondsChanged();
 
 private:
     mutable QMutex m_stateMutex;
     QByteArray m_peaksData;
+    double m_generatedSeconds{0.0};
+    bool m_waveformComplete{false};
     double m_positionSeconds{0.0};
     double m_durationSeconds{0.0};
     bool m_profileEnabled{false};

@@ -50,6 +50,8 @@ pub enum AnalysisCommand {
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
+        coverage_seconds: f32,
+        complete: bool,
         done: bool,
     },
 }
@@ -57,6 +59,8 @@ pub enum AnalysisCommand {
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisSnapshot {
     pub waveform_peaks: Vec<f32>,
+    pub waveform_coverage_seconds: f32,
+    pub waveform_complete: bool,
     pub spectrogram_rows: Vec<Vec<f32>>,
     pub spectrogram_seq: u64,
     pub sample_rate_hz: u32,
@@ -126,7 +130,7 @@ impl AnalysisEngine {
                         let _ = decode_waveform_peaks_stream(
                             &job.path,
                             1024,
-                            |peaks, done| {
+                            |peaks, coverage_seconds, done| {
                                 if waveform_decode_active_token.load(Ordering::Relaxed)
                                     != track_token
                                 {
@@ -135,6 +139,8 @@ impl AnalysisEngine {
                                 let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
                                     track_token,
                                     peaks,
+                                    coverage_seconds,
+                                    complete: done,
                                     done,
                                 });
                                 true
@@ -199,6 +205,8 @@ impl AnalysisEngine {
                                 active_track_path = Some(path.clone());
 
                                 snapshot.waveform_peaks.clear();
+                                snapshot.waveform_coverage_seconds = 0.0;
+                                snapshot.waveform_complete = false;
                                 waveform_dirty = true;
                                 if reset_spectrogram {
                                     snapshot.spectrogram_seq = 0;
@@ -249,6 +257,8 @@ impl AnalysisEngine {
 
                                 if let Some(peaks) = peaks {
                                     snapshot.waveform_peaks = peaks;
+                                    snapshot.waveform_coverage_seconds = 0.0;
+                                    snapshot.waveform_complete = true;
                                     waveform_dirty = true;
                                     emit_snapshot(
                                         &event_tx,
@@ -301,6 +311,8 @@ impl AnalysisEngine {
                             AnalysisCommand::WaveformProgress {
                                 track_token,
                                 peaks,
+                                coverage_seconds,
+                                complete,
                                 done,
                             } => {
                                 if track_token == active_track_token {
@@ -312,6 +324,8 @@ impl AnalysisEngine {
                                         continue;
                                     }
                                     snapshot.waveform_peaks = peaks;
+                                    snapshot.waveform_coverage_seconds = coverage_seconds;
+                                    snapshot.waveform_complete = complete;
                                     if done {
                                         if let Some(path) = active_track_path.as_ref() {
                                             let cached_peaks = snapshot.waveform_peaks.clone();
@@ -731,6 +745,8 @@ fn emit_snapshot(
         } else {
             Vec::new()
         },
+        waveform_coverage_seconds: snapshot.waveform_coverage_seconds,
+        waveform_complete: snapshot.waveform_complete,
         spectrogram_rows: std::mem::take(pending_rows),
         spectrogram_seq: snapshot.spectrogram_seq,
         sample_rate_hz: snapshot.sample_rate_hz,
@@ -927,7 +943,7 @@ fn decode_waveform_peaks_stream<F, C>(
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<f32>, bool) -> bool,
+    F: FnMut(Vec<f32>, f32, bool) -> bool,
     C: FnMut() -> bool,
 {
     #[cfg(feature = "gst")]
@@ -1048,7 +1064,7 @@ where
                 if peaks.len() >= 12
                     && last_preview_emit.elapsed() >= std::time::Duration::from_millis(240)
                 {
-                    if !on_update(peaks.clone(), false) {
+                    if !on_update(peaks.clone(), 0.0, false) {
                         return Ok(());
                     }
                     last_preview_emit = std::time::Instant::now();
@@ -1077,7 +1093,7 @@ where
     }
 
     if !is_cancelled() {
-        let _ = on_update(peaks, true);
+        let _ = on_update(peaks, 0.0, true);
     }
     Ok(())
 }
@@ -1090,7 +1106,7 @@ fn decode_waveform_peaks_stream_gst<F, C>(
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<f32>, bool) -> bool,
+    F: FnMut(Vec<f32>, f32, bool) -> bool,
     C: FnMut() -> bool,
 {
     if is_cancelled() {
@@ -1181,15 +1197,11 @@ where
     level.set_property("post-messages", true);
     pipeline.set_state(gst::State::Playing)?;
 
-    let duration_ns = duration_ns.filter(|value| *value > 0);
-    let mut peaks = if duration_ns.is_some() {
-        vec![0.0; max_points]
-    } else {
-        Vec::with_capacity(max_points)
-    };
+    let mut observed_span_ns = duration_ns.unwrap_or(0);
+    let mut peak_events: Vec<(u64, f32)> = Vec::with_capacity(max_points.saturating_mul(2));
+    let mut fallback_peaks = Vec::with_capacity(max_points);
     let mut level_messages_seen = 0usize;
     let mut last_preview_emit = std::time::Instant::now();
-
     loop {
         if is_cancelled() {
             let _ = pipeline.set_state(gst::State::Null);
@@ -1209,27 +1221,32 @@ where
                     if let Some(structure) = element.message().structure() {
                         if let Some(peak) = level_message_peak(structure) {
                             level_messages_seen = level_messages_seen.saturating_add(1);
-                            if let Some(track_duration_ns) = duration_ns {
-                                if let Some(bin_index) = level_message_bin_index(
-                                    structure,
-                                    track_duration_ns,
-                                    max_points,
-                                ) {
-                                    if peak > peaks[bin_index] {
-                                        peaks[bin_index] = peak;
-                                    }
-                                }
+                            if let Some((time_ns, end_ns)) = level_message_time_range_ns(structure)
+                            {
+                                observed_span_ns = observed_span_ns.max(end_ns);
+                                peak_events.push((time_ns, peak));
                             } else {
-                                peaks.push(peak);
-                                if peaks.len() > max_points {
-                                    peaks = reduce_waveform_peaks(&peaks, max_points);
+                                fallback_peaks.push(peak);
+                                if fallback_peaks.len() > max_points {
+                                    fallback_peaks =
+                                        reduce_waveform_peaks(&fallback_peaks, max_points);
                                 }
                             }
                         }
                         if level_messages_seen >= 12
                             && last_preview_emit.elapsed() >= Duration::from_millis(240)
                         {
-                            if !on_update(peaks.clone(), false) {
+                            let preview = if observed_span_ns > 0 && !peak_events.is_empty() {
+                                materialize_waveform_peaks(
+                                    &peak_events,
+                                    observed_span_ns,
+                                    max_points,
+                                )
+                            } else {
+                                fallback_peaks.clone()
+                            };
+                            if !on_update(preview, observed_span_ns as f32 / 1_000_000_000.0, false)
+                            {
                                 let _ = pipeline.set_state(gst::State::Null);
                                 return Ok(());
                             }
@@ -1251,14 +1268,18 @@ where
         }
     }
 
-    if peaks.len() > max_points {
-        peaks = reduce_waveform_peaks(&peaks, max_points);
-    }
+    let peaks = if observed_span_ns > 0 && !peak_events.is_empty() {
+        materialize_waveform_peaks(&peak_events, observed_span_ns, max_points)
+    } else if fallback_peaks.len() > max_points {
+        reduce_waveform_peaks(&fallback_peaks, max_points)
+    } else {
+        fallback_peaks
+    };
 
     let _ = pipeline.set_state(gst::State::Null);
 
     if !is_cancelled() {
-        let _ = on_update(peaks, true);
+        let _ = on_update(peaks, observed_span_ns as f32 / 1_000_000_000.0, true);
     }
     Ok(())
 }
@@ -1271,16 +1292,11 @@ fn level_message_interval_ns(max_points: usize, duration_ns: Option<u64>) -> u64
 }
 
 #[cfg(feature = "gst")]
-fn level_message_bin_index(
-    structure: &gst::StructureRef,
-    duration_ns: u64,
-    max_points: usize,
-) -> Option<usize> {
+fn level_message_bin_index(time_ns: u64, duration_ns: u64, max_points: usize) -> Option<usize> {
     if duration_ns == 0 || max_points == 0 {
         return None;
     }
 
-    let time_ns = level_message_time_ns(structure)?;
     Some(
         ((time_ns.saturating_mul(max_points as u64)) / duration_ns).min(max_points as u64 - 1)
             as usize,
@@ -1288,8 +1304,8 @@ fn level_message_bin_index(
 }
 
 #[cfg(feature = "gst")]
-fn level_message_time_ns(structure: &gst::StructureRef) -> Option<u64> {
-    structure
+fn level_message_time_range_ns(structure: &gst::StructureRef) -> Option<(u64, u64)> {
+    let start = structure
         .get::<u64>("running-time")
         .ok()
         .or_else(|| structure.get::<u64>("stream-time").ok())
@@ -1298,7 +1314,14 @@ fn level_message_time_ns(structure: &gst::StructureRef) -> Option<u64> {
             let end = structure.get::<u64>("endtime").ok()?;
             let duration = structure.get::<u64>("duration").ok().unwrap_or(0);
             Some(end.saturating_sub(duration))
-        })
+        })?;
+    let duration = structure.get::<u64>("duration").ok().unwrap_or(0);
+    let end = structure
+        .get::<u64>("endtime")
+        .ok()
+        .unwrap_or_else(|| start.saturating_add(duration));
+    let center = start.saturating_add(duration / 2);
+    Some((center, end.max(center)))
 }
 
 #[cfg(feature = "gst")]
@@ -1392,6 +1415,23 @@ fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
     reduced
 }
 
+#[cfg(feature = "gst")]
+fn materialize_waveform_peaks(events: &[(u64, f32)], span_ns: u64, max_points: usize) -> Vec<f32> {
+    if span_ns == 0 || max_points == 0 || events.is_empty() {
+        return Vec::new();
+    }
+
+    let mut peaks = vec![0.0f32; max_points];
+    for &(time_ns, peak) in events {
+        if let Some(bin_index) = level_message_bin_index(time_ns, span_ns, max_points) {
+            if peak > peaks[bin_index] {
+                peaks[bin_index] = peak;
+            }
+        }
+    }
+    peaks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1465,6 +1505,8 @@ mod tests {
         let (tx, rx) = unbounded::<AnalysisEvent>();
         let snapshot = AnalysisSnapshot {
             waveform_peaks: vec![0.1, 0.2],
+            waveform_coverage_seconds: 0.0,
+            waveform_complete: true,
             spectrogram_rows: Vec::new(),
             spectrogram_seq: 0,
             sample_rate_hz: 48_000,
@@ -1540,12 +1582,14 @@ mod tests {
         let _ = gst::init();
         let structure = gst::Structure::builder("level")
             .field("running-time", 5_000_000_000u64)
+            .field("duration", 1_000_000_000u64)
             .field("peak", gst::Array::new([-9.0f64]))
             .build();
 
+        let (time_ns, _) = level_message_time_range_ns(structure.as_ref()).expect("time");
         assert_eq!(
-            level_message_bin_index(structure.as_ref(), 10_000_000_000, 100),
-            Some(50)
+            level_message_bin_index(time_ns, 10_000_000_000, 100),
+            Some(55)
         );
     }
 
@@ -1559,9 +1603,11 @@ mod tests {
             .field("peak", gst::Array::new([-9.0f64]))
             .build();
 
+        let (time_ns, end_ns) = level_message_time_range_ns(structure.as_ref()).expect("time");
+        assert_eq!(end_ns, 8_000_000_000);
         assert_eq!(
-            level_message_bin_index(structure.as_ref(), 10_000_000_000, 100),
-            Some(60)
+            level_message_bin_index(time_ns, 10_000_000_000, 100),
+            Some(70)
         );
     }
 }

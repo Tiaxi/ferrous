@@ -43,6 +43,40 @@ void WaveformItem::setPeaksData(const QByteArray &data) {
     update();
 }
 
+double WaveformItem::generatedSeconds() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_generatedSeconds;
+}
+
+void WaveformItem::setGeneratedSeconds(double value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (std::abs(m_generatedSeconds - value) < 0.0001) {
+            return;
+        }
+        m_generatedSeconds = value;
+    }
+    emit generatedSecondsChanged();
+    update();
+}
+
+bool WaveformItem::waveformComplete() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_waveformComplete;
+}
+
+void WaveformItem::setWaveformComplete(bool value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_waveformComplete == value) {
+            return;
+        }
+        m_waveformComplete = value;
+    }
+    emit waveformCompleteChanged();
+    update();
+}
+
 double WaveformItem::positionSeconds() const {
     QMutexLocker lock(&m_stateMutex);
     return m_positionSeconds;
@@ -81,9 +115,15 @@ void WaveformItem::paint(QPainter *painter) {
     const int h = std::max(1, static_cast<int>(std::floor(height())));
 
     QByteArray peaksDataLocal;
+    double generatedSecondsLocal = 0.0;
+    bool waveformCompleteLocal = false;
+    double durationSecondsLocal = 0.0;
     {
         QMutexLocker lock(&m_stateMutex);
         peaksDataLocal = m_peaksData;
+        generatedSecondsLocal = m_generatedSeconds;
+        waveformCompleteLocal = m_waveformComplete;
+        durationSecondsLocal = m_durationSeconds;
     }
 
     painter->fillRect(QRect(0, 0, w, h), QColor("#ffffff"));
@@ -93,8 +133,15 @@ void WaveformItem::paint(QPainter *painter) {
         const int count = peaksDataLocal.size();
         const double half = static_cast<double>(h) / 2.0;
         const auto *src = reinterpret_cast<const uchar *>(peaksDataLocal.constData());
-        for (int x = 0; x < w; ++x) {
-            const int idx = (count <= 1 || w <= 1) ? 0 : (x * (count - 1) / (w - 1));
+        int drawWidth = w;
+        if (!waveformCompleteLocal && generatedSecondsLocal > 0.0 && durationSecondsLocal > 0.0) {
+            drawWidth = std::clamp(
+                static_cast<int>(std::floor((generatedSecondsLocal / durationSecondsLocal) * w)),
+                0,
+                w);
+        }
+        for (int x = 0; x < drawWidth; ++x) {
+            const int idx = (count <= 1 || drawWidth <= 1) ? 0 : (x * (count - 1) / (drawWidth - 1));
             const double peak = static_cast<double>(src[idx]) / 255.0;
             const int bar = std::max(1, static_cast<int>(std::floor(peak * half)));
             const int y = static_cast<int>(half) - bar;

@@ -15,6 +15,7 @@ const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_RESET: u8 = 0x02;
 const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
+const ANALYSIS_FLAG_WAVEFORM_COMPLETE: u8 = 0x08;
 const MAX_PENDING_BINARY_EVENTS: usize = 12;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
 const MAX_PENDING_LIBRARY_TREES: usize = 1;
@@ -36,6 +37,8 @@ struct AnalysisDelta {
     frame_seq: u32,
     spectrogram_reset: bool,
     waveform_changed: bool,
+    waveform_coverage_millis: u32,
+    waveform_complete: bool,
     waveform_peaks_u8: Vec<u8>,
     spectrogram_rows_u8: Vec<Vec<u8>>,
 }
@@ -43,6 +46,8 @@ struct AnalysisDelta {
 #[derive(Default)]
 struct AnalysisEmitState {
     last_waveform_peaks: Vec<f32>,
+    last_waveform_coverage_millis: u32,
+    last_waveform_complete: bool,
     last_spectrogram_seq: u64,
     analysis_frame_seq: u32,
 }
@@ -1146,6 +1151,12 @@ fn push_u16_string(out: &mut Vec<u8>, value: &str) {
 
 fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState) -> AnalysisDelta {
     let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
+    let waveform_coverage_millis = (s.analysis.waveform_coverage_seconds.max(0.0) * 1000.0)
+        .round()
+        .clamp(0.0, u32::MAX as f32) as u32;
+    let waveform_meta_changed = waveform_coverage_millis
+        != emit_state.last_waveform_coverage_millis
+        || s.analysis.waveform_complete != emit_state.last_waveform_complete;
     let waveform_peaks_u8 = if waveform_changed {
         emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
         downsample_waveform_peaks(&s.analysis.waveform_peaks, 1024)
@@ -1155,6 +1166,8 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     } else {
         Vec::new()
     };
+    emit_state.last_waveform_coverage_millis = waveform_coverage_millis;
+    emit_state.last_waveform_complete = s.analysis.waveform_complete;
 
     let spectrogram_reset = s.analysis.spectrogram_seq < emit_state.last_spectrogram_seq
         || (s.analysis.spectrogram_seq == 0
@@ -1178,7 +1191,10 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
         Vec::new()
     };
     emit_state.last_spectrogram_seq = spectrogram_seq;
-    let has_payload = waveform_changed || spectrogram_reset || !spectrogram_rows_u8.is_empty();
+    let has_payload = waveform_changed
+        || waveform_meta_changed
+        || spectrogram_reset
+        || !spectrogram_rows_u8.is_empty();
     if has_payload {
         emit_state.analysis_frame_seq = emit_state.analysis_frame_seq.wrapping_add(1);
     }
@@ -1188,6 +1204,8 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
         frame_seq: emit_state.analysis_frame_seq,
         spectrogram_reset,
         waveform_changed,
+        waveform_coverage_millis,
+        waveform_complete: s.analysis.waveform_complete,
         waveform_peaks_u8,
         spectrogram_rows_u8,
     }
@@ -1228,6 +1246,9 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     if has_spectrogram {
         flags |= ANALYSIS_FLAG_SPECTROGRAM;
     }
+    if delta.waveform_complete {
+        flags |= ANALYSIS_FLAG_WAVEFORM_COMPLETE;
+    }
 
     if flags == 0 {
         return Vec::new();
@@ -1237,7 +1258,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     let row_count_u16 = row_count.min(u16::MAX as usize) as u16;
     let bin_count_u16 = bin_count.min(u16::MAX as usize) as u16;
     let spectrogram_bytes = row_count_u16 as usize * bin_count_u16 as usize;
-    let payload_len = 16usize + waveform_len_u16 as usize + spectrogram_bytes;
+    let payload_len = 20usize + waveform_len_u16 as usize + spectrogram_bytes;
 
     let mut out = Vec::with_capacity(4 + payload_len);
     out.extend_from_slice(&(payload_len as u32).to_le_bytes());
@@ -1245,6 +1266,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     out.extend_from_slice(&delta.sample_rate_hz.to_le_bytes());
     out.push(flags);
     out.extend_from_slice(&waveform_len_u16.to_le_bytes());
+    out.extend_from_slice(&delta.waveform_coverage_millis.to_le_bytes());
     out.extend_from_slice(&row_count_u16.to_le_bytes());
     out.extend_from_slice(&bin_count_u16.to_le_bytes());
     out.extend_from_slice(&delta.frame_seq.to_le_bytes());
@@ -1311,6 +1333,8 @@ mod tests {
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
+                waveform_coverage_seconds: 0.0,
+                waveform_complete: true,
                 spectrogram_rows: vec![vec![0.0, 1.0], vec![2.0, 3.0]],
                 spectrogram_seq: 2,
                 sample_rate_hz: 48_000,
