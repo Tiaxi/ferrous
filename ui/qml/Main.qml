@@ -2219,7 +2219,7 @@ Kirigami.ApplicationWindow {
         }
         const rowType = row.rowType || ""
         if (rowType === "track") {
-            uiBridge.playTrack(row.trackPath || "")
+            uiBridge.replaceWithPaths([row.trackPath || ""])
         } else if (rowType === "album") {
             const albumName = (row.album || row.label || "").trim()
             uiBridge.replaceAlbumByKey(
