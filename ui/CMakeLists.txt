@@ -18,6 +18,7 @@ pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
     gstreamer-1.0
     gstreamer-app-1.0
     gstreamer-audio-1.0
+    gstreamer-pbutils-1.0
     gio-2.0
 )
 
