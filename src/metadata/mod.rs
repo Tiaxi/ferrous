@@ -176,19 +176,21 @@ impl MetadataService {
                         }
                     }
 
-                    if let Some(details) = probe_stream_details(&path) {
-                        if !details.format_label.is_empty() {
-                            metadata.format_label = details.format_label;
-                        }
-                        metadata.sample_rate_hz =
-                            metadata.sample_rate_hz.or(details.sample_rate_hz);
-                        metadata.channels = metadata.channels.or(details.channels);
-                        metadata.bit_depth = metadata.bit_depth.or(details.bit_depth);
-                        metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
-                        metadata.current_bitrate_kbps = details.current_bitrate_kbps;
-                        metadata.bitrate_timeline_kbps = details.bitrate_timeline_kbps;
+                    if !is_raw_surround_file(&path) {
+                        if let Some(details) = probe_stream_details(&path) {
+                            if !details.format_label.is_empty() {
+                                metadata.format_label = details.format_label;
+                            }
+                            metadata.sample_rate_hz =
+                                metadata.sample_rate_hz.or(details.sample_rate_hz);
+                            metadata.channels = metadata.channels.or(details.channels);
+                            metadata.bit_depth = metadata.bit_depth.or(details.bit_depth);
+                            metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
+                            metadata.current_bitrate_kbps = details.current_bitrate_kbps;
+                            metadata.bitrate_timeline_kbps = details.bitrate_timeline_kbps;
 
-                        let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+                            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+                        }
                     }
 
                     if metadata.current_bitrate_kbps.is_none() {
@@ -553,6 +555,26 @@ mod tests {
         assert_eq!(metadata.genre, "Progressive death metal");
         assert_eq!(metadata.year, Some(2010));
         assert_eq!(metadata.format_label, "AC3");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn metadata_service_keeps_raw_dts_format_label() {
+        let path = metadata_test_path("dts-format", "dts");
+        write_test_apev2_file(&path, &[("Title", "The Leper Affinity")], true);
+
+        let (service, rx) = MetadataService::new_with_delay(Duration::ZERO);
+        service.request(path.clone());
+
+        let mut final_metadata = None;
+        while let Ok(event) = rx.recv_timeout(Duration::from_millis(250)) {
+            let MetadataEvent::Loaded(metadata) = event;
+            final_metadata = Some(metadata);
+        }
+
+        let metadata = final_metadata.expect("final metadata");
+        assert_eq!(metadata.format_label, "DTS");
 
         let _ = std::fs::remove_file(path);
     }

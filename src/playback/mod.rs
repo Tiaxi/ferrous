@@ -1497,6 +1497,12 @@ mod backend {
         let queue_out = gst::ElementFactory::make("queue")
             .build()
             .map_err(|_| anyhow!("missing queue element"))?;
+        let conv_out = gst::ElementFactory::make("audioconvert")
+            .build()
+            .map_err(|_| anyhow!("missing audioconvert element"))?;
+        let resample_out = gst::ElementFactory::make("audioresample")
+            .build()
+            .map_err(|_| anyhow!("missing audioresample element"))?;
         let output_sink_name = std::env::var("FERROUS_GST_OUTPUT_SINK")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -1634,6 +1640,8 @@ mod backend {
         bin.add_many([
             &tee,
             &queue_out,
+            &conv_out,
+            &resample_out,
             &sink_out,
             &queue_tap,
             &conv,
@@ -1643,7 +1651,8 @@ mod backend {
         ])
         .context("failed to add elements to analysis audio bin")?;
 
-        gst::Element::link_many([&queue_out, &sink_out]).context("failed to link output branch")?;
+        gst::Element::link_many([&queue_out, &conv_out, &resample_out, &sink_out])
+            .context("failed to link output branch")?;
         gst::Element::link_many([
             &queue_tap,
             &conv,
