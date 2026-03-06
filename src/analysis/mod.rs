@@ -23,8 +23,6 @@ use symphonia::core::probe::Hint;
 use gst::prelude::*;
 #[cfg(feature = "gst")]
 use gstreamer as gst;
-#[cfg(feature = "gst")]
-use gstreamer_app as gst_app;
 
 #[cfg(feature = "gst")]
 use crate::raw_audio::is_raw_surround_file;
@@ -1125,13 +1123,13 @@ where
         .field("rate", 44_100i32)
         .build();
     capsfilter.set_property("caps", &caps);
-
-    let appsink = gst_app::AppSink::builder()
-        .caps(&caps)
-        .drop(false)
-        .max_buffers(32)
-        .sync(false)
-        .build();
+    let level = gst::ElementFactory::make("level")
+        .build()
+        .map_err(|_| anyhow::anyhow!("missing level element"))?;
+    let fakesink = gst::ElementFactory::make("fakesink")
+        .build()
+        .map_err(|_| anyhow::anyhow!("missing fakesink element"))?;
+    fakesink.set_property("sync", false);
 
     pipeline.add_many([
         &src,
@@ -1139,10 +1137,11 @@ where
         &conv,
         &resample,
         &capsfilter,
-        appsink.upcast_ref(),
+        &level,
+        &fakesink,
     ])?;
     src.link(&decodebin)?;
-    gst::Element::link_many([&conv, &resample, &capsfilter, appsink.upcast_ref()])?;
+    gst::Element::link_many([&conv, &resample, &capsfilter, &level, &fakesink])?;
 
     let conv_sink_pad = conv
         .static_pad("sink")
@@ -1169,18 +1168,20 @@ where
     let bus = pipeline
         .bus()
         .ok_or_else(|| anyhow::anyhow!("waveform pipeline has no bus"))?;
+    pipeline.set_state(gst::State::Paused)?;
+    let _ = pipeline.state(gst::ClockTime::from_seconds(2));
+
+    let duration_ns = pipeline
+        .query_duration::<gst::ClockTime>()
+        .map(gst::ClockTime::nseconds);
+    level.set_property(
+        "interval",
+        level_message_interval_ns(max_points, duration_ns),
+    );
+    level.set_property("post-messages", true);
     pipeline.set_state(gst::State::Playing)?;
 
-    let mut last_rate_hz = 44_100u32;
-    let duration_frames = pipeline
-        .query_duration::<gst::ClockTime>()
-        .map(gst::ClockTime::nseconds)
-        .map(|ns| ns.saturating_mul(last_rate_hz as u64) / 1_000_000_000);
-    let mut block_size =
-        (duration_frames.unwrap_or(last_rate_hz as u64 * 240) / max_points.max(1) as u64).max(1);
     let mut peaks = Vec::with_capacity(max_points);
-    let mut bucket_peak = 0.0f32;
-    let mut bucket_count = 0u64;
     let mut last_preview_emit = std::time::Instant::now();
 
     loop {
@@ -1189,81 +1190,32 @@ where
             return Ok(());
         }
 
-        while let Some(msg) =
-            bus.timed_pop_filtered(gst::ClockTime::from_mseconds(1), &[gst::MessageType::Error])
-        {
-            if let gst::MessageView::Error(err) = msg.view() {
-                let _ = pipeline.set_state(gst::State::Null);
-                return Err(anyhow::anyhow!(
-                    "gstreamer waveform decode failed: {} ({:?})",
-                    err.error(),
-                    err.debug()
-                ));
-            }
-        }
-
-        if let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(50)) {
-            if let Some(caps) = sample.caps() {
-                if let Some(s) = caps.structure(0) {
-                    if let Ok(rate) = s.get::<i32>("rate") {
-                        if rate > 0 && last_rate_hz != rate as u32 {
-                            last_rate_hz = rate as u32;
-                        }
-                    }
-                }
-            }
-            if let Some(buffer) = sample.buffer() {
-                if let Ok(map) = buffer.map_readable() {
-                    let bytes = map.as_slice();
-                    let channels = sample_channels(&sample).max(1);
-                    for amp in interleaved_f32_frame_amps(bytes, channels) {
-                        if amp > bucket_peak {
-                            bucket_peak = amp;
-                        }
-                        bucket_count += 1;
-                        if bucket_count >= block_size {
-                            peaks.push(bucket_peak.clamp(0.0, 1.0));
-                            bucket_peak = 0.0;
-                            bucket_count = 0;
-                            while peaks.len() > max_points {
-                                let mut reduced = Vec::with_capacity(peaks.len().div_ceil(2));
-                                for chunk in peaks.chunks(2) {
-                                    let mut p = 0.0f32;
-                                    for &value in chunk {
-                                        if value > p {
-                                            p = value;
-                                        }
-                                    }
-                                    reduced.push(p);
-                                }
-                                peaks = reduced;
-                                block_size = block_size.saturating_mul(2).max(1);
-                            }
-                            if peaks.len() >= 12
-                                && last_preview_emit.elapsed() >= Duration::from_millis(240)
-                            {
-                                if !on_update(peaks.clone(), false) {
-                                    let _ = pipeline.set_state(gst::State::Null);
-                                    return Ok(());
-                                }
-                                last_preview_emit = std::time::Instant::now();
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        if appsink.is_eos() {
-            break;
-        }
-
         if let Some(msg) = bus.timed_pop_filtered(
-            gst::ClockTime::from_mseconds(10),
-            &[gst::MessageType::Eos, gst::MessageType::Error],
+            gst::ClockTime::from_mseconds(50),
+            &[
+                gst::MessageType::Element,
+                gst::MessageType::Eos,
+                gst::MessageType::Error,
+            ],
         ) {
             match msg.view() {
+                gst::MessageView::Element(element) => {
+                    if let Some(peak) = element.message().structure().and_then(level_message_peak) {
+                        peaks.push(peak);
+                        if peaks.len() > max_points {
+                            peaks = reduce_waveform_peaks(&peaks, max_points);
+                        }
+                        if peaks.len() >= 12
+                            && last_preview_emit.elapsed() >= Duration::from_millis(240)
+                        {
+                            if !on_update(peaks.clone(), false) {
+                                let _ = pipeline.set_state(gst::State::Null);
+                                return Ok(());
+                            }
+                            last_preview_emit = std::time::Instant::now();
+                        }
+                    }
+                }
                 gst::MessageView::Eos(..) => break,
                 gst::MessageView::Error(err) => {
                     let _ = pipeline.set_state(gst::State::Null);
@@ -1278,18 +1230,8 @@ where
         }
     }
 
-    if bucket_count > 0 {
-        peaks.push(bucket_peak.clamp(0.0, 1.0));
-    }
-
     if peaks.len() > max_points {
-        let stride = peaks.len() as f32 / max_points as f32;
-        let mut reduced = Vec::with_capacity(max_points);
-        for i in 0..max_points {
-            let idx = (i as f32 * stride) as usize;
-            reduced.push(peaks[idx.min(peaks.len() - 1)]);
-        }
-        peaks = reduced;
+        peaks = reduce_waveform_peaks(&peaks, max_points);
     }
 
     let _ = pipeline.set_state(gst::State::Null);
@@ -1301,60 +1243,67 @@ where
 }
 
 #[cfg(feature = "gst")]
-fn sample_channels(sample: &gst::Sample) -> usize {
-    sample
-        .caps()
-        .and_then(|caps| caps.structure(0))
-        .and_then(|structure| structure.get::<i32>("channels").ok())
-        .filter(|value| *value > 0)
-        .map_or(1, |value| value as usize)
+fn level_message_interval_ns(max_points: usize, duration_ns: Option<u64>) -> u64 {
+    let fallback_duration_ns = 240u64 * 1_000_000_000;
+    (duration_ns.unwrap_or(fallback_duration_ns) / max_points.max(1) as u64)
+        .clamp(20_000_000, 500_000_000)
 }
 
 #[cfg(feature = "gst")]
-fn interleaved_f32_frame_amps(bytes: &[u8], channels: usize) -> impl Iterator<Item = f32> + '_ {
-    if channels <= 1 {
-        return EitherFrameAmpIter::Mono(bytes.chunks_exact(4));
+fn level_message_peak(structure: &gst::StructureRef) -> Option<f32> {
+    if structure.name() != "level" {
+        return None;
     }
 
-    EitherFrameAmpIter::Multi {
-        frames: bytes.chunks_exact(4 * channels),
-        channels,
-    }
+    let peaks = structure.get::<gst::List>("peak").ok()?;
+    collapse_level_db_peaks(peaks.as_slice())
 }
 
 #[cfg(feature = "gst")]
-enum EitherFrameAmpIter<'a> {
-    Mono(std::slice::ChunksExact<'a, u8>),
-    Multi {
-        frames: std::slice::ChunksExact<'a, u8>,
-        channels: usize,
-    },
-}
+fn collapse_level_db_peaks(values: &[gst::glib::SendValue]) -> Option<f32> {
+    let mut peak = 0.0f32;
+    let mut seen_any = false;
 
-#[cfg(feature = "gst")]
-impl Iterator for EitherFrameAmpIter<'_> {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Mono(chunks) => chunks
-                .next()
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs()),
-            Self::Multi { frames, channels } => frames.next().map(|frame| {
-                let mut sum = 0.0f32;
-                let mut count = 0usize;
-                for sample in frame.chunks_exact(4).take(*channels) {
-                    sum += f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
-                    count += 1;
-                }
-                if count > 0 {
-                    (sum / count as f32).abs()
-                } else {
-                    0.0
-                }
-            }),
+    for value in values {
+        let db = level_db_value(value)?;
+        let linear = dbfs_peak_to_linear(db);
+        if linear > peak {
+            peak = linear;
         }
+        seen_any = true;
     }
+
+    seen_any.then_some(peak)
+}
+
+#[cfg(feature = "gst")]
+fn level_db_value(value: &gst::glib::SendValue) -> Option<f64> {
+    value
+        .get::<f64>()
+        .ok()
+        .or_else(|| value.get::<f32>().ok().map(f64::from))
+}
+
+#[cfg(feature = "gst")]
+fn dbfs_peak_to_linear(db: f64) -> f32 {
+    if !db.is_finite() || db <= -120.0 {
+        return 0.0;
+    }
+    10f32.powf((db as f32) / 20.0).clamp(0.0, 1.0)
+}
+
+fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
+    if peaks.len() <= max_points || max_points == 0 {
+        return peaks.to_vec();
+    }
+
+    let stride = peaks.len() as f32 / max_points as f32;
+    let mut reduced = Vec::with_capacity(max_points);
+    for i in 0..max_points {
+        let idx = (i as f32 * stride) as usize;
+        reduced.push(peaks[idx.min(peaks.len() - 1)]);
+    }
+    reduced
 }
 
 #[cfg(test)]
@@ -1450,5 +1399,29 @@ mod tests {
         match evt {
             AnalysisEvent::Snapshot(s) => assert_eq!(s.waveform_peaks, vec![0.1, 0.2]),
         }
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn collapse_level_message_peaks_uses_loudest_channel() {
+        let _ = gst::init();
+        let structure = gst::Structure::builder("level")
+            .field("peak", gst::List::new([-18.0f64, -6.0, -12.0]))
+            .build();
+
+        let peak = level_message_peak(structure.as_ref()).expect("peak");
+
+        assert!((peak - 10f32.powf(-6.0 / 20.0)).abs() < 0.0001);
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn collapse_level_message_peaks_treats_floor_as_silence() {
+        let _ = gst::init();
+        let structure = gst::Structure::builder("level")
+            .field("peak", gst::List::new([-150.0f64, f64::NEG_INFINITY]))
+            .build();
+
+        assert_eq!(level_message_peak(structure.as_ref()), Some(0.0));
     }
 }
