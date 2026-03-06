@@ -1288,7 +1288,10 @@ Kirigami.ApplicationWindow {
 
     function statusBarSections() {
         if (root.transientBridgeError.length > 0) {
-            return [{ text: "Error", emphasis: true }, { text: root.transientBridgeError }]
+            return [
+                { text: "Error", emphasis: true, kind: "error" },
+                { text: root.transientBridgeError, kind: "error" }
+            ]
         }
         if (!uiBridge.connected) {
             return [{ text: "Bridge disconnected" }]
@@ -3638,9 +3641,16 @@ Kirigami.ApplicationWindow {
                             Layout.fillWidth: !!modelData.stretch
                             text: modelData.text || ""
                             elide: Text.ElideRight
-                            color: modelData.emphasis
-                                ? Kirigami.Theme.highlightedTextColor
-                                : root.uiTextColor
+                            color: modelData.kind === "error"
+                                ? (modelData.emphasis
+                                    ? root.mixColor(
+                                        Kirigami.Theme.negativeTextColor,
+                                        root.uiTextColor,
+                                        root.themeIsDark ? 0.18 : 0.08)
+                                    : Kirigami.Theme.negativeTextColor)
+                                : (modelData.emphasis
+                                    ? Kirigami.Theme.highlightColor
+                                    : root.uiTextColor)
                             font.weight: modelData.emphasis ? Font.DemiBold : Font.Normal
                         }
                     }
