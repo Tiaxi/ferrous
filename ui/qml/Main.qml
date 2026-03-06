@@ -385,12 +385,14 @@ Kirigami.ApplicationWindow {
             if (albumPaths.length > 0) {
                 uiBridge.appendPaths(albumPaths)
             } else {
-                uiBridge.appendAlbumByKey(rowMap.artist || "", rowMap.name || "")
+                uiBridge.appendAlbumByKey(
+                    rowMap.artist || "",
+                    rowMap.selectionKey || rowMap.name || "")
             }
             return true
         }
         if (rowType === "artist") {
-            uiBridge.appendArtistByName(rowMap.artist || "")
+            uiBridge.appendArtistByName(rowMap.selectionKey || rowMap.artist || "")
             return true
         }
         uiBridge.appendPaths(rowMap.playPaths || [])
@@ -411,12 +413,14 @@ Kirigami.ApplicationWindow {
             if (albumPaths.length > 0) {
                 uiBridge.replaceWithPaths(albumPaths)
             } else {
-                uiBridge.replaceAlbumByKey(rowMap.artist || "", rowMap.name || "")
+                uiBridge.replaceAlbumByKey(
+                    rowMap.artist || "",
+                    rowMap.selectionKey || rowMap.name || "")
             }
             return true
         }
         if (rowType === "artist") {
-            uiBridge.replaceArtistByName(rowMap.artist || "")
+            uiBridge.replaceArtistByName(rowMap.selectionKey || rowMap.artist || "")
             return true
         }
         uiBridge.replaceWithPaths(rowMap.playPaths || [])
@@ -1741,9 +1745,11 @@ Kirigami.ApplicationWindow {
             uiBridge.playTrack(row.trackPath || "")
         } else if (rowType === "album") {
             const albumName = (row.album || row.label || "").trim()
-            uiBridge.replaceAlbumByKey((row.artist || "").trim(), albumName)
+            uiBridge.replaceAlbumByKey(
+                (row.artistKey || row.artist || "").trim(),
+                (row.albumKey || albumName).trim())
         } else if (rowType === "artist") {
-            uiBridge.replaceArtistByName((row.artist || row.label || "").trim())
+            uiBridge.replaceArtistByName((row.artistKey || row.artist || row.label || "").trim())
         }
         requestLibraryRevealForSearchRow(row)
         globalSearchDialog.close()
@@ -1760,11 +1766,13 @@ Kirigami.ApplicationWindow {
         }
         if (rowType === "album") {
             const albumName = (row.album || row.label || "").trim()
-            uiBridge.appendAlbumByKey((row.artist || "").trim(), albumName)
+            uiBridge.appendAlbumByKey(
+                (row.artistKey || row.artist || "").trim(),
+                (row.albumKey || albumName).trim())
             return
         }
         if (rowType === "artist") {
-            uiBridge.appendArtistByName((row.artist || row.label || "").trim())
+            uiBridge.appendArtistByName((row.artistKey || row.artist || row.label || "").trim())
         }
     }
 

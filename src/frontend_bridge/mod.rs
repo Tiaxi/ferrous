@@ -1406,13 +1406,24 @@ fn collect_artist_paths_for_queue(
 
     let mut loose_tracks = Vec::new();
     let mut album_buckets: HashMap<String, AlbumBucket<'_>> = HashMap::new();
+    let artist_selector = artist.trim();
+    let artist_selector_is_key = artist_selector.starts_with("artist|");
 
     for track in &library.tracks {
-        if normalized_library_artist(track) != artist {
+        let context = derive_tree_path_context(&track.path, &library.roots, &track.artist);
+        let artist_matches = if artist_selector_is_key {
+            context
+                .as_ref()
+                .is_some_and(|ctx| ctx.artist_key == artist_selector)
+        } else if let Some(ctx) = context.as_ref() {
+            ctx.artist_name == artist_selector
+        } else {
+            normalized_library_artist(track) == artist_selector
+        };
+        if !artist_matches {
             continue;
         }
-        let Some(context) = derive_tree_path_context(&track.path, &library.roots, &track.artist)
-        else {
+        let Some(context) = context else {
             loose_tracks.push(track);
             continue;
         };
@@ -1465,6 +1476,57 @@ fn collect_artist_paths_for_queue(
         out.extend(ordered_track_paths_for_queue(bucket.tracks));
     }
     out
+}
+
+fn collect_album_paths_for_queue(
+    library: &LibrarySnapshot,
+    artist: &str,
+    album: &str,
+) -> Vec<PathBuf> {
+    let artist_selector = artist.trim();
+    let album_selector = album.trim();
+    if album_selector.is_empty() {
+        return Vec::new();
+    }
+    let artist_selector_is_key = artist_selector.starts_with("artist|");
+    let album_selector_is_key = album_selector.starts_with("album|");
+
+    library
+        .tracks
+        .iter()
+        .filter(|track| {
+            let context = derive_tree_path_context(&track.path, &library.roots, &track.artist);
+
+            if album_selector_is_key {
+                return context
+                    .as_ref()
+                    .and_then(|ctx| ctx.album_key.as_ref())
+                    .is_some_and(|key| key == album_selector);
+            }
+
+            let artist_matches = if artist_selector_is_key {
+                context
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.artist_key == artist_selector)
+            } else if let Some(ctx) = context.as_ref() {
+                ctx.artist_name == artist_selector
+            } else {
+                normalized_library_artist(track) == artist_selector
+            };
+            if !artist_matches {
+                return false;
+            }
+
+            if let Some(ctx) = context {
+                let context_album = ctx
+                    .album_folder
+                    .unwrap_or_else(|| String::from("Unknown Album"));
+                return context_album == album_selector;
+            }
+            normalized_library_album(track) == album_selector
+        })
+        .map(|track| track.path.clone())
+        .collect()
 }
 
 fn handle_library_command(
@@ -1539,25 +1601,7 @@ fn handle_library_command(
             true
         }
         BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => {
-            let paths: Vec<PathBuf> = state
-                .library
-                .tracks
-                .iter()
-                .filter(|track| {
-                    let track_artist = if track.artist.trim().is_empty() {
-                        "Unknown Artist"
-                    } else {
-                        track.artist.as_str()
-                    };
-                    let track_album = if track.album.trim().is_empty() {
-                        "Unknown Album"
-                    } else {
-                        track.album.as_str()
-                    };
-                    track_artist == artist && track_album == album
-                })
-                .map(|track| track.path.clone())
-                .collect();
+            let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
             if paths.is_empty() {
                 return false;
             }
@@ -1569,25 +1613,7 @@ fn handle_library_command(
             true
         }
         BridgeLibraryCommand::AppendAlbumByKey { artist, album } => {
-            let paths: Vec<PathBuf> = state
-                .library
-                .tracks
-                .iter()
-                .filter(|track| {
-                    let track_artist = if track.artist.trim().is_empty() {
-                        "Unknown Artist"
-                    } else {
-                        track.artist.as_str()
-                    };
-                    let track_album = if track.album.trim().is_empty() {
-                        "Unknown Album"
-                    } else {
-                        track.album.as_str()
-                    };
-                    track_artist == artist && track_album == album
-                })
-                .map(|track| track.path.clone())
-                .collect();
+            let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
             if paths.is_empty() {
                 return false;
             }
@@ -3081,6 +3107,119 @@ mod tests {
                 p("/music/Artist/Alpha/01 - One.flac"),
                 p("/music/Artist/Beta/01 - One.flac"),
             ]
+        );
+    }
+
+    #[test]
+    fn collect_artist_paths_for_queue_uses_tree_artist_not_track_artist_tag() {
+        let root = p("/music");
+        let sampler = library_track(
+            "/music/Porcupine Tree/Muut/Porcupine Tree Sampler 2005/01 - Hello.flac",
+            &root,
+            "Blackfield",
+            "Porcupine Tree Sampler 2005",
+            Some(2005),
+            Some(1),
+        );
+        let blackfield = library_track(
+            "/music/Blackfield/Blackfield/01 - Open Mind.flac",
+            &root,
+            "Blackfield",
+            "Blackfield",
+            Some(2004),
+            Some(1),
+        );
+        let library = LibrarySnapshot {
+            roots: vec![root.clone()],
+            tracks: vec![sampler, blackfield],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+
+        let ordered =
+            collect_artist_paths_for_queue(&library, "Blackfield", LibrarySortMode::Title);
+        assert_eq!(
+            ordered,
+            vec![p("/music/Blackfield/Blackfield/01 - Open Mind.flac")]
+        );
+    }
+
+    #[test]
+    fn collect_artist_paths_for_queue_honors_artist_key_scope() {
+        let root_a = p("/music-a");
+        let root_b = p("/music-b");
+        let library = LibrarySnapshot {
+            roots: vec![root_a.clone(), root_b.clone()],
+            tracks: vec![
+                library_track(
+                    "/music-a/Same Artist/Alpha/01 - One.flac",
+                    &root_a,
+                    "Same Artist",
+                    "Alpha",
+                    Some(2020),
+                    Some(1),
+                ),
+                library_track(
+                    "/music-b/Same Artist/Beta/01 - Two.flac",
+                    &root_b,
+                    "Same Artist",
+                    "Beta",
+                    Some(2021),
+                    Some(1),
+                ),
+            ],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+
+        let ordered = collect_artist_paths_for_queue(
+            &library,
+            "artist|/music-a|Same Artist",
+            LibrarySortMode::Title,
+        );
+        assert_eq!(ordered, vec![p("/music-a/Same Artist/Alpha/01 - One.flac")]);
+    }
+
+    #[test]
+    fn collect_album_paths_for_queue_honors_album_key_scope() {
+        let root = p("/music");
+        let library = LibrarySnapshot {
+            roots: vec![root.clone()],
+            tracks: vec![
+                library_track(
+                    "/music/Porcupine Tree/Muut/Porcupine Tree Sampler 2005/01 - Hello.flac",
+                    &root,
+                    "Blackfield",
+                    "Porcupine Tree Sampler 2005",
+                    Some(2005),
+                    Some(1),
+                ),
+                library_track(
+                    "/music/Blackfield/Blackfield/01 - Open Mind.flac",
+                    &root,
+                    "Blackfield",
+                    "Blackfield",
+                    Some(2004),
+                    Some(1),
+                ),
+            ],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+
+        let ordered = collect_album_paths_for_queue(
+            &library,
+            "artist|/music|Porcupine Tree",
+            "album|/music|Porcupine Tree|Muut",
+        );
+        assert_eq!(
+            ordered,
+            vec![p(
+                "/music/Porcupine Tree/Muut/Porcupine Tree Sampler 2005/01 - Hello.flac"
+            )]
         );
     }
 
