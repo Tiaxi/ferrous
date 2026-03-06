@@ -5,11 +5,15 @@
 #include <qqml.h>
 #include <QQuickStyle>
 
+#include <atomic>
 #include <array>
 #include <thread>
 #include <vector>
 
 #if defined(Q_OS_UNIX)
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 #endif
 
@@ -79,6 +83,14 @@ private:
             return;
         }
 
+        const int readFlags = ::fcntl(pipeFds[0], F_GETFL, 0);
+        if (readFlags < 0 || ::fcntl(pipeFds[0], F_SETFL, readFlags | O_NONBLOCK) < 0) {
+            ::close(pipeFds[0]);
+            ::close(pipeFds[1]);
+            ::close(savedFd);
+            return;
+        }
+
         if (::dup2(pipeFds[1], fd) < 0) {
             ::close(pipeFds[0]);
             ::close(pipeFds[1]);
@@ -97,7 +109,34 @@ private:
             QByteArray pending;
 
             while (true) {
+                if (m_shutdownRequested.load(std::memory_order_relaxed)) {
+                    break;
+                }
+
+                pollfd pfd{};
+                pfd.fd = readFd;
+                pfd.events = POLLIN | POLLERR | POLLHUP | POLLNVAL;
+                const int pollResult = ::poll(&pfd, 1, 100);
+                if (pollResult < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    break;
+                }
+                if (pollResult == 0) {
+                    continue;
+                }
+                if ((pfd.revents & POLLNVAL) != 0) {
+                    break;
+                }
+                if ((pfd.revents & (POLLIN | POLLERR | POLLHUP)) == 0) {
+                    continue;
+                }
+
                 const ssize_t readBytes = ::read(readFd, buffer.data(), buffer.size());
+                if (readBytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                    continue;
+                }
                 if (readBytes <= 0) {
                     break;
                 }
@@ -134,13 +173,13 @@ private:
     }
 
     void shutdown() {
+        if (m_shutdownRequested.exchange(true, std::memory_order_relaxed)) {
+            return;
+        }
+
         for (auto &stream : m_streams) {
             if (stream.targetFd >= 0 && stream.savedFd >= 0) {
                 ::dup2(stream.savedFd, stream.targetFd);
-            }
-            if (stream.readFd >= 0) {
-                ::close(stream.readFd);
-                stream.readFd = -1;
             }
         }
 
@@ -152,6 +191,10 @@ private:
             if (stream.worker.joinable()) {
                 stream.worker.join();
             }
+            if (stream.readFd >= 0) {
+                ::close(stream.readFd);
+                stream.readFd = -1;
+            }
         }
         m_streams.clear();
     }
@@ -162,6 +205,7 @@ private:
 #endif
 
     QString m_logPath;
+    std::atomic_bool m_shutdownRequested{false};
 };
 
 } // namespace
