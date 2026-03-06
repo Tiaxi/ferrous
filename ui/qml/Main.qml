@@ -3561,8 +3561,8 @@ Kirigami.ApplicationWindow {
         title: pendingFileDialogContext === "open" ? "Open Files" : "Add Files"
         fileMode: Platform.FileDialog.OpenFiles
         nameFilters: [
-            "Audio and Playlist Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.m3u *.m3u8)",
-            "Audio Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav)",
+            "Audio and Playlist Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.ac3 *.dts *.m3u *.m3u8)",
+            "Audio Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.ac3 *.dts)",
             "Playlist Files (*.m3u *.m3u8)",
             "All Files (*)"
         ]

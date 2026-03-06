@@ -1216,8 +1216,7 @@ where
                 if let Ok(map) = buffer.map_readable() {
                     let bytes = map.as_slice();
                     let channels = sample_channels(&sample).max(1);
-                    let pcm = downmix_interleaved_f32_bytes(bytes, channels);
-                    for amp in pcm.into_iter().map(f32::abs) {
+                    for amp in interleaved_f32_frame_amps(bytes, channels) {
                         if amp > bucket_peak {
                             bucket_peak = amp;
                         }
@@ -1312,28 +1311,50 @@ fn sample_channels(sample: &gst::Sample) -> usize {
 }
 
 #[cfg(feature = "gst")]
-fn downmix_interleaved_f32_bytes(bytes: &[u8], channels: usize) -> Vec<f32> {
+fn interleaved_f32_frame_amps(bytes: &[u8], channels: usize) -> impl Iterator<Item = f32> + '_ {
     if channels <= 1 {
-        let mut pcm = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        return pcm;
+        return EitherFrameAmpIter::Mono(bytes.chunks_exact(4));
     }
 
-    let mut pcm = Vec::with_capacity(bytes.len() / (4 * channels.max(1)));
-    for frame in bytes.chunks_exact(4 * channels) {
-        let mut sum = 0.0f32;
-        let mut count = 0usize;
-        for sample in frame.chunks_exact(4) {
-            sum += f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
-            count += 1;
-        }
-        if count > 0 {
-            pcm.push(sum / count as f32);
+    EitherFrameAmpIter::Multi {
+        frames: bytes.chunks_exact(4 * channels),
+        channels,
+    }
+}
+
+#[cfg(feature = "gst")]
+enum EitherFrameAmpIter<'a> {
+    Mono(std::slice::ChunksExact<'a, u8>),
+    Multi {
+        frames: std::slice::ChunksExact<'a, u8>,
+        channels: usize,
+    },
+}
+
+#[cfg(feature = "gst")]
+impl Iterator for EitherFrameAmpIter<'_> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Mono(chunks) => chunks
+                .next()
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs()),
+            Self::Multi { frames, channels } => frames.next().map(|frame| {
+                let mut sum = 0.0f32;
+                let mut count = 0usize;
+                for sample in frame.chunks_exact(4).take(*channels) {
+                    sum += f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                    count += 1;
+                }
+                if count > 0 {
+                    (sum / count as f32).abs()
+                } else {
+                    0.0
+                }
+            }),
         }
     }
-    pcm
 }
 
 #[cfg(test)]
