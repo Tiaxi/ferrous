@@ -54,6 +54,8 @@ Kirigami.ApplicationWindow {
     property string pendingFolderDialogContext: ""
     property string pendingFileDialogContext: ""
     property string transientBridgeError: ""
+    property real rememberedVolumeBeforeMute: 1.0
+    property bool volumeMuted: false
     property string libraryTypeAheadBuffer: ""
     property string pendingLibraryRevealSelectionKey: ""
     property var pendingLibraryRevealExpandKeys: []
@@ -135,6 +137,54 @@ Kirigami.ApplicationWindow {
 
     function colorLuma(colorValue) {
         return (0.2126 * colorValue.r) + (0.7152 * colorValue.g) + (0.0722 * colorValue.b)
+    }
+
+    function normalizedVolumeValue(value) {
+        const numericValue = Number(value)
+        if (!isFinite(numericValue)) {
+            return 0.0
+        }
+        return Math.max(0.0, Math.min(1.0, numericValue))
+    }
+
+    function syncMutedVolumeState() {
+        const currentVolume = normalizedVolumeValue(uiBridge.volume)
+        if (currentVolume > 0.0001) {
+            root.rememberedVolumeBeforeMute = currentVolume
+            root.volumeMuted = false
+        } else if (!root.volumeMuted && root.rememberedVolumeBeforeMute <= 0.0001) {
+            root.rememberedVolumeBeforeMute = 1.0
+        }
+    }
+
+    function setAppVolume(value) {
+        const nextVolume = normalizedVolumeValue(value)
+        if (nextVolume > 0.0001) {
+            root.rememberedVolumeBeforeMute = nextVolume
+            root.volumeMuted = false
+        } else if (!root.volumeMuted) {
+            const currentVolume = normalizedVolumeValue(uiBridge.volume)
+            if (currentVolume > 0.0001) {
+                root.rememberedVolumeBeforeMute = currentVolume
+            }
+        }
+        uiBridge.setVolume(nextVolume)
+    }
+
+    function toggleMutedVolume() {
+        const currentVolume = normalizedVolumeValue(uiBridge.volume)
+        if (root.volumeMuted || currentVolume <= 0.0001) {
+            const restoreVolume = root.rememberedVolumeBeforeMute > 0.0001
+                ? root.rememberedVolumeBeforeMute
+                : 1.0
+            root.volumeMuted = false
+            uiBridge.setVolume(restoreVolume)
+            return
+        }
+
+        root.rememberedVolumeBeforeMute = currentVolume
+        root.volumeMuted = true
+        uiBridge.setVolume(0.0)
     }
 
     QtObject {
@@ -3609,6 +3659,12 @@ Kirigami.ApplicationWindow {
     }
 
     footer: ToolBar {
+        implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
+        leftPadding: 14
+        rightPadding: 10
+        topPadding: 2
+        bottomPadding: 2
+
         contentItem: RowLayout {
             spacing: 6
 
@@ -3682,12 +3738,18 @@ Kirigami.ApplicationWindow {
         ToolBar {
             id: transportBar
             Layout.fillWidth: true
-            implicitHeight: 56
+            implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
+            leftPadding: 8
+            rightPadding: 12
+            topPadding: 4
+            bottomPadding: 4
 
             contentItem: RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 8
-                anchors.rightMargin: 12
+                anchors.leftMargin: transportBar.leftPadding
+                anchors.rightMargin: transportBar.rightPadding
+                anchors.topMargin: transportBar.topPadding
+                anchors.bottomMargin: transportBar.bottomPadding
                 spacing: 8
 
                 RowLayout {
@@ -3826,10 +3888,16 @@ Kirigami.ApplicationWindow {
                 }
 
                 ToolButton {
-                    icon.name: "audio-volume-high"
+                    Layout.preferredWidth: 28
+                    Layout.preferredHeight: 28
+                    Layout.alignment: Qt.AlignVCenter
                     display: AbstractButton.IconOnly
-                    enabled: false
-                    focusPolicy: Qt.NoFocus
+                    flat: true
+                    icon.name: (root.volumeMuted || root.normalizedVolumeValue(uiBridge.volume) <= 0.0001)
+                        ? "audio-volume-muted"
+                        : "audio-volume-high"
+                    icon.color: root.mixColor(root.uiTextColor, "#ffffff", root.themeIsDark ? 0.16 : 0.04)
+                    onClicked: root.toggleMutedVolume()
                 }
 
                 Slider {
@@ -3838,10 +3906,10 @@ Kirigami.ApplicationWindow {
                     from: 0
                     to: 1
                     stepSize: 0
-                    onMoved: uiBridge.setVolume(value)
+                    onMoved: root.setAppVolume(value)
                     onPressedChanged: {
                         if (!pressed) {
-                            uiBridge.setVolume(value)
+                            root.setAppVolume(value)
                         }
                     }
                 }
@@ -5357,6 +5425,7 @@ Kirigami.ApplicationWindow {
             }
         }
         function onSnapshotChanged() {
+            root.syncMutedVolumeState()
             const incomingPosition = uiBridge.positionSeconds
             const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath
             const nowMs = Date.now()
@@ -5442,6 +5511,7 @@ Kirigami.ApplicationWindow {
         root.lastAutoCenterPlaybackState = uiBridge.playbackState
         root.lastAutoCenterTrackPath = uiBridge.currentTrackPath
         root.displayedPositionSeconds = uiBridge.positionSeconds
+        root.syncMutedVolumeState()
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
         root.positionSmoothingAnchorSeconds = uiBridge.positionSeconds
         root.positionSmoothingLastMs = Date.now()
