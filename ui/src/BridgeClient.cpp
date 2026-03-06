@@ -2482,21 +2482,21 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     QString nextTrackAlbum = m_currentTrackAlbum;
     QString nextTrackGenre = m_currentTrackGenre;
     QVariant nextTrackYear = m_currentTrackYear;
+    const bool metadataMatchesCurrentPath =
+        !currentPath.isEmpty() && snapshot.metadata.present && metadataSourcePath == currentPath;
     QString nextTrackFormatLabel = currentPath.isEmpty()
         ? QString{}
-        : formatLabelFromPath(currentPath);
-    int nextTrackChannels = 0;
-    int nextTrackSampleRateHz = 0;
-    int nextTrackBitDepth = 0;
-    int nextTrackCurrentBitrateKbps = 0;
+        : (metadataMatchesCurrentPath
+            ? formatLabelFromPath(currentPath)
+            : m_currentTrackFormatLabel);
+    int nextTrackChannels = currentPath.isEmpty() ? 0 : m_currentTrackChannels;
+    int nextTrackSampleRateHz = currentPath.isEmpty() ? 0 : m_currentTrackSampleRateHz;
+    int nextTrackBitDepth = currentPath.isEmpty() ? 0 : m_currentTrackBitDepth;
+    int nextTrackCurrentBitrateKbps = currentPath.isEmpty() ? 0 : m_currentTrackCurrentBitrateKbps;
     QString queueTrackCover;
     const bool stoppedTrackAdvanced = isStopped && hadTrackContextPath && currentPathChanged;
-    if (!currentPathChanged) {
-        nextTrackFormatLabel = m_currentTrackFormatLabel;
-        nextTrackChannels = m_currentTrackChannels;
-        nextTrackSampleRateHz = m_currentTrackSampleRateHz;
-        nextTrackBitDepth = m_currentTrackBitDepth;
-        nextTrackCurrentBitrateKbps = m_currentTrackCurrentBitrateKbps;
+    if (!metadataMatchesCurrentPath && !currentPath.isEmpty() && nextTrackFormatLabel.isEmpty()) {
+        nextTrackFormatLabel = formatLabelFromPath(currentPath);
     }
     if (!currentPath.isEmpty() && (!isStopped || stoppedTrackAdvanced)) {
         int detailIndex = playing;
@@ -2553,9 +2553,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackTitle = fallbackTitle.isEmpty() ? currentPath : fallbackTitle;
         }
     }
-    if (!currentPath.isEmpty()
-        && snapshot.metadata.present
-        && metadataSourcePath == currentPath) {
+    if (metadataMatchesCurrentPath) {
         if (!metadataFormatLabel.trimmed().isEmpty()) {
             nextTrackFormatLabel = metadataFormatLabel;
         }
