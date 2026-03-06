@@ -135,6 +135,7 @@ pub enum BridgeSettingsCommand {
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
+    SetSystemMediaControlsEnabled(bool),
     SetLibrarySortMode(LibrarySortMode),
 }
 
@@ -202,6 +203,7 @@ pub struct BridgeSettings {
     pub db_range: f32,
     pub log_scale: bool,
     pub show_fps: bool,
+    pub system_media_controls_enabled: bool,
     pub library_sort_mode: LibrarySortMode,
 }
 
@@ -216,6 +218,7 @@ impl Default for BridgeSettings {
             db_range: 90.0,
             log_scale: false,
             show_fps,
+            system_media_controls_enabled: true,
             library_sort_mode: LibrarySortMode::Year,
         }
     }
@@ -1053,6 +1056,10 @@ fn handle_bridge_command(
                 }
                 BridgeSettingsCommand::SetShowFps(v) => {
                     state.settings.show_fps = v;
+                    *context.settings_dirty = true;
+                }
+                BridgeSettingsCommand::SetSystemMediaControlsEnabled(v) => {
+                    state.settings.system_media_controls_enabled = v;
                     *context.settings_dirty = true;
                 }
                 BridgeSettingsCommand::SetLibrarySortMode(mode) => {
@@ -2995,6 +3002,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.show_fps = x != 0;
                 }
             }
+            "system_media_controls_enabled" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.system_media_controls_enabled = x != 0;
+                }
+            }
             "library_sort_mode" => {
                 if let Ok(x) = value.parse::<i32>() {
                     settings.library_sort_mode = LibrarySortMode::from_i32(x);
@@ -3018,12 +3030,13 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nlibrary_sort_mode={}\n",
+        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\n",
         settings.volume,
         settings.fft_size,
         settings.db_range,
         i32::from(settings.log_scale),
         i32::from(settings.show_fps),
+        i32::from(settings.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
     )
 }
@@ -3201,6 +3214,7 @@ mod tests {
             db_range: 77.5,
             log_scale: true,
             show_fps: true,
+            system_media_controls_enabled: false,
             library_sort_mode: LibrarySortMode::Title,
         };
         let text = format_settings_text(&settings);
@@ -3211,6 +3225,7 @@ mod tests {
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.log_scale);
         assert!(parsed.show_fps);
+        assert!(!parsed.system_media_controls_enabled);
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
     }
 
@@ -3219,14 +3234,25 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\nshow_fps=1\nlibrary_sort_mode=0\n",
+            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\nshow_fps=1\nsystem_media_controls_enabled=0\nlibrary_sort_mode=0\n",
         );
         assert_eq!(settings.volume, 1.0);
         assert_eq!(settings.fft_size, 512);
         assert_eq!(settings.db_range, 120.0);
         assert!(!settings.log_scale);
         assert!(settings.show_fps);
+        assert!(!settings.system_media_controls_enabled);
         assert_eq!(settings.library_sort_mode, LibrarySortMode::Year);
+    }
+
+    #[test]
+    fn settings_default_system_media_controls_enabled_when_omitted() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(
+            &mut settings,
+            "volume=0.5\nfft_size=2048\ndb_range=80\nlog_scale=1\nshow_fps=0\nlibrary_sort_mode=1\n",
+        );
+        assert!(settings.system_media_controls_enabled);
     }
 
     #[test]

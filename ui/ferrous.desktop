@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ferrous
+Comment=High-performance Linux audio player
+Exec=ferrous
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true

@@ -351,6 +351,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     Reader reader(payload);
     quint8 logScale = 0;
     quint8 showFps = 0;
+    quint8 systemMediaControlsEnabled = 1;
     qint32 librarySortMode = 0;
     quint32 fftSize = 0;
     if (!reader.readF32(&out->volume)
@@ -358,8 +359,13 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
         || !reader.readF32(&out->dbRange)
         || !reader.readU8(&logScale)
         || !reader.readU8(&showFps)
-        || !reader.readI32(&librarySortMode)
-        || !reader.atEnd()) {
+        || !reader.readI32(&librarySortMode)) {
+        return false;
+    }
+    if (!reader.atEnd() && !reader.readU8(&systemMediaControlsEnabled)) {
+        return false;
+    }
+    if (!reader.atEnd()) {
         return false;
     }
     out->present = true;
@@ -367,6 +373,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->logScale = logScale != 0;
     out->showFps = showFps != 0;
     out->librarySortMode = static_cast<int>(librarySortMode);
+    out->systemMediaControlsEnabled = systemMediaControlsEnabled != 0;
     return true;
 }
 

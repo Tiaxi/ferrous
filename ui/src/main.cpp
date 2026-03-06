@@ -2,8 +2,9 @@
 #include <QDateTime>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
-#include <qqml.h>
 #include <QQuickStyle>
+#include <QStandardPaths>
+#include <qqml.h>
 
 #include <atomic>
 #include <array>
@@ -20,10 +21,19 @@
 #include "BridgeClient.h"
 #include "DiagnosticsLog.h"
 #include "LibraryTreeModel.h"
+#include "MprisController.h"
 #include "SpectrogramItem.h"
 #include "WaveformItem.h"
 
 namespace {
+
+bool hasInstalledDesktopEntry(const QString &desktopFileName) {
+    return !QStandardPaths::locate(
+                QStandardPaths::ApplicationsLocation,
+                desktopFileName,
+                QStandardPaths::LocateFile)
+                .isEmpty();
+}
 
 class ConsoleTeeManager {
 public:
@@ -213,8 +223,14 @@ private:
 int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
     QApplication app(argc, argv);
+    QApplication::setApplicationName(QStringLiteral("Ferrous"));
+    QApplication::setApplicationDisplayName(QStringLiteral("Ferrous"));
+    if (hasInstalledDesktopEntry(QStringLiteral("ferrous.desktop"))) {
+        QApplication::setDesktopFileName(QStringLiteral("ferrous"));
+    }
     ConsoleTeeManager consoleTee(DiagnosticsLog::defaultLogPath());
     BridgeClient bridge;
+    MprisController mpris(&bridge);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");

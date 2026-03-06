@@ -58,6 +58,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int repeatMode READ repeatMode NOTIFY snapshotChanged)
     Q_PROPERTY(bool shuffleEnabled READ shuffleEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
+    Q_PROPERTY(bool systemMediaControlsEnabled READ systemMediaControlsEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
     Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY snapshotChanged)
@@ -127,6 +128,7 @@ public:
     int repeatMode() const;
     bool shuffleEnabled() const;
     bool showFps() const;
+    bool systemMediaControlsEnabled() const;
     QStringList libraryAlbums() const;
     QByteArray libraryTreeBinary() const;
     int libraryVersion() const;
@@ -168,6 +170,7 @@ public:
     Q_INVOKABLE void setRepeatMode(int mode);
     Q_INVOKABLE void setShuffleEnabled(bool value);
     Q_INVOKABLE void setShowFps(bool value);
+    Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
@@ -319,6 +322,7 @@ private:
     int m_repeatMode{0};
     bool m_shuffleEnabled{false};
     bool m_showFps{false};
+    bool m_systemMediaControlsEnabled{true};
     QStringList m_libraryAlbums;
     QByteArray m_libraryTreeBinary;
     int m_libraryVersion{0};

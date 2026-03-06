@@ -1016,6 +1016,10 @@ bool BridgeClient::showFps() const {
     return m_showFps;
 }
 
+bool BridgeClient::systemMediaControlsEnabled() const {
+    return m_systemMediaControlsEnabled;
+}
+
 QStringList BridgeClient::libraryAlbums() const {
     return m_libraryAlbums;
 }
@@ -1224,6 +1228,16 @@ void BridgeClient::setShowFps(bool value) {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetShowFps,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setSystemMediaControlsEnabled(bool value) {
+    if (m_systemMediaControlsEnabled != value) {
+        m_systemMediaControlsEnabled = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSystemMediaControls,
         static_cast<quint8>(value ? 1 : 0)));
 }
 
@@ -2683,6 +2697,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
     if (m_showFps != showFps) {
         m_showFps = showFps;
+        changed = true;
+    }
+
+    const bool systemMediaControlsEnabled = snapshot.settings.present
+        ? snapshot.settings.systemMediaControlsEnabled
+        : m_systemMediaControlsEnabled;
+    if (m_systemMediaControlsEnabled != systemMediaControlsEnabled) {
+        m_systemMediaControlsEnabled = systemMediaControlsEnabled;
         changed = true;
     }
 

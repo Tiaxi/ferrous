@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(FERROUS_ENABLE_PROFILE_LOGS "Compile profiling log output into binaries" OFF)
 
-find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Network Widgets Concurrent)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
@@ -47,6 +47,7 @@ qt_add_executable(ferrous
     src/BridgeClient.cpp
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
+    src/MprisController.cpp
     src/SpectrogramItem.cpp
     src/WaveformItem.cpp
 )
@@ -73,6 +74,7 @@ target_link_libraries(ferrous PRIVATE
     "${FERROUS_RUST_STATIC_LIB}"
     PkgConfig::FERROUS_GSTREAMER
     Qt6::Core
+    Qt6::DBus
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick
@@ -89,6 +91,9 @@ target_link_libraries(ferrous PRIVATE
 if(FERROUS_ENABLE_PROFILE_LOGS)
     target_compile_definitions(ferrous PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
 endif()
+
+install(TARGETS ferrous RUNTIME DESTINATION bin)
+install(FILES ferrous.desktop DESTINATION share/applications)
 
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)

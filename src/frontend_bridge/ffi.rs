@@ -697,6 +697,13 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::AppendAllTracks)
         }
+        38 => {
+            let enabled = reader.read_u8()? != 0;
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::SetSystemMediaControlsEnabled(
+                enabled,
+            ))
+        }
         _ => return Err(format!("unknown binary command id {cmd_id}")),
     };
 
@@ -1107,6 +1114,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(&mut out, u8::from(snapshot.settings.log_scale));
     push_u8(&mut out, u8::from(snapshot.settings.show_fps));
     push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.system_media_controls_enabled),
+    );
     out
 }
 
@@ -1385,6 +1396,7 @@ mod tests {
                 db_range: 90.0,
                 log_scale: false,
                 show_fps: false,
+                system_media_controls_enabled: true,
                 library_sort_mode: LibrarySortMode::Year,
             },
         }
@@ -1495,6 +1507,16 @@ mod tests {
         match cmd {
             BridgeCommand::Settings(BridgeSettingsCommand::SetLibrarySortMode(mode)) => {
                 assert_eq!(mode, LibrarySortMode::Title);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_binary_command(&encode_command(38, &[0]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetSystemMediaControlsEnabled(v)) => {
+                assert!(!v);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1705,6 +1727,26 @@ mod tests {
         assert_ne!(mask & SECTION_SETTINGS, 0);
         assert_eq!(mask & SECTION_ERROR, 0);
         assert_eq!(mask & SECTION_STOPPED, 0);
+    }
+
+    #[test]
+    fn settings_section_encodes_system_media_controls_flag() {
+        let mut snapshot = sample_snapshot();
+        snapshot.settings.system_media_controls_enabled = false;
+        let queue_section = compute_queue_section_data(&snapshot);
+        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
+        let mut offset = 12usize;
+        let playback_len = read_u32(&packet, &mut offset) as usize;
+        offset += playback_len;
+        let queue_len = read_u32(&packet, &mut offset) as usize;
+        offset += queue_len;
+        let library_len = read_u32(&packet, &mut offset) as usize;
+        offset += library_len;
+        let metadata_len = read_u32(&packet, &mut offset) as usize;
+        offset += metadata_len;
+        let settings_len = read_u32(&packet, &mut offset) as usize;
+        let settings = &packet[offset..offset + settings_len];
+        assert_eq!(settings.last().copied(), Some(0));
     }
 
     #[test]

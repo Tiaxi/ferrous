@@ -60,6 +60,7 @@ enum CommandId : quint16 {
     CmdSetSearchQuery = 35,
     CmdReplaceAllTracks = 36,
     CmdAppendAllTracks = 37,
+    CmdSetSystemMediaControls = 38,
 };
 
 struct DecodedPlayback {
@@ -138,6 +139,7 @@ struct DecodedSettings {
     bool logScale{false};
     bool showFps{false};
     int librarySortMode{0};
+    bool systemMediaControlsEnabled{true};
 };
 
 struct DecodedSnapshot {

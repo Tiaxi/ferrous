@@ -179,6 +179,7 @@ Kirigami.ApplicationWindow {
         property int repeatMode: 0
         property bool shuffleEnabled: false
         property bool showFps: false
+        property bool systemMediaControlsEnabled: true
         property int sampleRateHz: 48000
         property var libraryAlbums: []
         property var libraryTreeBinary: ""
@@ -226,6 +227,7 @@ Kirigami.ApplicationWindow {
         function setRepeatMode(mode) {}
         function setShuffleEnabled(value) {}
         function setShowFps(value) {}
+        function setSystemMediaControlsEnabled(value) {}
         function playAt(index) {}
         function selectQueueIndex(index) {}
         function removeAt(index) {}
@@ -2484,21 +2486,18 @@ Kirigami.ApplicationWindow {
         id: playAction
         text: "Play"
         icon.name: "media-playback-start"
-        shortcut: "Media Play"
         onTriggered: uiBridge.play()
     }
     Action {
         id: pauseAction
         text: "Pause"
         icon.name: "media-playback-pause"
-        shortcut: "Media Pause"
         onTriggered: uiBridge.pause()
     }
     Action {
         id: stopAction
         text: "Stop"
         icon.name: "media-playback-stop"
-        shortcut: "Media Stop"
         onTriggered: uiBridge.stop()
     }
     Action {
@@ -2533,14 +2532,6 @@ Kirigami.ApplicationWindow {
                 && ((globalSearchQueryField && globalSearchQueryField.activeFocus)
                     || (globalSearchResultsView && globalSearchResultsView.activeFocus)))
         onActivated: root.togglePlayPause()
-    }
-    Shortcut {
-        sequence: "Media Previous"
-        onActivated: previousAction.trigger()
-    }
-    Shortcut {
-        sequence: "Media Next"
-        onActivated: nextAction.trigger()
     }
     menuBar: MenuBar {
         Menu {
@@ -2844,6 +2835,30 @@ Kirigami.ApplicationWindow {
                             focusPolicy: Qt.NoFocus
                             checked: uiBridge.showFps
                             onToggled: uiBridge.setShowFps(checked)
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "System Media"
+                    Layout.fillWidth: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        CheckBox {
+                            text: "Enable KDE media controls and media buttons"
+                            focusPolicy: Qt.NoFocus
+                            checked: uiBridge.systemMediaControlsEnabled
+                            onToggled: uiBridge.setSystemMediaControlsEnabled(checked)
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            color: Kirigami.Theme.disabledTextColor
+                            text: "When enabled, Ferrous appears in Plasma's media controls and responds to Play/Pause, Previous, Next, and Stop media buttons. Keyboard volume buttons always control system volume, not Ferrous volume."
                         }
                     }
                 }
