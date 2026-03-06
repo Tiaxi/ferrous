@@ -1288,10 +1288,11 @@ Kirigami.ApplicationWindow {
 
     function statusBarSections() {
         if (root.transientBridgeError.length > 0) {
-            return [
-                { text: "Error", emphasis: true, kind: "error" },
-                { text: root.transientBridgeError, kind: "error" }
-            ]
+            return [{
+                text: "Error: " + root.transientBridgeError,
+                emphasis: true,
+                kind: "error"
+            }]
         }
         if (!uiBridge.connected) {
             return [{ text: "Bridge disconnected" }]
