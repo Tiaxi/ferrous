@@ -441,6 +441,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             artist TEXT NOT NULL,
             album TEXT NOT NULL,
             cover_path TEXT NOT NULL DEFAULT '',
+            cover_checked INTEGER NOT NULL DEFAULT 0,
             genre TEXT NOT NULL DEFAULT '',
             year INTEGER,
             track_no INTEGER,
@@ -463,6 +464,10 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE tracks ADD COLUMN cover_path TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE tracks ADD COLUMN cover_checked INTEGER NOT NULL DEFAULT 0",
         [],
     );
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
@@ -679,10 +684,10 @@ where
     insert_root(conn, &root)?;
 
     let root_str = root.to_string_lossy().to_string();
-    let mut existing: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut existing: HashMap<String, (i64, i64, bool)> = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, mtime_ns, size_bytes
+        SELECT path, mtime_ns, size_bytes, cover_checked
         FROM tracks
         WHERE root_path = ?1
            OR (root_path = '' AND (path = ?1 OR path LIKE ?1 || '/%'))
@@ -693,11 +698,12 @@ where
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         });
         if let Ok(rows) = mapped {
             for item in rows.flatten() {
-                existing.insert(item.0, (item.1, item.2));
+                existing.insert(item.0, (item.1, item.2, item.3 != 0));
             }
         }
     }
@@ -718,6 +724,7 @@ where
                 artist,
                 album,
                 cover_path,
+                cover_checked,
                 genre,
                 year,
                 track_no,
@@ -726,13 +733,14 @@ where
                 size_bytes,
                 indexed_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(path) DO UPDATE SET
                 root_path=excluded.root_path,
                 title=excluded.title,
                 artist=excluded.artist,
                 album=excluded.album,
                 cover_path=excluded.cover_path,
+                cover_checked=excluded.cover_checked,
                 genre=excluded.genre,
                 year=excluded.year,
                 track_no=excluded.track_no,
@@ -837,6 +845,7 @@ where
                 indexed.artist.as_str(),
                 indexed.album.as_str(),
                 indexed.cover_path.as_str(),
+                1_i64,
                 indexed.genre.as_str(),
                 indexed.year.map(i64::from),
                 indexed.track_no.map(i64::from),
@@ -882,7 +891,9 @@ where
         seen_paths.insert(path_string.clone());
 
         let needs_update = match existing.get(&path_string) {
-            Some((old_mtime, old_size)) => *old_mtime != mtime_ns || *old_size != size_bytes,
+            Some((old_mtime, old_size, has_cover_path)) => {
+                *old_mtime != mtime_ns || *old_size != size_bytes || !has_cover_path
+            }
             None => true,
         };
 
@@ -1234,6 +1245,69 @@ mod tests {
             snapshot.tracks[0].cover_path,
             cover.to_string_lossy().to_string()
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_root_backfills_missing_cover_path_without_file_changes() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+
+        let root = test_dir("cover-backfill");
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mp3 = root.join("song.mp3");
+        let cover = root.join("cover.jpg");
+        write_stub(&mp3, b"not-real-mp3");
+        write_stub(&cover, b"not-real-jpg");
+
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("initial scan");
+
+        let mp3_path = mp3.to_string_lossy().to_string();
+        conn.execute(
+            "UPDATE tracks SET cover_path='', cover_checked=0 WHERE path=?1",
+            params![mp3_path.as_str()],
+        )
+        .expect("clear cover path");
+
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("rescan");
+
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(
+            snapshot.tracks[0].cover_path,
+            cover.to_string_lossy().to_string()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_root_does_not_reprocess_unchanged_tracks_without_cover_after_backfill() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+
+        let root = test_dir("cover-no-repeat");
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mp3 = root.join("song.mp3");
+        write_stub(&mp3, b"not-real-mp3");
+
+        let mut first_upserts = 0usize;
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {
+            first_upserts = first_upserts.saturating_add(1);
+        })
+        .expect("initial scan");
+        assert_eq!(first_upserts, 1);
+
+        let mut second_upserts = 0usize;
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {
+            second_upserts = second_upserts.saturating_add(1);
+        })
+        .expect("rescan");
+        assert_eq!(second_upserts, 0);
 
         let _ = fs::remove_dir_all(root);
     }
