@@ -1255,13 +1255,8 @@ fn level_message_peak(structure: &gst::StructureRef) -> Option<f32> {
         return None;
     }
 
-    if let Ok(peaks) = structure.get::<gst::Array>("peak") {
-        return collapse_level_db_peaks(peaks.as_slice());
-    }
-    if let Ok(peaks) = structure.get::<gst::List>("peak") {
-        return collapse_level_db_peaks(peaks.as_slice());
-    }
-    None
+    let peaks = structure.value("peak").ok()?;
+    collapse_level_peak_value(peaks)
 }
 
 #[cfg(feature = "gst")]
@@ -1271,6 +1266,40 @@ fn collapse_level_db_peaks(values: &[gst::glib::SendValue]) -> Option<f32> {
 
     for value in values {
         let db = level_db_value(value)?;
+        let linear = dbfs_peak_to_linear(db);
+        if linear > peak {
+            peak = linear;
+        }
+        seen_any = true;
+    }
+
+    seen_any.then_some(peak)
+}
+
+#[cfg(feature = "gst")]
+fn collapse_level_peak_value(value: &gst::glib::SendValue) -> Option<f32> {
+    if let Ok(peaks) = value.get::<gst::Array>() {
+        return collapse_level_db_peaks(peaks.as_slice());
+    }
+    if let Ok(peaks) = value.get::<gst::List>() {
+        return collapse_level_db_peaks(peaks.as_slice());
+    }
+    if let Ok(peaks) = value.get::<gst::glib::ValueArray>() {
+        return collapse_level_db_values(peaks.as_slice());
+    }
+    level_db_value(value).map(dbfs_peak_to_linear)
+}
+
+#[cfg(feature = "gst")]
+fn collapse_level_db_values(values: &[gst::glib::Value]) -> Option<f32> {
+    let mut peak = 0.0f32;
+    let mut seen_any = false;
+
+    for value in values {
+        let db = value
+            .get::<f64>()
+            .ok()
+            .or_else(|| value.get::<f32>().ok().map(f64::from))?;
         let linear = dbfs_peak_to_linear(db);
         if linear > peak {
             peak = linear;
@@ -1441,5 +1470,15 @@ mod tests {
         let peak = level_message_peak(structure.as_ref()).expect("peak");
 
         assert!((peak - 10f32.powf(-3.0 / 20.0)).abs() < 0.0001);
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn collapse_level_message_peaks_accepts_value_array_too() {
+        let _ = gst::init();
+        let peaks = gst::glib::ValueArray::new([-15.0f64, -4.0]);
+        let peak = collapse_level_db_values(peaks.as_slice()).expect("peak");
+
+        assert!((peak - 10f32.powf(-4.0 / 20.0)).abs() < 0.0001);
     }
 }
