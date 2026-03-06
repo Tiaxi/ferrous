@@ -1181,7 +1181,13 @@ where
     level.set_property("post-messages", true);
     pipeline.set_state(gst::State::Playing)?;
 
-    let mut peaks = Vec::with_capacity(max_points);
+    let duration_ns = duration_ns.filter(|value| *value > 0);
+    let mut peaks = if duration_ns.is_some() {
+        vec![0.0; max_points]
+    } else {
+        Vec::with_capacity(max_points)
+    };
+    let mut level_messages_seen = 0usize;
     let mut last_preview_emit = std::time::Instant::now();
 
     loop {
@@ -1200,12 +1206,27 @@ where
         ) {
             match msg.view() {
                 gst::MessageView::Element(element) => {
-                    if let Some(peak) = element.message().structure().and_then(level_message_peak) {
-                        peaks.push(peak);
-                        if peaks.len() > max_points {
-                            peaks = reduce_waveform_peaks(&peaks, max_points);
+                    if let Some(structure) = element.message().structure() {
+                        if let Some(peak) = level_message_peak(structure) {
+                            level_messages_seen = level_messages_seen.saturating_add(1);
+                            if let Some(track_duration_ns) = duration_ns {
+                                if let Some(bin_index) = level_message_bin_index(
+                                    structure,
+                                    track_duration_ns,
+                                    max_points,
+                                ) {
+                                    if peak > peaks[bin_index] {
+                                        peaks[bin_index] = peak;
+                                    }
+                                }
+                            } else {
+                                peaks.push(peak);
+                                if peaks.len() > max_points {
+                                    peaks = reduce_waveform_peaks(&peaks, max_points);
+                                }
+                            }
                         }
-                        if peaks.len() >= 12
+                        if level_messages_seen >= 12
                             && last_preview_emit.elapsed() >= Duration::from_millis(240)
                         {
                             if !on_update(peaks.clone(), false) {
@@ -1247,6 +1268,37 @@ fn level_message_interval_ns(max_points: usize, duration_ns: Option<u64>) -> u64
     let fallback_duration_ns = 240u64 * 1_000_000_000;
     (duration_ns.unwrap_or(fallback_duration_ns) / max_points.max(1) as u64)
         .clamp(20_000_000, 500_000_000)
+}
+
+#[cfg(feature = "gst")]
+fn level_message_bin_index(
+    structure: &gst::StructureRef,
+    duration_ns: u64,
+    max_points: usize,
+) -> Option<usize> {
+    if duration_ns == 0 || max_points == 0 {
+        return None;
+    }
+
+    let time_ns = level_message_time_ns(structure)?;
+    Some(
+        ((time_ns.saturating_mul(max_points as u64)) / duration_ns).min(max_points as u64 - 1)
+            as usize,
+    )
+}
+
+#[cfg(feature = "gst")]
+fn level_message_time_ns(structure: &gst::StructureRef) -> Option<u64> {
+    structure
+        .get::<u64>("running-time")
+        .ok()
+        .or_else(|| structure.get::<u64>("stream-time").ok())
+        .or_else(|| structure.get::<u64>("timestamp").ok())
+        .or_else(|| {
+            let end = structure.get::<u64>("endtime").ok()?;
+            let duration = structure.get::<u64>("duration").ok().unwrap_or(0);
+            Some(end.saturating_sub(duration))
+        })
 }
 
 #[cfg(feature = "gst")]
@@ -1480,5 +1532,36 @@ mod tests {
         let peak = collapse_level_db_values(peaks.as_slice()).expect("peak");
 
         assert!((peak - 10f32.powf(-4.0 / 20.0)).abs() < 0.0001);
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn level_message_bin_index_uses_running_time_when_present() {
+        let _ = gst::init();
+        let structure = gst::Structure::builder("level")
+            .field("running-time", 5_000_000_000u64)
+            .field("peak", gst::Array::new([-9.0f64]))
+            .build();
+
+        assert_eq!(
+            level_message_bin_index(structure.as_ref(), 10_000_000_000, 100),
+            Some(50)
+        );
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn level_message_bin_index_falls_back_to_end_minus_duration() {
+        let _ = gst::init();
+        let structure = gst::Structure::builder("level")
+            .field("endtime", 8_000_000_000u64)
+            .field("duration", 2_000_000_000u64)
+            .field("peak", gst::Array::new([-9.0f64]))
+            .build();
+
+        assert_eq!(
+            level_message_bin_index(structure.as_ref(), 10_000_000_000, 100),
+            Some(60)
+        );
     }
 }
