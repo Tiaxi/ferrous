@@ -66,18 +66,49 @@ Kirigami.ApplicationWindow {
     property var globalSearchContextRowData: ({})
     property bool globalSearchOpening: false
     property bool globalSearchIgnoreRefocusFind: false
-    readonly property color uiSurfaceColor: "#ffffff"
-    readonly property color uiSurfaceAltColor: "#f7f9fb"
-    readonly property color uiSurfaceRaisedColor: "#ffffff"
-    readonly property color uiHeaderColor: "#d9e1e8"
-    readonly property color uiSectionColor: "#c4d1dd"
-    readonly property color uiColumnsColor: "#d7e1ea"
-    readonly property color uiBorderColor: "#bcc7d1"
-    readonly property color uiTextColor: "#11161b"
-    readonly property color uiMutedTextColor: "#5d6873"
-    readonly property color uiSelectionColor: "#7299c7"
-    readonly property color uiSelectionTextColor: "#ffffff"
-    readonly property color uiActiveIndicatorColor: "#2b689c"
+    readonly property bool themeIsDark: root.colorLuma(Kirigami.Theme.backgroundColor) < 0.45
+    readonly property color uiPaneColor: root.themeIsDark
+        ? root.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.08)
+        : root.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.20)
+    readonly property color uiSurfaceColor: root.themeIsDark
+        ? root.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.14)
+        : "#ffffff"
+    readonly property color uiSurfaceAltColor: root.themeIsDark
+        ? root.mixColor(root.uiSurfaceColor, Kirigami.Theme.textColor, 0.08)
+        : root.mixColor(root.uiSurfaceColor, Kirigami.Theme.textColor, 0.07)
+    readonly property color uiSurfaceRaisedColor: root.themeIsDark
+        ? root.mixColor(root.uiSurfaceColor, "#ffffff", 0.08)
+        : "#ffffff"
+    readonly property color uiHeaderColor: root.mixColor(
+        root.uiSurfaceAltColor,
+        Kirigami.Theme.highlightColor,
+        root.themeIsDark ? 0.12 : 0.10)
+    readonly property color uiSectionColor: root.mixColor(
+        root.uiSurfaceAltColor,
+        Kirigami.Theme.highlightColor,
+        root.themeIsDark ? 0.18 : 0.16)
+    readonly property color uiColumnsColor: root.mixColor(
+        root.uiSurfaceAltColor,
+        Kirigami.Theme.highlightColor,
+        root.themeIsDark ? 0.11 : 0.09)
+    readonly property color uiBorderColor: root.mixColor(
+        root.uiSurfaceColor,
+        Kirigami.Theme.textColor,
+        root.themeIsDark ? 0.22 : 0.18)
+    readonly property color uiTextColor: Kirigami.Theme.textColor
+    readonly property color uiMutedTextColor: root.mixColor(
+        Kirigami.Theme.disabledTextColor,
+        Kirigami.Theme.textColor,
+        root.themeIsDark ? 0.12 : 0.06)
+    readonly property color uiSelectionColor: root.mixColor(
+        Kirigami.Theme.highlightColor,
+        root.uiSurfaceColor,
+        root.themeIsDark ? 0.08 : 0.06)
+    readonly property color uiSelectionTextColor: Kirigami.Theme.highlightedTextColor
+    readonly property color uiActiveIndicatorColor: root.mixColor(
+        Kirigami.Theme.highlightColor,
+        Kirigami.Theme.positiveTextColor,
+        0.35)
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -91,6 +122,19 @@ Kirigami.ApplicationWindow {
         && uiBridge.globalSearchModel.nextSelectableIndex)
         ? uiBridge.globalSearchModel
         : globalSearchModelFallback
+
+    function mixColor(colorA, colorB, amount) {
+        const t = Math.max(0, Math.min(1, amount))
+        return Qt.rgba(
+            (colorA.r * (1 - t)) + (colorB.r * t),
+            (colorA.g * (1 - t)) + (colorB.g * t),
+            (colorA.b * (1 - t)) + (colorB.b * t),
+            (colorA.a * (1 - t)) + (colorB.a * t))
+    }
+
+    function colorLuma(colorValue) {
+        return (0.2126 * colorValue.r) + (0.7152 * colorValue.g) + (0.0722 * colorValue.b)
+    }
 
     QtObject {
         id: globalSearchModelFallback
@@ -2800,7 +2844,13 @@ Kirigami.ApplicationWindow {
                                 Label { text: ""; Layout.preferredWidth: 26; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
                                 Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
                                 Label { text: "Artist"; Layout.preferredWidth: 170; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Year"; Layout.preferredWidth: 52; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label {
+                                    text: "Year"
+                                    Layout.preferredWidth: 52
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                    horizontalAlignment: Text.AlignRight
+                                }
                                 Label { text: "Genre"; Layout.preferredWidth: 120; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
                                 Label { text: "#"; Layout.preferredWidth: 34; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
                                 Label { text: "Length"; Layout.preferredWidth: 76; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
@@ -2810,7 +2860,13 @@ Kirigami.ApplicationWindow {
                                 visible: rowKind === "columns" && rowTypeValue === "track"
                                 Layout.fillWidth: true
                                 spacing: 8
-                                Label { text: "#"; Layout.preferredWidth: 34; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label {
+                                    text: "#"
+                                    Layout.preferredWidth: 34
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                    horizontalAlignment: Text.AlignRight
+                                }
                                 Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
                                 Label { text: "Artist"; Layout.preferredWidth: 160; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
                                 Label { text: ""; Layout.preferredWidth: 20; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
@@ -3396,7 +3452,7 @@ Kirigami.ApplicationWindow {
             orientation: Qt.Horizontal
 
             Rectangle {
-                color: root.uiSurfaceColor
+                color: root.uiPaneColor
                 SplitView.preferredWidth: Math.max(300, root.width * 0.26)
                 SplitView.minimumWidth: 250
 
@@ -3444,7 +3500,7 @@ Kirigami.ApplicationWindow {
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        color: root.uiSurfaceColor
+                        color: root.uiPaneColor
                         border.color: root.uiBorderColor
 
                         ColumnLayout {
@@ -4184,7 +4240,7 @@ Kirigami.ApplicationWindow {
                 SplitView.fillWidth: true
 
                 Rectangle {
-                    color: root.uiSurfaceColor
+                    color: root.uiSurfaceRaisedColor
                     SplitView.fillWidth: true
                     SplitView.preferredHeight: root.height * 0.58
                     SplitView.minimumHeight: 220
