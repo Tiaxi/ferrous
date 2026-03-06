@@ -66,6 +66,18 @@ Kirigami.ApplicationWindow {
     property var globalSearchContextRowData: ({})
     property bool globalSearchOpening: false
     property bool globalSearchIgnoreRefocusFind: false
+    readonly property color uiSurfaceColor: "#ffffff"
+    readonly property color uiSurfaceAltColor: "#f7f9fb"
+    readonly property color uiSurfaceRaisedColor: "#ffffff"
+    readonly property color uiHeaderColor: "#d9e1e8"
+    readonly property color uiSectionColor: "#c4d1dd"
+    readonly property color uiColumnsColor: "#d7e1ea"
+    readonly property color uiBorderColor: "#bcc7d1"
+    readonly property color uiTextColor: "#11161b"
+    readonly property color uiMutedTextColor: "#5d6873"
+    readonly property color uiSelectionColor: "#7299c7"
+    readonly property color uiSelectionTextColor: "#ffffff"
+    readonly property color uiActiveIndicatorColor: "#2b689c"
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -1562,15 +1574,12 @@ Kirigami.ApplicationWindow {
         if (globalSearchResultsView && index >= 0 && index < globalSearchRowCount()) {
             const firstSelectable = searchFirstSelectableIndex()
             if (index === firstSelectable && globalSearchModelApi) {
-                let headerIndex = index
-                while (headerIndex > 0) {
-                    const candidate = globalSearchModelApi.rowDataAt(headerIndex - 1)
-                    if (!candidate || (candidate.kind || "") === "item") {
-                        break
+                globalSearchResultsView.contentY = 0
+                Qt.callLater(function() {
+                    if (globalSearchResultsView) {
+                        globalSearchResultsView.contentY = 0
                     }
-                    headerIndex -= 1
-                }
-                globalSearchResultsView.positionViewAtIndex(headerIndex, ListView.Beginning)
+                })
             } else {
                 globalSearchResultsView.positionViewAtIndex(index, ListView.Contain)
             }
@@ -2615,7 +2624,7 @@ Kirigami.ApplicationWindow {
 
             Label {
                 Layout.fillWidth: true
-                color: Kirigami.Theme.disabledTextColor
+                color: root.uiMutedTextColor
                 text: "Artists: " + (uiBridge.globalSearchArtistCount || 0)
                     + " | Albums: " + (uiBridge.globalSearchAlbumCount || 0)
                     + " | Tracks: " + (uiBridge.globalSearchTrackCount || 0)
@@ -2624,8 +2633,8 @@ Kirigami.ApplicationWindow {
             Rectangle {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                color: Qt.rgba(0, 0, 0, 0.02)
-                border.color: Qt.rgba(0, 0, 0, 0.08)
+                color: root.uiSurfaceRaisedColor
+                border.color: root.uiBorderColor
 
                 ListView {
                     id: globalSearchResultsView
@@ -2735,21 +2744,28 @@ Kirigami.ApplicationWindow {
                         readonly property var trackNumberValue: trackNumber
                         readonly property var countValue: count
                         readonly property color rowTextColor: index === root.globalSearchSelectedDisplayIndex
-                            ? Kirigami.Theme.highlightedTextColor
-                            : Kirigami.Theme.textColor
+                            ? root.uiSelectionTextColor
+                            : root.uiTextColor
                         width: Math.max(
                             0,
                             ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
                         height: rowKind === "section" ? 30 : 24
                         color: rowKind === "section"
-                            ? Kirigami.Theme.alternateBackgroundColor
+                            ? root.uiSectionColor
                             : (rowKind === "columns"
-                                ? Qt.rgba(0, 0, 0, 0.05)
+                                ? root.uiColumnsColor
                                 : (index === root.globalSearchSelectedDisplayIndex
-                                    ? Kirigami.Theme.highlightColor
+                                    ? root.uiSelectionColor
                                     : (index % 2 === 0
-                                        ? Kirigami.Theme.backgroundColor
-                                        : Kirigami.Theme.alternateBackgroundColor)))
+                                        ? root.uiSurfaceRaisedColor
+                                        : root.uiSurfaceAltColor)))
+
+                        border.width: rowKind === "item" ? 0 : 1
+                        border.color: rowKind === "section"
+                            ? Qt.darker(root.uiSectionColor, 1.12)
+                            : (rowKind === "columns"
+                                ? Qt.darker(root.uiColumnsColor, 1.1)
+                                : "transparent")
 
                         RowLayout {
                             anchors.fill: parent
@@ -2761,46 +2777,53 @@ Kirigami.ApplicationWindow {
                                 visible: rowKind === "section"
                                 Layout.fillWidth: true
                                 text: sectionTitleValue || ""
-                                font.bold: true
+                                font.weight: Font.DemiBold
+                                color: root.uiTextColor
                             }
 
                             RowLayout {
                                 visible: rowKind === "columns" && rowTypeValue === "artist"
                                 Layout.fillWidth: true
                                 spacing: 8
-                                Label { text: "Name"; Layout.fillWidth: true; font.bold: true }
+                                Label {
+                                    text: "Name"
+                                    Layout.fillWidth: true
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                }
                             }
 
                             RowLayout {
                                 visible: rowKind === "columns" && rowTypeValue === "album"
                                 Layout.fillWidth: true
                                 spacing: 8
-                                Label { text: ""; Layout.preferredWidth: 26; font.bold: true }
-                                Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
-                                Label { text: "Artist"; Layout.preferredWidth: 170; font.bold: true }
-                                Label { text: "Year"; Layout.preferredWidth: 52; font.bold: true }
-                                Label { text: "Genre"; Layout.preferredWidth: 120; font.bold: true }
-                                Label { text: "#"; Layout.preferredWidth: 34; font.bold: true; horizontalAlignment: Text.AlignRight }
-                                Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: ""; Layout.preferredWidth: 26; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Artist"; Layout.preferredWidth: 170; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Year"; Layout.preferredWidth: 52; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Genre"; Layout.preferredWidth: 120; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "#"; Layout.preferredWidth: 34; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Length"; Layout.preferredWidth: 76; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
                             }
 
                             RowLayout {
                                 visible: rowKind === "columns" && rowTypeValue === "track"
                                 Layout.fillWidth: true
                                 spacing: 8
-                                Label { text: "#"; Layout.preferredWidth: 34; font.bold: true }
-                                Label { text: "Title"; Layout.fillWidth: true; font.bold: true }
-                                Label { text: "Artist"; Layout.preferredWidth: 160; font.bold: true }
-                                Label { text: ""; Layout.preferredWidth: 20; font.bold: true }
-                                Label { text: "Album"; Layout.preferredWidth: 182; font.bold: true }
+                                Label { text: "#"; Layout.preferredWidth: 34; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Artist"; Layout.preferredWidth: 160; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: ""; Layout.preferredWidth: 20; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Album"; Layout.preferredWidth: 182; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
                                 Label {
                                     text: "Year"
                                     Layout.preferredWidth: 52
-                                    font.bold: true
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
                                     horizontalAlignment: Text.AlignRight
                                 }
-                                Label { text: "Genre"; Layout.preferredWidth: 112; font.bold: true }
-                                Label { text: "Length"; Layout.preferredWidth: 76; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Genre"; Layout.preferredWidth: 112; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Length"; Layout.preferredWidth: 76; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
                             }
 
                             Loader {
@@ -3373,7 +3396,7 @@ Kirigami.ApplicationWindow {
             orientation: Qt.Horizontal
 
             Rectangle {
-                color: Kirigami.Theme.backgroundColor
+                color: root.uiSurfaceColor
                 SplitView.preferredWidth: Math.max(300, root.width * 0.26)
                 SplitView.minimumWidth: 250
 
@@ -3421,8 +3444,8 @@ Kirigami.ApplicationWindow {
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        color: Kirigami.Theme.backgroundColor
-                        border.color: Qt.rgba(0, 0, 0, 0.12)
+                        color: root.uiSurfaceColor
+                        border.color: root.uiBorderColor
 
                         ColumnLayout {
                             anchors.fill: parent
@@ -3516,8 +3539,8 @@ Kirigami.ApplicationWindow {
                                 }
                                 implicitHeight: nowPlayingColumn.implicitHeight + 12
                                 radius: 6
-                                color: Kirigami.Theme.alternateBackgroundColor
-                                border.color: Qt.rgba(0, 0, 0, 0.16)
+                                color: root.uiSurfaceRaisedColor
+                                border.color: root.uiBorderColor
 
                                 ColumnLayout {
                                     id: nowPlayingColumn
@@ -3532,7 +3555,7 @@ Kirigami.ApplicationWindow {
                                             text: "Title:"
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
-                                            color: Kirigami.Theme.disabledTextColor
+                                            color: root.uiMutedTextColor
                                             font.pixelSize: 12
                                         }
                                         Item {
@@ -3564,7 +3587,7 @@ Kirigami.ApplicationWindow {
                                                 text: nowPlayingCard.resolvedTitle
                                                 font.weight: Font.DemiBold
                                                 font.pixelSize: 12
-                                                color: Kirigami.Theme.textColor
+                                                color: root.uiTextColor
                                                 textFormat: Text.PlainText
                                             }
 
@@ -3607,7 +3630,7 @@ Kirigami.ApplicationWindow {
                                             text: "Artist:"
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
-                                            color: Kirigami.Theme.disabledTextColor
+                                            color: root.uiMutedTextColor
                                             font.pixelSize: 12
                                         }
                                         Item {
@@ -3637,7 +3660,7 @@ Kirigami.ApplicationWindow {
                                                 anchors.verticalCenter: artistMarquee.verticalCenter
                                                 x: -artistMarquee.offsetPx
                                                 text: nowPlayingCard.resolvedArtist
-                                                color: Kirigami.Theme.textColor
+                                                color: root.uiTextColor
                                                 font.pixelSize: 12
                                                 textFormat: Text.PlainText
                                             }
@@ -3681,7 +3704,7 @@ Kirigami.ApplicationWindow {
                                             text: "Album:"
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
-                                            color: Kirigami.Theme.disabledTextColor
+                                            color: root.uiMutedTextColor
                                             font.pixelSize: 12
                                         }
                                         Item {
@@ -3711,7 +3734,7 @@ Kirigami.ApplicationWindow {
                                                 anchors.verticalCenter: albumMarquee.verticalCenter
                                                 x: -albumMarquee.offsetPx
                                                 text: nowPlayingCard.resolvedAlbum
-                                                color: Kirigami.Theme.textColor
+                                                color: root.uiTextColor
                                                 font.pixelSize: 12
                                                 textFormat: Text.PlainText
                                             }
@@ -3755,14 +3778,14 @@ Kirigami.ApplicationWindow {
                                             text: "Track:"
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
-                                            color: Kirigami.Theme.disabledTextColor
+                                            color: root.uiMutedTextColor
                                             font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedTrackNumber
                                             elide: Text.ElideRight
-                                            color: Kirigami.Theme.textColor
+                                            color: root.uiTextColor
                                             font.pixelSize: 12
                                         }
                                     }
@@ -3774,14 +3797,14 @@ Kirigami.ApplicationWindow {
                                             text: "Year:"
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
-                                            color: Kirigami.Theme.disabledTextColor
+                                            color: root.uiMutedTextColor
                                             font.pixelSize: 12
                                         }
                                         Label {
                                             Layout.fillWidth: true
                                             text: nowPlayingCard.resolvedYear
                                             elide: Text.ElideRight
-                                            color: Kirigami.Theme.textColor
+                                            color: root.uiTextColor
                                             font.pixelSize: 12
                                         }
                                     }
@@ -3793,7 +3816,7 @@ Kirigami.ApplicationWindow {
                                             text: "Genre:"
                                             Layout.preferredWidth: 44
                                             horizontalAlignment: Text.AlignRight
-                                            color: Kirigami.Theme.disabledTextColor
+                                            color: root.uiMutedTextColor
                                             font.pixelSize: 12
                                         }
                                         Item {
@@ -3823,7 +3846,7 @@ Kirigami.ApplicationWindow {
                                                 anchors.verticalCenter: genreMarquee.verticalCenter
                                                 x: -genreMarquee.offsetPx
                                                 text: nowPlayingCard.resolvedGenre
-                                                color: Kirigami.Theme.textColor
+                                                color: root.uiTextColor
                                                 font.pixelSize: 12
                                                 textFormat: Text.PlainText
                                             }
@@ -3953,10 +3976,10 @@ Kirigami.ApplicationWindow {
                                     width: ListView.view.width
                                     height: 24
                                     color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                                        ? Kirigami.Theme.highlightColor
+                                        ? root.uiSelectionColor
                                         : (index % 2 === 0
-                                            ? Kirigami.Theme.backgroundColor
-                                            : Kirigami.Theme.alternateBackgroundColor)
+                                            ? root.uiSurfaceRaisedColor
+                                            : root.uiSurfaceAltColor)
 
                                     RowLayout {
                                         anchors.fill: parent
@@ -3979,8 +4002,8 @@ Kirigami.ApplicationWindow {
                                             font.pixelSize: 20
                                             font.bold: true
                                             color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                                                ? Kirigami.Theme.highlightedTextColor
-                                                : Kirigami.Theme.disabledTextColor
+                                                ? root.uiSelectionTextColor
+                                                : root.uiMutedTextColor
                                         }
 
                                         Item {
@@ -4011,8 +4034,8 @@ Kirigami.ApplicationWindow {
                                             verticalAlignment: Text.AlignVCenter
                                             text: rowTitle
                                             color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                                                ? Kirigami.Theme.highlightedTextColor
-                                                : Kirigami.Theme.textColor
+                                                ? root.uiSelectionTextColor
+                                                : root.uiTextColor
                                         }
                                     }
 
@@ -4142,15 +4165,15 @@ Kirigami.ApplicationWindow {
                                 }
                             }
 
-                            Label {
-                                visible: libraryAlbumView.count === 0
-                                text: root.isLibraryTreeLoading()
-                                    ? "Loading library..."
-                                    : "Library is empty"
-                                color: Kirigami.Theme.disabledTextColor
-                                Layout.fillWidth: true
-                                horizontalAlignment: Text.AlignHCenter
-                            }
+                                    Label {
+                                        visible: libraryAlbumView.count === 0
+                                        text: root.isLibraryTreeLoading()
+                                            ? "Loading library..."
+                                            : "Library is empty"
+                                        color: root.uiMutedTextColor
+                                        Layout.fillWidth: true
+                                        horizontalAlignment: Text.AlignHCenter
+                                    }
                         }
                     }
                 }
@@ -4161,11 +4184,11 @@ Kirigami.ApplicationWindow {
                 SplitView.fillWidth: true
 
                 Rectangle {
-                    color: Kirigami.Theme.backgroundColor
+                    color: root.uiSurfaceColor
                     SplitView.fillWidth: true
                     SplitView.preferredHeight: root.height * 0.58
                     SplitView.minimumHeight: 220
-                    border.color: Qt.rgba(0, 0, 0, 0.12)
+                    border.color: root.uiBorderColor
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -4174,8 +4197,8 @@ Kirigami.ApplicationWindow {
                         Rectangle {
                             Layout.fillWidth: true
                             implicitHeight: 26
-                            color: Kirigami.Theme.alternateBackgroundColor
-                            border.color: Qt.rgba(0, 0, 0, 0.08)
+                            color: root.uiHeaderColor
+                            border.color: root.uiBorderColor
 
                             RowLayout {
                                 anchors.fill: parent
@@ -4185,19 +4208,22 @@ Kirigami.ApplicationWindow {
                                     text: "▶"
                                     Layout.preferredWidth: root.playlistIndicatorColumnWidth
                                     horizontalAlignment: Text.AlignHCenter
+                                    color: root.uiMutedTextColor
                                 }
                                 Label {
                                     text: "#"
                                     Layout.preferredWidth: root.playlistOrderColumnWidth
                                     horizontalAlignment: Text.AlignRight
+                                    color: root.uiMutedTextColor
                                 }
-                                Label { text: "Title"; Layout.fillWidth: true }
-                                Label { text: "Artist"; Layout.preferredWidth: 170 }
-                                Label { text: "Album"; Layout.preferredWidth: 190 }
+                                Label { text: "Title"; Layout.fillWidth: true; color: root.uiMutedTextColor }
+                                Label { text: "Artist"; Layout.preferredWidth: 170; color: root.uiMutedTextColor }
+                                Label { text: "Album"; Layout.preferredWidth: 190; color: root.uiMutedTextColor }
                                 Label {
                                     text: "Length"
                                     Layout.preferredWidth: 76
                                     horizontalAlignment: Text.AlignRight
+                                    color: root.uiMutedTextColor
                                 }
                             }
                         }
@@ -4260,9 +4286,9 @@ Kirigami.ApplicationWindow {
                                 Drag.dragType: Drag.Automatic
                                 Drag.supportedActions: Qt.MoveAction
                                 color: root.isQueueIndexSelected(index)
-                                    ? Kirigami.Theme.highlightColor
-                                    : (index % 2 === 0 ? Kirigami.Theme.backgroundColor
-                                                        : Kirigami.Theme.alternateBackgroundColor)
+                                    ? root.uiSelectionColor
+                                    : (index % 2 === 0 ? root.uiSurfaceRaisedColor
+                                                        : root.uiSurfaceAltColor)
 
                                 RowLayout {
                                     anchors.fill: parent
@@ -4286,52 +4312,52 @@ Kirigami.ApplicationWindow {
                                         horizontalAlignment: Text.AlignHCenter
                                         font.bold: true
                                         color: root.isQueueIndexSelected(index)
-                                            ? Kirigami.Theme.highlightedTextColor
+                                            ? root.uiSelectionTextColor
                                             : (playlistRow.isCurrentQueueRow
                                                 ? (uiBridge.playbackState === "Playing"
-                                                    ? Kirigami.Theme.positiveTextColor
-                                                    : Kirigami.Theme.disabledTextColor)
-                                                : Kirigami.Theme.textColor)
+                                                    ? root.uiActiveIndicatorColor
+                                                    : root.uiMutedTextColor)
+                                                : root.uiTextColor)
                                     }
                                     Label {
                                         text: root.playlistOrderText(index)
                                         Layout.preferredWidth: root.playlistOrderColumnWidth
                                         horizontalAlignment: Text.AlignRight
                                         color: root.isQueueIndexSelected(index)
-                                            ? Kirigami.Theme.highlightedTextColor
-                                            : Kirigami.Theme.textColor
+                                            ? root.uiSelectionTextColor
+                                            : root.uiTextColor
                                     }
                                     Label {
                                         text: titleValue
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                         color: root.isQueueIndexSelected(index)
-                                            ? Kirigami.Theme.highlightedTextColor
-                                            : Kirigami.Theme.textColor
+                                            ? root.uiSelectionTextColor
+                                            : root.uiTextColor
                                     }
                                     Label {
                                         text: artistValue
                                         Layout.preferredWidth: 170
                                         elide: Text.ElideRight
                                         color: root.isQueueIndexSelected(index)
-                                            ? Kirigami.Theme.highlightedTextColor
-                                            : Kirigami.Theme.textColor
+                                            ? root.uiSelectionTextColor
+                                            : root.uiTextColor
                                     }
                                     Label {
                                         text: albumValue
                                         Layout.preferredWidth: 190
                                         elide: Text.ElideRight
                                         color: root.isQueueIndexSelected(index)
-                                            ? Kirigami.Theme.highlightedTextColor
-                                            : Kirigami.Theme.textColor
+                                            ? root.uiSelectionTextColor
+                                            : root.uiTextColor
                                     }
                                     Label {
                                         text: lengthTextValue
                                         Layout.preferredWidth: 76
                                         horizontalAlignment: Text.AlignRight
                                         color: root.isQueueIndexSelected(index)
-                                            ? Kirigami.Theme.highlightedTextColor
-                                            : Kirigami.Theme.textColor
+                                            ? root.uiSelectionTextColor
+                                            : root.uiTextColor
                                     }
                                 }
 
