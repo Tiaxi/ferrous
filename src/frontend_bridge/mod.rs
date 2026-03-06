@@ -1071,7 +1071,12 @@ fn handle_queue_command(
     playback: &PlaybackEngine,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
-    let outcome = apply_queue_command_state(cmd, &mut state.queue, &mut state.selected_queue_index);
+    let outcome = apply_queue_command_state(
+        cmd,
+        &mut state.queue,
+        &mut state.selected_queue_index,
+        state.playback.state,
+    );
     if outcome.changed {
         refresh_queue_details(state);
     }
@@ -1121,6 +1126,7 @@ fn apply_queue_command_state(
     cmd: BridgeQueueCommand,
     queue: &mut Vec<PathBuf>,
     selected_queue_index: &mut Option<usize>,
+    playback_state: PlaybackState,
 ) -> QueueCommandOutcome {
     match cmd {
         BridgeQueueCommand::Replace { tracks, autoplay } => {
@@ -1133,7 +1139,9 @@ fn apply_queue_command_state(
                 playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
                 if autoplay {
                     playback_ops.push(QueuePlaybackOp::PlayAt(0));
-                    playback_ops.push(QueuePlaybackOp::Play);
+                    if playback_state != PlaybackState::Playing {
+                        playback_ops.push(QueuePlaybackOp::Play);
+                    }
                 }
             }
             QueueCommandOutcome {
@@ -1162,10 +1170,14 @@ fn apply_queue_command_state(
         }
         BridgeQueueCommand::PlayAt(idx) => {
             if idx < queue.len() {
+                let mut playback_ops = vec![QueuePlaybackOp::PlayAt(idx)];
+                if playback_state != PlaybackState::Playing {
+                    playback_ops.push(QueuePlaybackOp::Play);
+                }
                 *selected_queue_index = Some(idx);
                 QueueCommandOutcome {
                     changed: true,
-                    playback_ops: vec![QueuePlaybackOp::PlayAt(idx), QueuePlaybackOp::Play],
+                    playback_ops,
                     error: None,
                 }
             } else {
@@ -3558,6 +3570,7 @@ mod tests {
             BridgeQueueCommand::Append(vec![p("/a.flac"), p("/b.flac")]),
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(outcome.changed);
         assert_eq!(queue, vec![p("/a.flac"), p("/b.flac")]);
@@ -3575,6 +3588,7 @@ mod tests {
             BridgeQueueCommand::Append(Vec::new()),
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(!outcome.changed);
         assert_eq!(queue, vec![p("/a.flac")]);
@@ -3587,8 +3601,12 @@ mod tests {
     fn queue_play_at_out_of_bounds_emits_error() {
         let mut queue = vec![p("/a.flac")];
         let mut selected = None;
-        let outcome =
-            apply_queue_command_state(BridgeQueueCommand::PlayAt(3), &mut queue, &mut selected);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::PlayAt(3),
+            &mut queue,
+            &mut selected,
+            PlaybackState::Stopped,
+        );
         assert!(!outcome.changed);
         assert_eq!(
             outcome.error.as_deref(),
@@ -3605,6 +3623,7 @@ mod tests {
             BridgeQueueCommand::Move { from: 0, to: 2 },
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(outcome.changed);
         assert_eq!(queue, vec![p("/b.flac"), p("/c.flac"), p("/a.flac")]);
@@ -3623,6 +3642,7 @@ mod tests {
             BridgeQueueCommand::Move { from: 2, to: 0 },
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(!outcome.changed);
         assert_eq!(queue, vec![p("/a.flac"), p("/b.flac")]);
@@ -3642,6 +3662,7 @@ mod tests {
             },
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(outcome.changed);
         assert_eq!(selected, Some(0));
@@ -3663,6 +3684,7 @@ mod tests {
             BridgeQueueCommand::Append(vec![p("/b.flac"), p("/c.flac")]),
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(outcome.changed);
         assert_eq!(queue, vec![p("/a.flac"), p("/b.flac"), p("/c.flac")]);
@@ -3680,8 +3702,12 @@ mod tests {
     fn queue_remove_last_track_clears_selection_and_playback_queue() {
         let mut queue = vec![p("/only.flac")];
         let mut selected = Some(0);
-        let outcome =
-            apply_queue_command_state(BridgeQueueCommand::Remove(0), &mut queue, &mut selected);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Remove(0),
+            &mut queue,
+            &mut selected,
+            PlaybackState::Stopped,
+        );
         assert!(outcome.changed);
         assert!(queue.is_empty());
         assert!(selected.is_none());
@@ -3692,8 +3718,12 @@ mod tests {
     fn queue_remove_middle_track_uses_remove_op_and_keeps_reasonable_selection() {
         let mut queue = vec![p("/a.flac"), p("/b.flac"), p("/c.flac")];
         let mut selected = Some(2);
-        let outcome =
-            apply_queue_command_state(BridgeQueueCommand::Remove(1), &mut queue, &mut selected);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Remove(1),
+            &mut queue,
+            &mut selected,
+            PlaybackState::Stopped,
+        );
         assert!(outcome.changed);
         assert_eq!(queue, vec![p("/a.flac"), p("/c.flac")]);
         assert_eq!(selected, Some(1));
@@ -3704,8 +3734,12 @@ mod tests {
     fn queue_remove_out_of_bounds_is_noop() {
         let mut queue = vec![p("/a.flac"), p("/b.flac")];
         let mut selected = Some(0);
-        let outcome =
-            apply_queue_command_state(BridgeQueueCommand::Remove(3), &mut queue, &mut selected);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Remove(3),
+            &mut queue,
+            &mut selected,
+            PlaybackState::Stopped,
+        );
         assert!(!outcome.changed);
         assert_eq!(queue, vec![p("/a.flac"), p("/b.flac")]);
         assert_eq!(selected, Some(0));
@@ -3721,6 +3755,7 @@ mod tests {
             BridgeQueueCommand::Select(Some(1)),
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(outcome.changed);
         assert_eq!(selected, Some(1));
@@ -3736,6 +3771,7 @@ mod tests {
             BridgeQueueCommand::Select(Some(1)),
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(!outcome.changed);
         assert_eq!(selected, Some(1));
@@ -3751,6 +3787,7 @@ mod tests {
             BridgeQueueCommand::Select(Some(9)),
             &mut queue,
             &mut selected,
+            PlaybackState::Stopped,
         );
         assert!(outcome.changed);
         assert!(selected.is_none());
@@ -3772,13 +3809,57 @@ mod tests {
     fn queue_clear_empties_state_and_emits_clear_queue_op() {
         let mut queue = vec![p("/a.flac"), p("/b.flac")];
         let mut selected = Some(1);
-        let outcome =
-            apply_queue_command_state(BridgeQueueCommand::Clear, &mut queue, &mut selected);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Clear,
+            &mut queue,
+            &mut selected,
+            PlaybackState::Stopped,
+        );
         assert!(outcome.changed);
         assert!(queue.is_empty());
         assert!(selected.is_none());
         assert_eq!(outcome.playback_ops, vec![QueuePlaybackOp::ClearQueue]);
         assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn queue_play_at_while_playing_skips_redundant_play_op() {
+        let mut queue = vec![p("/a.flac"), p("/b.flac")];
+        let mut selected = Some(0);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::PlayAt(1),
+            &mut queue,
+            &mut selected,
+            PlaybackState::Playing,
+        );
+        assert!(outcome.changed);
+        assert_eq!(selected, Some(1));
+        assert_eq!(outcome.playback_ops, vec![QueuePlaybackOp::PlayAt(1)]);
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn queue_replace_autoplay_while_playing_skips_redundant_play_op() {
+        let mut queue = vec![p("/old.flac")];
+        let mut selected = Some(0);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::Replace {
+                tracks: vec![p("/a.flac"), p("/b.flac")],
+                autoplay: true,
+            },
+            &mut queue,
+            &mut selected,
+            PlaybackState::Playing,
+        );
+        assert!(outcome.changed);
+        assert_eq!(selected, Some(0));
+        assert_eq!(
+            outcome.playback_ops,
+            vec![
+                QueuePlaybackOp::LoadQueue(vec![p("/a.flac"), p("/b.flac")]),
+                QueuePlaybackOp::PlayAt(0),
+            ]
+        );
     }
 
     fn wait_for_snapshot_matching<F>(
