@@ -50,6 +50,7 @@ update-desktop-database %{_datadir}/applications >/dev/null 2>&1 || :
 %doc README.md
 %{_bindir}/ferrous
 %{_datadir}/applications/ferrous.desktop
+%{_datadir}/icons/hicolor/scalable/apps/ferrous.svg
 
 %changelog
 * Fri Mar 06 2026 Codex <codex@openai.local> - %{version}-%{release}
