@@ -14,7 +14,13 @@ Kirigami.ApplicationWindow {
     minimumWidth: 1280
     minimumHeight: 780
     visible: true
-    title: "Ferrous"
+    readonly property string appDisplayName: "Ferrous"
+    title: {
+        const context = root.windowTitleContext()
+        return context.length > 0
+            ? context + " \u2014 " + root.appDisplayName
+            : root.appDisplayName
+    }
     property string selectedLibrarySelectionKey: ""
     property int selectedLibrarySourceIndex: -1
     property string selectedLibraryRowType: ""
@@ -137,6 +143,27 @@ Kirigami.ApplicationWindow {
 
     function colorLuma(colorValue) {
         return (0.2126 * colorValue.r) + (0.7152 * colorValue.g) + (0.0722 * colorValue.b)
+    }
+
+    function basenameFromPath(pathValue) {
+        const normalized = (pathValue || "").trim().replace(/\\/g, "/")
+        if (normalized.length === 0) {
+            return ""
+        }
+        const parts = normalized.split("/")
+        return parts.length > 0 ? parts[parts.length - 1] : normalized
+    }
+
+    function windowTitleContext() {
+        const explicitTitle = (uiBridge.currentTrackTitle || "").trim()
+        if (explicitTitle.length > 0) {
+            return explicitTitle
+        }
+        const trackPath = (uiBridge.currentTrackPath || "").trim()
+        if (trackPath.length > 0) {
+            return root.basenameFromPath(trackPath)
+        }
+        return ""
     }
 
     function normalizedVolumeValue(value) {
