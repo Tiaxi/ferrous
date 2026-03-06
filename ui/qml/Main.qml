@@ -66,6 +66,7 @@ Kirigami.ApplicationWindow {
     property bool globalSearchIgnoreRefocusFind: false
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
+    readonly property int uiPopupTransitionMs: 0
     property string pendingGlobalSearchPrefillText: ""
     property string globalSearchOpenInitialText: ""
     readonly property bool visualFeedsEnabled: visible
@@ -1490,11 +1491,6 @@ Kirigami.ApplicationWindow {
         }
         beginGlobalSearchOpen()
         globalSearchDialog.open()
-        Qt.callLater(function() {
-            if (globalSearchDialog.visible) {
-                root.focusGlobalSearchQueryField(false)
-            }
-        })
     }
 
     function focusGlobalSearchQueryField(selectAll) {
@@ -2078,6 +2074,12 @@ Kirigami.ApplicationWindow {
                 { label: refreshSnapshotAction.text, shortcut: String(refreshSnapshotAction.shortcut) },
                 { label: quitAction.text, shortcut: String(quitAction.shortcut) }
             ])
+            enter: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
+            exit: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
             MenuItem { action: playLibrarySelectionAction }
             MenuItem { action: appendLibrarySelectionAction }
             MenuItem { action: playAllLibraryTracksAction }
@@ -2100,6 +2102,12 @@ Kirigami.ApplicationWindow {
                 { label: clearPlaylistAction.text, shortcut: "" },
                 { label: preferencesAction.text, shortcut: String(preferencesAction.shortcut) }
             ])
+            enter: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
+            exit: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
             MenuItem { action: removeSelectedTrackAction }
             MenuItem { action: moveTrackUpAction }
             MenuItem { action: moveTrackDownAction }
@@ -2121,6 +2129,12 @@ Kirigami.ApplicationWindow {
                 { label: resetSpectrogramAction.text, shortcut: "" },
                 { label: showFpsOverlayAction.text, shortcut: "" }
             ])
+            enter: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
+            exit: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
             MenuItem { action: globalSearchAction }
             MenuItem { action: diagnosticsAction }
             MenuItem { action: refreshSnapshotAction }
@@ -2145,6 +2159,12 @@ Kirigami.ApplicationWindow {
                 { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut) },
                 { label: clearPlaylistAction.text, shortcut: "" }
             ])
+            enter: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
+            exit: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
             MenuItem { action: previousAction }
             MenuItem { action: playAction }
             MenuItem { action: pauseAction }
@@ -2166,6 +2186,12 @@ Kirigami.ApplicationWindow {
             width: root.menuPopupWidth([
                 { label: aboutAction.text, shortcut: "" }
             ])
+            enter: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
+            exit: Transition {
+                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+            }
             MenuItem { action: aboutAction }
         }
     }
@@ -2176,6 +2202,12 @@ Kirigami.ApplicationWindow {
         title: "About Ferrous"
         standardButtons: Dialog.Ok
         width: 420
+        enter: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
+        exit: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
         contentItem: Label {
             width: parent.width
             wrapMode: Text.Wrap
@@ -2191,6 +2223,12 @@ Kirigami.ApplicationWindow {
         standardButtons: Dialog.Close
         width: Math.min(760, root.width - 80)
         height: Math.min(620, root.height - 80)
+        enter: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
+        exit: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
 
         contentItem: ScrollView {
             clip: true
@@ -2364,6 +2402,12 @@ Kirigami.ApplicationWindow {
         standardButtons: Dialog.Close
         width: Math.min(1080, root.width - 80)
         height: Math.min(720, root.height - 80)
+        enter: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
+        exit: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
         onOpened: {
             root.globalSearchOpening = false
             root.globalSearchIgnoreRefocusFind = true
@@ -2826,6 +2870,12 @@ Kirigami.ApplicationWindow {
                 Menu {
                     id: globalSearchContextMenu
                     property var rowData: root.globalSearchContextRowData || ({})
+                    enter: Transition {
+                        NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                    }
+                    exit: Transition {
+                        NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                    }
 
                     MenuItem {
                         text: "Play"
@@ -2874,6 +2924,12 @@ Kirigami.ApplicationWindow {
         standardButtons: Dialog.Close
         width: Math.min(980, root.width - 80)
         height: Math.min(680, root.height - 80)
+        enter: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
+        exit: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
         onOpened: {
             uiBridge.reloadDiagnosticsFromDisk()
             root.refreshDiagnosticsTextView()
@@ -2970,6 +3026,12 @@ Kirigami.ApplicationWindow {
 
                     Menu {
                         id: diagnosticsContextMenu
+                        enter: Transition {
+                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                        }
+                        exit: Transition {
+                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                        }
 
                         MenuItem {
                             text: "Copy"
@@ -3224,6 +3286,7 @@ Kirigami.ApplicationWindow {
                             smooth: true
                             asynchronous: true
                             cache: true
+                            retainWhileLoading: true
                             sourceSize.width: Math.max(256, width)
                             sourceSize.height: Math.max(256, height)
                         }
@@ -3917,6 +3980,12 @@ Kirigami.ApplicationWindow {
                                     Menu {
                                         id: libraryContextMenu
                                         property var rowMap: ({})
+                                        enter: Transition {
+                                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                                        }
+                                        exit: Transition {
+                                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                                        }
 
                                         MenuItem {
                                             text: "Play"
@@ -4194,6 +4263,12 @@ Kirigami.ApplicationWindow {
                             Menu {
                                 id: playlistContextMenu
                                 property int rowIndex: -1
+                                enter: Transition {
+                                    NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                                }
+                                exit: Transition {
+                                    NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+                                }
 
                                 MenuItem {
                                     text: "Play Track"
@@ -4466,20 +4541,14 @@ Kirigami.ApplicationWindow {
         closePolicy: Popup.CloseOnEscape
         enter: Transition {
             NumberAnimation {
-                property: "opacity"
-                from: 0.0
-                to: 1.0
-                duration: 140
-                easing.type: Easing.OutCubic
+                properties: "opacity,scale,x,y"
+                duration: root.uiPopupTransitionMs
             }
         }
         exit: Transition {
             NumberAnimation {
-                property: "opacity"
-                from: 1.0
-                to: 0.0
-                duration: 120
-                easing.type: Easing.InCubic
+                properties: "opacity,scale,x,y"
+                duration: root.uiPopupTransitionMs
             }
         }
         background: Rectangle {
@@ -4590,6 +4659,7 @@ Kirigami.ApplicationWindow {
                     smooth: true
                     asynchronous: true
                     cache: true
+                    retainWhileLoading: true
                     onStatusChanged: albumArtViewer.applyInitialView()
                 }
             }

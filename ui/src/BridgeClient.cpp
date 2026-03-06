@@ -2459,6 +2459,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     QString currentCover = metadataCoverUrl;
+    bool waitingForCoverLookup = false;
     if (currentCover.isEmpty() && !queueTrackCover.isEmpty()) {
         currentCover = queueTrackCover;
     }
@@ -2476,8 +2477,16 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 cacheTrackCoverForPath(currentPath, currentCover);
             } else {
                 requestTrackCoverLookup(currentPath);
+                waitingForCoverLookup = true;
             }
         }
+    }
+    if (waitingForCoverLookup
+        && currentPathChanged
+        && currentCover.isEmpty()
+        && !m_currentTrackCoverPath.isEmpty()) {
+        // Avoid flashing an empty placeholder while the next track cover is still loading.
+        currentCover = m_currentTrackCoverPath;
     }
     if (!currentPath.isEmpty() && !currentCover.isEmpty()) {
         cacheTrackCoverForPath(currentPath, currentCover);
