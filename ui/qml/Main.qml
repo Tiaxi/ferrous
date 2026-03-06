@@ -57,6 +57,8 @@ Kirigami.ApplicationWindow {
     property string pendingLibraryRevealSelectionKey: ""
     property var pendingLibraryRevealExpandKeys: []
     property int pendingLibraryRevealAttempts: 0
+    property string pendingLibraryExpandFitKey: ""
+    property int pendingLibraryExpandFitAttempts: 0
     property string pendingSearchOpenSelectionKey: ""
     property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
@@ -721,8 +723,27 @@ Kirigami.ApplicationWindow {
         if (!key || key.length === 0) {
             return
         }
+        const index = libraryModel.indexForSelectionKey(key)
+        let expanding = false
+        if (index >= 0) {
+            const rowMap = libraryModel.rowDataForRow(index) || ({})
+            const rowType = rowMap.rowType || ""
+            const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0
+            expanding = hasChildren && !Boolean(rowMap.expanded)
+        }
+        if (expanding) {
+            scheduleLibraryExpansionFit(key)
+        } else if (pendingLibraryExpandFitKey === key) {
+            pendingLibraryExpandFitKey = ""
+            pendingLibraryExpandFitAttempts = 0
+        }
         pendingLibraryAnchorValid = false
         libraryModel.toggleKey(key)
+        if (expanding) {
+            Qt.callLater(function() {
+                root.applyPendingLibraryExpansionFit()
+            })
+        }
     }
 
     function stepScrollView(view, wheel, rowHeight, rowsPerStep) {
@@ -793,6 +814,80 @@ Kirigami.ApplicationWindow {
         Qt.callLater(restoreY)
     }
 
+    function scheduleLibraryExpansionFit(key) {
+        if (!key || key.length === 0) {
+            return
+        }
+        pendingLibraryExpandFitKey = key
+        pendingLibraryExpandFitAttempts = 4
+    }
+
+    function applyPendingLibraryExpansionFit() {
+        if (!libraryAlbumView || pendingLibraryExpandFitKey.length === 0) {
+            return
+        }
+        const key = pendingLibraryExpandFitKey
+        const rowIndex = libraryModel.indexForSelectionKey(key)
+        if (rowIndex < 0 || rowIndex >= libraryModel.count) {
+            return
+        }
+
+        const rowMap = libraryModel.rowDataForRow(rowIndex) || ({})
+        if (!rowMap || !rowMap.expanded) {
+            pendingLibraryExpandFitKey = ""
+            pendingLibraryExpandFitAttempts = 0
+            return
+        }
+
+        const viewHeight = Math.max(0, libraryAlbumView.height)
+        if (viewHeight <= 0) {
+            if (pendingLibraryExpandFitAttempts > 0) {
+                pendingLibraryExpandFitAttempts -= 1
+                Qt.callLater(function() {
+                    root.applyPendingLibraryExpansionFit()
+                })
+            } else {
+                pendingLibraryExpandFitKey = ""
+            }
+            return
+        }
+
+        const rowHeight = 24
+        const baseDepth = rowMap.depth !== undefined ? rowMap.depth : 0
+        let lastDescendantIndex = rowIndex
+        for (let i = rowIndex + 1; i < libraryModel.count; ++i) {
+            const descendant = libraryModel.rowDataForRow(i) || ({})
+            const descendantDepth = descendant.depth !== undefined ? descendant.depth : 0
+            if (descendantDepth <= baseDepth) {
+                break
+            }
+            lastDescendantIndex = i
+        }
+
+        if ((rowMap.count || 0) > 0 && lastDescendantIndex === rowIndex) {
+            return
+        }
+
+        const blockTop = rowIndex * rowHeight
+        const blockBottom = (lastDescendantIndex + 1) * rowHeight
+        if ((blockBottom - blockTop) > viewHeight) {
+            libraryAlbumView.positionViewAtIndex(rowIndex, ListView.Beginning)
+        } else {
+            libraryAlbumView.positionViewAtIndex(lastDescendantIndex, ListView.Contain)
+        }
+        const visibleTop = libraryAlbumView.contentY
+        const visibleBottom = visibleTop + viewHeight
+        const blockFits = (blockBottom - blockTop) <= viewHeight
+        const blockVisible = blockFits
+            ? (blockTop >= visibleTop - 0.5 && blockBottom <= visibleBottom + 0.5)
+            : Math.abs(visibleTop - blockTop) <= 0.5
+        if (blockVisible) {
+            pendingLibraryExpandFitKey = ""
+            pendingLibraryExpandFitAttempts = 0
+            return
+        }
+    }
+
     function finishPendingLibraryTreeApply() {
         if (pendingLibraryVersion < 0 || libraryModel.parsing) {
             return
@@ -801,12 +896,17 @@ Kirigami.ApplicationWindow {
         pendingLibraryVersion = -1
         root.syncLibrarySelectionToVisibleRows()
         if (pendingLibraryAnchorValid) {
-            restoreLibraryViewAnchor({
-                key: pendingLibraryAnchorKey,
-                offset: pendingLibraryAnchorOffset,
-                fallbackY: pendingLibraryAnchorFallbackY
-            })
+            if (pendingLibraryExpandFitKey.length === 0) {
+                restoreLibraryViewAnchor({
+                    key: pendingLibraryAnchorKey,
+                    offset: pendingLibraryAnchorOffset,
+                    fallbackY: pendingLibraryAnchorFallbackY
+                })
+            }
             pendingLibraryAnchorValid = false
+        }
+        if (pendingLibraryExpandFitKey.length > 0) {
+            applyPendingLibraryExpansionFit()
         }
     }
 
@@ -3806,6 +3906,13 @@ Kirigami.ApplicationWindow {
                                 flickDeceleration: root.snappyScrollFlickDeceleration
                                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
                                 pixelAligned: true
+                                onContentHeightChanged: {
+                                    if (root.pendingLibraryExpandFitKey.length > 0) {
+                                        Qt.callLater(function() {
+                                            root.applyPendingLibraryExpansionFit()
+                                        })
+                                    }
+                                }
                                 ScrollBar.vertical: ScrollBar {
                                     policy: ScrollBar.AlwaysOn
                                 }
