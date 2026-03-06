@@ -987,7 +987,7 @@ where
     Ok(stale)
 }
 
-fn is_supported_audio(path: &Path) -> bool {
+pub(crate) fn is_supported_audio(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
@@ -998,18 +998,18 @@ fn is_supported_audio(path: &Path) -> bool {
 }
 
 #[derive(Debug, Clone)]
-struct IndexedTrack {
-    title: String,
-    artist: String,
-    album: String,
-    cover_path: String,
-    genre: String,
-    year: Option<i32>,
-    track_no: Option<u32>,
-    duration_secs: Option<f32>,
+pub(crate) struct IndexedTrack {
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) album: String,
+    pub(crate) cover_path: String,
+    pub(crate) genre: String,
+    pub(crate) year: Option<i32>,
+    pub(crate) track_no: Option<u32>,
+    pub(crate) duration_secs: Option<f32>,
 }
 
-fn read_track_info(path: &Path) -> IndexedTrack {
+pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
     let mut out = IndexedTrack {
         title: path
             .file_stem()

@@ -52,6 +52,7 @@ Kirigami.ApplicationWindow {
     property real albumArtPanX: 0.0
     property real albumArtPanY: 0.0
     property string pendingFolderDialogContext: ""
+    property string pendingFileDialogContext: ""
     property string transientBridgeError: ""
     property string libraryTypeAheadBuffer: ""
     property string pendingLibraryRevealSelectionKey: ""
@@ -2226,6 +2227,96 @@ Kirigami.ApplicationWindow {
         return ""
     }
 
+    function fileDialogPaths(dialogObj) {
+        if (!dialogObj) {
+            return []
+        }
+        const candidates = [
+            dialogObj.files,
+            dialogObj.selectedFiles,
+            dialogObj.currentFiles,
+            dialogObj.file,
+            dialogObj.selectedFile,
+            dialogObj.currentFile
+        ]
+        const paths = []
+        for (let i = 0; i < candidates.length; ++i) {
+            const candidate = candidates[i]
+            if (candidate === undefined || candidate === null) {
+                continue
+            }
+            if (candidate.length !== undefined && typeof candidate !== "string") {
+                for (let j = 0; j < candidate.length; ++j) {
+                    const path = root.urlToLocalPath(candidate[j])
+                    if (path.length > 0) {
+                        paths.push(path)
+                    }
+                }
+                if (paths.length > 0) {
+                    return paths
+                }
+                continue
+            }
+            const path = root.urlToLocalPath(candidate)
+            if (path.length > 0) {
+                paths.push(path)
+            }
+        }
+        return paths
+    }
+
+    function droppedExternalPaths(drop) {
+        const paths = []
+        if (drop && drop.hasUrls && drop.urls) {
+            for (let i = 0; i < drop.urls.length; ++i) {
+                const path = root.urlToLocalPath(drop.urls[i])
+                if (path.length > 0) {
+                    paths.push(path)
+                }
+            }
+        }
+        if (paths.length > 0) {
+            return paths
+        }
+        if (drop && drop.hasText && (drop.text || "").length > 0) {
+            const lines = (drop.text || "").split(/\r?\n/)
+            for (let i = 0; i < lines.length; ++i) {
+                const path = root.urlToLocalPath(lines[i])
+                if (path.length > 0) {
+                    paths.push(path)
+                }
+            }
+        }
+        return paths
+    }
+
+    function submitExternalImport(paths, replaceQueue) {
+        if (!paths || paths.length === 0) {
+            return false
+        }
+        if (replaceQueue) {
+            uiBridge.replaceWithPaths(paths)
+        } else {
+            uiBridge.appendPaths(paths)
+        }
+        return true
+    }
+
+    function openExternalFiles() {
+        pendingFileDialogContext = "open"
+        externalFileDialog.open()
+    }
+
+    function addExternalFiles() {
+        pendingFileDialogContext = "append"
+        externalFileDialog.open()
+    }
+
+    function addExternalFolder() {
+        pendingFolderDialogContext = "append-external-folder"
+        scanFolderDialog.open()
+    }
+
     function promptAddLibraryRoot(contextValue) {
         pendingFolderDialogContext = contextValue || ""
         scanFolderDialog.open()
@@ -2242,6 +2333,22 @@ Kirigami.ApplicationWindow {
         albumArtViewer.open()
     }
 
+    Action {
+        id: openFilesAction
+        text: "Open File(s)"
+        shortcut: StandardKey.Open
+        onTriggered: root.openExternalFiles()
+    }
+    Action {
+        id: addFilesAction
+        text: "Add File(s)"
+        onTriggered: root.addExternalFiles()
+    }
+    Action {
+        id: addFolderAction
+        text: "Add Folder(s)"
+        onTriggered: root.addExternalFolder()
+    }
     Action {
         id: quitAction
         text: "Quit"
@@ -2435,6 +2542,9 @@ Kirigami.ApplicationWindow {
         Menu {
             title: "File"
             width: root.menuPopupWidth([
+                { label: openFilesAction.text, shortcut: String(openFilesAction.shortcut) },
+                { label: addFilesAction.text, shortcut: "" },
+                { label: addFolderAction.text, shortcut: "" },
                 { label: playLibrarySelectionAction.text, shortcut: "" },
                 { label: appendLibrarySelectionAction.text, shortcut: "" },
                 { label: playAllLibraryTracksAction.text, shortcut: "" },
@@ -2447,6 +2557,10 @@ Kirigami.ApplicationWindow {
             exit: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
             }
+            MenuItem { action: openFilesAction }
+            MenuItem { action: addFilesAction }
+            MenuItem { action: addFolderAction }
+            MenuSeparator {}
             MenuItem { action: playLibrarySelectionAction }
             MenuItem { action: appendLibrarySelectionAction }
             MenuItem { action: playAllLibraryTracksAction }
@@ -3438,13 +3552,37 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    Platform.FileDialog {
+        id: externalFileDialog
+        title: pendingFileDialogContext === "open" ? "Open Files" : "Add Files"
+        fileMode: Platform.FileDialog.OpenFiles
+        nameFilters: [
+            "Audio and Playlist Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.m3u *.m3u8)",
+            "Audio Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav)",
+            "Playlist Files (*.m3u *.m3u8)",
+            "All Files (*)"
+        ]
+        onAccepted: {
+            const localPaths = root.fileDialogPaths(externalFileDialog)
+            root.submitExternalImport(localPaths, pendingFileDialogContext === "open")
+            pendingFileDialogContext = ""
+        }
+        onRejected: pendingFileDialogContext = ""
+    }
+
     Platform.FolderDialog {
         id: scanFolderDialog
-        title: "Select Music Folder to Scan"
+        title: pendingFolderDialogContext === "append-external-folder"
+            ? "Add Folder"
+            : "Select Music Folder to Scan"
         onAccepted: {
             const localPath = root.folderDialogPath(scanFolderDialog)
             if (localPath.length > 0) {
-                uiBridge.addLibraryRoot(localPath)
+                if (pendingFolderDialogContext === "append-external-folder") {
+                    root.submitExternalImport([localPath], false)
+                } else {
+                    uiBridge.addLibraryRoot(localPath)
+                }
             }
             pendingFolderDialogContext = ""
         }
@@ -4864,6 +5002,13 @@ Kirigami.ApplicationWindow {
                         onDropped: function(drop) {
                             const src = drop.source
                             if (!src) {
+                                const externalPaths = root.droppedExternalPaths(drop)
+                                if (externalPaths.length > 0
+                                        && root.submitExternalImport(externalPaths, false)) {
+                                    queueReorderDragActive = false
+                                    queueDropInsertIndex = -1
+                                    drop.acceptProposedAction()
+                                }
                                 return
                             }
                             if (src.draggableQueueItem) {

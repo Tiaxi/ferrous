@@ -1286,19 +1286,23 @@ void BridgeClient::appendAlbumAt(int index) {
 }
 
 void BridgeClient::playTrack(const QString &path) {
-    const QString trimmed = path.trimmed();
-    if (trimmed.isEmpty()) {
+    const QString normalized = normalizeLocalPathArg(path);
+    if (normalized.isEmpty()) {
         return;
     }
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(BinaryBridgeCodec::CmdPlayTrack, trimmed));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdPlayTrack,
+        normalized));
 }
 
 void BridgeClient::appendTrack(const QString &path) {
-    const QString trimmed = path.trimmed();
-    if (trimmed.isEmpty()) {
+    const QString normalized = normalizeLocalPathArg(path);
+    if (normalized.isEmpty()) {
         return;
     }
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(BinaryBridgeCodec::CmdAddTrack, trimmed));
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdAddTrack,
+        normalized));
 }
 
 void BridgeClient::replaceAlbumByKey(const QString &artist, const QString &album) {
@@ -1353,9 +1357,9 @@ void BridgeClient::replaceWithPaths(const QStringList &paths) {
     QStringList sanitized;
     sanitized.reserve(paths.size());
     for (const QString &path : paths) {
-        const QString trimmed = path.trimmed();
-        if (!trimmed.isEmpty()) {
-            sanitized.push_back(trimmed);
+        const QString normalized = normalizeLocalPathArg(path);
+        if (!normalized.isEmpty()) {
+            sanitized.push_back(normalized);
         }
     }
     if (sanitized.isEmpty()) {
@@ -1370,9 +1374,9 @@ void BridgeClient::appendPaths(const QStringList &paths) {
     QStringList sanitized;
     sanitized.reserve(paths.size());
     for (const QString &path : paths) {
-        const QString trimmed = path.trimmed();
-        if (!trimmed.isEmpty()) {
-            sanitized.push_back(trimmed);
+        const QString normalized = normalizeLocalPathArg(path);
+        if (!normalized.isEmpty()) {
+            sanitized.push_back(normalized);
         }
     }
     if (sanitized.isEmpty()) {

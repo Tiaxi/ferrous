@@ -245,13 +245,7 @@ impl FfiRuntime {
             return self.queue_section_cache.queue_section.clone();
         }
 
-        // During scan, prefer lightweight fallback queue rows and unknown duration markers.
-        // Once scan settles, rows are enriched from indexed library metadata.
-        let queue_section = if snapshot.library.scan_in_progress {
-            fallback_queue_section(snapshot)
-        } else {
-            compute_queue_section_data(snapshot)
-        };
+        let queue_section = compute_queue_section_data(snapshot);
         self.queue_section_cache.library_ptr = library_ptr;
         self.queue_section_cache.queue_paths = snapshot.queue.clone();
         self.queue_section_cache.queue_section = queue_section.clone();
@@ -897,29 +891,6 @@ fn path_title_fallback(path: &std::path::Path, path_str: &str) -> String {
     )
 }
 
-fn fallback_queue_section(snapshot: &BridgeSnapshot) -> QueueSectionData {
-    let mut tracks = Vec::with_capacity(snapshot.queue.len());
-    for path in &snapshot.queue {
-        let path_str = path.to_string_lossy().to_string();
-        tracks.push(EncodedQueueTrack {
-            title: path_title_fallback(path, &path_str),
-            artist: String::new(),
-            album: String::new(),
-            cover_path: String::new(),
-            genre: String::new(),
-            year: None,
-            track_number: None,
-            length_seconds: None,
-            path: path_str,
-        });
-    }
-    QueueSectionData {
-        total_duration_secs: 0.0,
-        unknown_duration_count: snapshot.queue.len(),
-        tracks,
-    }
-}
-
 fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
     let mut by_path: HashMap<&std::path::Path, &crate::library::LibraryTrack> =
         HashMap::with_capacity(snapshot.library.tracks.len());
@@ -936,6 +907,44 @@ fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
         let fallback_title = path_title_fallback(path, &path_str);
 
         if let Some(track) = by_path.get(path.as_path()) {
+            let duration_for_sum = track.duration_secs.and_then(|value| {
+                if value.is_finite() && value > 0.0 {
+                    Some(value)
+                } else {
+                    None
+                }
+            });
+            if let Some(value) = duration_for_sum {
+                total_duration_secs += f64::from(value);
+            } else {
+                unknown_duration_count = unknown_duration_count.saturating_add(1);
+            }
+
+            tracks.push(EncodedQueueTrack {
+                title: if track.title.trim().is_empty() {
+                    fallback_title
+                } else {
+                    track.title.clone()
+                },
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                cover_path: track.cover_path.clone(),
+                genre: track.genre.clone(),
+                year: track.year,
+                track_number: track.track_no,
+                length_seconds: track.duration_secs.and_then(|value| {
+                    if value.is_finite() && value >= 0.0 {
+                        Some(value)
+                    } else {
+                        None
+                    }
+                }),
+                path: path_str,
+            });
+            continue;
+        }
+
+        if let Some(track) = snapshot.queue_details.get(path) {
             let duration_for_sum = track.duration_secs.and_then(|value| {
                 if value.is_finite() && value > 0.0 {
                     Some(value)
@@ -1339,6 +1348,7 @@ mod tests {
                 }],
                 ..LibrarySnapshot::default()
             }),
+            queue_details: HashMap::new(),
             library_artist_count: 1,
             library_album_count: 1,
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
@@ -1586,6 +1596,39 @@ mod tests {
         assert!((read_f32(&encoded, &mut offset) - 180.0).abs() < 0.001);
         assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.flac");
         assert_eq!(offset, encoded.len());
+    }
+
+    #[test]
+    fn queue_section_uses_external_queue_details_when_library_misses() {
+        let mut snapshot = sample_snapshot();
+        snapshot.library = Arc::new(LibrarySnapshot::default());
+        snapshot.queue = vec![PathBuf::from("/outside/song.flac")];
+        snapshot.queue_details.insert(
+            PathBuf::from("/outside/song.flac"),
+            crate::library::IndexedTrack {
+                title: "Outside Song".to_string(),
+                artist: "Outside Artist".to_string(),
+                album: "Outside Album".to_string(),
+                cover_path: "/outside/cover.jpg".to_string(),
+                genre: "Ambient".to_string(),
+                year: Some(2024),
+                track_no: Some(7),
+                duration_secs: Some(245.0),
+            },
+        );
+
+        let queue_section = compute_queue_section_data(&snapshot);
+        assert_eq!(queue_section.unknown_duration_count, 0);
+        assert!((queue_section.total_duration_secs - 245.0).abs() < 0.001);
+        assert_eq!(queue_section.tracks.len(), 1);
+        assert_eq!(queue_section.tracks[0].title, "Outside Song");
+        assert_eq!(queue_section.tracks[0].artist, "Outside Artist");
+        assert_eq!(queue_section.tracks[0].album, "Outside Album");
+        assert_eq!(queue_section.tracks[0].cover_path, "/outside/cover.jpg");
+        assert_eq!(queue_section.tracks[0].genre, "Ambient");
+        assert_eq!(queue_section.tracks[0].year, Some(2024));
+        assert_eq!(queue_section.tracks[0].track_number, Some(7));
+        assert_eq!(queue_section.tracks[0].length_seconds, Some(245.0));
     }
 
     #[test]

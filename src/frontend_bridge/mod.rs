@@ -1,17 +1,19 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TrySendError};
 use serde_json::json;
+use walkdir::WalkDir;
 
 use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
 use crate::library::{
-    search_tracks_fts, LibraryCommand, LibraryEvent, LibrarySearchTrack, LibraryService,
-    LibrarySnapshot, LibraryTrack,
+    is_supported_audio, read_track_info, search_tracks_fts, IndexedTrack, LibraryCommand,
+    LibraryEvent, LibrarySearchTrack, LibraryService, LibrarySnapshot, LibraryTrack,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -183,6 +185,7 @@ pub struct BridgeSnapshot {
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
+    pub(crate) queue_details: HashMap<PathBuf, IndexedTrack>,
     pub library_artist_count: usize,
     pub library_album_count: usize,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
@@ -224,6 +227,7 @@ struct BridgeState {
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
+    queue_details: HashMap<PathBuf, IndexedTrack>,
     library_artist_count: usize,
     library_album_count: usize,
     pre_built_tree_bytes: Arc<Vec<u8>>,
@@ -337,6 +341,7 @@ impl BridgeState {
             analysis: self.analysis.clone(),
             metadata,
             library: self.library.clone(),
+            queue_details: self.queue_details.clone(),
             library_artist_count: self.library_artist_count,
             library_album_count: self.library_album_count,
             pre_built_tree_bytes: if include_tree {
@@ -1067,6 +1072,9 @@ fn handle_queue_command(
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
     let outcome = apply_queue_command_state(cmd, &mut state.queue, &mut state.selected_queue_index);
+    if outcome.changed {
+        refresh_queue_details(state);
+    }
     for op in &outcome.playback_ops {
         match op {
             QueuePlaybackOp::LoadQueue(tracks) => {
@@ -1536,13 +1544,262 @@ fn collect_album_paths_for_queue(
         .collect()
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ImportExpandOutcome {
+    tracks: Vec<PathBuf>,
+    missing_count: usize,
+    unsupported_count: usize,
+    unreadable_count: usize,
+    non_local_url_count: usize,
+}
+
+impl ImportExpandOutcome {
+    fn skipped_count(&self) -> usize {
+        self.missing_count
+            + self.unsupported_count
+            + self.unreadable_count
+            + self.non_local_url_count
+    }
+
+    fn push_missing(&mut self) {
+        self.missing_count = self.missing_count.saturating_add(1);
+    }
+
+    fn push_unsupported(&mut self) {
+        self.unsupported_count = self.unsupported_count.saturating_add(1);
+    }
+
+    fn push_unreadable(&mut self) {
+        self.unreadable_count = self.unreadable_count.saturating_add(1);
+    }
+
+    fn push_non_local_url(&mut self) {
+        self.non_local_url_count = self.non_local_url_count.saturating_add(1);
+    }
+}
+
+fn is_playlist_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "m3u" | "m3u8"))
+}
+
+fn canonicalize_existing_path(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    path.canonicalize()
+        .ok()
+        .or_else(|| Some(path.to_path_buf()))
+}
+
+fn playlist_entry_path(
+    line: &str,
+    base_dir: &Path,
+    outcome: &mut ImportExpandOutcome,
+) -> Option<PathBuf> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+
+    if let Ok(url) = url::Url::parse(trimmed) {
+        if url.scheme() != "file" {
+            outcome.push_non_local_url();
+            return None;
+        }
+        let Ok(path) = url.to_file_path() else {
+            outcome.push_non_local_url();
+            return None;
+        };
+        let Some(path) = canonicalize_existing_path(&path) else {
+            outcome.push_missing();
+            return None;
+        };
+        return Some(path);
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        base_dir.join(candidate)
+    };
+    let Some(resolved) = canonicalize_existing_path(&resolved) else {
+        outcome.push_missing();
+        return None;
+    };
+    Some(resolved)
+}
+
+fn append_folder_tracks(root: &Path, outcome: &mut ImportExpandOutcome) {
+    let mut folder_tracks = Vec::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if is_playlist_file(path) || !is_supported_audio(path) {
+            continue;
+        }
+        folder_tracks.push(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+    }
+    folder_tracks.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    outcome.tracks.extend(folder_tracks);
+}
+
+fn append_import_path(path: &Path, outcome: &mut ImportExpandOutcome) {
+    if path.is_dir() {
+        append_folder_tracks(path, outcome);
+        return;
+    }
+
+    if is_playlist_file(path) {
+        let Ok(bytes) = fs::read(path) else {
+            outcome.push_unreadable();
+            return;
+        };
+        let mut reader = Cursor::new(String::from_utf8_lossy(&bytes).into_owned());
+        let base_dir = path.parent().unwrap_or_else(|| Path::new(""));
+        let mut line = String::new();
+        while let Ok(read) = reader.read_line(&mut line) {
+            if read == 0 {
+                break;
+            }
+            let cleaned = line.trim_start_matches('\u{feff}');
+            if let Some(entry_path) = playlist_entry_path(cleaned, base_dir, outcome) {
+                append_import_path(&entry_path, outcome);
+            }
+            line.clear();
+        }
+        return;
+    }
+
+    if path.is_file() && is_supported_audio(path) {
+        outcome.tracks.push(path.to_path_buf());
+        return;
+    }
+
+    outcome.push_unsupported();
+}
+
+fn expand_import_paths(paths: Vec<PathBuf>) -> ImportExpandOutcome {
+    let mut outcome = ImportExpandOutcome::default();
+    for raw_path in paths {
+        let Some(path) = canonicalize_existing_path(&raw_path) else {
+            outcome.push_missing();
+            continue;
+        };
+        append_import_path(&path, &mut outcome);
+    }
+    outcome
+}
+
+fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<String> {
+    let skipped = outcome.skipped_count();
+    if skipped == 0 {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if outcome.missing_count > 0 {
+        parts.push(format!("{} missing", outcome.missing_count));
+    }
+    if outcome.unsupported_count > 0 {
+        parts.push(format!("{} unsupported", outcome.unsupported_count));
+    }
+    if outcome.unreadable_count > 0 {
+        parts.push(format!("{} unreadable", outcome.unreadable_count));
+    }
+    if outcome.non_local_url_count > 0 {
+        parts.push(format!("{} non-local URLs", outcome.non_local_url_count));
+    }
+
+    let joined = parts.join(", ");
+    if outcome.tracks.is_empty() {
+        Some(format!("Import {} skipped all entries ({joined})", action))
+    } else {
+        Some(format!(
+            "Import {} queued {} track(s); skipped {} item(s) ({joined})",
+            action,
+            outcome.tracks.len(),
+            skipped,
+        ))
+    }
+}
+
+fn refresh_queue_details(state: &mut BridgeState) {
+    state
+        .queue_details
+        .retain(|path, _| state.queue.iter().any(|queued| queued == path));
+
+    for path in &state.queue {
+        if state.queue_details.contains_key(path) {
+            continue;
+        }
+        if state.library.tracks.iter().any(|track| track.path == *path) {
+            continue;
+        }
+        if !path.is_file() || !is_supported_audio(path) {
+            continue;
+        }
+        state
+            .queue_details
+            .insert(path.clone(), read_track_info(path));
+    }
+}
+
+fn replace_queue_paths(
+    state: &mut BridgeState,
+    playback: &PlaybackEngine,
+    paths: Vec<PathBuf>,
+    autoplay: bool,
+) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    state.queue = paths;
+    state.selected_queue_index = Some(0);
+    refresh_queue_details(state);
+    playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+    if autoplay {
+        playback.command(PlaybackCommand::PlayAt(0));
+        playback.command(PlaybackCommand::Play);
+    }
+    true
+}
+
+fn append_queue_paths(
+    state: &mut BridgeState,
+    playback: &PlaybackEngine,
+    paths: Vec<PathBuf>,
+) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    if state.queue.is_empty() {
+        state.queue.extend(paths);
+        refresh_queue_details(state);
+        playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
+    } else {
+        state.queue.extend(paths.clone());
+        refresh_queue_details(state);
+        playback.command(PlaybackCommand::AddToQueue(paths));
+    }
+    true
+}
+
 fn handle_library_command(
     cmd: BridgeLibraryCommand,
     state: &mut BridgeState,
     playback: &PlaybackEngine,
     library: &LibraryService,
     search_query_tx: &Sender<SearchWorkerQuery>,
-    _event_tx: &Sender<BridgeEvent>,
+    event_tx: &Sender<BridgeEvent>,
 ) -> bool {
     match cmd {
         BridgeLibraryCommand::ScanRoot(path) => {
@@ -1566,72 +1823,40 @@ fn handle_library_command(
             false
         }
         BridgeLibraryCommand::AddTrack(path) => {
-            if state.queue.is_empty() {
-                state.queue.push(path);
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            } else {
-                state.queue.push(path.clone());
-                playback.command(PlaybackCommand::AddToQueue(vec![path]));
+            let outcome = expand_import_paths(vec![path]);
+            if let Some(message) = format_import_warning("append", &outcome) {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
             }
-            true
+            append_queue_paths(state, playback, outcome.tracks)
         }
         BridgeLibraryCommand::PlayTrack(path) => {
-            state.queue.clear();
-            state.queue.push(path.clone());
-            state.selected_queue_index = Some(0);
-            playback.command(PlaybackCommand::LoadQueue(vec![path]));
-            playback.command(PlaybackCommand::Play);
-            true
+            let outcome = expand_import_paths(vec![path]);
+            if let Some(message) = format_import_warning("open", &outcome) {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+            }
+            replace_queue_paths(state, playback, outcome.tracks, true)
         }
         BridgeLibraryCommand::ReplaceWithAlbum(paths) => {
-            if paths.is_empty() {
-                return false;
+            let outcome = expand_import_paths(paths);
+            if let Some(message) = format_import_warning("open", &outcome) {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
             }
-            state.queue = paths;
-            state.selected_queue_index = Some(0);
-            playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            playback.command(PlaybackCommand::PlayAt(0));
-            playback.command(PlaybackCommand::Play);
-            true
+            replace_queue_paths(state, playback, outcome.tracks, true)
         }
         BridgeLibraryCommand::AppendAlbum(paths) => {
-            if paths.is_empty() {
-                return false;
+            let outcome = expand_import_paths(paths);
+            if let Some(message) = format_import_warning("append", &outcome) {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
             }
-            if state.queue.is_empty() {
-                state.queue.extend(paths);
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            } else {
-                state.queue.extend(paths.clone());
-                playback.command(PlaybackCommand::AddToQueue(paths));
-            }
-            true
+            append_queue_paths(state, playback, outcome.tracks)
         }
         BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => {
             let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
-            if paths.is_empty() {
-                return false;
-            }
-            state.queue = paths;
-            state.selected_queue_index = Some(0);
-            playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            playback.command(PlaybackCommand::PlayAt(0));
-            playback.command(PlaybackCommand::Play);
-            true
+            replace_queue_paths(state, playback, paths, true)
         }
         BridgeLibraryCommand::AppendAlbumByKey { artist, album } => {
             let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
-            if paths.is_empty() {
-                return false;
-            }
-            if state.queue.is_empty() {
-                state.queue.extend(paths);
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            } else {
-                state.queue.extend(paths.clone());
-                playback.command(PlaybackCommand::AddToQueue(paths));
-            }
-            true
+            append_queue_paths(state, playback, paths)
         }
         BridgeLibraryCommand::ReplaceArtistByKey { artist } => {
             let paths = collect_artist_paths_for_queue(
@@ -1639,15 +1864,7 @@ fn handle_library_command(
                 &artist,
                 state.settings.library_sort_mode,
             );
-            if paths.is_empty() {
-                return false;
-            }
-            state.queue = paths;
-            state.selected_queue_index = Some(0);
-            playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            playback.command(PlaybackCommand::PlayAt(0));
-            playback.command(PlaybackCommand::Play);
-            true
+            replace_queue_paths(state, playback, paths, true)
         }
         BridgeLibraryCommand::AppendArtistByKey { artist } => {
             let paths = collect_artist_paths_for_queue(
@@ -1655,17 +1872,7 @@ fn handle_library_command(
                 &artist,
                 state.settings.library_sort_mode,
             );
-            if paths.is_empty() {
-                return false;
-            }
-            if state.queue.is_empty() {
-                state.queue.extend(paths);
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            } else {
-                state.queue.extend(paths.clone());
-                playback.command(PlaybackCommand::AddToQueue(paths));
-            }
-            true
+            append_queue_paths(state, playback, paths)
         }
         BridgeLibraryCommand::ReplaceAllTracks => {
             let paths: Vec<PathBuf> = state
@@ -1674,15 +1881,7 @@ fn handle_library_command(
                 .iter()
                 .map(|track| track.path.clone())
                 .collect();
-            if paths.is_empty() {
-                return false;
-            }
-            state.queue = paths;
-            state.selected_queue_index = Some(0);
-            playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            playback.command(PlaybackCommand::PlayAt(0));
-            playback.command(PlaybackCommand::Play);
-            true
+            replace_queue_paths(state, playback, paths, true)
         }
         BridgeLibraryCommand::AppendAllTracks => {
             let paths: Vec<PathBuf> = state
@@ -1691,17 +1890,7 @@ fn handle_library_command(
                 .iter()
                 .map(|track| track.path.clone())
                 .collect();
-            if paths.is_empty() {
-                return false;
-            }
-            if state.queue.is_empty() {
-                state.queue.extend(paths);
-                playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-            } else {
-                state.queue.extend(paths.clone());
-                playback.command(PlaybackCommand::AddToQueue(paths));
-            }
-            true
+            append_queue_paths(state, playback, paths)
         }
         BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
             let normalized = key.trim();
@@ -2670,6 +2859,7 @@ fn apply_session_restore(
         .selected_queue_index
         .filter(|idx| *idx < state.queue.len())
         .or(restored_current_index);
+    refresh_queue_details(state);
     if state.queue.is_empty() {
         return;
     }
@@ -2823,11 +3013,31 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        path.push(format!(
+            "ferrous-frontend-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        path
+    }
+
+    fn write_stub(path: &Path, bytes: &[u8]) {
+        fs::File::create(path)
+            .and_then(|mut file| file.write_all(bytes))
+            .expect("write stub file");
     }
 
     fn library_track(
@@ -3018,6 +3228,110 @@ mod tests {
     fn session_parse_rejects_missing_queue_array() {
         let parsed = parse_session_text(r#"{"selected_queue_index":1}"#);
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn expand_import_paths_preserves_playlist_order_and_tracks_missing_entries() {
+        let root = test_dir("playlist-import");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let track_a = root.join("b-song.flac");
+        let track_b = root.join("a-song.mp3");
+        let playlist = root.join("mix.m3u8");
+        write_stub(&track_a, b"a");
+        write_stub(&track_b, b"b");
+        fs::write(
+            &playlist,
+            b"#EXTM3U\nb-song.flac\nmissing.flac\na-song.mp3\n",
+        )
+        .expect("write playlist");
+
+        let outcome = expand_import_paths(vec![playlist.clone()]);
+        assert_eq!(outcome.tracks, vec![track_a, track_b]);
+        assert_eq!(outcome.missing_count, 1);
+        assert_eq!(outcome.unsupported_count, 0);
+        assert_eq!(outcome.unreadable_count, 0);
+    }
+
+    #[test]
+    fn expand_import_paths_sorts_folder_tracks_and_skips_nested_playlists() {
+        let root = test_dir("folder-import");
+        let nested = root.join("Disc 1");
+        fs::create_dir_all(&nested).expect("mkdir nested");
+        let track_z = nested.join("02-zeta.flac");
+        let track_a = nested.join("01-alpha.mp3");
+        let playlist = nested.join("ignored.m3u");
+        write_stub(&track_z, b"z");
+        write_stub(&track_a, b"a");
+        fs::write(&playlist, b"02-zeta.flac\n").expect("write nested playlist");
+
+        let outcome = expand_import_paths(vec![root.clone()]);
+        assert_eq!(outcome.tracks, vec![track_a, track_z]);
+        assert_eq!(outcome.skipped_count(), 0);
+    }
+
+    #[test]
+    fn expand_import_paths_preserves_playlist_order_and_sorts_folder_tracks() {
+        let root = test_dir("import-expand");
+        let folder = root.join("folder");
+        fs::create_dir_all(&folder).expect("mkdir folder");
+        let a = folder.join("a.flac");
+        let b = folder.join("b.flac");
+        let text = folder.join("notes.txt");
+        let nested_playlist = folder.join("nested.m3u8");
+        write_stub(&a, b"not-real-audio");
+        write_stub(&b, b"not-real-audio");
+        write_stub(&text, b"ignore");
+        write_stub(&nested_playlist, b"#EXTM3U\n");
+
+        let playlist = root.join("mix.m3u8");
+        let playlist_text = [
+            "#EXTM3U",
+            "folder/b.flac",
+            "folder/a.flac",
+            "http://example.com/skip.mp3",
+            "missing.flac",
+        ]
+        .join("\n");
+        fs::write(&playlist, playlist_text).expect("write playlist");
+
+        let outcome = expand_import_paths(vec![playlist.clone(), folder.clone()]);
+        assert_eq!(
+            outcome.tracks,
+            vec![b, a, folder.join("a.flac"), folder.join("b.flac")]
+        );
+        assert_eq!(outcome.non_local_url_count, 1);
+        assert_eq!(outcome.missing_count, 1);
+        assert_eq!(outcome.unsupported_count, 0);
+        assert_eq!(outcome.unreadable_count, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn refresh_queue_details_populates_external_tracks_and_prunes_removed_entries() {
+        let root = test_dir("queue-details");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let track = root.join("song.flac");
+        let cover = root.join("cover.jpg");
+        write_stub(&track, b"not-real-audio");
+        write_stub(&cover, b"not-real-jpg");
+
+        let mut state = BridgeState::default();
+        state.queue = vec![track.clone()];
+        refresh_queue_details(&mut state);
+
+        let details = state
+            .queue_details
+            .get(&track)
+            .expect("external queue details inserted");
+        assert_eq!(details.title, "song");
+        assert_eq!(details.cover_path, cover.to_string_lossy());
+
+        state.queue.clear();
+        refresh_queue_details(&mut state);
+        assert!(state.queue_details.is_empty());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
