@@ -10,6 +10,10 @@ use lofty::prelude::Accessor;
 use rusqlite::{params, Connection};
 use walkdir::WalkDir;
 
+use crate::raw_audio::{
+    is_raw_surround_file, probe_raw_surround_technical_details, read_appended_apev2_text_metadata,
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct LibraryTrack {
     pub path: PathBuf,
@@ -993,7 +997,7 @@ pub(crate) fn is_supported_audio(path: &Path) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "mp3" | "flac" | "m4a" | "aac" | "ogg" | "opus" | "wav"
+        "mp3" | "flac" | "m4a" | "aac" | "ogg" | "opus" | "wav" | "ac3" | "dts"
     )
 }
 
@@ -1044,6 +1048,30 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
         }
         out.duration_secs = Some(tagged.properties().duration().as_secs_f32());
     }
+
+    if is_raw_surround_file(path) {
+        if let Some(tagged) = read_appended_apev2_text_metadata(path) {
+            if let Some(title) = tagged.title {
+                out.title = title;
+            }
+            if let Some(artist) = tagged.artist {
+                out.artist = artist;
+            }
+            if let Some(album) = tagged.album {
+                out.album = album;
+            }
+            if let Some(genre) = tagged.genre {
+                out.genre = genre;
+            }
+            out.year = tagged.year.or(out.year);
+            out.track_no = tagged.track_no.or(out.track_no);
+        }
+
+        if let Some(details) = probe_raw_surround_technical_details(path) {
+            out.duration_secs = out.duration_secs.or(details.duration_secs);
+        }
+    }
+
     out.cover_path = find_cover_path_for_track(path);
     out
 }
@@ -1108,6 +1136,7 @@ fn unix_ts_i64() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raw_audio::write_test_apev2_file;
     use std::io::Write;
 
     fn test_dir(name: &str) -> PathBuf {
@@ -1138,8 +1167,39 @@ mod tests {
         assert!(is_supported_audio(Path::new("a.ogg")));
         assert!(is_supported_audio(Path::new("a.opus")));
         assert!(is_supported_audio(Path::new("a.wav")));
+        assert!(is_supported_audio(Path::new("a.ac3")));
+        assert!(is_supported_audio(Path::new("a.dts")));
         assert!(!is_supported_audio(Path::new("a.txt")));
         assert!(!is_supported_audio(Path::new("a")));
+    }
+
+    #[test]
+    fn read_track_info_uses_appended_apev2_for_raw_surround_files() {
+        let dir = test_dir("apev2-raw");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("01 - The Leper Affinity.dts");
+        write_test_apev2_file(
+            &path,
+            &[
+                ("Title", "The Leper Affinity"),
+                ("Artist", "Opeth"),
+                ("Album", "Blackwater Park"),
+                ("Genre", "Progressive death metal"),
+                ("Year", "2001"),
+                ("Track", "01/8"),
+            ],
+            true,
+        );
+
+        let info = read_track_info(&path);
+        assert_eq!(info.title, "The Leper Affinity");
+        assert_eq!(info.artist, "Opeth");
+        assert_eq!(info.album, "Blackwater Park");
+        assert_eq!(info.genre, "Progressive death metal");
+        assert_eq!(info.year, Some(2001));
+        assert_eq!(info.track_no, Some(1));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

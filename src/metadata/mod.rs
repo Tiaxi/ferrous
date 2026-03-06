@@ -26,6 +26,11 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::TimeBase;
 
+use crate::raw_audio::{
+    is_raw_surround_file, probe_raw_surround_technical_details, raw_surround_format_label,
+    read_appended_apev2_text_metadata,
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct TrackMetadata {
     pub source_path: Option<String>,
@@ -123,6 +128,24 @@ impl MetadataService {
                         }
                     }
 
+                    if is_raw_surround_file(&path) {
+                        if let Some(tagged) = read_appended_apev2_text_metadata(&path) {
+                            if let Some(title) = tagged.title {
+                                metadata.title = title;
+                            }
+                            if let Some(artist) = tagged.artist {
+                                metadata.artist = artist;
+                            }
+                            if let Some(album) = tagged.album {
+                                metadata.album = album;
+                            }
+                            if let Some(genre) = tagged.genre {
+                                metadata.genre = genre;
+                            }
+                            metadata.year = tagged.year.or(metadata.year);
+                        }
+                    }
+
                     if metadata.format_label.is_empty() {
                         metadata.format_label = format_label_from_extension(
                             path.extension().and_then(|value| value.to_str()),
@@ -133,6 +156,25 @@ impl MetadataService {
                     }
 
                     let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+
+                    if is_raw_surround_file(&path) {
+                        if let Some(details) = probe_raw_surround_technical_details(&path) {
+                            if !details.format_label.is_empty() {
+                                metadata.format_label = details.format_label;
+                            }
+                            metadata.sample_rate_hz =
+                                metadata.sample_rate_hz.or(details.sample_rate_hz);
+                            metadata.channels = metadata.channels.or(details.channels);
+                            metadata.bit_depth = metadata.bit_depth.or(details.bit_depth);
+                            metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
+                            metadata.current_bitrate_kbps = details
+                                .current_bitrate_kbps
+                                .or(metadata.current_bitrate_kbps)
+                                .or(metadata.bitrate_kbps);
+
+                            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+                        }
+                    }
 
                     if let Some(details) = probe_stream_details(&path) {
                         if !details.format_label.is_empty() {
@@ -357,8 +399,10 @@ fn format_label_from_extension(extension: Option<&str>) -> String {
         .as_str()
     {
         "aac" => "AAC".to_string(),
+        "ac3" => raw_surround_format_label(Path::new("a.ac3")),
         "aif" | "aiff" | "aifc" | "afc" => "AIFF".to_string(),
         "alac" => "ALAC".to_string(),
+        "dts" => raw_surround_format_label(Path::new("a.dts")),
         "flac" => "FLAC".to_string(),
         "m4a" | "m4b" | "m4p" | "m4r" | "mp4" => "AAC".to_string(),
         "mp1" => "MP1".to_string(),
@@ -424,13 +468,33 @@ fn codec_label(codec: CodecType) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bytes_to_kbps, format_label_from_extension, TrackMetadata};
+    use super::{
+        bytes_to_kbps, format_label_from_extension, MetadataEvent, MetadataService, TrackMetadata,
+    };
+    use crate::raw_audio::write_test_apev2_file;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn metadata_test_path(name: &str, ext: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        path.push(format!(
+            "ferrous-metadata-{name}-{}-{nanos}.{ext}",
+            std::process::id()
+        ));
+        path
+    }
 
     #[test]
     fn format_label_prefers_user_facing_names() {
         assert_eq!(format_label_from_extension(Some("mp3")), "MP3");
         assert_eq!(format_label_from_extension(Some("flac")), "FLAC");
         assert_eq!(format_label_from_extension(Some("m4a")), "AAC");
+        assert_eq!(format_label_from_extension(Some("ac3")), "AC3");
+        assert_eq!(format_label_from_extension(Some("dts")), "DTS");
     }
 
     #[test]
@@ -449,6 +513,48 @@ mod tests {
     #[test]
     fn kbps_rounding_matches_expected_values() {
         assert_eq!(bytes_to_kbps(113_125.0), 905);
+    }
+
+    #[test]
+    fn metadata_service_reads_appended_apev2_for_raw_surround_files() {
+        let path = metadata_test_path("apev2", "ac3");
+        write_test_apev2_file(
+            &path,
+            &[
+                ("Title", "Harvest"),
+                ("Artist", "Opeth"),
+                ("Album", "In Live Concert at the Royal Albert Hall"),
+                ("Genre", "Progressive death metal"),
+                ("Year", "2010"),
+                ("Track", "03/8"),
+            ],
+            true,
+        );
+
+        let (service, rx) = MetadataService::new_with_delay(Duration::ZERO);
+        service.request(path.clone());
+
+        let mut seen = None;
+        for _ in 0..3 {
+            let event = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("metadata event");
+            let MetadataEvent::Loaded(metadata) = event;
+            if metadata.title == "Harvest" {
+                seen = Some(metadata);
+                break;
+            }
+        }
+
+        let metadata = seen.expect("raw metadata");
+        assert_eq!(metadata.title, "Harvest");
+        assert_eq!(metadata.artist, "Opeth");
+        assert_eq!(metadata.album, "In Live Concert at the Royal Albert Hall");
+        assert_eq!(metadata.genre, "Progressive death metal");
+        assert_eq!(metadata.year, Some(2010));
+        assert_eq!(metadata.format_label, "AC3");
+
+        let _ = std::fs::remove_file(path);
     }
 }
 

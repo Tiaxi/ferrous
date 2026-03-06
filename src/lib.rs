@@ -30,3 +30,4 @@ pub mod frontend_bridge;
 pub mod library;
 pub mod metadata;
 pub mod playback;
+mod raw_audio;

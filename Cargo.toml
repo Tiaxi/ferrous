@@ -12,6 +12,7 @@ crossbeam-channel = "0.5"
 gstreamer = { version = "0.25", optional = true }
 gstreamer-app = { version = "0.25", optional = true }
 gstreamer-audio = { version = "0.25", optional = true }
+gstreamer-pbutils = { version = "0.25", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 lofty = "0.23"
 parking_lot = "0.12"
@@ -28,5 +29,5 @@ walkdir = "2"
 
 [features]
 default = []
-gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio"]
+gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio", "dep:gstreamer-pbutils"]
 profiling-logs = []
