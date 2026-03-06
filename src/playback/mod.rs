@@ -665,6 +665,7 @@ mod backend {
     use gstreamer_app as gst_app;
 
     use crate::analysis::AnalysisCommand;
+    use crate::raw_audio::is_dts_file;
 
     use super::{
         PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
@@ -1272,8 +1273,16 @@ mod backend {
             PlaybackCommand::Seek(pos) => {
                 let nanos = pos.as_nanos().min(u64::MAX as u128) as u64;
                 let target = gst::ClockTime::from_nseconds(nanos);
-                let _ =
-                    playbin.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, target);
+                let seek_flags = if snapshot
+                    .current
+                    .as_ref()
+                    .is_some_and(|path| is_dts_file(path))
+                {
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+                } else {
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+                };
+                let _ = playbin.seek_simple(seek_flags, target);
                 snapshot.position = pos.min(snapshot.duration);
                 *seek_hold = Some((
                     Instant::now() + Duration::from_millis(220),

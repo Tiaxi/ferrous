@@ -986,6 +986,7 @@ where
     let mut peaks = Vec::with_capacity(max_points);
     let mut bucket_peak = 0.0f32;
     let mut bucket_count = 0u64;
+    let mut covered_frames = 0u64;
     let mut last_preview_emit = std::time::Instant::now();
 
     let mut packet_counter = 0usize;
@@ -1041,6 +1042,7 @@ where
                 bucket_peak = amp;
             }
             bucket_count += sample_stride as u64;
+            covered_frames = covered_frames.saturating_add(sample_stride as u64);
 
             if bucket_count >= block_size {
                 peaks.push(bucket_peak.clamp(0.0, 1.0));
@@ -1064,7 +1066,11 @@ where
                 if peaks.len() >= 12
                     && last_preview_emit.elapsed() >= std::time::Duration::from_millis(240)
                 {
-                    if !on_update(peaks.clone(), 0.0, false) {
+                    if !on_update(
+                        peaks.clone(),
+                        covered_frames as f32 / sample_rate_hz as f32,
+                        false,
+                    ) {
                         return Ok(());
                     }
                     last_preview_emit = std::time::Instant::now();

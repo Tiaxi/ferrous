@@ -50,22 +50,23 @@ struct Apev2Footer {
 }
 
 pub(crate) fn is_raw_surround_file(path: &Path) -> bool {
+    matches!(raw_surround_extension(path).as_deref(), Some("ac3" | "dts"))
+}
+
+pub(crate) fn is_dts_file(path: &Path) -> bool {
+    matches!(raw_surround_extension(path).as_deref(), Some("dts"))
+}
+
+fn raw_surround_extension(path: &Path) -> Option<String> {
     let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
-        return false;
+        return None;
     };
 
-    matches!(ext.to_ascii_lowercase().as_str(), "ac3" | "dts")
+    Some(ext.to_ascii_lowercase())
 }
 
 pub(crate) fn raw_surround_format_label(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-
-    match ext.as_str() {
+    match raw_surround_extension(path).as_deref().unwrap_or_default() {
         "ac3" => "AC3".to_string(),
         "dts" => "DTS".to_string(),
         _ => String::new(),
