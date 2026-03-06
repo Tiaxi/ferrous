@@ -1480,6 +1480,30 @@ mod backend {
         }
     }
 
+    fn downmix_interleaved_f32_to_mono(bytes: &[u8], channels: usize) -> Vec<f32> {
+        if channels <= 1 {
+            let mut pcm = Vec::with_capacity(bytes.len() / 4);
+            for chunk in bytes.chunks_exact(4) {
+                pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+            return pcm;
+        }
+
+        let mut pcm = Vec::with_capacity(bytes.len() / (4 * channels.max(1)));
+        for frame in bytes.chunks_exact(4 * channels) {
+            let mut sum = 0.0f32;
+            let mut count = 0usize;
+            for sample in frame.chunks_exact(4) {
+                sum += f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                count += 1;
+            }
+            if count > 0 {
+                pcm.push(sum / count as f32);
+            }
+        }
+        pcm
+    }
+
     #[cfg_attr(
         not(feature = "profiling-logs"),
         allow(unused_variables, unused_assignments)
@@ -1538,7 +1562,6 @@ mod backend {
         let caps = gst::Caps::builder("audio/x-raw")
             .field("format", "F32LE")
             .field("layout", "interleaved")
-            .field("channels", 1i32)
             // Keep analysis workload constant across source formats/codecs.
             .field("rate", 44_100i32)
             .build();
@@ -1583,27 +1606,28 @@ mod backend {
                                 if let Ok(map) = buffer.map_readable() {
                                     let bytes = map.as_slice();
                                     if !bytes.is_empty() {
-                                        let mut pcm = Vec::with_capacity(bytes.len() / 4);
-                                        for chunk in bytes.chunks_exact(4) {
-                                            pcm.push(f32::from_le_bytes([
-                                                chunk[0], chunk[1], chunk[2], chunk[3],
-                                            ]));
-                                        }
-                                        if !pcm.is_empty() {
-                                            if let Some(caps) = sample.caps() {
-                                                if let Some(s) = caps.structure(0) {
-                                                    if let Ok(rate) = s.get::<i32>("rate") {
-                                                        if rate > 0 && last_rate_hz != rate as u32 {
-                                                            last_rate_hz = rate as u32;
-                                                            let _ = analysis_tx.send(
-                                                                AnalysisCommand::SetSampleRate(
-                                                                    rate as u32,
-                                                                ),
-                                                            );
-                                                        }
+                                        let mut channels = 1usize;
+                                        if let Some(caps) = sample.caps() {
+                                            if let Some(s) = caps.structure(0) {
+                                                if let Ok(rate) = s.get::<i32>("rate") {
+                                                    if rate > 0 && last_rate_hz != rate as u32 {
+                                                        last_rate_hz = rate as u32;
+                                                        let _ = analysis_tx.send(
+                                                            AnalysisCommand::SetSampleRate(
+                                                                rate as u32,
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                                if let Ok(value) = s.get::<i32>("channels") {
+                                                    if value > 0 {
+                                                        channels = value as usize;
                                                     }
                                                 }
                                             }
+                                        }
+                                        let pcm = downmix_interleaved_f32_to_mono(bytes, channels);
+                                        if !pcm.is_empty() {
                                             // Chunking balances analysis pacing against per-chunk allocation overhead.
                                             for part in pcm.chunks(tap_chunk_samples) {
                                                 if pcm_tx.try_send(part.to_vec()).is_ok() {
@@ -1782,6 +1806,24 @@ mod backend {
             let _ = queue.set_current(1);
             queue.set_repeat_mode(RepeatMode::All);
             assert_eq!(queue.next_natural().as_ref(), Some(&a));
+        }
+
+        #[test]
+        fn analysis_downmix_averages_multichannel_frames() {
+            let bytes = [
+                1.0f32.to_le_bytes(),
+                0.0f32.to_le_bytes(),
+                (-1.0f32).to_le_bytes(),
+                0.5f32.to_le_bytes(),
+                0.5f32.to_le_bytes(),
+                0.5f32.to_le_bytes(),
+            ]
+            .concat();
+
+            let pcm = downmix_interleaved_f32_to_mono(&bytes, 3);
+            assert_eq!(pcm.len(), 2);
+            assert!((pcm[0] - 0.0).abs() < f32::EPSILON);
+            assert!((pcm[1] - 0.5).abs() < f32::EPSILON);
         }
 
         #[test]
