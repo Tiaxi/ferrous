@@ -257,7 +257,9 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
 }
 
 void SpectrogramItem::paint(QPainter *painter) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto paint_start = std::chrono::steady_clock::now();
+#endif
     QMutexLocker lock(&m_stateMutex);
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));

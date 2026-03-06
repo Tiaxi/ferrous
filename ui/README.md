@@ -48,6 +48,18 @@ cmake --build ui/build
 ctest --test-dir ui/build --output-on-failure
 ```
 
+## Desktop Integration
+
+Installed builds now advertise Ferrous as a handler for its supported audio and playlist types, and repeated launches reuse the existing Ferrous instance instead of opening a second window.
+
+Typical local verification flow:
+
+```bash
+cmake --install ui/build --prefix "$HOME/.local"
+xdg-mime default ferrous.desktop audio/flac
+xdg-open /path/to/file.flac
+```
+
 ## Scope (Milestone A)
 
 - UI shell window and menu/footer scaffolding

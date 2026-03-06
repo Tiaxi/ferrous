@@ -69,6 +69,24 @@ Run project tests (Rust + UI smoke test):
 ./scripts/run-tests.sh
 ```
 
+Build a local RPM for quick deployment testing:
+
+```bash
+./scripts/build-rpm.sh
+```
+
+Build and install the resulting RPM locally via `dnf`:
+
+```bash
+./scripts/build-rpm.sh --install
+```
+
+The RPM path is also reusable later through:
+
+```bash
+./scripts/install-rpm.sh
+```
+
 Rust verification now also includes strict lint/security checks by default:
 
 - `cargo clippy --features gst -- -D clippy::pedantic`

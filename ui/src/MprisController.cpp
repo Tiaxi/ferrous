@@ -1,6 +1,7 @@
 #include "MprisController.h"
 
 #include "BridgeClient.h"
+#include "WindowActivation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,10 +14,8 @@
 #include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QFileInfo>
-#include <QGuiApplication>
 #include <QUrl>
 #include <QVariant>
-#include <QWindow>
 
 namespace {
 
@@ -301,20 +300,7 @@ bool MprisController::canControl() const {
 }
 
 void MprisController::raiseWindow() {
-    const auto windows = QGuiApplication::topLevelWindows();
-    for (QWindow *window : windows) {
-        if (window == nullptr) {
-            continue;
-        }
-        if (window->visibility() == QWindow::Minimized) {
-            window->showNormal();
-        } else if (!window->isVisible()) {
-            window->show();
-        }
-        window->raise();
-        window->requestActivate();
-        return;
-    }
+    activateTopLevelWindow();
 }
 
 void MprisController::quitApplication() {

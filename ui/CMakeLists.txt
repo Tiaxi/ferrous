@@ -10,6 +10,7 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(FERROUS_ENABLE_PROFILE_LOGS "Compile profiling log output into binaries" OFF)
+option(FERROUS_WARNINGS_AS_ERRORS "Fail UI builds on compiler warnings" ON)
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
@@ -24,6 +25,20 @@ pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
 
 qt_standard_project_setup(REQUIRES 6.6)
 qt_policy(SET QTP0004 NEW)
+
+function(ferrous_enable_strict_warnings target_name)
+    if(MSVC)
+        target_compile_options(${target_name} PRIVATE /W4)
+        if(FERROUS_WARNINGS_AS_ERRORS)
+            target_compile_options(${target_name} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target_name} PRIVATE -Wall -Wextra -Wpedantic)
+        if(FERROUS_WARNINGS_AS_ERRORS)
+            target_compile_options(${target_name} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
 
 set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
@@ -41,6 +56,7 @@ add_custom_target(ferrous_rust_bridge ALL
 )
 
 qt_add_executable(ferrous
+    src/AppInstanceController.cpp
     src/main.cpp
     src/DiagnosticsLog.cpp
     src/BinaryBridgeCodec.cpp
@@ -49,11 +65,13 @@ qt_add_executable(ferrous
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
     src/SpectrogramItem.cpp
+    src/WindowActivation.cpp
     src/WaveformItem.cpp
 )
 
 target_include_directories(ferrous PRIVATE src)
 add_dependencies(ferrous ferrous_rust_bridge)
+ferrous_enable_strict_warnings(ferrous)
 
 qt_add_qml_module(ferrous
     URI FerrousUi
@@ -69,6 +87,13 @@ qt_add_qml_module(ferrous
         qml/assets/channel-5_1.svg
         qml/assets/channel-7_1.svg
 )
+
+if(NOT MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_BINARY_DIR}/.rcc/qmlcache/ferrous_qml/Main_qml.cpp"
+        PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter"
+    )
+endif()
 
 target_link_libraries(ferrous PRIVATE
     "${FERROUS_RUST_STATIC_LIB}"
@@ -118,6 +143,7 @@ if(BUILD_TESTING)
         Qt6::Test
         KF6::Kirigami
     )
+    ferrous_enable_strict_warnings(ferrous_qml_smoke_tests)
     if(FERROUS_ENABLE_PROFILE_LOGS)
         target_compile_definitions(ferrous_qml_smoke_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
     endif()
@@ -126,6 +152,24 @@ if(BUILD_TESTING)
     )
     add_test(NAME ferrous_qml_smoke_tests COMMAND ferrous_qml_smoke_tests)
     set_tests_properties(ferrous_qml_smoke_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(ferrous_app_instance_tests
+        tests/tst_app_instance_controller.cpp
+        src/AppInstanceController.cpp
+        src/WindowActivation.cpp
+    )
+    target_include_directories(ferrous_app_instance_tests PRIVATE src)
+    target_link_libraries(ferrous_app_instance_tests PRIVATE
+        Qt6::Core
+        Qt6::DBus
+        Qt6::Gui
+        Qt6::Test
+    )
+    ferrous_enable_strict_warnings(ferrous_app_instance_tests)
+    add_test(NAME ferrous_app_instance_tests COMMAND ferrous_app_instance_tests)
+    set_tests_properties(ferrous_app_instance_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 endif()

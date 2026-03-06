@@ -19,6 +19,7 @@
 #endif
 
 #include "BridgeClient.h"
+#include "AppInstanceController.h"
 #include "DiagnosticsLog.h"
 #include "LibraryTreeModel.h"
 #include "MprisController.h"
@@ -229,7 +230,23 @@ int main(int argc, char *argv[]) {
         QApplication::setDesktopFileName(QStringLiteral("ferrous"));
     }
     ConsoleTeeManager consoleTee(DiagnosticsLog::defaultLogPath());
+    AppInstanceController instanceController;
+    QString instanceError;
+    switch (instanceController.initialize(QCoreApplication::arguments().mid(1), &instanceError)) {
+    case AppInstanceController::StartupResult::ExitAfterForward:
+        return 0;
+    case AppInstanceController::StartupResult::ExitWithError:
+        if (!instanceError.trimmed().isEmpty()) {
+            std::fprintf(stderr, "%s\n", qPrintable(instanceError));
+        }
+        return 1;
+    case AppInstanceController::StartupResult::ContinuePrimary:
+        break;
+    }
     BridgeClient bridge;
+    instanceController.setOpenHandler([&bridge](const QStringList &paths) {
+        bridge.replaceWithPaths(paths);
+    });
     MprisController mpris(&bridge);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;

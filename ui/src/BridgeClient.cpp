@@ -1960,8 +1960,10 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
         return false;
     }
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     QElapsedTimer modelApplyTimer;
     modelApplyTimer.start();
+#endif
     const int artistCount = frame.artistCount;
     const int albumCount = frame.albumCount;
     const int trackCount = frame.trackCount;
@@ -1985,9 +1987,10 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
         }
     }
     m_globalSearchModel.replaceRows(std::move(frame.displayRows));
-    const qint64 modelApplyMs = modelApplyTimer.elapsed();
     m_searchFramesApplied++;
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    const qint64 modelApplyMs = modelApplyTimer.elapsed();
     const qint64 sentAtMs = m_globalSearchSentAtMs.take(frame.seq);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 latencyMs = sentAtMs > 0 ? (nowMs - sentAtMs) : -1;
@@ -2012,6 +2015,9 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
             .arg(m_searchFramesApplied)
             .arg(m_searchFramesDroppedStale)
             .arg(m_searchFramesDecodeErrors));
+#else
+    m_globalSearchSentAtMs.take(frame.seq);
+#endif
     return true;
 }
 
