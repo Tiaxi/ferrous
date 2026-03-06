@@ -2783,11 +2783,12 @@ Kirigami.ApplicationWindow {
         }
 
         contentItem: ScrollView {
+            id: preferencesScrollView
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
-                width: preferencesDialog.availableWidth
+                width: preferencesScrollView.availableWidth
                 spacing: 12
 
                 GroupBox {
