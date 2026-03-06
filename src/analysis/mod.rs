@@ -1255,8 +1255,13 @@ fn level_message_peak(structure: &gst::StructureRef) -> Option<f32> {
         return None;
     }
 
-    let peaks = structure.get::<gst::List>("peak").ok()?;
-    collapse_level_db_peaks(peaks.as_slice())
+    if let Ok(peaks) = structure.get::<gst::Array>("peak") {
+        return collapse_level_db_peaks(peaks.as_slice());
+    }
+    if let Ok(peaks) = structure.get::<gst::List>("peak") {
+        return collapse_level_db_peaks(peaks.as_slice());
+    }
+    None
 }
 
 #[cfg(feature = "gst")]
@@ -1406,7 +1411,7 @@ mod tests {
     fn collapse_level_message_peaks_uses_loudest_channel() {
         let _ = gst::init();
         let structure = gst::Structure::builder("level")
-            .field("peak", gst::List::new([-18.0f64, -6.0, -12.0]))
+            .field("peak", gst::Array::new([-18.0f64, -6.0, -12.0]))
             .build();
 
         let peak = level_message_peak(structure.as_ref()).expect("peak");
@@ -1419,9 +1424,22 @@ mod tests {
     fn collapse_level_message_peaks_treats_floor_as_silence() {
         let _ = gst::init();
         let structure = gst::Structure::builder("level")
-            .field("peak", gst::List::new([-150.0f64, f64::NEG_INFINITY]))
+            .field("peak", gst::Array::new([-150.0f64, f64::NEG_INFINITY]))
             .build();
 
         assert_eq!(level_message_peak(structure.as_ref()), Some(0.0));
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn collapse_level_message_peaks_accepts_list_values_too() {
+        let _ = gst::init();
+        let structure = gst::Structure::builder("level")
+            .field("peak", gst::List::new([-9.0f64, -3.0]))
+            .build();
+
+        let peak = level_message_peak(structure.as_ref()).expect("peak");
+
+        assert!((peak - 10f32.powf(-3.0 / 20.0)).abs() < 0.0001);
     }
 }
