@@ -155,6 +155,10 @@ Kirigami.ApplicationWindow {
     }
 
     function windowTitleContext() {
+        const playbackState = (uiBridge.playbackState || "").trim()
+        if (playbackState === "Stopped") {
+            return ""
+        }
         const explicitTitle = (uiBridge.currentTrackTitle || "").trim()
         if (explicitTitle.length > 0) {
             return explicitTitle
