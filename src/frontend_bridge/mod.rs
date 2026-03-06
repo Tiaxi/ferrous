@@ -1359,19 +1359,24 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     a.len().cmp(&b.len())
 }
 
+fn resolve_uniform_year<I>(years: I) -> Option<i32>
+where
+    I: IntoIterator<Item = Option<i32>>,
+{
+    let mut resolved = None;
+    for year in years {
+        let year = year?;
+        match resolved {
+            Some(existing) if existing != year => return None,
+            Some(_) => {}
+            None => resolved = Some(year),
+        }
+    }
+    resolved
+}
+
 fn resolved_album_year(tracks: &[&LibraryTrack]) -> Option<i32> {
-    let mut counts: HashMap<i32, usize> = HashMap::new();
-    for year in tracks.iter().filter_map(|track| track.year) {
-        *counts.entry(year).or_insert(0) += 1;
-    }
-    if counts.is_empty() {
-        return None;
-    }
-    let mut items = counts.into_iter().collect::<Vec<_>>();
-    items.sort_by(|(a_year, a_count), (b_year, b_count)| {
-        b_count.cmp(a_count).then_with(|| a_year.cmp(b_year))
-    });
-    items.first().map(|(year, _)| *year)
+    resolve_uniform_year(tracks.iter().map(|track| track.year))
 }
 
 fn ordered_track_paths_for_queue(tracks: Vec<&LibraryTrack>) -> Vec<PathBuf> {
@@ -3433,6 +3438,53 @@ mod tests {
             vec![
                 p("/music/Artist/Beta/01 - One.flac"),
                 p("/music/Artist/Alpha/01 - One.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_artist_paths_for_queue_treats_mixed_year_album_as_unknown() {
+        let root = p("/music");
+        let library = LibrarySnapshot {
+            roots: vec![root.clone()],
+            tracks: vec![
+                library_track(
+                    "/music/Artist/Alpha/01 - One.flac",
+                    &root,
+                    "Artist",
+                    "Alpha",
+                    Some(1998),
+                    Some(1),
+                ),
+                library_track(
+                    "/music/Artist/Alpha/02 - Two.flac",
+                    &root,
+                    "Artist",
+                    "Alpha",
+                    Some(2001),
+                    Some(2),
+                ),
+                library_track(
+                    "/music/Artist/Beta/01 - One.flac",
+                    &root,
+                    "Artist",
+                    "Beta",
+                    Some(2010),
+                    Some(1),
+                ),
+            ],
+            scan_in_progress: false,
+            scan_progress: None,
+            last_error: None,
+        };
+
+        let ordered = collect_artist_paths_for_queue(&library, "Artist", LibrarySortMode::Year);
+        assert_eq!(
+            ordered,
+            vec![
+                p("/music/Artist/Beta/01 - One.flac"),
+                p("/music/Artist/Alpha/01 - One.flac"),
+                p("/music/Artist/Alpha/02 - Two.flac"),
             ]
         );
     }

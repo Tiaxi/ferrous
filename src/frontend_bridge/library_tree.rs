@@ -744,19 +744,7 @@ fn resolve_album_title(all_tracks: &[TrackLeaf], folder_name: &str) -> String {
 }
 
 fn resolve_album_year(all_tracks: &[TrackLeaf]) -> Option<i32> {
-    let mut counts: HashMap<i32, usize> = HashMap::new();
-    for year in all_tracks.iter().filter_map(|track| track.year) {
-        *counts.entry(year).or_insert(0) += 1;
-    }
-    if counts.is_empty() {
-        return None;
-    }
-
-    let mut items = counts.into_iter().collect::<Vec<_>>();
-    items.sort_by(|(a_year, a_count), (b_year, b_count)| {
-        b_count.cmp(a_count).then_with(|| a_year.cmp(b_year))
-    });
-    items.first().map(|(year, _)| *year)
+    super::resolve_uniform_year(all_tracks.iter().map(|track| track.year))
 }
 
 fn resolve_album_cover(all_tracks: &[TrackLeaf]) -> Option<String> {
@@ -1143,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn year_tie_breaks_to_earliest() {
+    fn mixed_album_years_omit_album_year() {
         let album = AlbumNodeBuilder {
             folder_name: "Folder".to_string(),
             folder_path: PathBuf::from("/music/Artist/Folder"),
@@ -1155,6 +1143,37 @@ mod tests {
                     album_tag: "Tag".to_string(),
                     cover_path: String::new(),
                     year: Some(2024),
+                    track_no: Some(1),
+                },
+                TrackLeaf {
+                    path: PathBuf::from("/music/Artist/Folder/02.flac"),
+                    title: "B".to_string(),
+                    file_stem: "02".to_string(),
+                    album_tag: "Tag".to_string(),
+                    cover_path: String::new(),
+                    year: Some(2023),
+                    track_no: Some(2),
+                },
+            ],
+            sections: BTreeMap::new(),
+        };
+        let resolved = resolve_album(&album);
+        assert_eq!(resolved.year, None);
+    }
+
+    #[test]
+    fn uniform_album_years_are_preserved() {
+        let album = AlbumNodeBuilder {
+            folder_name: "Folder".to_string(),
+            folder_path: PathBuf::from("/music/Artist/Folder"),
+            root_tracks: vec![
+                TrackLeaf {
+                    path: PathBuf::from("/music/Artist/Folder/01.flac"),
+                    title: "A".to_string(),
+                    file_stem: "01".to_string(),
+                    album_tag: "Tag".to_string(),
+                    cover_path: String::new(),
+                    year: Some(2023),
                     track_no: Some(1),
                 },
                 TrackLeaf {

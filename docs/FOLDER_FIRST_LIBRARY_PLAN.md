@@ -18,7 +18,7 @@ Album title/year come from metadata with deterministic fallbacks, disc/subfolder
 8. Loose tracks directly under artist folder are shown as track rows directly under that artist (not as synthetic album).
 9. Album rows format as `<Cover art> Title` or `<Cover art> Title (Year)` when year exists.
 10. Album title/year resolution:
-   1. Year = most common parsed year from tracks in album scope, tie -> earliest year.
+   1. Year = parsed year only when every track in album scope has the same year; otherwise omit it.
    2. Title = metadata album title only when consistent; otherwise fallback to album folder name.
 11. Album ordering per artist:
    1. Default = year ascending, unknown-year albums last, tie-break by title.
