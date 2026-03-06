@@ -328,10 +328,14 @@ enum SearchFallbackOutcome {
 
 impl BridgeState {
     fn snapshot(&self, include_tree: bool, include_queue: bool) -> BridgeSnapshot {
+        let mut metadata = metadata_for_snapshot(&self.metadata);
+        metadata.current_bitrate_kbps = self
+            .metadata
+            .displayed_bitrate_kbps(self.playback.position.as_secs_f64());
         BridgeSnapshot {
             playback: self.playback.clone(),
             analysis: self.analysis.clone(),
-            metadata: metadata_for_snapshot(&self.metadata),
+            metadata,
             library: self.library.clone(),
             library_artist_count: self.library_artist_count,
             library_album_count: self.library_album_count,
@@ -383,6 +387,9 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         bitrate_kbps: metadata.bitrate_kbps,
         channels: metadata.channels,
         bit_depth: metadata.bit_depth,
+        format_label: metadata.format_label.clone(),
+        current_bitrate_kbps: metadata.current_bitrate_kbps,
+        bitrate_timeline_kbps: Vec::new(),
         cover_art_path: metadata.cover_art_path.clone(),
         // Large RGBA cover payload is not needed in bridge snapshots; avoid per-snapshot megabyte clones.
         cover_art_rgba: None,

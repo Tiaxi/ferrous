@@ -194,6 +194,74 @@ QString playbackStateText(int state, const QString &fallback) {
     }
 }
 
+QString channelLayoutText(int channels) {
+    switch (channels) {
+    case 1:
+        return QStringLiteral("mono");
+    case 2:
+        return QStringLiteral("stereo");
+    case 3:
+        return QStringLiteral("3.0");
+    case 4:
+        return QStringLiteral("4.0");
+    case 5:
+        return QStringLiteral("5.0");
+    case 6:
+        return QStringLiteral("5.1");
+    case 7:
+        return QStringLiteral("6.1");
+    case 8:
+        return QStringLiteral("7.1");
+    default:
+        return channels > 0 ? QStringLiteral("%1 ch").arg(channels) : QString{};
+    }
+}
+
+QString channelLayoutIconKey(int channels) {
+    switch (channels) {
+    case 1:
+        return QStringLiteral("mono");
+    case 2:
+        return QStringLiteral("stereo");
+    case 4:
+        return QStringLiteral("4.0");
+    case 5:
+        return QStringLiteral("5.0");
+    case 6:
+        return QStringLiteral("5.1");
+    case 7:
+        return QStringLiteral("6.1");
+    case 8:
+        return QStringLiteral("7.1");
+    default:
+        return QString{};
+    }
+}
+
+QString formatLabelFromPath(const QString &path) {
+    const QString ext = QFileInfo(path).suffix().trimmed().toLower();
+    if (ext == QStringLiteral("m4a")
+        || ext == QStringLiteral("m4b")
+        || ext == QStringLiteral("m4p")
+        || ext == QStringLiteral("m4r")
+        || ext == QStringLiteral("mp4")) {
+        return QStringLiteral("AAC");
+    }
+    if (ext == QStringLiteral("aif")
+        || ext == QStringLiteral("aiff")
+        || ext == QStringLiteral("aifc")
+        || ext == QStringLiteral("afc")) {
+        return QStringLiteral("AIFF");
+    }
+    if (ext == QStringLiteral("ogg")) {
+        return QStringLiteral("Vorbis");
+    }
+    if (ext == QStringLiteral("wv")) {
+        return QStringLiteral("WavPack");
+    }
+    return ext.isEmpty() ? QString{} : ext.toUpper();
+}
+
 } // namespace
 
 BridgeClient::BridgeClient(QObject *parent)
@@ -881,6 +949,30 @@ QString BridgeClient::currentTrackGenre() const {
 
 QVariant BridgeClient::currentTrackYear() const {
     return m_currentTrackYear;
+}
+
+QString BridgeClient::currentTrackFormatLabel() const {
+    return m_currentTrackFormatLabel;
+}
+
+QString BridgeClient::currentTrackChannelLayoutText() const {
+    return channelLayoutText(m_currentTrackChannels);
+}
+
+QString BridgeClient::currentTrackChannelLayoutIconKey() const {
+    return channelLayoutIconKey(m_currentTrackChannels);
+}
+
+int BridgeClient::currentTrackSampleRateHz() const {
+    return m_currentTrackSampleRateHz;
+}
+
+int BridgeClient::currentTrackBitDepth() const {
+    return m_currentTrackBitDepth;
+}
+
+int BridgeClient::currentTrackCurrentBitrateKbps() const {
+    return m_currentTrackCurrentBitrateKbps;
 }
 
 QByteArray BridgeClient::waveformPeaksPacked() const {
@@ -2199,6 +2291,16 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const int metadataYear = snapshot.metadata.present
         ? snapshot.metadata.year
         : std::numeric_limits<int>::min();
+    const QString metadataFormatLabel =
+        snapshot.metadata.present ? snapshot.metadata.formatLabel : QString{};
+    const int metadataChannels = snapshot.metadata.present ? snapshot.metadata.channels : 0;
+    const int metadataSampleRateHz = snapshot.metadata.present ? snapshot.metadata.sampleRateHz : 0;
+    const int metadataBitDepth = snapshot.metadata.present ? snapshot.metadata.bitDepth : 0;
+    const int metadataCurrentBitrateKbps = snapshot.metadata.present
+        ? (snapshot.metadata.currentBitrateKbps > 0
+            ? snapshot.metadata.currentBitrateKbps
+            : snapshot.metadata.bitrateKbps)
+        : 0;
     QString metadataCoverUrl;
     if (!metadataCoverPath.trimmed().isEmpty() && metadataSourcePath == currentPath) {
         const QUrl maybeUrl(metadataCoverPath);
@@ -2380,8 +2482,22 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     QString nextTrackAlbum = m_currentTrackAlbum;
     QString nextTrackGenre = m_currentTrackGenre;
     QVariant nextTrackYear = m_currentTrackYear;
+    QString nextTrackFormatLabel = currentPath.isEmpty()
+        ? QString{}
+        : formatLabelFromPath(currentPath);
+    int nextTrackChannels = 0;
+    int nextTrackSampleRateHz = 0;
+    int nextTrackBitDepth = 0;
+    int nextTrackCurrentBitrateKbps = 0;
     QString queueTrackCover;
     const bool stoppedTrackAdvanced = isStopped && hadTrackContextPath && currentPathChanged;
+    if (!currentPathChanged) {
+        nextTrackFormatLabel = m_currentTrackFormatLabel;
+        nextTrackChannels = m_currentTrackChannels;
+        nextTrackSampleRateHz = m_currentTrackSampleRateHz;
+        nextTrackBitDepth = m_currentTrackBitDepth;
+        nextTrackCurrentBitrateKbps = m_currentTrackCurrentBitrateKbps;
+    }
     if (!currentPath.isEmpty() && (!isStopped || stoppedTrackAdvanced)) {
         int detailIndex = playing;
         if (detailIndex < 0 && !m_queuePaths.isEmpty()) {
@@ -2437,6 +2553,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackTitle = fallbackTitle.isEmpty() ? currentPath : fallbackTitle;
         }
     }
+    if (!currentPath.isEmpty()
+        && snapshot.metadata.present
+        && metadataSourcePath == currentPath) {
+        if (!metadataFormatLabel.trimmed().isEmpty()) {
+            nextTrackFormatLabel = metadataFormatLabel;
+        }
+        nextTrackChannels = metadataChannels;
+        nextTrackSampleRateHz = metadataSampleRateHz;
+        nextTrackBitDepth = metadataBitDepth;
+        nextTrackCurrentBitrateKbps = metadataCurrentBitrateKbps;
+    }
     if (m_currentTrackTitle != nextTrackTitle) {
         m_currentTrackTitle = nextTrackTitle;
         changed = true;
@@ -2455,6 +2582,26 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_currentTrackYear != nextTrackYear) {
         m_currentTrackYear = nextTrackYear;
+        changed = true;
+    }
+    if (m_currentTrackFormatLabel != nextTrackFormatLabel) {
+        m_currentTrackFormatLabel = nextTrackFormatLabel;
+        changed = true;
+    }
+    if (m_currentTrackChannels != nextTrackChannels) {
+        m_currentTrackChannels = nextTrackChannels;
+        changed = true;
+    }
+    if (m_currentTrackSampleRateHz != nextTrackSampleRateHz) {
+        m_currentTrackSampleRateHz = nextTrackSampleRateHz;
+        changed = true;
+    }
+    if (m_currentTrackBitDepth != nextTrackBitDepth) {
+        m_currentTrackBitDepth = nextTrackBitDepth;
+        changed = true;
+    }
+    if (m_currentTrackCurrentBitrateKbps != nextTrackCurrentBitrateKbps) {
+        m_currentTrackCurrentBitrateKbps = nextTrackCurrentBitrateKbps;
         changed = true;
     }
 
@@ -2631,8 +2778,15 @@ QString BridgeClient::formatSeconds(double seconds) {
         return QStringLiteral("--:--");
     }
     const int total = static_cast<int>(seconds + 0.5);
-    const int minutes = total / 60;
+    const int hours = total / 3600;
+    const int minutes = (total % 3600) / 60;
     const int secs = total % 60;
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3")
+            .arg(hours)
+            .arg(minutes, 2, 10, QChar('0'))
+            .arg(secs, 2, 10, QChar('0'));
+    }
     return QStringLiteral("%1:%2")
         .arg(minutes, 2, 10, QChar('0'))
         .arg(secs, 2, 10, QChar('0'));

@@ -125,6 +125,8 @@ struct DecodedMetadata {
     int bitrateKbps{0};
     int channels{0};
     int bitDepth{0};
+    QString formatLabel;
+    int currentBitrateKbps{0};
     QString coverPath;
 };
 

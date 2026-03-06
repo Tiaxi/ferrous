@@ -165,6 +165,12 @@ Kirigami.ApplicationWindow {
         property string currentTrackAlbum: ""
         property string currentTrackGenre: ""
         property var currentTrackYear: null
+        property string currentTrackFormatLabel: ""
+        property string currentTrackChannelLayoutText: ""
+        property string currentTrackChannelLayoutIconKey: ""
+        property int currentTrackSampleRateHz: 0
+        property int currentTrackBitDepth: 0
+        property int currentTrackCurrentBitrateKbps: 0
         property var waveformPeaksPacked: ""
         property bool spectrogramReset: false
         property real dbRange: 90
@@ -1244,21 +1250,156 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    function statusLineText() {
+    function formatSampleRateText(sampleRateHz) {
+        const rate = Number(sampleRateHz)
+        if (!isFinite(rate) || rate <= 0) {
+            return ""
+        }
+        const khz = rate / 1000.0
+        const roundedTenth = Math.round(khz * 10) / 10
+        const wholeKhz = Math.round(roundedTenth)
+        const valueText = Math.abs(roundedTenth - wholeKhz) < 0.05
+            ? wholeKhz.toString()
+            : roundedTenth.toFixed(1)
+        return valueText + " kHz"
+    }
+
+    function formatBitDepthSampleRateText(bitDepth, sampleRateHz) {
+        const bitValue = Number(bitDepth)
+        const sampleRateText = formatSampleRateText(sampleRateHz)
+        const bitText = isFinite(bitValue) && bitValue > 0
+            ? Math.floor(bitValue).toString() + " bit"
+            : ""
+        if (bitText.length > 0 && sampleRateText.length > 0) {
+            return bitText + "/" + sampleRateText
+        }
+        if (bitText.length > 0) {
+            return bitText
+        }
+        return sampleRateText
+    }
+
+    function playlistStatusSummary() {
+        const count = Math.max(0, Number(uiBridge.queueLength) || 0)
+        const noun = count === 1 ? "track" : "tracks"
+        return count.toString() + " " + noun + " (" + (uiBridge.queueDurationText || "00:00") + ")"
+    }
+
+    function statusBarSections() {
         if (root.transientBridgeError.length > 0) {
-            return "error | " + root.transientBridgeError
+            return [{ text: "Error", emphasis: true }, { text: root.transientBridgeError }]
         }
         if (!uiBridge.connected) {
-            return "bridge disconnected"
+            return [{ text: "Bridge disconnected" }]
         }
-        return uiBridge.playbackState.toLowerCase()
-            + " | " + uiBridge.positionText + "/" + uiBridge.durationText
-            + " | tracks " + uiBridge.queueLength
-            + " | qdur " + uiBridge.queueDurationText
-            + " | sel q:" + queueSelectionCount() + " l:" + librarySelectionCount()
-            + " | " + librarySelectionStatusText()
-            + " | " + repeatModeText(uiBridge.repeatMode)
-            + " | " + (uiBridge.shuffleEnabled ? "shuffle-on" : "shuffle-off")
+
+        const sections = [
+            { text: uiBridge.playbackState || "Stopped" },
+            { text: (uiBridge.positionText || "00:00") + "/" + (uiBridge.durationText || "00:00") }
+        ]
+
+        const formatLabel = (uiBridge.currentTrackFormatLabel || "").trim()
+        if (formatLabel.length > 0) {
+            sections.push({ text: formatLabel })
+        }
+
+        const channelText = (uiBridge.currentTrackChannelLayoutText || "").trim()
+        if (channelText.length > 0) {
+            sections.push({
+                text: channelText,
+                iconKey: (uiBridge.currentTrackChannelLayoutIconKey || "").trim()
+            })
+        }
+
+        const bitDepthSampleRateText = formatBitDepthSampleRateText(
+            uiBridge.currentTrackBitDepth,
+            uiBridge.currentTrackSampleRateHz)
+        if (bitDepthSampleRateText.length > 0) {
+            sections.push({ text: bitDepthSampleRateText })
+        }
+
+        const bitrateKbps = Number(uiBridge.currentTrackCurrentBitrateKbps)
+        if (isFinite(bitrateKbps) && bitrateKbps > 0) {
+            sections.push({ text: Math.round(bitrateKbps).toString() + " kbps" })
+        }
+
+        sections.push({ text: playlistStatusSummary(), stretch: true })
+        return sections
+    }
+
+    function channelStatusIconSource(iconKey) {
+        switch (iconKey) {
+        case "mono":
+            return Qt.resolvedUrl("assets/channel-mono.svg")
+        case "stereo":
+            return Qt.resolvedUrl("assets/channel-stereo.svg")
+        case "4.0":
+            return Qt.resolvedUrl("assets/channel-4_0.svg")
+        case "5.0":
+            return Qt.resolvedUrl("assets/channel-5_0.svg")
+        case "5.1":
+            return Qt.resolvedUrl("assets/channel-5_1.svg")
+        case "7.1":
+            return Qt.resolvedUrl("assets/channel-7_1.svg")
+        default:
+            return ""
+        }
+    }
+
+    function channelStatusIconCells(iconKey) {
+        switch (iconKey) {
+        case "mono":
+            return [{ x: 7, y: 2, w: 4, h: 3 }]
+        case "stereo":
+            return [{ x: 2, y: 2, w: 3, h: 3 }, { x: 13, y: 2, w: 3, h: 3 }]
+        case "4.0":
+            return [
+                { x: 2, y: 2, w: 3, h: 3 },
+                { x: 13, y: 2, w: 3, h: 3 },
+                { x: 2, y: 11, w: 3, h: 3 },
+                { x: 13, y: 11, w: 3, h: 3 }
+            ]
+        case "5.0":
+            return [
+                { x: 2, y: 2, w: 3, h: 3 },
+                { x: 7, y: 2, w: 4, h: 3 },
+                { x: 13, y: 2, w: 3, h: 3 },
+                { x: 2, y: 11, w: 3, h: 3 },
+                { x: 13, y: 11, w: 3, h: 3 }
+            ]
+        case "5.1":
+            return [
+                { x: 2, y: 2, w: 3, h: 3 },
+                { x: 7, y: 2, w: 4, h: 3 },
+                { x: 13, y: 2, w: 3, h: 3 },
+                { x: 2, y: 11, w: 3, h: 3 },
+                { x: 13, y: 11, w: 3, h: 3 },
+                { x: 8, y: 7, w: 2, h: 2, lfe: true }
+            ]
+        case "6.1":
+            return [
+                { x: 2, y: 2, w: 3, h: 3 },
+                { x: 7, y: 2, w: 4, h: 3 },
+                { x: 13, y: 2, w: 3, h: 3 },
+                { x: 1, y: 7, w: 3, h: 3 },
+                { x: 14, y: 7, w: 3, h: 3 },
+                { x: 7, y: 11, w: 4, h: 3 },
+                { x: 8, y: 7, w: 2, h: 2, lfe: true }
+            ]
+        case "7.1":
+            return [
+                { x: 2, y: 2, w: 3, h: 3 },
+                { x: 7, y: 2, w: 4, h: 3 },
+                { x: 13, y: 2, w: 3, h: 3 },
+                { x: 1, y: 7, w: 3, h: 3 },
+                { x: 14, y: 7, w: 3, h: 3 },
+                { x: 3, y: 11, w: 3, h: 3 },
+                { x: 12, y: 11, w: 3, h: 3 },
+                { x: 8, y: 7, w: 2, h: 2, lfe: true }
+            ]
+        default:
+            return []
+        }
     }
 
     function selectQueueRelative(delta) {
@@ -3312,11 +3453,60 @@ Kirigami.ApplicationWindow {
 
     footer: ToolBar {
         contentItem: RowLayout {
-            spacing: 8
-            Label {
-                Layout.fillWidth: true
-                text: statusLineText()
-                elide: Text.ElideRight
+            spacing: 6
+
+            Repeater {
+                model: statusBarSections()
+
+                delegate: RowLayout {
+                    required property int index
+                    required property var modelData
+
+                    spacing: 6
+                    Layout.fillWidth: !!modelData.stretch
+
+                    Label {
+                        visible: index > 0
+                        text: "|"
+                        color: root.uiMutedTextColor
+                    }
+
+                    RowLayout {
+                        readonly property string channelIconSource: root.channelStatusIconSource(modelData.iconKey || "")
+                        spacing: channelIconSource.length > 0 ? 4 : 0
+                        Layout.fillWidth: !!modelData.stretch
+
+                        Item {
+                            id: channelIconItem
+                            visible: parent.channelIconSource.length > 0
+                            Layout.preferredWidth: visible ? 22 : 0
+                            Layout.preferredHeight: 20
+                            property url iconSource: parent.channelIconSource.length > 0
+                                ? parent.channelIconSource
+                                : ""
+
+                            Image {
+                                anchors.fill: parent
+                                source: channelIconItem.iconSource
+                                asynchronous: false
+                                fillMode: Image.PreserveAspectFit
+                                smooth: false
+                                sourceSize.width: 44
+                                sourceSize.height: 40
+                            }
+                        }
+
+                        Label {
+                            Layout.fillWidth: !!modelData.stretch
+                            text: modelData.text || ""
+                            elide: Text.ElideRight
+                            color: modelData.emphasis
+                                ? Kirigami.Theme.highlightedTextColor
+                                : root.uiTextColor
+                            font.weight: modelData.emphasis ? Font.DemiBold : Font.Normal
+                        }
+                    }
+                }
             }
         }
     }

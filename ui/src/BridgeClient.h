@@ -42,6 +42,12 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackGenre READ currentTrackGenre NOTIFY snapshotChanged)
     Q_PROPERTY(QVariant currentTrackYear READ currentTrackYear NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackFormatLabel READ currentTrackFormatLabel NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackChannelLayoutText READ currentTrackChannelLayoutText NOTIFY snapshotChanged)
+    Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY snapshotChanged)
+    Q_PROPERTY(int currentTrackSampleRateHz READ currentTrackSampleRateHz NOTIFY snapshotChanged)
+    Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY snapshotChanged)
+    Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY snapshotChanged)
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
     Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY analysisChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
@@ -103,6 +109,12 @@ public:
     QString currentTrackAlbum() const;
     QString currentTrackGenre() const;
     QVariant currentTrackYear() const;
+    QString currentTrackFormatLabel() const;
+    QString currentTrackChannelLayoutText() const;
+    QString currentTrackChannelLayoutIconKey() const;
+    int currentTrackSampleRateHz() const;
+    int currentTrackBitDepth() const;
+    int currentTrackCurrentBitrateKbps() const;
     QByteArray waveformPeaksPacked() const;
     bool spectrogramReset() const;
     int sampleRateHz() const;
@@ -285,6 +297,11 @@ private:
     QString m_currentTrackAlbum;
     QString m_currentTrackGenre;
     QVariant m_currentTrackYear;
+    QString m_currentTrackFormatLabel;
+    int m_currentTrackChannels{0};
+    int m_currentTrackSampleRateHz{0};
+    int m_currentTrackBitDepth{0};
+    int m_currentTrackCurrentBitrateKbps{0};
     QByteArray m_waveformPeaksPacked;
     QByteArray m_spectrogramRowsPacked;
     int m_spectrogramPackedRows{0};

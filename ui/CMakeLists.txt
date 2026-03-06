@@ -59,6 +59,13 @@ qt_add_qml_module(ferrous
     NO_IMPORT_SCAN
     QML_FILES
         qml/Main.qml
+    RESOURCES
+        qml/assets/channel-mono.svg
+        qml/assets/channel-stereo.svg
+        qml/assets/channel-4_0.svg
+        qml/assets/channel-5_0.svg
+        qml/assets/channel-5_1.svg
+        qml/assets/channel-7_1.svg
 )
 
 target_link_libraries(ferrous PRIVATE

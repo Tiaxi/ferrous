@@ -316,6 +316,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     Reader reader(payload);
     quint32 sampleRateHz = 0;
     quint32 bitrateKbps = 0;
+    quint32 currentBitrateKbps = 0;
     quint16 channels = 0;
     quint16 bitDepth = 0;
     if (!reader.readUtf8U16(&out->sourcePath)
@@ -328,6 +329,8 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
         || !reader.readU32(&bitrateKbps)
         || !reader.readU16(&channels)
         || !reader.readU16(&bitDepth)
+        || !reader.readUtf8U16(&out->formatLabel)
+        || !reader.readU32(&currentBitrateKbps)
         || !reader.readUtf8U16(&out->coverPath)
         || !reader.atEnd()) {
         return false;
@@ -337,6 +340,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     out->bitrateKbps = static_cast<int>(bitrateKbps);
     out->channels = static_cast<int>(channels);
     out->bitDepth = static_cast<int>(bitDepth);
+    out->currentBitrateKbps = static_cast<int>(currentBitrateKbps);
     return true;
 }
 

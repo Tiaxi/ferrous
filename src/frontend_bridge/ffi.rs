@@ -1069,6 +1069,11 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u32(&mut out, snapshot.metadata.bitrate_kbps.unwrap_or(0));
     push_u16(&mut out, snapshot.metadata.channels.map_or(0, u16::from));
     push_u16(&mut out, snapshot.metadata.bit_depth.map_or(0, u16::from));
+    push_u16_string(&mut out, &snapshot.metadata.format_label);
+    push_u32(
+        &mut out,
+        snapshot.metadata.current_bitrate_kbps.unwrap_or(0),
+    );
     push_u16_string(
         &mut out,
         snapshot
@@ -1312,6 +1317,9 @@ mod tests {
                 bitrate_kbps: Some(320),
                 channels: Some(2),
                 bit_depth: Some(24),
+                format_label: "FLAC".to_string(),
+                current_bitrate_kbps: Some(905),
+                bitrate_timeline_kbps: vec![905, 877, 901],
                 cover_art_path: Some("/music/a.cover.png".to_string()),
                 cover_art_rgba: None,
             },
@@ -1608,6 +1616,8 @@ mod tests {
             u16::from_le_bytes(encoded[start..end].try_into().expect("bit depth"))
         };
         assert_eq!(bit_depth, 24);
+        assert_eq!(read_u16_string(&encoded, &mut offset), "FLAC");
+        assert_eq!(read_u32(&encoded, &mut offset), 905);
         assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.cover.png");
         assert_eq!(offset, encoded.len());
     }
