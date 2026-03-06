@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDateTime>
+#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
@@ -226,6 +227,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("Ferrous"));
     QApplication::setApplicationDisplayName(QStringLiteral("Ferrous"));
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/assets/ferrous.svg")));
     if (hasInstalledDesktopEntry(QStringLiteral("ferrous.desktop"))) {
         QApplication::setDesktopFileName(QStringLiteral("ferrous"));
     }

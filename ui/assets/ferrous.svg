@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="32" y1="24" x2="224" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d9efff"/>
+      <stop offset="1" stop-color="#75a9db"/>
+    </linearGradient>
+    <linearGradient id="groove" x1="64" y1="56" x2="192" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22304c"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="96" y1="88" x2="164" y2="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f9fcff"/>
+      <stop offset="1" stop-color="#b5c4d8"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="18" width="220" height="220" rx="52" fill="url(#bg)"/>
+  <rect x="18" y="18" width="220" height="220" rx="52" fill="none" stroke="#284f76" stroke-opacity=".18" stroke-width="4"/>
+  <circle cx="128" cy="128" r="76" fill="url(#groove)"/>
+  <circle cx="128" cy="128" r="61" fill="none" stroke="#4d6387" stroke-width="6"/>
+  <circle cx="128" cy="128" r="28" fill="url(#metal)"/>
+  <circle cx="128" cy="128" r="11" fill="#1c2740"/>
+  <path d="M169 56c13 9 23 22 30 38" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-opacity=".55" stroke-width="10"/>
+  <path d="M81 188l40-40 18 18 39-52" fill="none" stroke="#f97316" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/>
+</svg>

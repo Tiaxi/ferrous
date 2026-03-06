@@ -73,6 +73,12 @@ target_include_directories(ferrous PRIVATE src)
 add_dependencies(ferrous ferrous_rust_bridge)
 ferrous_enable_strict_warnings(ferrous)
 
+qt_add_resources(ferrous ferrous_app_resources
+    PREFIX "/icons"
+    FILES
+        assets/ferrous.svg
+)
+
 qt_add_qml_module(ferrous
     URI FerrousUi
     VERSION 1.0
@@ -119,6 +125,7 @@ endif()
 
 install(TARGETS ferrous RUNTIME DESTINATION bin)
 install(FILES ferrous.desktop DESTINATION share/applications)
+install(FILES assets/ferrous.svg DESTINATION share/icons/hicolor/scalable/apps RENAME ferrous.svg)
 
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
