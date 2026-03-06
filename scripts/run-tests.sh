@@ -7,6 +7,10 @@ UI_DIR="${REPO_ROOT}/ui"
 BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${UI_DIR}/build}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/load-build-env.sh"
+load_repo_build_env "${REPO_ROOT}"
+
 RUN_RUST=1
 RUN_UI=1
 DO_CONFIGURE=1

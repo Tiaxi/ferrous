@@ -8,6 +8,10 @@ BUILD_DIR="${FERROUS_UI_BUILD_DIR:-${UI_DIR}/build}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/load-build-env.sh"
+load_repo_build_env "${REPO_ROOT}"
+
 DO_CONFIGURE=1
 DO_BUILD=1
 DO_RUN=1

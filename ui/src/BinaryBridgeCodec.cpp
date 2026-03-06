@@ -377,6 +377,33 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     return true;
 }
 
+bool decodeLastFmSection(const QByteArray &payload, DecodedLastFm *out) {
+    if (!out) {
+        return false;
+    }
+    Reader reader(payload);
+    quint8 enabled = 0;
+    quint8 buildConfigured = 0;
+    quint8 authState = 0;
+    quint32 pendingScrobbleCount = 0;
+    if (!reader.readU8(&enabled)
+        || !reader.readU8(&buildConfigured)
+        || !reader.readU8(&authState)
+        || !reader.readU32(&pendingScrobbleCount)
+        || !reader.readUtf8U16(&out->username)
+        || !reader.readUtf8U16(&out->statusText)
+        || !reader.readUtf8U16(&out->authUrl)
+        || !reader.atEnd()) {
+        return false;
+    }
+    out->present = true;
+    out->enabled = enabled != 0;
+    out->buildConfigured = buildConfigured != 0;
+    out->authState = static_cast<int>(authState);
+    out->pendingScrobbleCount = static_cast<int>(pendingScrobbleCount);
+    return true;
+}
+
 } // namespace
 
 QByteArray encodeCommandNoPayload(quint16 cmdId) {
@@ -519,7 +546,7 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
 
     out->sectionMask = mask;
 
-    for (int bit = 0; bit < 8; ++bit) {
+    for (int bit = 0; bit < 16; ++bit) {
         const quint16 sectionBit = static_cast<quint16>(1u << bit);
         if ((mask & sectionBit) == 0) {
             continue;
@@ -558,6 +585,9 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             break;
         case SectionSettings:
             ok = decodeSettingsSection(sectionPayload, &out->settings);
+            break;
+        case SectionLastFm:
+            ok = decodeLastFmSection(sectionPayload, &out->lastfm);
             break;
         case SectionError: {
             Reader sectionReader(sectionPayload);

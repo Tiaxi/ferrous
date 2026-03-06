@@ -59,6 +59,12 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool shuffleEnabled READ shuffleEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(bool systemMediaControlsEnabled READ systemMediaControlsEnabled NOTIFY snapshotChanged)
+    Q_PROPERTY(bool lastFmScrobblingEnabled READ lastFmScrobblingEnabled NOTIFY snapshotChanged)
+    Q_PROPERTY(bool lastFmBuildConfigured READ lastFmBuildConfigured NOTIFY snapshotChanged)
+    Q_PROPERTY(QString lastFmUsername READ lastFmUsername NOTIFY snapshotChanged)
+    Q_PROPERTY(int lastFmAuthState READ lastFmAuthState NOTIFY snapshotChanged)
+    Q_PROPERTY(int lastFmPendingScrobbleCount READ lastFmPendingScrobbleCount NOTIFY snapshotChanged)
+    Q_PROPERTY(QString lastFmStatusText READ lastFmStatusText NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
     Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY snapshotChanged)
@@ -129,6 +135,12 @@ public:
     bool shuffleEnabled() const;
     bool showFps() const;
     bool systemMediaControlsEnabled() const;
+    bool lastFmScrobblingEnabled() const;
+    bool lastFmBuildConfigured() const;
+    QString lastFmUsername() const;
+    int lastFmAuthState() const;
+    int lastFmPendingScrobbleCount() const;
+    QString lastFmStatusText() const;
     QStringList libraryAlbums() const;
     QByteArray libraryTreeBinary() const;
     int libraryVersion() const;
@@ -171,6 +183,10 @@ public:
     Q_INVOKABLE void setShuffleEnabled(bool value);
     Q_INVOKABLE void setShowFps(bool value);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
+    Q_INVOKABLE void setLastFmScrobblingEnabled(bool value);
+    Q_INVOKABLE void beginLastFmAuth();
+    Q_INVOKABLE void completeLastFmAuth();
+    Q_INVOKABLE void disconnectLastFm();
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
@@ -323,6 +339,14 @@ private:
     bool m_shuffleEnabled{false};
     bool m_showFps{false};
     bool m_systemMediaControlsEnabled{true};
+    bool m_lastFmScrobblingEnabled{false};
+    bool m_lastFmBuildConfigured{false};
+    QString m_lastFmUsername;
+    int m_lastFmAuthState{0};
+    int m_lastFmPendingScrobbleCount{0};
+    QString m_lastFmStatusText;
+    QString m_lastFmAuthUrl;
+    QString m_lastOpenedExternalUrl;
     QStringList m_libraryAlbums;
     QByteArray m_libraryTreeBinary;
     int m_libraryVersion{0};

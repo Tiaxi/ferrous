@@ -20,6 +20,7 @@ enum SnapshotSection : quint16 {
     SectionSettings = 1u << 5,
     SectionError = 1u << 6,
     SectionStopped = 1u << 7,
+    SectionLastFm = 1u << 8,
 };
 
 enum CommandId : quint16 {
@@ -61,6 +62,10 @@ enum CommandId : quint16 {
     CmdReplaceAllTracks = 36,
     CmdAppendAllTracks = 37,
     CmdSetSystemMediaControls = 38,
+    CmdSetLastFmScrobblingEnabled = 39,
+    CmdBeginLastFmAuth = 40,
+    CmdCompleteLastFmAuth = 41,
+    CmdDisconnectLastFm = 42,
 };
 
 struct DecodedPlayback {
@@ -142,6 +147,17 @@ struct DecodedSettings {
     bool systemMediaControlsEnabled{true};
 };
 
+struct DecodedLastFm {
+    bool present{false};
+    bool enabled{false};
+    bool buildConfigured{false};
+    int authState{0};
+    int pendingScrobbleCount{0};
+    QString username;
+    QString statusText;
+    QString authUrl;
+};
+
 struct DecodedSnapshot {
     quint16 sectionMask{0};
     bool hasStopped{false};
@@ -151,6 +167,7 @@ struct DecodedSnapshot {
     DecodedLibraryMeta library;
     DecodedMetadata metadata;
     DecodedSettings settings;
+    DecodedLastFm lastfm;
 };
 
 enum SearchRowType : quint8 {

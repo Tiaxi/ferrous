@@ -30,6 +30,7 @@ const SECTION_METADATA: u16 = 1 << 4;
 const SECTION_SETTINGS: u16 = 1 << 5;
 const SECTION_ERROR: u16 = 1 << 6;
 const SECTION_STOPPED: u16 = 1 << 7;
+const SECTION_LASTFM: u16 = 1 << 8;
 
 #[derive(Default)]
 struct AnalysisDelta {
@@ -704,6 +705,23 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
                 enabled,
             ))
         }
+        39 => {
+            let enabled = reader.read_u8()? != 0;
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmScrobblingEnabled(enabled))
+        }
+        40 => {
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::BeginLastFmAuth)
+        }
+        41 => {
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::CompleteLastFmAuth)
+        }
+        42 => {
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::DisconnectLastFm)
+        }
         _ => return Err(format!("unknown binary command id {cmd_id}")),
     };
 
@@ -791,6 +809,7 @@ fn encode_binary_snapshot(
         (SECTION_LIBRARY_META, encode_library_meta_section(snapshot)),
         (SECTION_METADATA, encode_metadata_section(snapshot)),
         (SECTION_SETTINGS, encode_settings_section(snapshot)),
+        (SECTION_LASTFM, encode_lastfm_section(snapshot)),
     ];
     if let Some(section) = queue_section {
         sections.insert(1, (SECTION_QUEUE, encode_queue_section(snapshot, section)));
@@ -1121,6 +1140,25 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     out
 }
 
+fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    let auth_state = match snapshot.lastfm.auth_state {
+        crate::lastfm::AuthState::Disconnected => 0u8,
+        crate::lastfm::AuthState::AwaitingBrowserApproval => 1u8,
+        crate::lastfm::AuthState::Connected => 2u8,
+        crate::lastfm::AuthState::ReauthRequired => 3u8,
+        crate::lastfm::AuthState::Error => 4u8,
+    };
+    push_u8(&mut out, u8::from(snapshot.lastfm.enabled));
+    push_u8(&mut out, u8::from(snapshot.lastfm.build_configured));
+    push_u8(&mut out, auth_state);
+    push_u32(&mut out, snapshot.lastfm.pending_scrobble_count as u32);
+    push_u16_string(&mut out, &snapshot.lastfm.username);
+    push_u16_string(&mut out, &snapshot.lastfm.status_text);
+    push_u16_string(&mut out, &snapshot.lastfm.auth_url);
+    out
+}
+
 fn clamp_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
 }
@@ -1398,6 +1436,17 @@ mod tests {
                 show_fps: false,
                 system_media_controls_enabled: true,
                 library_sort_mode: LibrarySortMode::Year,
+                lastfm_scrobbling_enabled: true,
+                lastfm_username: "tester".to_string(),
+            },
+            lastfm: crate::lastfm::RuntimeState {
+                enabled: true,
+                build_configured: true,
+                username: "tester".to_string(),
+                auth_state: crate::lastfm::AuthState::Connected,
+                pending_scrobble_count: 2,
+                status_text: "Connected".to_string(),
+                auth_url: String::new(),
             },
         }
     }
@@ -1520,6 +1569,40 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+
+        let cmd = parse_binary_command(&encode_command(39, &[1]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmScrobblingEnabled(v)) => {
+                assert!(v);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_binary_command(&encode_command(40, &[]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::BeginLastFmAuth)
+        ));
+
+        let cmd = parse_binary_command(&encode_command(41, &[]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::CompleteLastFmAuth)
+        ));
+
+        let cmd = parse_binary_command(&encode_command(42, &[]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::DisconnectLastFm)
+        ));
     }
 
     #[test]
@@ -1747,6 +1830,38 @@ mod tests {
         let settings_len = read_u32(&packet, &mut offset) as usize;
         let settings = &packet[offset..offset + settings_len];
         assert_eq!(settings.last().copied(), Some(0));
+    }
+
+    #[test]
+    fn lastfm_section_encodes_runtime_state() {
+        let snapshot = sample_snapshot();
+        let queue_section = compute_queue_section_data(&snapshot);
+        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
+        let mut offset = 12usize;
+        let playback_len = read_u32(&packet, &mut offset) as usize;
+        offset += playback_len;
+        let queue_len = read_u32(&packet, &mut offset) as usize;
+        offset += queue_len;
+        let library_len = read_u32(&packet, &mut offset) as usize;
+        offset += library_len;
+        let metadata_len = read_u32(&packet, &mut offset) as usize;
+        offset += metadata_len;
+        let settings_len = read_u32(&packet, &mut offset) as usize;
+        offset += settings_len;
+        let lastfm_len = read_u32(&packet, &mut offset) as usize;
+        let lastfm = &packet[offset..offset + lastfm_len];
+        let mut lastfm_offset = 0usize;
+        assert_eq!(lastfm[lastfm_offset], 1);
+        lastfm_offset += 1;
+        assert_eq!(lastfm[lastfm_offset], 1);
+        lastfm_offset += 1;
+        assert_eq!(lastfm[lastfm_offset], 2);
+        lastfm_offset += 1;
+        assert_eq!(read_u32(lastfm, &mut lastfm_offset), 2);
+        assert_eq!(read_u16_string(lastfm, &mut lastfm_offset), "tester");
+        assert_eq!(read_u16_string(lastfm, &mut lastfm_offset), "Connected");
+        assert_eq!(read_u16_string(lastfm, &mut lastfm_offset), "");
+        assert_eq!(lastfm_offset, lastfm.len());
     }
 
     #[test]

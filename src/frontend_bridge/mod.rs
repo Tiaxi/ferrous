@@ -4,13 +4,18 @@ use std::fs;
 use std::io::{BufRead, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TrySendError};
 use serde_json::json;
 use walkdir::WalkDir;
 
 use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
+use crate::lastfm::{
+    self, Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
+    NowPlayingTrack as LastFmNowPlayingTrack, RuntimeState as LastFmRuntimeState,
+    ScrobbleEntry as LastFmScrobbleEntry, ServiceOptions as LastFmServiceOptions,
+};
 use crate::library::{
     is_supported_audio, read_track_info, search_tracks_fts, IndexedTrack, LibraryCommand,
     LibraryEvent, LibrarySearchTrack, LibraryService, LibrarySnapshot, LibraryTrack,
@@ -137,6 +142,10 @@ pub enum BridgeSettingsCommand {
     SetShowFps(bool),
     SetSystemMediaControlsEnabled(bool),
     SetLibrarySortMode(LibrarySortMode),
+    SetLastFmScrobblingEnabled(bool),
+    BeginLastFmAuth,
+    CompleteLastFmAuth,
+    DisconnectLastFm,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +203,7 @@ pub struct BridgeSnapshot {
     pub queue: Vec<PathBuf>,
     pub selected_queue_index: Option<usize>,
     pub settings: BridgeSettings,
+    pub lastfm: LastFmRuntimeState,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +215,8 @@ pub struct BridgeSettings {
     pub show_fps: bool,
     pub system_media_controls_enabled: bool,
     pub library_sort_mode: LibrarySortMode,
+    pub lastfm_scrobbling_enabled: bool,
+    pub lastfm_username: String,
 }
 
 impl Default for BridgeSettings {
@@ -220,6 +232,8 @@ impl Default for BridgeSettings {
             show_fps,
             system_media_controls_enabled: true,
             library_sort_mode: LibrarySortMode::Year,
+            lastfm_scrobbling_enabled: false,
+            lastfm_username: String::new(),
         }
     }
 }
@@ -238,8 +252,23 @@ struct BridgeState {
     queue: Vec<PathBuf>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
+    lastfm: LastFmRuntimeState,
     pending_search_results: Option<BridgeSearchResultsFrame>,
     pending_waveform_track: Option<PendingWaveformTrack>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LastFmPlaybackTracker {
+    active_path: Option<PathBuf>,
+    artist: String,
+    track: String,
+    album: String,
+    track_number: Option<u32>,
+    duration_seconds: Option<u32>,
+    started_at_utc: Option<i64>,
+    listened_duration: Duration,
+    now_playing_sent: bool,
+    scrobble_queued: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +389,7 @@ impl BridgeState {
             },
             selected_queue_index: self.selected_queue_index,
             settings: self.settings.clone(),
+            lastfm: self.lastfm.clone(),
         }
     }
 
@@ -472,11 +502,23 @@ fn run_bridge_loop(
 
     let mut state = BridgeState::default();
     load_settings_into(&mut state.settings);
+    state.lastfm.enabled = state.settings.lastfm_scrobbling_enabled;
+    let lastfm_queue_path = config_base_path().map(|base| lastfm::queue_path(&base));
+    let (lastfm, lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
+        queue_path: lastfm_queue_path,
+        initial_enabled: state.settings.lastfm_scrobbling_enabled,
+    });
+    if !state.settings.lastfm_username.trim().is_empty() {
+        lastfm.command(LastFmCommand::LoadStoredSession {
+            username: state.settings.lastfm_username.clone(),
+        });
+    }
     state.playback.volume = state.settings.volume;
     playback.command(PlaybackCommand::SetVolume(state.settings.volume));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
     apply_session_restore(&mut state, &playback, load_session_snapshot().as_ref());
     state.rebuild_pre_built_tree();
+    let mut lastfm_tracker = LastFmPlaybackTracker::default();
 
     let mut running = true;
     let mut settings_dirty = false;
@@ -543,6 +585,7 @@ fn run_bridge_loop(
                             playback: &playback,
                             analysis: &analysis,
                             library: &library,
+                            lastfm: &lastfm,
                             search_query_tx: &search_query_tx,
                             event_tx: &event_tx,
                             running: &mut running,
@@ -605,9 +648,15 @@ fn run_bridge_loop(
         let analysis_changed = pump_analysis_events(&analysis_rx, &mut state);
         let metadata_changed = pump_metadata_events(&metadata_rx, &mut state);
         let library_changed = pump_library_events(&library_rx, &mut state);
+        let lastfm_changed = pump_lastfm_events(&lastfm_rx, &mut state, &mut settings_dirty);
         let _ = pump_search_results(&search_results_rx, &mut state);
+        tick_lastfm_playback(&state, &lastfm, &mut lastfm_tracker);
         let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
-        let changed = playback_changed || analysis_changed || metadata_changed || library_changed;
+        let changed = playback_changed
+            || analysis_changed
+            || metadata_changed
+            || library_changed
+            || lastfm_changed;
         if library_changed {
             if !state.queue.is_empty() {
                 include_queue_in_next_snapshot = true;
@@ -706,6 +755,7 @@ fn run_bridge_loop(
 
     save_settings(&state.settings);
     save_session_snapshot(&session_snapshot_for_state(&state));
+    lastfm.command(LastFmCommand::Shutdown);
     let _ = try_send_event(&event_tx, BridgeEvent::Stopped);
 }
 
@@ -951,6 +1001,7 @@ struct BridgeCommandContext<'a> {
     playback: &'a PlaybackEngine,
     analysis: &'a AnalysisEngine,
     library: &'a LibraryService,
+    lastfm: &'a LastFmHandle,
     search_query_tx: &'a Sender<SearchWorkerQuery>,
     event_tx: &'a Sender<BridgeEvent>,
     running: &'a mut bool,
@@ -1023,12 +1074,21 @@ fn handle_bridge_command(
             match cmd {
                 BridgeSettingsCommand::LoadFromDisk => {
                     load_settings_into(&mut state.settings);
+                    state.lastfm.enabled = state.settings.lastfm_scrobbling_enabled;
                     context
                         .playback
                         .command(PlaybackCommand::SetVolume(state.settings.volume));
                     context
                         .analysis
                         .command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+                    context.lastfm.command(LastFmCommand::SetEnabled(
+                        state.settings.lastfm_scrobbling_enabled,
+                    ));
+                    if !state.settings.lastfm_username.trim().is_empty() {
+                        context.lastfm.command(LastFmCommand::LoadStoredSession {
+                            username: state.settings.lastfm_username.clone(),
+                        });
+                    }
                 }
                 BridgeSettingsCommand::SaveToDisk => {
                     save_settings(&state.settings);
@@ -1064,6 +1124,28 @@ fn handle_bridge_command(
                 }
                 BridgeSettingsCommand::SetLibrarySortMode(mode) => {
                     state.settings.library_sort_mode = mode;
+                    *context.settings_dirty = true;
+                }
+                BridgeSettingsCommand::SetLastFmScrobblingEnabled(v) => {
+                    state.settings.lastfm_scrobbling_enabled = v;
+                    state.lastfm.enabled = v;
+                    context.lastfm.command(LastFmCommand::SetEnabled(v));
+                    *context.settings_dirty = true;
+                }
+                BridgeSettingsCommand::BeginLastFmAuth => {
+                    context.lastfm.command(LastFmCommand::BeginDesktopAuth);
+                }
+                BridgeSettingsCommand::CompleteLastFmAuth => {
+                    context.lastfm.command(LastFmCommand::CompleteDesktopAuth);
+                }
+                BridgeSettingsCommand::DisconnectLastFm => {
+                    state.settings.lastfm_username.clear();
+                    state.lastfm.username.clear();
+                    state.lastfm.auth_url.clear();
+                    state.lastfm.auth_state = lastfm::AuthState::Disconnected;
+                    context
+                        .lastfm
+                        .command(LastFmCommand::Disconnect { clear_queue: true });
                     *context.settings_dirty = true;
                 }
             }
@@ -2803,6 +2885,166 @@ fn pump_metadata_events(metadata_rx: &Receiver<MetadataEvent>, state: &mut Bridg
     changed
 }
 
+fn pump_lastfm_events(
+    lastfm_rx: &Receiver<LastFmEvent>,
+    state: &mut BridgeState,
+    settings_dirty: &mut bool,
+) -> bool {
+    let mut changed = false;
+    for _ in 0..8 {
+        let Ok(event) = lastfm_rx.try_recv() else {
+            break;
+        };
+        match event {
+            LastFmEvent::State(runtime) => {
+                if state.lastfm != runtime {
+                    state.lastfm = runtime.clone();
+                    changed = true;
+                }
+                if state.settings.lastfm_username != runtime.username {
+                    state.settings.lastfm_username = runtime.username;
+                    *settings_dirty = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn tick_lastfm_playback(
+    state: &BridgeState,
+    lastfm_handle: &LastFmHandle,
+    tracker: &mut LastFmPlaybackTracker,
+) {
+    let current_path = state.playback.current.clone();
+    if tracker.active_path != current_path {
+        queue_lastfm_scrobble_if_ready(lastfm_handle, tracker);
+        *tracker = LastFmPlaybackTracker::default();
+        tracker.active_path = current_path;
+        tracker.duration_seconds = match u32::try_from(state.playback.duration.as_secs()) {
+            Ok(value) if value > 0 => Some(value),
+            _ => None,
+        };
+    }
+
+    if state.playback.state == PlaybackState::Stopped || tracker.active_path.is_none() {
+        queue_lastfm_scrobble_if_ready(lastfm_handle, tracker);
+        tracker.active_path = None;
+        tracker.artist.clear();
+        tracker.track.clear();
+        tracker.album.clear();
+        tracker.track_number = None;
+        tracker.duration_seconds = None;
+        tracker.started_at_utc = None;
+        tracker.listened_duration = Duration::ZERO;
+        tracker.now_playing_sent = false;
+        tracker.scrobble_queued = false;
+        return;
+    }
+
+    if tracker.duration_seconds.is_none() {
+        tracker.duration_seconds = match u32::try_from(state.playback.duration.as_secs()) {
+            Ok(value) if value > 0 => Some(value),
+            _ => None,
+        };
+    }
+    if tracker.track_number.is_none() {
+        tracker.track_number = current_track_number(state);
+    }
+
+    let metadata_matches_current = state
+        .metadata
+        .source_path
+        .as_ref()
+        .zip(state.playback.current.as_ref())
+        .is_some_and(|(source, path)| source == &path.to_string_lossy());
+    if metadata_matches_current {
+        tracker.artist = state.metadata.artist.trim().to_string();
+        tracker.track = state.metadata.title.trim().to_string();
+        tracker.album = state.metadata.album.trim().to_string();
+    }
+
+    if state.playback.state == PlaybackState::Playing {
+        if tracker.started_at_utc.is_none() {
+            tracker.started_at_utc = Some(unix_timestamp_now());
+        }
+        tracker.listened_duration = state.playback.position;
+    }
+
+    if state.lastfm.enabled
+        && !tracker.now_playing_sent
+        && state.playback.state == PlaybackState::Playing
+        && tracker.started_at_utc.is_some()
+        && !tracker.artist.is_empty()
+        && !tracker.track.is_empty()
+    {
+        lastfm_handle.command(LastFmCommand::SendNowPlaying(LastFmNowPlayingTrack {
+            artist: tracker.artist.clone(),
+            track: tracker.track.clone(),
+            album: tracker.album.clone(),
+            track_number: tracker.track_number,
+            duration_seconds: tracker.duration_seconds,
+        }));
+        tracker.now_playing_sent = true;
+    }
+
+    queue_lastfm_scrobble_if_ready(lastfm_handle, tracker);
+}
+
+fn queue_lastfm_scrobble_if_ready(
+    lastfm_handle: &LastFmHandle,
+    tracker: &mut LastFmPlaybackTracker,
+) {
+    if tracker.scrobble_queued || tracker.started_at_utc.is_none() {
+        return;
+    }
+    let Some(duration_seconds) = tracker.duration_seconds else {
+        return;
+    };
+    let Some(threshold_seconds) = lastfm::scrobble_threshold_seconds(duration_seconds) else {
+        return;
+    };
+    if tracker.listened_duration < Duration::from_secs(u64::from(threshold_seconds)) {
+        return;
+    }
+    if tracker.artist.is_empty() || tracker.track.is_empty() {
+        return;
+    }
+    lastfm_handle.command(LastFmCommand::QueueScrobble(LastFmScrobbleEntry {
+        artist: tracker.artist.clone(),
+        track: tracker.track.clone(),
+        album: tracker.album.clone(),
+        track_number: tracker.track_number,
+        duration_seconds: tracker.duration_seconds,
+        timestamp_utc: tracker.started_at_utc.unwrap_or_else(unix_timestamp_now),
+    }));
+    tracker.scrobble_queued = true;
+}
+
+fn current_track_number(state: &BridgeState) -> Option<u32> {
+    let path = state.playback.current.as_ref()?;
+    state
+        .queue_details
+        .get(path)
+        .and_then(|track| track.track_no)
+        .or_else(|| {
+            state
+                .library
+                .tracks
+                .iter()
+                .find(|track| &track.path == path)
+                .and_then(|track| track.track_no)
+        })
+}
+
+fn unix_timestamp_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeState) -> bool {
     let mut latest_snapshot: Option<LibrarySnapshot> = None;
     while let Ok(event) = library_rx.try_recv() {
@@ -3017,6 +3259,14 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.library_sort_mode = LibrarySortMode::from_i32(x);
                 }
             }
+            "lastfm_scrobbling_enabled" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.lastfm_scrobbling_enabled = x != 0;
+                }
+            }
+            "lastfm_username" => {
+                settings.lastfm_username = value.to_string();
+            }
             _ => {}
         }
     }
@@ -3035,7 +3285,7 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\n",
+        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.db_range,
@@ -3043,6 +3293,8 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
         i32::from(settings.show_fps),
         i32::from(settings.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
+        i32::from(settings.lastfm_scrobbling_enabled),
+        settings.lastfm_username,
     )
 }
 
@@ -3221,6 +3473,8 @@ mod tests {
             show_fps: true,
             system_media_controls_enabled: false,
             library_sort_mode: LibrarySortMode::Title,
+            lastfm_scrobbling_enabled: true,
+            lastfm_username: "tester".to_string(),
         };
         let text = format_settings_text(&settings);
         let mut parsed = BridgeSettings::default();
@@ -3232,6 +3486,8 @@ mod tests {
         assert!(parsed.show_fps);
         assert!(!parsed.system_media_controls_enabled);
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
+        assert!(parsed.lastfm_scrobbling_enabled);
+        assert_eq!(parsed.lastfm_username, "tester");
     }
 
     #[test]
@@ -3248,6 +3504,8 @@ mod tests {
         assert!(settings.show_fps);
         assert!(!settings.system_media_controls_enabled);
         assert_eq!(settings.library_sort_mode, LibrarySortMode::Year);
+        assert!(!settings.lastfm_scrobbling_enabled);
+        assert!(settings.lastfm_username.is_empty());
     }
 
     #[test]

@@ -230,6 +230,12 @@ Kirigami.ApplicationWindow {
         property bool shuffleEnabled: false
         property bool showFps: false
         property bool systemMediaControlsEnabled: true
+        property bool lastFmScrobblingEnabled: false
+        property bool lastFmBuildConfigured: false
+        property string lastFmUsername: ""
+        property int lastFmAuthState: 0
+        property int lastFmPendingScrobbleCount: 0
+        property string lastFmStatusText: ""
         property int sampleRateHz: 48000
         property var libraryAlbums: []
         property var libraryTreeBinary: ""
@@ -278,6 +284,10 @@ Kirigami.ApplicationWindow {
         function setShuffleEnabled(value) {}
         function setShowFps(value) {}
         function setSystemMediaControlsEnabled(value) {}
+        function setLastFmScrobblingEnabled(value) {}
+        function beginLastFmAuth() {}
+        function completeLastFmAuth() {}
+        function disconnectLastFm() {}
         function playAt(index) {}
         function selectQueueIndex(index) {}
         function removeAt(index) {}
@@ -2885,6 +2895,77 @@ Kirigami.ApplicationWindow {
                             focusPolicy: Qt.NoFocus
                             checked: uiBridge.showFps
                             onToggled: uiBridge.setShowFps(checked)
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "Last.fm"
+                    Layout.fillWidth: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        CheckBox {
+                            text: "Enable Last.fm scrobbling"
+                            focusPolicy: Qt.NoFocus
+                            checked: uiBridge.lastFmScrobblingEnabled
+                            onToggled: uiBridge.setLastFmScrobblingEnabled(checked)
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            color: Kirigami.Theme.disabledTextColor
+                            text: "Ferrous follows Last.fm's rule: only tracks longer than 30 seconds are eligible, and a scrobble is submitted after half the track or 4 minutes, whichever comes first."
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            text: !uiBridge.lastFmBuildConfigured
+                                ? "Last.fm is not configured in this build."
+                                : (uiBridge.lastFmUsername.length > 0
+                                    ? "Connected account: " + uiBridge.lastFmUsername
+                                    : "No Last.fm account connected.")
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            visible: uiBridge.lastFmStatusText.length > 0
+                            color: Kirigami.Theme.disabledTextColor
+                            text: uiBridge.lastFmStatusText
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            visible: uiBridge.lastFmPendingScrobbleCount > 0
+                            color: Kirigami.Theme.disabledTextColor
+                            text: "Pending scrobbles: " + uiBridge.lastFmPendingScrobbleCount
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+
+                            Button {
+                                text: uiBridge.lastFmUsername.length > 0 ? "Reconnect" : "Connect"
+                                enabled: uiBridge.lastFmBuildConfigured
+                                onClicked: uiBridge.beginLastFmAuth()
+                            }
+
+                            Button {
+                                text: "Complete Connection"
+                                enabled: uiBridge.lastFmBuildConfigured && uiBridge.lastFmAuthState === 1
+                                onClicked: uiBridge.completeLastFmAuth()
+                            }
+
+                            Button {
+                                text: "Disconnect"
+                                enabled: uiBridge.lastFmUsername.length > 0 || uiBridge.lastFmAuthState !== 0
+                                onClicked: uiBridge.disconnectLastFm()
+                            }
                         }
                     }
                 }

@@ -1020,6 +1020,30 @@ bool BridgeClient::systemMediaControlsEnabled() const {
     return m_systemMediaControlsEnabled;
 }
 
+bool BridgeClient::lastFmScrobblingEnabled() const {
+    return m_lastFmScrobblingEnabled;
+}
+
+bool BridgeClient::lastFmBuildConfigured() const {
+    return m_lastFmBuildConfigured;
+}
+
+QString BridgeClient::lastFmUsername() const {
+    return m_lastFmUsername;
+}
+
+int BridgeClient::lastFmAuthState() const {
+    return m_lastFmAuthState;
+}
+
+int BridgeClient::lastFmPendingScrobbleCount() const {
+    return m_lastFmPendingScrobbleCount;
+}
+
+QString BridgeClient::lastFmStatusText() const {
+    return m_lastFmStatusText;
+}
+
 QStringList BridgeClient::libraryAlbums() const {
     return m_libraryAlbums;
 }
@@ -1239,6 +1263,31 @@ void BridgeClient::setSystemMediaControlsEnabled(bool value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSystemMediaControls,
         static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setLastFmScrobblingEnabled(bool value) {
+    if (m_lastFmScrobblingEnabled != value) {
+        m_lastFmScrobblingEnabled = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetLastFmScrobblingEnabled,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::beginLastFmAuth() {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(
+        BinaryBridgeCodec::CmdBeginLastFmAuth));
+}
+
+void BridgeClient::completeLastFmAuth() {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(
+        BinaryBridgeCodec::CmdCompleteLastFmAuth));
+}
+
+void BridgeClient::disconnectLastFm() {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(
+        BinaryBridgeCodec::CmdDisconnectLastFm));
 }
 
 void BridgeClient::playAt(int index) {
@@ -2305,7 +2354,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         && !snapshot.queue.present
         && !snapshot.library.present
         && !snapshot.metadata.present
-        && !snapshot.settings.present) {
+        && !snapshot.settings.present
+        && !snapshot.lastfm.present) {
         return false;
     }
 
@@ -2715,6 +2765,62 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_librarySortMode != settingsSortMode) {
         m_librarySortMode = settingsSortMode;
         changed = true;
+    }
+
+    const bool lastFmEnabled = snapshot.lastfm.present ? snapshot.lastfm.enabled : m_lastFmScrobblingEnabled;
+    if (m_lastFmScrobblingEnabled != lastFmEnabled) {
+        m_lastFmScrobblingEnabled = lastFmEnabled;
+        changed = true;
+    }
+
+    const bool lastFmBuildConfigured = snapshot.lastfm.present
+        ? snapshot.lastfm.buildConfigured
+        : m_lastFmBuildConfigured;
+    if (m_lastFmBuildConfigured != lastFmBuildConfigured) {
+        m_lastFmBuildConfigured = lastFmBuildConfigured;
+        changed = true;
+    }
+
+    const int lastFmAuthState = snapshot.lastfm.present ? snapshot.lastfm.authState : m_lastFmAuthState;
+    if (m_lastFmAuthState != lastFmAuthState) {
+        m_lastFmAuthState = lastFmAuthState;
+        changed = true;
+    }
+
+    const int lastFmPendingScrobbleCount = snapshot.lastfm.present
+        ? snapshot.lastfm.pendingScrobbleCount
+        : m_lastFmPendingScrobbleCount;
+    if (m_lastFmPendingScrobbleCount != lastFmPendingScrobbleCount) {
+        m_lastFmPendingScrobbleCount = lastFmPendingScrobbleCount;
+        changed = true;
+    }
+
+    const QString lastFmUsername = snapshot.lastfm.present ? snapshot.lastfm.username : m_lastFmUsername;
+    if (m_lastFmUsername != lastFmUsername) {
+        m_lastFmUsername = lastFmUsername;
+        changed = true;
+    }
+
+    const QString lastFmStatusText = snapshot.lastfm.present ? snapshot.lastfm.statusText : m_lastFmStatusText;
+    if (m_lastFmStatusText != lastFmStatusText) {
+        m_lastFmStatusText = lastFmStatusText;
+        changed = true;
+    }
+
+    const QString lastFmAuthUrl = snapshot.lastfm.present ? snapshot.lastfm.authUrl : m_lastFmAuthUrl;
+    if (m_lastFmAuthUrl != lastFmAuthUrl) {
+        m_lastFmAuthUrl = lastFmAuthUrl;
+        changed = true;
+    }
+    if (!m_lastFmAuthUrl.trimmed().isEmpty() && m_lastOpenedExternalUrl != m_lastFmAuthUrl) {
+        const QUrl authUrl(m_lastFmAuthUrl);
+        if (authUrl.isValid()) {
+            QDesktopServices::openUrl(authUrl);
+            m_lastOpenedExternalUrl = m_lastFmAuthUrl;
+        }
+    }
+    if (m_lastFmAuthUrl.trimmed().isEmpty()) {
+        m_lastOpenedExternalUrl.clear();
     }
 
     const bool scanInProgress = snapshot.library.present ? snapshot.library.scanInProgress : m_libraryScanInProgress;
