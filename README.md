@@ -1,164 +1,100 @@
 # Ferrous
 
-A high-performance Linux audio player prototype in Rust, inspired by Foobar2000/DeaDBeeF.
+Ferrous is a Linux desktop audio player prototype built with a Rust backend and a Qt6/Kirigami frontend. It is aimed at fast local-library playback, responsive queue workflows, and rich playback visualization.
 
-## Current status
+## Highlights
 
-This is a runnable architecture scaffold with:
+- Linux-first desktop UI built with Qt6/QML and KDE Kirigami
+- Real playback through GStreamer, including seeking, repeat, shuffle, volume control, and gapless queue handoff
+- Local library indexing from one or more folders, backed by SQLite
+- Folder-first library browsing with artist, album, and track grouping
+- Global search across artists, albums, and tracks
+- Queue workflows for opening files, adding folders, importing playlists, reordering tracks, and restoring the previous session
+- Embedded cover art extraction plus live waveform and spectrogram views
+- KDE/Plasma integration through MPRIS media controls, media keys, and single-instance file opening
 
-- KDE Qt6/QML (Kirigami) frontend (`ui/`) as the primary UI path
-- playback worker thread with queue/state/seek commands
-- metadata worker using `lofty` (title/artist/album + embedded cover art extraction)
-- analysis worker with live waveform accumulation + STFT spectrogram
-- transport controls and seekbar wired through command/event channels
-- queue view with Open/Add files, Prev/Next, and click-to-play track selection
+## Supported Content
 
-With `--features gst`, playback uses a real GStreamer `playbin` backend with:
+Ferrous currently targets local audio playback on Linux. The UI and desktop integration are wired for common audio and playlist formats including:
 
-- MP3/FLAC playback through installed GStreamer plugins
-- gapless queue handoff via `about-to-finish`
-- PCM tap (`appsink`) feeding analysis data for waveform/spectrogram visuals
+- MP3
+- FLAC
+- M4A / AAC / MP4 audio
+- Ogg Vorbis and Opus
+- WAV
+- AC-3 and DTS
+- M3U / M3U8 playlists
 
-Without `--features gst`, playback remains a simulated backend for development.
+Actual playback support depends on the GStreamer plugins installed on the host system.
 
-## Build prerequisites (Linux)
+## Status
 
-Install Rust via `rustup` (user-local):
+Ferrous is usable today, but it should still be treated as a prototype rather than a polished end-user release.
+
+What is already in place:
+
+- Playback, queue management, library indexing, global search, and visualization
+- Persistent settings and queue/session restore
+- Desktop-file and MIME integration for installed builds
+- Local RPM packaging for Fedora-like systems
+
+What is still in progress:
+
+- ReplayGain and preamp behavior
+- Crossfade and output-device tuning
+- Deeper visualization customization
+- General polish expected from a mature public release
+
+## Installation
+
+Prebuilt packages are not published yet. Right now Ferrous is best installed from source or from a locally built RPM.
+
+### Quick Start From Source
+
+Install these prerequisites for your distro:
+
+- Rust toolchain
+- `zsh`
+- CMake and Ninja
+- A C++20-capable compiler
+- Qt 6.6+ development packages, including Quick Controls 2
+- KDE Frameworks 6 Kirigami development packages
+- GStreamer runtime and development packages
+- GStreamer codec plugins for the formats you want to play
+
+Then run:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
-
-Install Qt6 + Kirigami/KF6 development/runtime packages for your distro (primary UI path).
-
-When enabling real playback with GStreamer later, install:
-
-- GStreamer runtime + development packages
-- plugins base/good (and likely `ugly` for MP3 in many distros)
-
-## Commands
-
-Primary app run path (Kirigami UI + in-process Rust backend):
-
-```bash
+git clone <your-repo-url>
+cd ferrous
 ./scripts/run-ui.sh
 ```
 
-Start from a clean local Ferrous state (library DB + saved session + thumbnail cache):
+That script builds the Rust backend, configures the Qt UI, builds the app, and launches Ferrous.
 
-```bash
-./scripts/run-ui.sh --nuke-all
-```
+### Local RPM Build
 
-Cleanup-only utility mode (no configure/build/run):
-
-```bash
-./scripts/run-ui.sh --nuke-session --no-configure --no-build --no-run
-```
-
-Backend CLI/debug shell:
-
-```bash
-cargo run --bin frontend_cli --features gst
-```
-
-Run project tests (Rust + UI smoke test):
-
-```bash
-./scripts/run-tests.sh
-```
-
-Build a local RPM for quick deployment testing:
+For Fedora-like systems, the repository includes local RPM packaging:
 
 ```bash
 ./scripts/build-rpm.sh
-```
-
-Build and install the resulting RPM locally via `dnf`:
-
-```bash
 ./scripts/build-rpm.sh --install
 ```
 
-The RPM path is also reusable later through:
+## Development And Docs
 
-```bash
-./scripts/install-rpm.sh
-```
+- [Installation guide](docs/INSTALL.md)
+- [Development guide](docs/DEVELOPMENT.md)
+- [UI-specific notes](ui/README.md)
+- [Roadmap](docs/ROADMAP.md)
 
-Rust verification now also includes strict lint/security checks by default:
+## Tech Stack
 
-- `cargo clippy --features gst -- -D clippy::pedantic`
-- `cargo audit` (requires `cargo-audit` installed)
+- Rust for playback, metadata, library, search, and analysis
+- Qt6/QML + Kirigami for the desktop UI
+- GStreamer for playback
+- SQLite for library and waveform cache persistence
 
-Install `cargo-audit` once:
+## License
 
-```bash
-cargo install cargo-audit
-```
-
-Use `./scripts/run-tests.sh --no-clippy --no-audit` to temporarily skip them.
-
-Optional coverage gate (line coverage threshold via `cargo llvm-cov`):
-
-- enable in script: `./scripts/run-tests.sh --coverage`
-- configure threshold: `FERROUS_COVERAGE_MIN=35 ./scripts/run-tests.sh --rust-only --coverage`
-
-Install coverage tooling once:
-
-```bash
-rustup component add llvm-tools-preview
-cargo install cargo-llvm-cov
-```
-
-Optional runtime tuning:
-
-- `FERROUS_BRIDGE_SNAPSHOT_MS`: controls bridge snapshot cadence (default `16`, range `8..1000`).
-- `FERROUS_UI_PAINT_FBO=1`: force `QQuickPaintedItem` framebuffer target (default uses image target).
-- `FERROUS_UI_SHOW_FPS=1`: show spectrogram FPS overlay.
-- `FERROUS_UI_SEARCH_DEBOUNCE_MS`: search debounce in milliseconds (default `90`).
-
-### Profiling logs (compile-time gated)
-
-Profiling prints are compiled out by default. Runtime env vars such as
-`FERROUS_PROFILE_UI`, `FERROUS_PROFILE`, and `FERROUS_SEARCH_PROFILE`
-only produce output when profiling logs are compiled in.
-
-Enable profiling logs for the UI build:
-
-```bash
-cmake -S ui -B ui/build -G Ninja -DFERROUS_ENABLE_PROFILE_LOGS=ON
-cmake --build ui/build -j
-```
-
-Enable profiling logs for direct Rust runs:
-
-```bash
-cargo run --bin frontend_cli --features "gst profiling-logs"
-```
-
-With a profile-enabled build, typical runtime toggles are:
-
-- `FERROUS_PROFILE_UI=1`: per-second UI paint counters (`[ui-spectrogram]`, `[ui-waveform]`).
-- `FERROUS_PROFILE=1`: bridge/playback/analysis profiling logs.
-- `FERROUS_SEARCH_PROFILE=1`: search-worker and search-apply profiling logs.
-
-Diagnostics log UI no longer live-rebinds large text while closed; use the
-Diagnostics dialog `Reload` button to refresh text from disk.
-
-Roadmap and engineering plans live under `docs/`:
-
-- `docs/ROADMAP.md`
-- `docs/MIGRATION_NOTES.md`
-- `docs/TEST_PLAN.md`
-- `docs/OPTIMIZATION_PLAN.md`
-
-## Project layout
-
-- `ui/`: Qt6/QML + Kirigami frontend (primary UI path)
-- `src/bin/frontend_cli.rs`: backend CLI/debug entrypoint
-- `src/playback/`: playback engine command/event model (`gst` + stub backends)
-- `src/analysis/`: waveform/spectrogram worker
-- `src/metadata/`: track metadata + cover art extraction
-- `src/frontend_bridge/`: typed bridge orchestration + FFI boundary
+Licensing is not finalized yet. This repository does not currently ship a public open-source license.
