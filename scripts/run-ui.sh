@@ -16,6 +16,7 @@ DO_CONFIGURE=1
 DO_BUILD=1
 DO_RUN=1
 NUKE_DB=0
+NUKE_SESSION=0
 NUKE_THUMBNAILS=0
 ENABLE_COREDUMP=0
 APP_ARGS=()
@@ -66,6 +67,13 @@ nuke_library_db() {
     remove_file_target "${db_path}-shm" "library database SHM"
 }
 
+nuke_session() {
+    local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+    local session_path="${config_home}/ferrous/session.json"
+
+    remove_file_target "${session_path}" "saved session"
+}
+
 nuke_thumbnail_cache() {
     local cache_home="${XDG_CACHE_HOME:-${HOME}/.cache}"
     local primary_path="${cache_home}/ferrous/thumbnails/library"
@@ -78,13 +86,16 @@ nuke_thumbnail_cache() {
 }
 
 run_requested_cleanup() {
-    if [[ ${NUKE_DB} -eq 0 && ${NUKE_THUMBNAILS} -eq 0 ]]; then
+    if [[ ${NUKE_DB} -eq 0 && ${NUKE_SESSION} -eq 0 && ${NUKE_THUMBNAILS} -eq 0 ]]; then
         return
     fi
 
     echo "Running requested Ferrous cleanup..."
     if [[ ${NUKE_DB} -eq 1 ]]; then
         nuke_library_db
+    fi
+    if [[ ${NUKE_SESSION} -eq 1 ]]; then
+        nuke_session
     fi
     if [[ ${NUKE_THUMBNAILS} -eq 1 ]]; then
         nuke_thumbnail_cache
@@ -100,14 +111,16 @@ Options:
   --no-build        Skip cmake build step
   --no-run          Only configure/build; do not launch UI
   --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
+  --nuke-session    Delete saved playlist/session (${XDG_CONFIG_HOME:-\$HOME/.config}/ferrous/session.json)
   --nuke-thumbnails Delete Ferrous library thumbnail cache (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
-  --nuke-all        Equivalent to --nuke-db --nuke-thumbnails
+  --nuke-all        Equivalent to --nuke-db --nuke-session --nuke-thumbnails
   --coredump        Enable unlimited core dump size and print coredumpctl hints
   -h, --help        Show this help
 
 Environment:
   FERROUS_UI_BUILD_DIR     Override build dir (default: ${UI_DIR}/build)
   XDG_DATA_HOME            Base path for DB cleanup target (default: \$HOME/.local/share)
+  XDG_CONFIG_HOME          Base path for session cleanup target (default: \$HOME/.config)
   XDG_CACHE_HOME           Base path for thumbnail cleanup target (default: \$HOME/.cache)
   CMAKE_BUILD_TYPE         Build type for single-config generators (default: RelWithDebInfo)
   CMAKE_GENERATOR          Override generator (default: Ninja)
@@ -128,11 +141,15 @@ while [[ $# -gt 0 ]]; do
         --nuke-db)
             NUKE_DB=1
             ;;
+        --nuke-session)
+            NUKE_SESSION=1
+            ;;
         --nuke-thumbnails)
             NUKE_THUMBNAILS=1
             ;;
         --nuke-all)
             NUKE_DB=1
+            NUKE_SESSION=1
             NUKE_THUMBNAILS=1
             ;;
         --coredump)

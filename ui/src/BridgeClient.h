@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QAbstractListModel>
 #include <QObject>
 #include <QByteArray>
 #include <QHash>
@@ -9,8 +10,10 @@
 #include <QVariant>
 #include <QVariantMap>
 #include <QVariantList>
+#include <QVector>
 
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -19,6 +22,50 @@
 #include "GlobalSearchResultsModel.h"
 
 struct FerrousFfiBridge;
+
+struct QueueRowData {
+    QString title;
+    QString artist;
+    QString album;
+    QString coverPath;
+    QString genre;
+    QString lengthText;
+    QString path;
+    int trackNumber{0};
+    int year{std::numeric_limits<int>::min()};
+
+    bool operator==(const QueueRowData &other) const = default;
+};
+
+class QueueRowsModel final : public QAbstractListModel {
+    Q_OBJECT
+
+public:
+    enum Role {
+        TitleRole = Qt::UserRole + 1,
+        ArtistRole,
+        AlbumRole,
+        CoverPathRole,
+        GenreRole,
+        LengthTextRole,
+        PathRole,
+        TrackNumberRole,
+        YearRole,
+    };
+
+    explicit QueueRowsModel(QObject *parent = nullptr);
+
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
+    QHash<int, QByteArray> roleNames() const override;
+
+    bool setRows(QVector<QueueRowData> rows);
+    const QueueRowData *rowAt(int index) const;
+    QVariant trackNumberAt(int index) const;
+
+private:
+    QVector<QueueRowData> m_rows;
+};
 
 class BridgeClient : public QObject {
     Q_OBJECT
@@ -31,8 +78,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(int queueVersion READ queueVersion NOTIFY snapshotChanged)
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
-    Q_PROPERTY(QStringList queueItems READ queueItems NOTIFY queueChanged)
-    Q_PROPERTY(QVariantList queueRows READ queueRows NOTIFY queueChanged)
+    Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY snapshotChanged)
@@ -107,8 +153,7 @@ public:
     int queueLength() const;
     int queueVersion() const;
     QString queueDurationText() const;
-    QStringList queueItems() const;
-    QVariantList queueRows() const;
+    QObject *queueRows() const;
     int selectedQueueIndex() const;
     int playingQueueIndex() const;
     QString currentTrackPath() const;
@@ -227,7 +272,6 @@ public:
 
 signals:
     void snapshotChanged();
-    void queueChanged();
     void analysisChanged();
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
@@ -290,6 +334,7 @@ private:
     static QString resolveDiagnosticsLogPath();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
+    void shutdownBridgeGracefully();
     static QString detectFileBrowserName();
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     void sendBinaryCommand(const QByteArray &payload);
@@ -308,8 +353,7 @@ private:
     int m_queueLength{0};
     int m_queueVersion{0};
     QString m_queueDurationText{"00:00"};
-    QStringList m_queueItems;
-    QVariantList m_queueRows;
+    QueueRowsModel m_queueRowsModel;
     QStringList m_queuePaths;
     int m_selectedQueueIndex{-1};
     int m_playingQueueIndex{-1};
@@ -395,6 +439,8 @@ private:
     QString m_pendingAddRootPath;
     qint64 m_pendingAddRootIssuedMs{0};
     bool m_connected{false};
+    bool m_loggedStartupQueueMissing{false};
+    bool m_loggedStartupQueuePresent{false};
     bool m_snapshotChangedPending{false};
     bool m_analysisChangedPending{false};
     bool m_pendingSeek{false};

@@ -20,6 +20,7 @@
 #include <QMetaObject>
 #include <QProcess>
 #include <QSet>
+#include <QThread>
 #include <QTextStream>
 #include <QUrl>
 #include <QUrlQuery>
@@ -265,6 +266,85 @@ QString formatLabelFromPath(const QString &path) {
 
 } // namespace
 
+QueueRowsModel::QueueRowsModel(QObject *parent)
+    : QAbstractListModel(parent) {}
+
+int QueueRowsModel::rowCount(const QModelIndex &parent) const {
+    if (parent.isValid()) {
+        return 0;
+    }
+    return m_rows.size();
+}
+
+QVariant QueueRowsModel::data(const QModelIndex &index, int role) const {
+    if (!index.isValid() || index.row() < 0 || index.row() >= m_rows.size()) {
+        return {};
+    }
+
+    const QueueRowData &row = m_rows.at(index.row());
+    switch (role) {
+    case TitleRole:
+        return row.title;
+    case ArtistRole:
+        return row.artist;
+    case AlbumRole:
+        return row.album;
+    case CoverPathRole:
+        return row.coverPath;
+    case GenreRole:
+        return row.genre;
+    case LengthTextRole:
+        return row.lengthText;
+    case PathRole:
+        return row.path;
+    case TrackNumberRole:
+        return row.trackNumber > 0 ? QVariant(row.trackNumber) : QVariant{};
+    case YearRole:
+        return row.year != std::numeric_limits<int>::min() ? QVariant(row.year) : QVariant{};
+    default:
+        return {};
+    }
+}
+
+QHash<int, QByteArray> QueueRowsModel::roleNames() const {
+    return {
+        {TitleRole, "title"},
+        {ArtistRole, "artist"},
+        {AlbumRole, "album"},
+        {CoverPathRole, "coverPath"},
+        {GenreRole, "genre"},
+        {LengthTextRole, "lengthText"},
+        {PathRole, "path"},
+        {TrackNumberRole, "trackNumber"},
+        {YearRole, "year"},
+    };
+}
+
+bool QueueRowsModel::setRows(QVector<QueueRowData> rows) {
+    if (m_rows == rows) {
+        return false;
+    }
+    beginResetModel();
+    m_rows = std::move(rows);
+    endResetModel();
+    return true;
+}
+
+const QueueRowData *QueueRowsModel::rowAt(int index) const {
+    if (index < 0 || index >= m_rows.size()) {
+        return nullptr;
+    }
+    return &m_rows.at(index);
+}
+
+QVariant QueueRowsModel::trackNumberAt(int index) const {
+    const QueueRowData *row = rowAt(index);
+    if (row == nullptr || row->trackNumber <= 0) {
+        return {};
+    }
+    return row->trackNumber;
+}
+
 BridgeClient::BridgeClient(QObject *parent)
     : QObject(parent) {
     m_fileBrowserName = detectFileBrowserName();
@@ -334,6 +414,7 @@ BridgeClient::~BridgeClient() {
     m_analysisNotifyTimer.stop();
     m_globalSearchDebounceTimer.stop();
     m_searchApplyDispatchTimer.stop();
+    shutdownBridgeGracefully();
     stopCoverLookupWorker();
     stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
@@ -908,12 +989,8 @@ QString BridgeClient::queueDurationText() const {
     return m_queueDurationText;
 }
 
-QStringList BridgeClient::queueItems() const {
-    return m_queueItems;
-}
-
-QVariantList BridgeClient::queueRows() const {
-    return m_queueRows;
+QObject *BridgeClient::queueRows() const {
+    return const_cast<QueueRowsModel *>(&m_queueRowsModel);
 }
 
 int BridgeClient::selectedQueueIndex() const {
@@ -1531,15 +1608,7 @@ QString BridgeClient::queuePathAt(int index) const {
 }
 
 QVariant BridgeClient::queueTrackNumberAt(int index) const {
-    if (index < 0 || index >= m_queueRows.size()) {
-        return {};
-    }
-    const QVariantMap row = m_queueRows[index].toMap();
-    const QVariant trackNumber = row.value(QStringLiteral("trackNumber"));
-    if (!trackNumber.isValid() || trackNumber.isNull()) {
-        return {};
-    }
-    return trackNumber;
+    return m_queueRowsModel.trackNumberAt(index);
 }
 
 void BridgeClient::addLibraryRoot(const QString &path) {
@@ -2212,6 +2281,23 @@ void BridgeClient::scheduleAnalysisChanged() {
     }
 }
 
+void BridgeClient::shutdownBridgeGracefully() {
+    if (m_ffiBridge == nullptr) {
+        return;
+    }
+
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
+
+    QElapsedTimer timer;
+    timer.start();
+    while (m_connected && timer.elapsed() < 1500) {
+        pollInProcessBridge();
+        if (m_connected) {
+            QThread::msleep(10);
+        }
+    }
+}
+
 QString BridgeClient::detectFileBrowserName() {
     auto fromDesktopId = [](const QString &desktopId) -> QString {
         const QString lowered = desktopId.trimmed().toLower();
@@ -2408,8 +2494,28 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     bool changed = false;
-    bool queueModelChanged = false;
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
+
+    if (snapshot.queue.present && !m_loggedStartupQueuePresent) {
+        logDiagnostic(
+            QStringLiteral("session"),
+            QStringLiteral("startup queue snapshot present len=%1 selected=%2 unknownDur=%3")
+                .arg(snapshot.queue.len)
+                .arg(snapshot.queue.selectedIndex)
+                .arg(snapshot.queue.unknownDurationCount));
+        m_loggedStartupQueuePresent = true;
+    } else if (!snapshot.queue.present
+        && !m_loggedStartupQueueMissing
+        && m_queueLength == 0
+        && (snapshot.library.present || snapshot.playback.present))
+    {
+        logDiagnostic(
+            QStringLiteral("session"),
+            QStringLiteral("startup snapshot omitted queue libraryTracks=%1 playbackPresent=%2")
+                .arg(snapshot.library.present ? snapshot.library.trackCount : -1)
+                .arg(snapshot.playback.present ? 1 : 0));
+        m_loggedStartupQueueMissing = true;
+    }
 
     if (m_playbackState != nextState) {
         m_playbackState = nextState;
@@ -2485,54 +2591,32 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             changed = true;
         }
 
-        QStringList items;
-        QVariantList rows;
+        QVector<QueueRowData> rows;
         QStringList paths;
-        items.reserve(snapshot.queue.tracks.size());
         rows.reserve(snapshot.queue.tracks.size());
         paths.reserve(snapshot.queue.tracks.size());
         for (const auto &track : snapshot.queue.tracks) {
-            const QString title = track.title.trimmed().isEmpty() ? track.path : track.title;
-            const QString coverUrl = searchCoverUrlFast(track.coverPath);
-            paths.push_back(track.path);
-            items.push_back(title);
+            QueueRowData row;
+            row.title = track.title.trimmed().isEmpty() ? track.path : track.title;
+            row.artist = track.artist;
+            row.album = track.album;
+            row.coverPath = searchCoverUrlFast(track.coverPath);
+            row.genre = track.genre;
+            row.lengthText = track.lengthSeconds >= 0.0f
+                ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
+                : QStringLiteral("--:--");
+            row.path = track.path;
+            row.trackNumber = track.trackNumber;
+            row.year = track.year;
 
-            QVariantMap row;
-            row.insert(QStringLiteral("title"), title);
-            row.insert(QStringLiteral("artist"), track.artist);
-            row.insert(QStringLiteral("album"), track.album);
-            row.insert(QStringLiteral("coverPath"), coverUrl);
-            row.insert(QStringLiteral("genre"), track.genre);
-            row.insert(
-                QStringLiteral("lengthText"),
-                track.lengthSeconds >= 0.0f
-                    ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
-                    : QStringLiteral("--:--"));
-            row.insert(QStringLiteral("path"), track.path);
-            if (track.trackNumber > 0) {
-                row.insert(QStringLiteral("trackNumber"), track.trackNumber);
-            } else {
-                row.insert(QStringLiteral("trackNumber"), QVariant{});
-            }
-            if (track.year != std::numeric_limits<int>::min()) {
-                row.insert(QStringLiteral("year"), track.year);
-            } else {
-                row.insert(QStringLiteral("year"), QVariant{});
-            }
+            paths.push_back(track.path);
             rows.push_back(row);
-            if (!track.path.trimmed().isEmpty() && !coverUrl.isEmpty()) {
-                cacheTrackCoverForPath(track.path, coverUrl);
+            if (!track.path.trimmed().isEmpty() && !row.coverPath.isEmpty()) {
+                cacheTrackCoverForPath(track.path, row.coverPath);
             }
         }
-        if (m_queueItems != items) {
-            m_queueItems = items;
+        if (m_queueRowsModel.setRows(std::move(rows))) {
             changed = true;
-            queueModelChanged = true;
-        }
-        if (m_queueRows != rows) {
-            m_queueRows = rows;
-            changed = true;
-            queueModelChanged = true;
         }
         if (m_queuePaths != paths) {
             m_queuePaths = paths;
@@ -2540,7 +2624,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 ? (m_queueVersion + 1)
                 : 1;
             changed = true;
-            queueModelChanged = true;
         }
     }
 
@@ -2611,16 +2694,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             if (track.year != std::numeric_limits<int>::min()) {
                 nextTrackYear = track.year;
             }
-        } else if (detailIndex >= 0 && detailIndex < m_queueRows.size()) {
-            const QVariantMap row = m_queueRows[detailIndex].toMap();
-            nextTrackTitle = row.value(QStringLiteral("title")).toString();
-            nextTrackArtist = row.value(QStringLiteral("artist")).toString();
-            nextTrackAlbum = row.value(QStringLiteral("album")).toString();
-            nextTrackGenre = row.value(QStringLiteral("genre")).toString();
-            queueTrackCover = row.value(QStringLiteral("coverPath")).toString();
-            const QVariant rowYear = row.value(QStringLiteral("year"));
-            if (rowYear.isValid() && !rowYear.isNull()) {
-                nextTrackYear = rowYear;
+        } else if (const QueueRowData *row = m_queueRowsModel.rowAt(detailIndex)) {
+            nextTrackTitle = row->title;
+            nextTrackArtist = row->artist;
+            nextTrackAlbum = row->album;
+            nextTrackGenre = row->genre;
+            queueTrackCover = row->coverPath;
+            if (row->year != std::numeric_limits<int>::min()) {
+                nextTrackYear = row->year;
             }
         }
 
@@ -2921,10 +3002,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!qFuzzyCompare(m_libraryScanEtaSeconds + 2.0, etaSeconds + 2.0)) {
         m_libraryScanEtaSeconds = etaSeconds;
         changed = true;
-    }
-
-    if (queueModelChanged) {
-        emit queueChanged();
     }
 
     return changed;

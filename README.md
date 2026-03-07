@@ -45,7 +45,7 @@ Primary app run path (Kirigami UI + in-process Rust backend):
 ./scripts/run-ui.sh
 ```
 
-Start from a clean local Ferrous state (library DB + thumbnail cache):
+Start from a clean local Ferrous state (library DB + saved session + thumbnail cache):
 
 ```bash
 ./scripts/run-ui.sh --nuke-all
@@ -54,7 +54,7 @@ Start from a clean local Ferrous state (library DB + thumbnail cache):
 Cleanup-only utility mode (no configure/build/run):
 
 ```bash
-./scripts/run-ui.sh --nuke-db --no-configure --no-build --no-run
+./scripts/run-ui.sh --nuke-session --no-configure --no-build --no-run
 ```
 
 Backend CLI/debug shell:

@@ -236,7 +236,6 @@ Kirigami.ApplicationWindow {
         property int queueLength: 0
         property int queueVersion: 0
         property string queueDurationText: "00:00"
-        property var queueItems: []
         property var queueRows: []
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
@@ -4912,13 +4911,18 @@ Kirigami.ApplicationWindow {
 
                             delegate: Rectangle {
                                 id: playlistRow
-                                readonly property var rowData: (modelData && typeof modelData === "object")
-                                    ? modelData
-                                    : ({})
-                                readonly property string titleValue: rowData.title || ""
-                                readonly property string artistValue: rowData.artist || ""
-                                readonly property string albumValue: rowData.album || ""
-                                readonly property string lengthTextValue: rowData.lengthText || "--:--"
+                                readonly property string titleValue: (typeof title !== "undefined" && title !== undefined)
+                                    ? title
+                                    : ((modelData && typeof modelData === "object") ? (modelData.title || "") : "")
+                                readonly property string artistValue: (typeof artist !== "undefined" && artist !== undefined)
+                                    ? artist
+                                    : ((modelData && typeof modelData === "object") ? (modelData.artist || "") : "")
+                                readonly property string albumValue: (typeof album !== "undefined" && album !== undefined)
+                                    ? album
+                                    : ((modelData && typeof modelData === "object") ? (modelData.album || "") : "")
+                                readonly property string lengthTextValue: (typeof lengthText !== "undefined" && lengthText !== undefined)
+                                    ? lengthText
+                                    : ((modelData && typeof modelData === "object") ? (modelData.lengthText || "--:--") : "--:--")
                                 readonly property bool isCurrentQueueRow: index === uiBridge.playingQueueIndex
                                 readonly property bool draggableQueueItem: true
                                 readonly property int queueRowIndex: index

@@ -22,7 +22,7 @@ From repo root:
 
 This script builds Rust artifacts first, then launches the UI.
 
-Launch from a clean Ferrous state (library DB + thumbnail cache):
+Launch from a clean Ferrous state (library DB + saved session + thumbnail cache):
 
 ```bash
 ./scripts/run-ui.sh --nuke-all

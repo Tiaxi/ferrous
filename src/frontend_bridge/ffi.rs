@@ -182,6 +182,7 @@ impl FfiRuntime {
         }
 
         let mut latest_snapshot: Option<BridgeSnapshot> = None;
+        let mut latest_queue_snapshot: Option<BridgeSnapshot> = None;
         let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
         for _ in 0..max_events.max(1) {
             let event = self.bridge.try_recv();
@@ -192,6 +193,9 @@ impl FfiRuntime {
                 BridgeEvent::Snapshot(snapshot) => {
                     if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
                         latest_tree_bytes = Some(tree_bytes.clone());
+                    }
+                    if snapshot.queue_included {
+                        latest_queue_snapshot = Some((*snapshot).clone());
                     }
                     latest_snapshot = Some(*snapshot);
                 }
@@ -211,7 +215,9 @@ impl FfiRuntime {
         if let Some(tree_bytes) = latest_tree_bytes {
             self.push_library_tree_frame(tree_bytes.as_ref().clone());
         }
-        if let Some(snapshot) = latest_snapshot {
+        if let Some(snapshot) =
+            latest_snapshot.map(|snapshot| merge_queue_snapshot(snapshot, latest_queue_snapshot))
+        {
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
             self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
             let queue_section = if snapshot.queue_included {
@@ -257,6 +263,22 @@ impl FfiRuntime {
         self.queue_section_cache.queue_section = queue_section.clone();
         queue_section
     }
+}
+
+fn merge_queue_snapshot(
+    mut latest_snapshot: BridgeSnapshot,
+    latest_queue_snapshot: Option<BridgeSnapshot>,
+) -> BridgeSnapshot {
+    if latest_snapshot.queue_included {
+        return latest_snapshot;
+    }
+    let Some(queue_snapshot) = latest_queue_snapshot else {
+        return latest_snapshot;
+    };
+    latest_snapshot.queue_included = true;
+    latest_snapshot.queue = queue_snapshot.queue;
+    latest_snapshot.selected_queue_index = queue_snapshot.selected_queue_index;
+    latest_snapshot
 }
 
 #[repr(C)]
@@ -1876,6 +1898,26 @@ mod tests {
         assert_ne!(mask & SECTION_PLAYBACK, 0);
         assert_eq!(mask & SECTION_QUEUE, 0);
         assert_ne!(mask & SECTION_METADATA, 0);
+    }
+
+    #[test]
+    fn merge_queue_snapshot_preserves_latest_included_queue() {
+        let queue_snapshot = sample_snapshot();
+        let mut latest_snapshot = sample_snapshot();
+        latest_snapshot.queue_included = false;
+        latest_snapshot.queue.clear();
+        latest_snapshot.selected_queue_index = None;
+        latest_snapshot.playback.position = std::time::Duration::from_secs(42);
+
+        let merged = merge_queue_snapshot(latest_snapshot, Some(queue_snapshot.clone()));
+
+        assert!(merged.queue_included);
+        assert_eq!(merged.queue, queue_snapshot.queue);
+        assert_eq!(
+            merged.selected_queue_index,
+            queue_snapshot.selected_queue_index
+        );
+        assert_eq!(merged.playback.position, std::time::Duration::from_secs(42));
     }
 
     #[test]

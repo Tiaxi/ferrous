@@ -104,19 +104,10 @@ impl Handle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ServiceOptions {
     pub queue_path: Option<PathBuf>,
     pub initial_enabled: bool,
-}
-
-impl Default for ServiceOptions {
-    fn default() -> Self {
-        Self {
-            queue_path: None,
-            initial_enabled: false,
-        }
-    }
 }
 
 #[derive(Debug)]

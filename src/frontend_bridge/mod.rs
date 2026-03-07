@@ -1839,15 +1839,23 @@ fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<
 }
 
 fn refresh_queue_details(state: &mut BridgeState) {
+    let queue_paths: HashSet<&Path> = state.queue.iter().map(PathBuf::as_path).collect();
+    let library_paths: HashSet<&Path> = state
+        .library
+        .tracks
+        .iter()
+        .map(|track| track.path.as_path())
+        .collect();
+
     state
         .queue_details
-        .retain(|path, _| state.queue.iter().any(|queued| queued == path));
+        .retain(|path, _| queue_paths.contains(path.as_path()));
 
     for path in &state.queue {
         if state.queue_details.contains_key(path) {
             continue;
         }
-        if state.library.tracks.iter().any(|track| track.path == *path) {
+        if library_paths.contains(path.as_path()) {
             continue;
         }
         if !path.is_file() || !is_supported_audio(path) {
@@ -3059,6 +3067,9 @@ fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeSt
         state.library = Arc::new(snapshot);
         state.library_artist_count = artist_count;
         state.library_album_count = album_count;
+        if !state.queue.is_empty() {
+            refresh_queue_details(state);
+        }
         return true;
     }
     false
@@ -3131,7 +3142,6 @@ fn apply_session_restore(
         .selected_queue_index
         .filter(|idx| *idx < state.queue.len())
         .or(restored_current_index);
-    refresh_queue_details(state);
     if state.queue.is_empty() {
         return;
     }
@@ -3203,7 +3213,12 @@ fn save_session_snapshot(session: &SessionSnapshot) {
         let _ = fs::create_dir_all(parent);
     }
     let text = format_session_text(session);
-    let _ = fs::write(path, text);
+    let tmp_path = path.with_extension("json.tmp");
+    if fs::write(&tmp_path, text).is_ok() {
+        let _ = fs::rename(&tmp_path, &path);
+    } else {
+        let _ = fs::remove_file(&tmp_path);
+    }
 }
 
 fn load_settings_into(settings: &mut BridgeSettings) {
@@ -3637,6 +3652,79 @@ mod tests {
         state.queue.clear();
         refresh_queue_details(&mut state);
         assert!(state.queue_details.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn refresh_queue_details_skips_library_tracks_in_queue() {
+        let track = p("/library/song.flac");
+        let mut state = BridgeState::default();
+        state.library = Arc::new(LibrarySnapshot {
+            tracks: vec![LibraryTrack {
+                path: track.clone(),
+                ..LibraryTrack::default()
+            }],
+            ..LibrarySnapshot::default()
+        });
+        state.queue = vec![track.clone()];
+
+        refresh_queue_details(&mut state);
+
+        assert!(!state.queue_details.contains_key(&track));
+    }
+
+    #[test]
+    fn apply_session_restore_does_not_eagerly_populate_queue_details() {
+        let (analysis_tx, _) = crossbeam_channel::unbounded();
+        let (pcm_tx, _) = crossbeam_channel::unbounded();
+        let (playback, _playback_rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+        let root = test_dir("session-restore-queue-details");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let track = root.join("song.flac");
+        write_stub(&track, b"not-real-audio");
+
+        let mut state = BridgeState::default();
+        let session = SessionSnapshot {
+            queue: vec![track.clone()],
+            selected_queue_index: Some(0),
+            current_queue_index: Some(0),
+            current_path: Some(track.clone()),
+        };
+
+        apply_session_restore(&mut state, &playback, Some(&session));
+
+        assert_eq!(state.queue, vec![track]);
+        assert!(state.queue_details.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pump_library_events_populates_queue_details_for_restored_external_tracks() {
+        let root = test_dir("restored-external-queue-details");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let track = root.join("song.flac");
+        let cover = root.join("cover.jpg");
+        write_stub(&track, b"not-real-audio");
+        write_stub(&cover, b"not-real-jpg");
+
+        let mut state = BridgeState::default();
+        state.queue = vec![track.clone()];
+
+        let (library_tx, library_rx) = crossbeam_channel::unbounded();
+        library_tx
+            .send(LibraryEvent::Snapshot(LibrarySnapshot::default()))
+            .expect("send library snapshot");
+
+        assert!(pump_library_events(&library_rx, &mut state));
+
+        let details = state
+            .queue_details
+            .get(&track)
+            .expect("restored external track details inserted");
+        assert_eq!(details.title, "song");
+        assert_eq!(details.cover_path, cover.to_string_lossy());
 
         let _ = fs::remove_dir_all(root);
     }
