@@ -267,6 +267,7 @@ struct LastFmPlaybackTracker {
     duration_seconds: Option<u32>,
     started_at_utc: Option<i64>,
     listened_duration: Duration,
+    last_listen_tick: Option<Instant>,
     now_playing_sent: bool,
     scrobble_queued: bool,
 }
@@ -2925,6 +2926,22 @@ fn tick_lastfm_playback(
     lastfm_handle: &LastFmHandle,
     tracker: &mut LastFmPlaybackTracker,
 ) {
+    tick_lastfm_playback_at(
+        state,
+        lastfm_handle,
+        tracker,
+        Instant::now(),
+        unix_timestamp_now(),
+    );
+}
+
+fn tick_lastfm_playback_at(
+    state: &BridgeState,
+    lastfm_handle: &LastFmHandle,
+    tracker: &mut LastFmPlaybackTracker,
+    now: Instant,
+    now_utc: i64,
+) {
     let current_path = state.playback.current.clone();
     if tracker.active_path != current_path {
         queue_lastfm_scrobble_if_ready(lastfm_handle, tracker);
@@ -2946,6 +2963,7 @@ fn tick_lastfm_playback(
         tracker.duration_seconds = None;
         tracker.started_at_utc = None;
         tracker.listened_duration = Duration::ZERO;
+        tracker.last_listen_tick = None;
         tracker.now_playing_sent = false;
         tracker.scrobble_queued = false;
         return;
@@ -2975,9 +2993,16 @@ fn tick_lastfm_playback(
 
     if state.playback.state == PlaybackState::Playing {
         if tracker.started_at_utc.is_none() {
-            tracker.started_at_utc = Some(unix_timestamp_now());
+            tracker.started_at_utc = Some(now_utc);
         }
-        tracker.listened_duration = state.playback.position;
+        if let Some(previous_tick) = tracker.last_listen_tick {
+            tracker.listened_duration = tracker
+                .listened_duration
+                .saturating_add(now.saturating_duration_since(previous_tick));
+        }
+        tracker.last_listen_tick = Some(now);
+    } else {
+        tracker.last_listen_tick = None;
     }
 
     if state.lastfm.enabled
@@ -3316,6 +3341,7 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lastfm::ServiceOptions as LastFmServiceOptions;
     use std::io::Write;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
@@ -4617,5 +4643,53 @@ mod tests {
         assert_eq!(updated_metadata.metadata.title, second_title);
 
         bridge.command(BridgeCommand::Shutdown);
+    }
+
+    #[test]
+    fn lastfm_scrobble_requires_actual_listened_time_instead_of_seek_position() {
+        let (_guard, lastfm_handle) = (
+            test_guard(),
+            lastfm::spawn(LastFmServiceOptions::default()).0,
+        );
+        let track_path = p("/music/seek-test.flac");
+        let mut state = BridgeState::default();
+        state.lastfm.enabled = true;
+        state.playback.current = Some(track_path.clone());
+        state.playback.state = PlaybackState::Playing;
+        state.playback.duration = Duration::from_secs(240);
+        state.playback.position = Duration::from_secs(5);
+        state.metadata.source_path = Some(track_path.to_string_lossy().into_owned());
+        state.metadata.artist = "Artist".to_string();
+        state.metadata.title = "Track".to_string();
+        state.metadata.album = "Album".to_string();
+
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, start, 1_700_000_000);
+        assert_eq!(tracker.listened_duration, Duration::ZERO);
+        assert!(!tracker.scrobble_queued);
+
+        state.playback.position = Duration::from_secs(180);
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(1),
+            1_700_000_001,
+        );
+        assert!(tracker.listened_duration < Duration::from_secs(2));
+        assert!(!tracker.scrobble_queued);
+
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(120),
+            1_700_000_120,
+        );
+        assert!(tracker.listened_duration >= Duration::from_secs(120));
+        assert!(tracker.scrobble_queued);
+
+        lastfm_handle.command(LastFmCommand::Shutdown);
     }
 }

@@ -14,7 +14,7 @@ gstreamer-app = { version = "0.25", optional = true }
 gstreamer-audio = { version = "0.25", optional = true }
 gstreamer-pbutils = { version = "0.25", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
+keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native-sync-persistent", "windows-native", "vendored"] }
 lofty = "0.23"
 md5 = "0.7"
 parking_lot = "0.12"
