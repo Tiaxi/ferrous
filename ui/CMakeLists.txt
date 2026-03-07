@@ -119,6 +119,13 @@ target_link_libraries(ferrous PRIVATE
     pthread
 )
 
+if(UNIX AND NOT APPLE AND NOT MSVC)
+    # Keep symbols from static archives (notably vendored libdbus from Rust deps)
+    # out of the executable's dynamic symbol table so Qt binds to the shared
+    # system libraries it loaded, not our private static copies.
+    target_link_options(ferrous PRIVATE "-Wl,--exclude-libs,ALL")
+endif()
+
 if(FERROUS_ENABLE_PROFILE_LOGS)
     target_compile_definitions(ferrous PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
 endif()
