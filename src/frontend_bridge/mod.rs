@@ -53,6 +53,7 @@ pub enum LibrarySortMode {
 }
 
 impl LibrarySortMode {
+    #[must_use]
     pub fn from_i32(value: i32) -> Self {
         match value {
             1 => Self::Title,
@@ -60,6 +61,7 @@ impl LibrarySortMode {
         }
     }
 
+    #[must_use]
     pub fn to_i32(self) -> i32 {
         match self {
             Self::Year => 0,
@@ -156,6 +158,7 @@ pub enum BridgeSettingsCommand {
 }
 
 impl SpectrogramViewMode {
+    #[must_use]
     pub fn from_i32(value: i32) -> Self {
         match value {
             1 => Self::PerChannel,
@@ -163,6 +166,7 @@ impl SpectrogramViewMode {
         }
     }
 
+    #[must_use]
     pub fn to_i32(self) -> i32 {
         match self {
             Self::Downmix => 0,
@@ -193,6 +197,7 @@ pub enum ViewerFullscreenMode {
 }
 
 impl ViewerFullscreenMode {
+    #[must_use]
     pub fn from_i32(value: i32) -> Self {
         match value {
             1 => Self::WholeScreen,
@@ -200,6 +205,7 @@ impl ViewerFullscreenMode {
         }
     }
 
+    #[must_use]
     pub fn to_i32(self) -> i32 {
         match self {
             Self::WithinWindow => 0,
@@ -283,18 +289,28 @@ pub struct BridgeSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub struct BridgeDisplaySettings {
+    pub log_scale: bool,
+    pub show_fps: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeIntegrationSettings {
+    pub system_media_controls_enabled: bool,
+    pub lastfm_scrobbling_enabled: bool,
+    pub lastfm_username: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct BridgeSettings {
     pub volume: f32,
     pub fft_size: usize,
     pub spectrogram_view_mode: SpectrogramViewMode,
     pub viewer_fullscreen_mode: ViewerFullscreenMode,
     pub db_range: f32,
-    pub log_scale: bool,
-    pub show_fps: bool,
-    pub system_media_controls_enabled: bool,
+    pub display: BridgeDisplaySettings,
     pub library_sort_mode: LibrarySortMode,
-    pub lastfm_scrobbling_enabled: bool,
-    pub lastfm_username: String,
+    pub integrations: BridgeIntegrationSettings,
 }
 
 impl Default for BridgeSettings {
@@ -308,12 +324,16 @@ impl Default for BridgeSettings {
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
             viewer_fullscreen_mode: ViewerFullscreenMode::WithinWindow,
             db_range: 90.0,
-            log_scale: false,
-            show_fps,
-            system_media_controls_enabled: true,
+            display: BridgeDisplaySettings {
+                log_scale: false,
+                show_fps,
+            },
             library_sort_mode: LibrarySortMode::Year,
-            lastfm_scrobbling_enabled: false,
-            lastfm_username: String::new(),
+            integrations: BridgeIntegrationSettings {
+                system_media_controls_enabled: true,
+                lastfm_scrobbling_enabled: false,
+                lastfm_username: String::new(),
+            },
         }
     }
 }
@@ -541,6 +561,7 @@ struct BridgeRuntimeOptions {
 }
 
 impl FrontendBridgeHandle {
+    #[must_use]
     pub fn spawn() -> Self {
         Self::spawn_with_options(BridgeRuntimeOptions::default())
     }
@@ -557,7 +578,7 @@ impl FrontendBridgeHandle {
 
         let _ = std::thread::Builder::new()
             .name("ferrous-bridge".to_string())
-            .spawn(move || run_bridge_loop(cmd_rx, event_tx, options));
+            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options));
         Self {
             tx: cmd_tx,
             rx: event_rx,
@@ -568,13 +589,473 @@ impl FrontendBridgeHandle {
         let _ = self.tx.send(cmd);
     }
 
+    #[must_use]
     pub fn recv_timeout(&self, timeout: Duration) -> Option<BridgeEvent> {
         self.rx.recv_timeout(timeout).ok()
     }
 
+    #[must_use]
     pub fn try_recv(&self) -> Option<BridgeEvent> {
         self.rx.try_recv().ok()
     }
+}
+
+struct BridgeLoopRuntime {
+    analysis: AnalysisEngine,
+    analysis_rx: Receiver<AnalysisEvent>,
+    playback: PlaybackEngine,
+    playback_rx: Receiver<PlaybackEvent>,
+    metadata: MetadataService,
+    metadata_rx: Receiver<MetadataEvent>,
+    library: LibraryService,
+    library_rx: Receiver<LibraryEvent>,
+    search_query_tx: Sender<SearchWorkerQuery>,
+    search_results_rx: Receiver<BridgeSearchResultsFrame>,
+    external_queue_details_tx: Sender<ExternalQueueDetailsRequest>,
+    external_queue_details_event_rx: Receiver<ExternalQueueDetailsEvent>,
+    lastfm: LastFmHandle,
+    lastfm_rx: Receiver<LastFmEvent>,
+    state: BridgeState,
+    lastfm_tracker: LastFmPlaybackTracker,
+    flags: BridgeLoopFlags,
+    last_settings_save: Instant,
+    last_session_save: Instant,
+    last_saved_session: Option<SessionSnapshot>,
+    ticker: Receiver<Instant>,
+    playing_poll_interval: Duration,
+    last_playing_poll: Instant,
+    idle_poll_interval: Duration,
+    last_idle_poll: Instant,
+    diagnostics: BridgeLoopDiagnostics,
+    snapshot_interval: Duration,
+    last_snapshot_emit: Instant,
+    snapshot_plan: BridgeSnapshotPlan,
+    queue_detail_revalidate_interval: Duration,
+    last_queue_detail_revalidate: Instant,
+    tree_emit_interval: Duration,
+    tree_emit_min_track_delta: usize,
+    last_tree_emit_at: Option<Instant>,
+    last_tree_emit_track_count: usize,
+}
+
+struct BridgeLoopFlags {
+    running: bool,
+    settings_dirty: bool,
+    snapshot_dirty: bool,
+}
+
+struct BridgeLoopDiagnostics {
+    profile_enabled: bool,
+    profile_last: Instant,
+    prof_snapshots_sent: usize,
+    prof_snapshots_dropped: usize,
+}
+
+struct BridgeSnapshotPlan {
+    include_tree_in_next_snapshot: bool,
+    include_queue_in_next_snapshot: bool,
+}
+
+impl BridgeLoopRuntime {
+    fn new(options: BridgeRuntimeOptions) -> Self {
+        let (analysis, analysis_rx) = AnalysisEngine::new();
+        let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
+        let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
+        let (library, library_rx) = LibraryService::new();
+        let (search_query_tx, search_query_rx) = unbounded::<SearchWorkerQuery>();
+        let (search_results_tx, search_results_rx) = unbounded::<BridgeSearchResultsFrame>();
+        let (external_queue_details_tx, external_queue_details_rx) =
+            unbounded::<ExternalQueueDetailsRequest>();
+        let (external_queue_details_event_tx, external_queue_details_event_rx) =
+            unbounded::<ExternalQueueDetailsEvent>();
+        spawn_bridge_support_threads(
+            search_query_rx,
+            search_results_tx,
+            external_queue_details_rx,
+            external_queue_details_event_tx,
+        );
+
+        let mut state = BridgeState::default();
+        load_settings_into(&mut state.settings);
+        state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
+        let (lastfm, lastfm_rx) = spawn_lastfm_service(&state.settings);
+        restore_initial_bridge_state(
+            &mut state,
+            &analysis,
+            &playback,
+            &external_queue_details_tx,
+            &lastfm,
+        );
+
+        let playing_poll_interval = Duration::from_millis(
+            std::env::var("FERROUS_PLAYBACK_POLL_MS")
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .map_or(40, |value| value.clamp(8, 500)),
+        );
+        let snapshot_interval = Duration::from_millis(
+            std::env::var("FERROUS_BRIDGE_SNAPSHOT_MS")
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .map_or(16, |value| value.clamp(8, 1000)),
+        );
+        Self {
+            analysis,
+            analysis_rx,
+            playback,
+            playback_rx,
+            metadata,
+            metadata_rx,
+            library,
+            library_rx,
+            search_query_tx,
+            search_results_rx,
+            external_queue_details_tx,
+            external_queue_details_event_rx,
+            lastfm,
+            lastfm_rx,
+            state,
+            lastfm_tracker: LastFmPlaybackTracker::default(),
+            flags: BridgeLoopFlags {
+                running: true,
+                settings_dirty: false,
+                snapshot_dirty: false,
+            },
+            last_settings_save: Instant::now(),
+            last_session_save: Instant::now(),
+            last_saved_session: None,
+            ticker: tick(Duration::from_millis(16)),
+            playing_poll_interval,
+            last_playing_poll: Instant::now()
+                .checked_sub(playing_poll_interval)
+                .unwrap_or_else(Instant::now),
+            idle_poll_interval: Duration::from_millis(250),
+            last_idle_poll: Instant::now(),
+            diagnostics: BridgeLoopDiagnostics {
+                profile_enabled: cfg!(feature = "profiling-logs")
+                    && std::env::var_os("FERROUS_PROFILE").is_some(),
+                profile_last: Instant::now(),
+                prof_snapshots_sent: 0,
+                prof_snapshots_dropped: 0,
+            },
+            snapshot_interval,
+            last_snapshot_emit: Instant::now(),
+            snapshot_plan: BridgeSnapshotPlan {
+                include_tree_in_next_snapshot: true,
+                include_queue_in_next_snapshot: true,
+            },
+            queue_detail_revalidate_interval: Duration::from_secs(2),
+            last_queue_detail_revalidate: Instant::now(),
+            tree_emit_interval: scan_tree_emit_interval(),
+            tree_emit_min_track_delta: scan_tree_emit_min_track_delta(),
+            last_tree_emit_at: None,
+            last_tree_emit_track_count: 0,
+        }
+    }
+
+    fn run(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) {
+        self.emit_initial_snapshot(event_tx);
+        while self.flags.running {
+            self.handle_select(cmd_rx, event_tx);
+            self.process_updates(event_tx);
+            self.maybe_log_profile();
+            self.maybe_persist();
+        }
+        self.shutdown(event_tx);
+    }
+
+    fn emit_initial_snapshot(&mut self, event_tx: &Sender<BridgeEvent>) {
+        self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+    }
+
+    fn handle_select(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) {
+        select! {
+            recv(cmd_rx) -> msg => {
+                match msg {
+                    Ok(cmd) => self.handle_command(cmd, event_tx),
+                    Err(_) => self.flags.running = false,
+                }
+            }
+            recv(self.ticker) -> _ => self.poll_playback_if_due(),
+        }
+    }
+
+    fn handle_command(&mut self, cmd: BridgeCommand, event_tx: &Sender<BridgeEvent>) {
+        let rebuild_tree =
+            command_requires_tree_rebuild(&cmd, self.state.settings.library_sort_mode);
+        let refresh_queue_snapshot = command_requires_queue_snapshot(&cmd);
+        let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
+        let mut command_context = BridgeCommandContext {
+            playback: &self.playback,
+            analysis: &self.analysis,
+            library: &self.library,
+            lastfm: &self.lastfm,
+            search_query_tx: &self.search_query_tx,
+            external_queue_details_tx: &self.external_queue_details_tx,
+            event_tx,
+            running: &mut self.flags.running,
+            settings_dirty: &mut self.flags.settings_dirty,
+        };
+        let changed = handle_bridge_command(cmd, &mut self.state, &mut command_context);
+        if rebuild_tree {
+            self.state.rebuild_pre_built_tree();
+            self.snapshot_plan.include_tree_in_next_snapshot = true;
+        }
+        if changed {
+            self.flags.snapshot_dirty = true;
+            if refresh_queue_snapshot {
+                self.snapshot_plan.include_queue_in_next_snapshot = true;
+            }
+        }
+        if force_snapshot && self.flags.running {
+            let include_queue = self.snapshot_plan.include_queue_in_next_snapshot || force_snapshot;
+            self.emit_snapshot(event_tx, include_queue);
+            self.last_snapshot_emit = Instant::now();
+        }
+    }
+
+    fn poll_playback_if_due(&mut self) {
+        if self.state.playback.state == PlaybackState::Playing {
+            if self.last_playing_poll.elapsed() >= self.playing_poll_interval {
+                self.playback.command(PlaybackCommand::Poll);
+                self.last_playing_poll = Instant::now();
+            }
+            return;
+        }
+        if self.last_idle_poll.elapsed() >= self.idle_poll_interval {
+            self.playback.command(PlaybackCommand::Poll);
+            self.last_idle_poll = Instant::now();
+        }
+    }
+
+    fn process_updates(&mut self, event_tx: &Sender<BridgeEvent>) {
+        let changed = self.pump_bridge_events(event_tx);
+        if changed {
+            self.flags.snapshot_dirty = true;
+        }
+        if self.flags.snapshot_dirty && self.last_snapshot_emit.elapsed() >= self.snapshot_interval
+        {
+            self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+            self.last_snapshot_emit = Instant::now();
+        }
+        let _ =
+            flush_pending_search_results_event(event_tx, &mut self.state.pending_search_results);
+    }
+
+    fn pump_bridge_events(&mut self, _event_tx: &Sender<BridgeEvent>) -> bool {
+        let playback_changed = pump_playback_events(
+            &self.playback_rx,
+            &self.analysis,
+            &self.metadata,
+            &mut self.state,
+        );
+        let analysis_changed = pump_analysis_events(&self.analysis_rx, &mut self.state);
+        let metadata_changed = pump_metadata_events(&self.metadata_rx, &mut self.state);
+        let library_changed = pump_library_events(
+            &self.library_rx,
+            &self.external_queue_details_tx,
+            &mut self.state,
+        );
+        let external_queue_details_changed = pump_external_queue_detail_events(
+            &self.external_queue_details_event_rx,
+            &mut self.state,
+        );
+        let lastfm_changed = pump_lastfm_events(
+            &self.lastfm_rx,
+            &mut self.state,
+            &mut self.flags.settings_dirty,
+        );
+        let _ = pump_search_results(&self.search_results_rx, &mut self.state);
+        tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
+        self.revalidate_queue_details();
+        self.handle_library_refresh(library_changed);
+        if external_queue_details_changed {
+            self.snapshot_plan.include_queue_in_next_snapshot = true;
+        }
+        playback_changed
+            || analysis_changed
+            || metadata_changed
+            || library_changed
+            || external_queue_details_changed
+            || lastfm_changed
+    }
+
+    fn revalidate_queue_details(&mut self) {
+        if self.last_queue_detail_revalidate.elapsed() < self.queue_detail_revalidate_interval {
+            return;
+        }
+        if sync_queue_details(&mut self.state, &self.external_queue_details_tx) {
+            self.snapshot_plan.include_queue_in_next_snapshot = true;
+            self.flags.snapshot_dirty = true;
+        }
+        self.last_queue_detail_revalidate = Instant::now();
+    }
+
+    fn handle_library_refresh(&mut self, library_changed: bool) {
+        if !library_changed {
+            return;
+        }
+        self.snapshot_plan.include_queue_in_next_snapshot = true;
+        let now = Instant::now();
+        let track_delta = self
+            .state
+            .library
+            .tracks
+            .len()
+            .saturating_sub(self.last_tree_emit_track_count);
+        let scan_emit_due = self
+            .last_tree_emit_at
+            .is_none_or(|last| now.duration_since(last) >= self.tree_emit_interval);
+        let should_emit_tree = !self.state.library.scan_in_progress
+            || self.last_tree_emit_at.is_none()
+            || (scan_emit_due && track_delta >= self.tree_emit_min_track_delta);
+        if should_emit_tree {
+            self.state.rebuild_pre_built_tree();
+            self.snapshot_plan.include_tree_in_next_snapshot = true;
+        }
+    }
+
+    fn emit_snapshot(&mut self, event_tx: &Sender<BridgeEvent>, include_queue: bool) {
+        if send_snapshot_event(
+            event_tx,
+            &self.state,
+            self.snapshot_plan.include_tree_in_next_snapshot,
+            include_queue,
+        ) {
+            self.diagnostics.prof_snapshots_sent += 1;
+            if self.snapshot_plan.include_tree_in_next_snapshot {
+                self.last_tree_emit_at = Some(Instant::now());
+                self.last_tree_emit_track_count = self.state.library.tracks.len();
+            }
+            self.snapshot_plan.include_tree_in_next_snapshot = false;
+            if include_queue {
+                self.snapshot_plan.include_queue_in_next_snapshot = false;
+            }
+            self.flags.snapshot_dirty = false;
+        } else {
+            self.diagnostics.prof_snapshots_dropped += 1;
+            self.flags.snapshot_dirty = true;
+        }
+    }
+
+    fn maybe_log_profile(&mut self) {
+        if !self.diagnostics.profile_enabled
+            || self.diagnostics.profile_last.elapsed() < Duration::from_secs(1)
+        {
+            return;
+        }
+        let _rss_kb = current_rss_kb();
+        let _spectro_rows = self
+            .state
+            .analysis
+            .spectrogram_channels
+            .first()
+            .map_or(0, |channel| channel.rows.len());
+        let _spectro_bins = self
+            .state
+            .analysis
+            .spectrogram_channels
+            .first()
+            .and_then(|channel| channel.rows.first())
+            .map_or(0, std::vec::Vec::len);
+        profile_eprintln!(
+            "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} spectro_rows={} spectro_bins={} sent_snap/s={} drop_snap/s={}",
+            _rss_kb,
+            self.playback_rx.len(),
+            self.analysis_rx.len(),
+            self.metadata_rx.len(),
+            self.library_rx.len(),
+            self.state.analysis.waveform_peaks.len(),
+            _spectro_rows,
+            _spectro_bins,
+            self.diagnostics.prof_snapshots_sent,
+            self.diagnostics.prof_snapshots_dropped
+        );
+        self.diagnostics.prof_snapshots_sent = 0;
+        self.diagnostics.prof_snapshots_dropped = 0;
+        self.diagnostics.profile_last = Instant::now();
+    }
+
+    fn maybe_persist(&mut self) {
+        if self.flags.settings_dirty && self.last_settings_save.elapsed() >= Duration::from_secs(2)
+        {
+            save_settings(&self.state.settings);
+            self.flags.settings_dirty = false;
+            self.last_settings_save = Instant::now();
+        }
+        if self.last_session_save.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        let session = session_snapshot_for_state(&self.state);
+        if self.last_saved_session.as_ref() != Some(&session) {
+            save_session_snapshot(&session);
+            self.last_saved_session = Some(session);
+        }
+        self.last_session_save = Instant::now();
+    }
+
+    fn shutdown(&mut self, event_tx: &Sender<BridgeEvent>) {
+        save_settings(&self.state.settings);
+        save_session_snapshot(&session_snapshot_for_state(&self.state));
+        self.lastfm.command(LastFmCommand::Shutdown);
+        let _ = try_send_event(event_tx, BridgeEvent::Stopped);
+    }
+}
+
+fn spawn_bridge_support_threads(
+    search_query_rx: Receiver<SearchWorkerQuery>,
+    search_results_tx: Sender<BridgeSearchResultsFrame>,
+    external_queue_details_rx: Receiver<ExternalQueueDetailsRequest>,
+    external_queue_details_event_tx: Sender<ExternalQueueDetailsEvent>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("ferrous-bridge-search".to_string())
+        .spawn(move || run_search_worker(&search_query_rx, &search_results_tx));
+    let _ = std::thread::Builder::new()
+        .name("ferrous-queue-details".to_string())
+        .spawn(move || {
+            run_external_queue_detail_worker(
+                &external_queue_details_rx,
+                &external_queue_details_event_tx,
+            );
+        });
+}
+
+fn spawn_lastfm_service(settings: &BridgeSettings) -> (LastFmHandle, Receiver<LastFmEvent>) {
+    let lastfm_queue_path = config_base_path().map(|base| lastfm::queue_path(&base));
+    let (lastfm, lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
+        queue_path: lastfm_queue_path,
+        initial_enabled: settings.integrations.lastfm_scrobbling_enabled,
+    });
+    if !settings.integrations.lastfm_username.trim().is_empty() {
+        lastfm.command(LastFmCommand::LoadStoredSession {
+            username: settings.integrations.lastfm_username.clone(),
+        });
+    }
+    (lastfm, lastfm_rx)
+}
+
+fn restore_initial_bridge_state(
+    state: &mut BridgeState,
+    analysis: &AnalysisEngine,
+    playback: &PlaybackEngine,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+    lastfm: &LastFmHandle,
+) {
+    state.playback.volume = state.settings.volume;
+    playback.command(PlaybackCommand::SetVolume(state.settings.volume));
+    analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+    analysis.command(AnalysisCommand::SetSpectrogramViewMode(
+        state.settings.spectrogram_view_mode,
+    ));
+    lastfm.command(LastFmCommand::SetEnabled(
+        state.settings.integrations.lastfm_scrobbling_enabled,
+    ));
+    apply_session_restore(state, playback, load_session_snapshot().as_ref());
+    if !state.queue.is_empty() {
+        let _ = sync_queue_details(state, external_queue_details_tx);
+    }
+    state.rebuild_pre_built_tree();
 }
 
 #[cfg_attr(
@@ -582,317 +1063,12 @@ impl FrontendBridgeHandle {
     allow(unused_variables, unused_assignments)
 )]
 fn run_bridge_loop(
-    cmd_rx: Receiver<BridgeCommand>,
-    event_tx: Sender<BridgeEvent>,
+    cmd_rx: &Receiver<BridgeCommand>,
+    event_tx: &Sender<BridgeEvent>,
     options: BridgeRuntimeOptions,
 ) {
-    let (analysis, analysis_rx) = AnalysisEngine::new();
-    let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
-    let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
-    let (library, library_rx) = LibraryService::new();
-    let (search_query_tx, search_query_rx) = unbounded::<SearchWorkerQuery>();
-    let (search_results_tx, search_results_rx) = unbounded::<BridgeSearchResultsFrame>();
-    let (external_queue_details_tx, external_queue_details_rx) =
-        unbounded::<ExternalQueueDetailsRequest>();
-    let (external_queue_details_event_tx, external_queue_details_event_rx) =
-        unbounded::<ExternalQueueDetailsEvent>();
-    let _ = std::thread::Builder::new()
-        .name("ferrous-bridge-search".to_string())
-        .spawn(move || run_search_worker(search_query_rx, search_results_tx));
-    let _ = std::thread::Builder::new()
-        .name("ferrous-queue-details".to_string())
-        .spawn(move || {
-            run_external_queue_detail_worker(
-                external_queue_details_rx,
-                external_queue_details_event_tx,
-            )
-        });
-
-    let mut state = BridgeState::default();
-    load_settings_into(&mut state.settings);
-    state.lastfm.enabled = state.settings.lastfm_scrobbling_enabled;
-    let lastfm_queue_path = config_base_path().map(|base| lastfm::queue_path(&base));
-    let (lastfm, lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
-        queue_path: lastfm_queue_path,
-        initial_enabled: state.settings.lastfm_scrobbling_enabled,
-    });
-    if !state.settings.lastfm_username.trim().is_empty() {
-        lastfm.command(LastFmCommand::LoadStoredSession {
-            username: state.settings.lastfm_username.clone(),
-        });
-    }
-    state.playback.volume = state.settings.volume;
-    playback.command(PlaybackCommand::SetVolume(state.settings.volume));
-    analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
-    analysis.command(AnalysisCommand::SetSpectrogramViewMode(
-        state.settings.spectrogram_view_mode,
-    ));
-    apply_session_restore(&mut state, &playback, load_session_snapshot().as_ref());
-    if !state.queue.is_empty() {
-        let _ = sync_queue_details(&mut state, &external_queue_details_tx);
-    }
-    state.rebuild_pre_built_tree();
-    let mut lastfm_tracker = LastFmPlaybackTracker::default();
-
-    let mut running = true;
-    let mut settings_dirty = false;
-    let mut last_settings_save = Instant::now();
-    let mut last_session_save = Instant::now();
-    let mut last_saved_session: Option<SessionSnapshot> = None;
-    let ticker = tick(Duration::from_millis(16));
-    let playing_poll_interval_ms = std::env::var("FERROUS_PLAYBACK_POLL_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map_or(40, |v| v.clamp(8, 500));
-    let playing_poll_interval = Duration::from_millis(playing_poll_interval_ms);
-    let mut last_playing_poll = Instant::now()
-        .checked_sub(playing_poll_interval)
-        .unwrap_or_else(Instant::now);
-    let idle_poll_interval = Duration::from_millis(250);
-    let mut last_idle_poll = Instant::now();
-    let profile_enabled =
-        cfg!(feature = "profiling-logs") && std::env::var_os("FERROUS_PROFILE").is_some();
-    let mut profile_last = Instant::now();
-    #[allow(unused_variables, unused_assignments)]
-    let mut prof_snapshots_sent = 0usize;
-    #[allow(unused_variables, unused_assignments)]
-    let mut prof_snapshots_dropped = 0usize;
-    let snapshot_interval_ms = std::env::var("FERROUS_BRIDGE_SNAPSHOT_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map_or(16, |v| v.clamp(8, 1000));
-    let snapshot_interval = Duration::from_millis(snapshot_interval_ms);
-    let mut last_snapshot_emit = Instant::now();
-    let mut snapshot_dirty = false;
-    let mut include_tree_in_next_snapshot = true;
-    let mut include_queue_in_next_snapshot = true;
-    let queue_detail_revalidate_interval = Duration::from_secs(2);
-    let mut last_queue_detail_revalidate = Instant::now();
-    let tree_emit_interval = scan_tree_emit_interval();
-    let tree_emit_min_track_delta = scan_tree_emit_min_track_delta();
-    let mut last_tree_emit_at: Option<Instant> = None;
-    let mut last_tree_emit_track_count = 0usize;
-
-    if send_snapshot_event(
-        &event_tx,
-        &state,
-        include_tree_in_next_snapshot,
-        include_queue_in_next_snapshot,
-    ) {
-        prof_snapshots_sent += 1;
-        include_tree_in_next_snapshot = false;
-        include_queue_in_next_snapshot = false;
-        last_tree_emit_at = Some(Instant::now());
-        last_tree_emit_track_count = state.library.tracks.len();
-    } else {
-        prof_snapshots_dropped += 1;
-    }
-
-    while running {
-        select! {
-            recv(cmd_rx) -> msg => {
-                match msg {
-                    Ok(cmd) => {
-                        let rebuild_tree =
-                            command_requires_tree_rebuild(&cmd, state.settings.library_sort_mode);
-                        let refresh_queue_snapshot = command_requires_queue_snapshot(&cmd);
-                        let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
-                        let mut command_context = BridgeCommandContext {
-                            playback: &playback,
-                            analysis: &analysis,
-                            library: &library,
-                            lastfm: &lastfm,
-                            search_query_tx: &search_query_tx,
-                            external_queue_details_tx: &external_queue_details_tx,
-                            event_tx: &event_tx,
-                            running: &mut running,
-                            settings_dirty: &mut settings_dirty,
-                        };
-                        let changed =
-                            handle_bridge_command(cmd, &mut state, &mut command_context);
-                        if rebuild_tree {
-                            state.rebuild_pre_built_tree();
-                            include_tree_in_next_snapshot = true;
-                        }
-                        if changed {
-                            snapshot_dirty = true;
-                            if refresh_queue_snapshot {
-                                include_queue_in_next_snapshot = true;
-                            }
-                        }
-                        if force_snapshot && running {
-                            let include_queue = include_queue_in_next_snapshot || force_snapshot;
-                            if send_snapshot_event(
-                                &event_tx,
-                                &state,
-                                include_tree_in_next_snapshot,
-                                include_queue,
-                            ) {
-                                prof_snapshots_sent += 1;
-                                if include_tree_in_next_snapshot {
-                                    last_tree_emit_at = Some(Instant::now());
-                                    last_tree_emit_track_count = state.library.tracks.len();
-                                }
-                                include_tree_in_next_snapshot = false;
-                                if include_queue {
-                                    include_queue_in_next_snapshot = false;
-                                }
-                                snapshot_dirty = false;
-                            } else {
-                                prof_snapshots_dropped += 1;
-                                snapshot_dirty = true;
-                            }
-                            last_snapshot_emit = Instant::now();
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            recv(ticker) -> _ => {
-                if state.playback.state == PlaybackState::Playing {
-                    if last_playing_poll.elapsed() >= playing_poll_interval {
-                        playback.command(PlaybackCommand::Poll);
-                        last_playing_poll = Instant::now();
-                    }
-                } else if last_idle_poll.elapsed() >= idle_poll_interval {
-                    playback.command(PlaybackCommand::Poll);
-                    last_idle_poll = Instant::now();
-                }
-            }
-        }
-
-        let playback_changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
-        let analysis_changed = pump_analysis_events(&analysis_rx, &mut state);
-        let metadata_changed = pump_metadata_events(&metadata_rx, &mut state);
-        let library_changed =
-            pump_library_events(&library_rx, &external_queue_details_tx, &mut state);
-        let external_queue_details_changed =
-            pump_external_queue_detail_events(&external_queue_details_event_rx, &mut state);
-        let lastfm_changed = pump_lastfm_events(&lastfm_rx, &mut state, &mut settings_dirty);
-        let _ = pump_search_results(&search_results_rx, &mut state);
-        tick_lastfm_playback(&state, &lastfm, &mut lastfm_tracker);
-        let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
-        if last_queue_detail_revalidate.elapsed() >= queue_detail_revalidate_interval {
-            let queue_details_revalidated =
-                sync_queue_details(&mut state, &external_queue_details_tx);
-            if queue_details_revalidated {
-                include_queue_in_next_snapshot = true;
-                snapshot_dirty = true;
-            }
-            last_queue_detail_revalidate = Instant::now();
-        }
-        let changed = playback_changed
-            || analysis_changed
-            || metadata_changed
-            || library_changed
-            || external_queue_details_changed
-            || lastfm_changed;
-        if library_changed {
-            include_queue_in_next_snapshot = true;
-            let now = Instant::now();
-            let track_delta = state
-                .library
-                .tracks
-                .len()
-                .saturating_sub(last_tree_emit_track_count);
-            let scan_emit_due =
-                last_tree_emit_at.is_none_or(|last| now.duration_since(last) >= tree_emit_interval);
-            let should_emit_tree = !state.library.scan_in_progress
-                || last_tree_emit_at.is_none()
-                || (scan_emit_due && track_delta >= tree_emit_min_track_delta);
-            if should_emit_tree {
-                state.rebuild_pre_built_tree();
-                include_tree_in_next_snapshot = true;
-            }
-        }
-        if external_queue_details_changed {
-            include_queue_in_next_snapshot = true;
-        }
-
-        if changed {
-            snapshot_dirty = true;
-        }
-        if snapshot_dirty && last_snapshot_emit.elapsed() >= snapshot_interval {
-            let include_queue = include_queue_in_next_snapshot;
-            if send_snapshot_event(
-                &event_tx,
-                &state,
-                include_tree_in_next_snapshot,
-                include_queue,
-            ) {
-                prof_snapshots_sent += 1;
-                if include_tree_in_next_snapshot {
-                    last_tree_emit_at = Some(Instant::now());
-                    last_tree_emit_track_count = state.library.tracks.len();
-                }
-                include_tree_in_next_snapshot = false;
-                if include_queue {
-                    include_queue_in_next_snapshot = false;
-                }
-                snapshot_dirty = false;
-            } else {
-                prof_snapshots_dropped += 1;
-                snapshot_dirty = true;
-            }
-            last_snapshot_emit = Instant::now();
-        }
-
-        let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
-
-        if profile_enabled && profile_last.elapsed() >= Duration::from_secs(1) {
-            #[allow(unused_variables)]
-            let rss_kb = current_rss_kb();
-            #[allow(unused_variables)]
-            let spectro_rows = state
-                .analysis
-                .spectrogram_channels
-                .first()
-                .map_or(0, |channel| channel.rows.len());
-            #[allow(unused_variables)]
-            let spectro_bins = state
-                .analysis
-                .spectrogram_channels
-                .first()
-                .and_then(|channel| channel.rows.first())
-                .map_or(0, std::vec::Vec::len);
-            profile_eprintln!(
-                "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} spectro_rows={} spectro_bins={} sent_snap/s={} drop_snap/s={}",
-                rss_kb,
-                playback_rx.len(),
-                analysis_rx.len(),
-                metadata_rx.len(),
-                library_rx.len(),
-                state.analysis.waveform_peaks.len(),
-                spectro_rows,
-                spectro_bins,
-                prof_snapshots_sent,
-                prof_snapshots_dropped
-            );
-            prof_snapshots_sent = 0;
-            prof_snapshots_dropped = 0;
-            profile_last = Instant::now();
-        }
-
-        if settings_dirty && last_settings_save.elapsed() >= Duration::from_secs(2) {
-            save_settings(&state.settings);
-            settings_dirty = false;
-            last_settings_save = Instant::now();
-        }
-
-        if last_session_save.elapsed() >= Duration::from_secs(2) {
-            let session = session_snapshot_for_state(&state);
-            if last_saved_session.as_ref() != Some(&session) {
-                save_session_snapshot(&session);
-                last_saved_session = Some(session);
-            }
-            last_session_save = Instant::now();
-        }
-    }
-
-    save_settings(&state.settings);
-    save_session_snapshot(&session_snapshot_for_state(&state));
-    lastfm.command(LastFmCommand::Shutdown);
-    let _ = try_send_event(&event_tx, BridgeEvent::Stopped);
+    let mut runtime = BridgeLoopRuntime::new(options);
+    runtime.run(cmd_rx, event_tx);
 }
 
 #[cfg_attr(
@@ -900,8 +1076,8 @@ fn run_bridge_loop(
     allow(unused_variables, unused_assignments)
 )]
 fn run_search_worker(
-    query_rx: Receiver<SearchWorkerQuery>,
-    results_tx: Sender<BridgeSearchResultsFrame>,
+    query_rx: &Receiver<SearchWorkerQuery>,
+    results_tx: &Sender<BridgeSearchResultsFrame>,
 ) {
     let Ok(mut query) = query_rx.recv() else {
         return;
@@ -916,7 +1092,7 @@ fn run_search_worker(
         #[allow(unused_variables)]
         let query_started = Instant::now();
         let prepared = prepared_cache.prepared_for(&query.library);
-        match build_search_results_frame(&query, prepared.as_ref(), &query_rx) {
+        match build_search_results_frame(&query, prepared.as_ref(), query_rx) {
             SearchBuildOutcome::Frame(frame) => {
                 if profile_search {
                     profile_eprintln!(
@@ -1091,8 +1267,8 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
         BridgeCommand::Settings(BridgeSettingsCommand::SetLibrarySortMode(mode)) => {
             *mode != current_sort_mode
         }
-        BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk) => true,
-        BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { .. }) => true,
+        BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk)
+        | BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { .. }) => true,
         _ => false,
     }
 }
@@ -1145,6 +1321,146 @@ struct BridgeCommandContext<'a> {
     settings_dirty: &'a mut bool,
 }
 
+fn handle_playback_bridge_command(
+    cmd: &BridgePlaybackCommand,
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+) {
+    match cmd {
+        BridgePlaybackCommand::Play => context.playback.command(PlaybackCommand::Play),
+        BridgePlaybackCommand::Pause => context.playback.command(PlaybackCommand::Pause),
+        BridgePlaybackCommand::Stop => context.playback.command(PlaybackCommand::Stop),
+        BridgePlaybackCommand::Next => context.playback.command(PlaybackCommand::Next),
+        BridgePlaybackCommand::Previous => context.playback.command(PlaybackCommand::Previous),
+        BridgePlaybackCommand::Seek(pos) => {
+            context.playback.command(PlaybackCommand::Seek(*pos));
+        }
+        BridgePlaybackCommand::SetVolume(volume) => {
+            let volume = volume.clamp(0.0, 1.0);
+            context.playback.command(PlaybackCommand::SetVolume(volume));
+            state.settings.volume = volume;
+            *context.settings_dirty = true;
+        }
+        BridgePlaybackCommand::SetRepeatMode(mode) => {
+            context
+                .playback
+                .command(PlaybackCommand::SetRepeatMode(*mode));
+        }
+        BridgePlaybackCommand::SetShuffle(enabled) => {
+            context
+                .playback
+                .command(PlaybackCommand::SetShuffle(*enabled));
+        }
+    }
+}
+
+fn handle_settings_bridge_command(
+    cmd: &BridgeSettingsCommand,
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+) {
+    match cmd {
+        BridgeSettingsCommand::LoadFromDisk => {
+            load_settings_into(&mut state.settings);
+            state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
+            context
+                .playback
+                .command(PlaybackCommand::SetVolume(state.settings.volume));
+            context
+                .analysis
+                .command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+            context
+                .analysis
+                .command(AnalysisCommand::SetSpectrogramViewMode(
+                    state.settings.spectrogram_view_mode,
+                ));
+            context.lastfm.command(LastFmCommand::SetEnabled(
+                state.settings.integrations.lastfm_scrobbling_enabled,
+            ));
+            if !state
+                .settings
+                .integrations
+                .lastfm_username
+                .trim()
+                .is_empty()
+            {
+                context.lastfm.command(LastFmCommand::LoadStoredSession {
+                    username: state.settings.integrations.lastfm_username.clone(),
+                });
+            }
+        }
+        BridgeSettingsCommand::SaveToDisk => {
+            save_settings(&state.settings);
+            *context.settings_dirty = false;
+        }
+        BridgeSettingsCommand::SetVolume(volume) => {
+            let volume = volume.clamp(0.0, 1.0);
+            state.settings.volume = volume;
+            context.playback.command(PlaybackCommand::SetVolume(volume));
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetFftSize(size) => {
+            let fft = (*size).clamp(512, 8192).next_power_of_two();
+            state.settings.fft_size = fft;
+            context.analysis.command(AnalysisCommand::SetFftSize(fft));
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetSpectrogramViewMode(view_mode) => {
+            state.settings.spectrogram_view_mode = *view_mode;
+            context
+                .analysis
+                .command(AnalysisCommand::SetSpectrogramViewMode(*view_mode));
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetViewerFullscreenMode(mode) => {
+            state.settings.viewer_fullscreen_mode = *mode;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetDbRange(value) => {
+            state.settings.db_range = value.clamp(50.0, 120.0);
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetLogScale(enabled) => {
+            state.settings.display.log_scale = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetShowFps(enabled) => {
+            state.settings.display.show_fps = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetSystemMediaControlsEnabled(enabled) => {
+            state.settings.integrations.system_media_controls_enabled = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetLibrarySortMode(mode) => {
+            state.settings.library_sort_mode = *mode;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetLastFmScrobblingEnabled(enabled) => {
+            state.settings.integrations.lastfm_scrobbling_enabled = *enabled;
+            state.lastfm.enabled = *enabled;
+            context.lastfm.command(LastFmCommand::SetEnabled(*enabled));
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::BeginLastFmAuth => {
+            context.lastfm.command(LastFmCommand::BeginDesktopAuth);
+        }
+        BridgeSettingsCommand::CompleteLastFmAuth => {
+            context.lastfm.command(LastFmCommand::CompleteDesktopAuth);
+        }
+        BridgeSettingsCommand::DisconnectLastFm => {
+            state.settings.integrations.lastfm_username.clear();
+            state.lastfm.username.clear();
+            state.lastfm.auth_url.clear();
+            state.lastfm.auth_state = lastfm::AuthState::Disconnected;
+            context
+                .lastfm
+                .command(LastFmCommand::Disconnect { clear_queue: true });
+            *context.settings_dirty = true;
+        }
+    }
+}
+
 fn handle_bridge_command(
     cmd: BridgeCommand,
     state: &mut BridgeState,
@@ -1157,34 +1473,7 @@ fn handle_bridge_command(
             false
         }
         BridgeCommand::Playback(cmd) => {
-            match cmd {
-                BridgePlaybackCommand::Play => context.playback.command(PlaybackCommand::Play),
-                BridgePlaybackCommand::Pause => context.playback.command(PlaybackCommand::Pause),
-                BridgePlaybackCommand::Stop => context.playback.command(PlaybackCommand::Stop),
-                BridgePlaybackCommand::Next => context.playback.command(PlaybackCommand::Next),
-                BridgePlaybackCommand::Previous => {
-                    context.playback.command(PlaybackCommand::Previous)
-                }
-                BridgePlaybackCommand::Seek(pos) => {
-                    context.playback.command(PlaybackCommand::Seek(pos))
-                }
-                BridgePlaybackCommand::SetVolume(v) => {
-                    let v = v.clamp(0.0, 1.0);
-                    context.playback.command(PlaybackCommand::SetVolume(v));
-                    state.settings.volume = v;
-                    *context.settings_dirty = true;
-                }
-                BridgePlaybackCommand::SetRepeatMode(mode) => {
-                    context
-                        .playback
-                        .command(PlaybackCommand::SetRepeatMode(mode));
-                }
-                BridgePlaybackCommand::SetShuffle(enabled) => {
-                    context
-                        .playback
-                        .command(PlaybackCommand::SetShuffle(enabled));
-                }
-            }
+            handle_playback_bridge_command(&cmd, state, context);
             false
         }
         BridgeCommand::Queue(cmd) => handle_queue_command(
@@ -1213,100 +1502,7 @@ fn handle_bridge_command(
             }
         },
         BridgeCommand::Settings(cmd) => {
-            match cmd {
-                BridgeSettingsCommand::LoadFromDisk => {
-                    load_settings_into(&mut state.settings);
-                    state.lastfm.enabled = state.settings.lastfm_scrobbling_enabled;
-                    context
-                        .playback
-                        .command(PlaybackCommand::SetVolume(state.settings.volume));
-                    context
-                        .analysis
-                        .command(AnalysisCommand::SetFftSize(state.settings.fft_size));
-                    context
-                        .analysis
-                        .command(AnalysisCommand::SetSpectrogramViewMode(
-                            state.settings.spectrogram_view_mode,
-                        ));
-                    context.lastfm.command(LastFmCommand::SetEnabled(
-                        state.settings.lastfm_scrobbling_enabled,
-                    ));
-                    if !state.settings.lastfm_username.trim().is_empty() {
-                        context.lastfm.command(LastFmCommand::LoadStoredSession {
-                            username: state.settings.lastfm_username.clone(),
-                        });
-                    }
-                }
-                BridgeSettingsCommand::SaveToDisk => {
-                    save_settings(&state.settings);
-                    *context.settings_dirty = false;
-                }
-                BridgeSettingsCommand::SetVolume(v) => {
-                    let v = v.clamp(0.0, 1.0);
-                    state.settings.volume = v;
-                    context.playback.command(PlaybackCommand::SetVolume(v));
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetFftSize(size) => {
-                    let fft = size.clamp(512, 8192).next_power_of_two();
-                    state.settings.fft_size = fft;
-                    context.analysis.command(AnalysisCommand::SetFftSize(fft));
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetSpectrogramViewMode(view_mode) => {
-                    state.settings.spectrogram_view_mode = view_mode;
-                    context
-                        .analysis
-                        .command(AnalysisCommand::SetSpectrogramViewMode(view_mode));
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetViewerFullscreenMode(mode) => {
-                    state.settings.viewer_fullscreen_mode = mode;
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetDbRange(v) => {
-                    state.settings.db_range = v.clamp(50.0, 120.0);
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetLogScale(v) => {
-                    state.settings.log_scale = v;
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetShowFps(v) => {
-                    state.settings.show_fps = v;
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetSystemMediaControlsEnabled(v) => {
-                    state.settings.system_media_controls_enabled = v;
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetLibrarySortMode(mode) => {
-                    state.settings.library_sort_mode = mode;
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::SetLastFmScrobblingEnabled(v) => {
-                    state.settings.lastfm_scrobbling_enabled = v;
-                    state.lastfm.enabled = v;
-                    context.lastfm.command(LastFmCommand::SetEnabled(v));
-                    *context.settings_dirty = true;
-                }
-                BridgeSettingsCommand::BeginLastFmAuth => {
-                    context.lastfm.command(LastFmCommand::BeginDesktopAuth);
-                }
-                BridgeSettingsCommand::CompleteLastFmAuth => {
-                    context.lastfm.command(LastFmCommand::CompleteDesktopAuth);
-                }
-                BridgeSettingsCommand::DisconnectLastFm => {
-                    state.settings.lastfm_username.clear();
-                    state.lastfm.username.clear();
-                    state.lastfm.auth_url.clear();
-                    state.lastfm.auth_state = lastfm::AuthState::Disconnected;
-                    context
-                        .lastfm
-                        .command(LastFmCommand::Disconnect { clear_queue: true });
-                    *context.settings_dirty = true;
-                }
-            }
+            handle_settings_bridge_command(&cmd, state, context);
             true
         }
     }
@@ -1331,10 +1527,10 @@ fn handle_queue_command(
     for op in &outcome.playback_ops {
         match op {
             QueuePlaybackOp::LoadQueue(tracks) => {
-                playback.command(PlaybackCommand::LoadQueue(tracks.clone()))
+                playback.command(PlaybackCommand::LoadQueue(tracks.clone()));
             }
             QueuePlaybackOp::AddToQueue(tracks) => {
-                playback.command(PlaybackCommand::AddToQueue(tracks.clone()))
+                playback.command(PlaybackCommand::AddToQueue(tracks.clone()));
             }
             QueuePlaybackOp::RemoveAt(idx) => playback.command(PlaybackCommand::RemoveAt(*idx)),
             QueuePlaybackOp::Move { from, to } => playback.command(PlaybackCommand::MoveQueue {
@@ -1370,6 +1566,141 @@ struct QueueCommandOutcome {
     error: Option<String>,
 }
 
+fn replace_queue_command_outcome(
+    queue: &mut Vec<PathBuf>,
+    selected_queue_index: &mut Option<usize>,
+    tracks: Vec<PathBuf>,
+    autoplay: bool,
+    playback_state: PlaybackState,
+) -> QueueCommandOutcome {
+    *queue = tracks;
+    *selected_queue_index = if queue.is_empty() { None } else { Some(0) };
+    let mut playback_ops = Vec::new();
+    if queue.is_empty() {
+        playback_ops.push(QueuePlaybackOp::ClearQueue);
+    } else {
+        playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
+        if autoplay {
+            playback_ops.push(QueuePlaybackOp::PlayAt(0));
+            if playback_state != PlaybackState::Playing {
+                playback_ops.push(QueuePlaybackOp::Play);
+            }
+        }
+    }
+    QueueCommandOutcome {
+        changed: true,
+        playback_ops,
+        error: None,
+    }
+}
+
+fn append_queue_command_outcome(
+    queue: &mut Vec<PathBuf>,
+    tracks: Vec<PathBuf>,
+) -> QueueCommandOutcome {
+    if tracks.is_empty() {
+        return QueueCommandOutcome::default();
+    }
+
+    let mut playback_ops = Vec::new();
+    if queue.is_empty() {
+        queue.extend(tracks);
+        playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
+    } else {
+        queue.extend(tracks.clone());
+        playback_ops.push(QueuePlaybackOp::AddToQueue(tracks));
+    }
+    QueueCommandOutcome {
+        changed: true,
+        playback_ops,
+        error: None,
+    }
+}
+
+fn play_at_queue_command_outcome(
+    idx: usize,
+    queue_len: usize,
+    selected_queue_index: &mut Option<usize>,
+    playback_state: PlaybackState,
+) -> QueueCommandOutcome {
+    if idx >= queue_len {
+        return QueueCommandOutcome {
+            changed: false,
+            playback_ops: Vec::new(),
+            error: Some(format!("queue index {idx} out of bounds")),
+        };
+    }
+
+    let mut playback_ops = vec![QueuePlaybackOp::PlayAt(idx)];
+    if playback_state != PlaybackState::Playing {
+        playback_ops.push(QueuePlaybackOp::Play);
+    }
+    *selected_queue_index = Some(idx);
+    QueueCommandOutcome {
+        changed: true,
+        playback_ops,
+        error: None,
+    }
+}
+
+fn remove_queue_command_outcome(
+    idx: usize,
+    queue: &mut Vec<PathBuf>,
+    selected_queue_index: &mut Option<usize>,
+) -> QueueCommandOutcome {
+    if idx >= queue.len() {
+        return QueueCommandOutcome::default();
+    }
+
+    queue.remove(idx);
+    let playback_ops = if queue.is_empty() {
+        *selected_queue_index = None;
+        vec![QueuePlaybackOp::ClearQueue]
+    } else {
+        *selected_queue_index = selected_queue_index.and_then(|sel| match sel.cmp(&idx) {
+            std::cmp::Ordering::Equal => Some(sel.min(queue.len().saturating_sub(1))),
+            std::cmp::Ordering::Greater => Some(sel - 1),
+            std::cmp::Ordering::Less => Some(sel),
+        });
+        vec![QueuePlaybackOp::RemoveAt(idx)]
+    };
+    QueueCommandOutcome {
+        changed: true,
+        playback_ops,
+        error: None,
+    }
+}
+
+fn move_queue_command_outcome(
+    from: usize,
+    to: usize,
+    queue: &mut Vec<PathBuf>,
+    selected_queue_index: &mut Option<usize>,
+) -> QueueCommandOutcome {
+    if from >= queue.len() || to >= queue.len() || from == to {
+        return QueueCommandOutcome::default();
+    }
+
+    let item = queue.remove(from);
+    queue.insert(to, item);
+    *selected_queue_index = selected_queue_index.map(|sel| {
+        if sel == from {
+            to
+        } else if from < sel && to >= sel {
+            sel - 1
+        } else if from > sel && to <= sel {
+            sel + 1
+        } else {
+            sel
+        }
+    });
+    QueueCommandOutcome {
+        changed: true,
+        playback_ops: vec![QueuePlaybackOp::Move { from, to }],
+        error: None,
+    }
+}
+
 fn apply_queue_command_state(
     cmd: BridgeQueueCommand,
     queue: &mut Vec<PathBuf>,
@@ -1377,109 +1708,22 @@ fn apply_queue_command_state(
     playback_state: PlaybackState,
 ) -> QueueCommandOutcome {
     match cmd {
-        BridgeQueueCommand::Replace { tracks, autoplay } => {
-            *queue = tracks;
-            *selected_queue_index = if queue.is_empty() { None } else { Some(0) };
-            let mut playback_ops = Vec::new();
-            if queue.is_empty() {
-                playback_ops.push(QueuePlaybackOp::ClearQueue);
-            } else {
-                playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
-                if autoplay {
-                    playback_ops.push(QueuePlaybackOp::PlayAt(0));
-                    if playback_state != PlaybackState::Playing {
-                        playback_ops.push(QueuePlaybackOp::Play);
-                    }
-                }
-            }
-            QueueCommandOutcome {
-                changed: true,
-                playback_ops,
-                error: None,
-            }
-        }
-        BridgeQueueCommand::Append(tracks) => {
-            if tracks.is_empty() {
-                return QueueCommandOutcome::default();
-            }
-            let mut playback_ops = Vec::new();
-            if queue.is_empty() {
-                queue.extend(tracks);
-                playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
-            } else {
-                queue.extend(tracks.clone());
-                playback_ops.push(QueuePlaybackOp::AddToQueue(tracks));
-            }
-            QueueCommandOutcome {
-                changed: true,
-                playback_ops,
-                error: None,
-            }
-        }
+        BridgeQueueCommand::Replace { tracks, autoplay } => replace_queue_command_outcome(
+            queue,
+            selected_queue_index,
+            tracks,
+            autoplay,
+            playback_state,
+        ),
+        BridgeQueueCommand::Append(tracks) => append_queue_command_outcome(queue, tracks),
         BridgeQueueCommand::PlayAt(idx) => {
-            if idx < queue.len() {
-                let mut playback_ops = vec![QueuePlaybackOp::PlayAt(idx)];
-                if playback_state != PlaybackState::Playing {
-                    playback_ops.push(QueuePlaybackOp::Play);
-                }
-                *selected_queue_index = Some(idx);
-                QueueCommandOutcome {
-                    changed: true,
-                    playback_ops,
-                    error: None,
-                }
-            } else {
-                QueueCommandOutcome {
-                    changed: false,
-                    playback_ops: Vec::new(),
-                    error: Some(format!("queue index {idx} out of bounds")),
-                }
-            }
+            play_at_queue_command_outcome(idx, queue.len(), selected_queue_index, playback_state)
         }
         BridgeQueueCommand::Remove(idx) => {
-            if idx >= queue.len() {
-                return QueueCommandOutcome::default();
-            }
-            queue.remove(idx);
-            let playback_ops = if queue.is_empty() {
-                *selected_queue_index = None;
-                vec![QueuePlaybackOp::ClearQueue]
-            } else {
-                *selected_queue_index = selected_queue_index.and_then(|sel| match sel.cmp(&idx) {
-                    std::cmp::Ordering::Equal => Some(sel.min(queue.len().saturating_sub(1))),
-                    std::cmp::Ordering::Greater => Some(sel - 1),
-                    std::cmp::Ordering::Less => Some(sel),
-                });
-                vec![QueuePlaybackOp::RemoveAt(idx)]
-            };
-            QueueCommandOutcome {
-                changed: true,
-                playback_ops,
-                error: None,
-            }
+            remove_queue_command_outcome(idx, queue, selected_queue_index)
         }
         BridgeQueueCommand::Move { from, to } => {
-            if from >= queue.len() || to >= queue.len() || from == to {
-                return QueueCommandOutcome::default();
-            }
-            let item = queue.remove(from);
-            queue.insert(to, item);
-            *selected_queue_index = selected_queue_index.map(|sel| {
-                if sel == from {
-                    to
-                } else if from < sel && to >= sel {
-                    sel - 1
-                } else if from > sel && to <= sel {
-                    sel + 1
-                } else {
-                    sel
-                }
-            });
-            QueueCommandOutcome {
-                changed: true,
-                playback_ops: vec![QueuePlaybackOp::Move { from, to }],
-                error: None,
-            }
+            move_queue_command_outcome(from, to, queue, selected_queue_index)
         }
         BridgeQueueCommand::Select(sel) => {
             let normalized = sel.filter(|idx| *idx < queue.len());
@@ -1986,7 +2230,7 @@ fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<
 
     let joined = parts.join(", ");
     if outcome.tracks.is_empty() {
-        Some(format!("Import {} skipped all entries ({joined})", action))
+        Some(format!("Import {action} skipped all entries ({joined})"))
     } else {
         Some(format!(
             "Import {} queued {} track(s); skipped {} item(s) ({joined})",
@@ -2132,6 +2376,79 @@ fn append_queue_paths(
     true
 }
 
+fn handle_import_library_command(
+    state: &mut BridgeState,
+    playback: &PlaybackEngine,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+    event_tx: &Sender<BridgeEvent>,
+    action: &str,
+    paths: Vec<PathBuf>,
+    replace: bool,
+) -> bool {
+    let outcome = expand_import_paths(paths);
+    if let Some(message) = format_import_warning(action, &outcome) {
+        let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+    }
+    if replace {
+        replace_queue_paths(
+            state,
+            playback,
+            external_queue_details_tx,
+            outcome.tracks,
+            true,
+        )
+    } else {
+        append_queue_paths(state, playback, external_queue_details_tx, outcome.tracks)
+    }
+}
+
+fn library_track_paths(library: &LibrarySnapshot) -> Vec<PathBuf> {
+    library
+        .tracks
+        .iter()
+        .map(|track| track.path.clone())
+        .collect()
+}
+
+fn handle_library_root_command(
+    cmd: &BridgeLibraryCommand,
+    library: &LibraryService,
+) -> Option<bool> {
+    match cmd {
+        BridgeLibraryCommand::ScanRoot(path) => {
+            library.command(LibraryCommand::ScanRoot(path.clone()));
+            Some(false)
+        }
+        BridgeLibraryCommand::AddRoot { path, name } => {
+            library.command(LibraryCommand::AddRoot {
+                path: path.clone(),
+                name: name.clone(),
+            });
+            Some(false)
+        }
+        BridgeLibraryCommand::RenameRoot { path, name } => {
+            library.command(LibraryCommand::RenameRoot {
+                path: path.clone(),
+                name: name.clone(),
+            });
+            Some(false)
+        }
+        BridgeLibraryCommand::RemoveRoot(path) => {
+            library.command(LibraryCommand::RemoveRoot(path.clone()));
+            Some(false)
+        }
+        BridgeLibraryCommand::RescanRoot(path) => {
+            library.command(LibraryCommand::RescanRoot(path.clone()));
+            Some(false)
+        }
+        BridgeLibraryCommand::RescanAll => {
+            library.command(LibraryCommand::RescanAll);
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
 fn handle_library_command(
     cmd: BridgeLibraryCommand,
     state: &mut BridgeState,
@@ -2141,71 +2458,46 @@ fn handle_library_command(
     search_query_tx: &Sender<SearchWorkerQuery>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
+    if let Some(outcome) = handle_library_root_command(&cmd, library) {
+        return outcome;
+    }
     match cmd {
-        BridgeLibraryCommand::ScanRoot(path) => {
-            library.command(LibraryCommand::ScanRoot(path));
-            false
-        }
-        BridgeLibraryCommand::AddRoot { path, name } => {
-            library.command(LibraryCommand::AddRoot { path, name });
-            false
-        }
-        BridgeLibraryCommand::RenameRoot { path, name } => {
-            library.command(LibraryCommand::RenameRoot { path, name });
-            false
-        }
-        BridgeLibraryCommand::RemoveRoot(path) => {
-            library.command(LibraryCommand::RemoveRoot(path));
-            false
-        }
-        BridgeLibraryCommand::RescanRoot(path) => {
-            library.command(LibraryCommand::RescanRoot(path));
-            false
-        }
-        BridgeLibraryCommand::RescanAll => {
-            library.command(LibraryCommand::RescanAll);
-            false
-        }
-        BridgeLibraryCommand::AddTrack(path) => {
-            let outcome = expand_import_paths(vec![path]);
-            if let Some(message) = format_import_warning("append", &outcome) {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
-            }
-            append_queue_paths(state, playback, external_queue_details_tx, outcome.tracks)
-        }
-        BridgeLibraryCommand::PlayTrack(path) => {
-            let outcome = expand_import_paths(vec![path]);
-            if let Some(message) = format_import_warning("open", &outcome) {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
-            }
-            replace_queue_paths(
-                state,
-                playback,
-                external_queue_details_tx,
-                outcome.tracks,
-                true,
-            )
-        }
-        BridgeLibraryCommand::ReplaceWithAlbum(paths) => {
-            let outcome = expand_import_paths(paths);
-            if let Some(message) = format_import_warning("open", &outcome) {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
-            }
-            replace_queue_paths(
-                state,
-                playback,
-                external_queue_details_tx,
-                outcome.tracks,
-                true,
-            )
-        }
-        BridgeLibraryCommand::AppendAlbum(paths) => {
-            let outcome = expand_import_paths(paths);
-            if let Some(message) = format_import_warning("append", &outcome) {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
-            }
-            append_queue_paths(state, playback, external_queue_details_tx, outcome.tracks)
-        }
+        BridgeLibraryCommand::AddTrack(path) => handle_import_library_command(
+            state,
+            playback,
+            external_queue_details_tx,
+            event_tx,
+            "append",
+            vec![path],
+            false,
+        ),
+        BridgeLibraryCommand::PlayTrack(path) => handle_import_library_command(
+            state,
+            playback,
+            external_queue_details_tx,
+            event_tx,
+            "open",
+            vec![path],
+            true,
+        ),
+        BridgeLibraryCommand::ReplaceWithAlbum(paths) => handle_import_library_command(
+            state,
+            playback,
+            external_queue_details_tx,
+            event_tx,
+            "open",
+            paths,
+            true,
+        ),
+        BridgeLibraryCommand::AppendAlbum(paths) => handle_import_library_command(
+            state,
+            playback,
+            external_queue_details_tx,
+            event_tx,
+            "append",
+            paths,
+            false,
+        ),
         BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => {
             let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
             replace_queue_paths(state, playback, external_queue_details_tx, paths, true)
@@ -2230,24 +2522,19 @@ fn handle_library_command(
             );
             append_queue_paths(state, playback, external_queue_details_tx, paths)
         }
-        BridgeLibraryCommand::ReplaceAllTracks => {
-            let paths: Vec<PathBuf> = state
-                .library
-                .tracks
-                .iter()
-                .map(|track| track.path.clone())
-                .collect();
-            replace_queue_paths(state, playback, external_queue_details_tx, paths, true)
-        }
-        BridgeLibraryCommand::AppendAllTracks => {
-            let paths: Vec<PathBuf> = state
-                .library
-                .tracks
-                .iter()
-                .map(|track| track.path.clone())
-                .collect();
-            append_queue_paths(state, playback, external_queue_details_tx, paths)
-        }
+        BridgeLibraryCommand::ReplaceAllTracks => replace_queue_paths(
+            state,
+            playback,
+            external_queue_details_tx,
+            library_track_paths(&state.library),
+            true,
+        ),
+        BridgeLibraryCommand::AppendAllTracks => append_queue_paths(
+            state,
+            playback,
+            external_queue_details_tx,
+            library_track_paths(&state.library),
+        ),
         BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
             let normalized = key.trim();
             if normalized.is_empty() {
@@ -2267,6 +2554,7 @@ fn handle_library_command(
             });
             false
         }
+        _ => false,
     }
 }
 
@@ -2284,114 +2572,67 @@ struct TreePathContext {
     is_disc_section_album_track: bool,
 }
 
-fn build_search_results_frame(
-    query: &SearchWorkerQuery,
-    prepared: &PreparedSearchLibrary,
-    query_rx: &Receiver<SearchWorkerQuery>,
-) -> SearchBuildOutcome {
-    #[derive(Default)]
-    struct HitAlbumAcc {
-        artist_name: String,
-        album_title: String,
-        artist_key: String,
-        root_label: String,
-        year_counts: HashMap<i32, usize>,
-        genre_counts: HashMap<String, usize>,
-    }
+#[derive(Default)]
+struct HitAlbumAcc {
+    artist_name: String,
+    album_title: String,
+    artist_key: String,
+    root_label: String,
+    year_counts: HashMap<i32, usize>,
+    genre_counts: HashMap<String, usize>,
+}
 
-    let seq = query.seq;
-    let query_text = query.query.trim();
-    if query_text.is_empty() {
-        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
-            seq,
-            rows: Vec::new(),
-        });
-    }
-    let query_terms = split_search_terms(query_text);
-    if query_terms.is_empty() {
-        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
-            seq,
-            rows: Vec::new(),
-        });
-    }
-    let is_short_query = query_text.chars().count() <= search_short_query_char_threshold();
+struct SearchResultLimits {
+    fallback: usize,
+    artist: usize,
+    album: usize,
+    track: usize,
+}
 
-    // In-memory search is deterministic and responsive while library scans are writing to SQLite.
-    // Optional FTS can be enabled explicitly for experimentation.
-    let fallback_limit = if is_short_query {
-        search_fallback_limit_short()
-    } else {
-        search_fallback_limit()
-    };
-    let artist_limit = if is_short_query {
-        search_artist_row_limit_short()
-    } else {
-        search_artist_row_limit()
-    };
-    let album_limit = if is_short_query {
-        search_album_row_limit_short()
-    } else {
-        search_album_row_limit()
-    };
-    let track_limit = if is_short_query {
-        search_track_row_limit_short()
-    } else {
-        search_track_row_limit()
-    };
-    let use_fts = std::env::var_os("FERROUS_SEARCH_USE_FTS").is_some();
-    let hits = if use_fts {
-        match search_tracks_fts(query_text, fallback_limit) {
-            Ok(rows) if !rows.is_empty() => rows,
-            Ok(_) | Err(_) => {
-                match search_tracks_fallback_prepared(
-                    query_text,
-                    prepared,
-                    fallback_limit,
-                    query_rx,
-                ) {
-                    SearchFallbackOutcome::Hits(rows) => rows,
-                    SearchFallbackOutcome::Cancelled(next) => {
-                        return SearchBuildOutcome::Cancelled(next)
-                    }
-                }
-            }
+type SearchGroupMap = HashMap<String, (f32, String, String)>;
+
+struct SearchRowBuckets {
+    track_rows: Vec<BridgeSearchResultRow>,
+    artist_groups: SearchGroupMap,
+    album_groups: SearchGroupMap,
+    album_hit_stats: HashMap<String, HitAlbumAcc>,
+}
+
+struct SearchRowAccumulator {
+    roots: Vec<LibraryRoot>,
+    album_cover_paths: HashMap<String, String>,
+    artist_groups: SearchGroupMap,
+    album_groups: SearchGroupMap,
+    album_hit_stats: HashMap<String, HitAlbumAcc>,
+    track_rows: Vec<BridgeSearchResultRow>,
+}
+
+impl SearchRowAccumulator {
+    fn new(roots: Vec<LibraryRoot>) -> Self {
+        Self {
+            roots,
+            album_cover_paths: HashMap::new(),
+            artist_groups: HashMap::new(),
+            album_groups: HashMap::new(),
+            album_hit_stats: HashMap::new(),
+            track_rows: Vec::new(),
         }
-    } else {
-        match search_tracks_fallback_prepared(query_text, prepared, fallback_limit, query_rx) {
-            SearchFallbackOutcome::Hits(rows) => rows,
-            SearchFallbackOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
-        }
-    };
-    if hits.is_empty() {
-        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
-            seq,
-            rows: Vec::new(),
-        });
     }
 
-    let roots = prepared.roots.clone();
-    if roots.is_empty() {
-        return SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
-            seq,
-            rows: Vec::new(),
-        });
-    }
-
-    let mut album_cover_paths: HashMap<String, String> = HashMap::new();
-    let mut artist_groups: HashMap<String, (f32, String, String)> = HashMap::new();
-    let mut album_groups: HashMap<String, (f32, String, String)> = HashMap::new();
-    let mut album_hit_stats: HashMap<String, HitAlbumAcc> = HashMap::new();
-    let mut track_rows = Vec::new();
-
-    for hit in &hits {
+    fn push_hit(
+        &mut self,
+        prepared: &PreparedSearchLibrary,
+        hit: &LibrarySearchTrack,
+        query_terms: &[String],
+    ) {
         let hit_path_string = hit.path.to_string_lossy().to_string();
         let Some(context) = prepared
             .context_by_path
             .get(&hit_path_string)
             .cloned()
-            .or_else(|| derive_tree_path_context(&hit.path, &roots, &hit.artist))
+            .or_else(|| derive_tree_path_context(&hit.path, &self.roots, &hit.artist))
         else {
-            continue;
+            return;
         };
         let hit_artist = if hit.artist.trim().is_empty() {
             context.artist_name.clone()
@@ -2407,92 +2648,248 @@ fn build_search_results_frame(
             hit.album.trim().to_string()
         };
         let album_key = context.album_key.clone();
-        let artist_query_match = query_terms_match_text(&query_terms, &context.artist_name);
-
-        if artist_query_match {
-            let artist_entry = artist_groups.entry(context.artist_key.clone()).or_insert((
-                hit.score,
-                context.artist_name.clone(),
-                context.root_label.clone(),
-            ));
+        if query_terms_match_text(query_terms, &context.artist_name) {
+            let artist_entry = self
+                .artist_groups
+                .entry(context.artist_key.clone())
+                .or_insert((
+                    hit.score,
+                    context.artist_name.clone(),
+                    context.root_label.clone(),
+                ));
             if hit.score < artist_entry.0 {
                 artist_entry.0 = hit.score;
-                artist_entry.1 = context.artist_name.clone();
-                artist_entry.2 = context.root_label.clone();
+                artist_entry.1.clone_from(&context.artist_name);
+                artist_entry.2.clone_from(&context.root_label);
             }
         }
-
-        if let Some(album_key) = album_key.clone() {
-            let album_query_match = query_terms_match_text(
-                &query_terms,
-                &format!("{} {}", context.artist_name, hit_album),
-            );
-            if album_query_match {
-                let album_entry = album_groups.entry(album_key.clone()).or_insert((
+        if let Some(album_key_value) = album_key.clone() {
+            let album_query = format!("{} {}", context.artist_name, hit_album);
+            if query_terms_match_text(query_terms, &album_query) {
+                let album_entry = self.album_groups.entry(album_key_value.clone()).or_insert((
                     hit.score,
                     hit_album.clone(),
                     context.root_label.clone(),
                 ));
                 if hit.score < album_entry.0 {
                     album_entry.0 = hit.score;
-                    album_entry.1 = hit_album.clone();
-                    album_entry.2 = context.root_label.clone();
+                    album_entry.1.clone_from(&hit_album);
+                    album_entry.2.clone_from(&context.root_label);
                 }
+                update_album_hit_stats(
+                    &mut self.album_hit_stats,
+                    album_key_value,
+                    &context,
+                    &hit_album,
+                    hit.year,
+                    hit.genre.trim(),
+                );
+            }
+        }
+        self.track_rows.push(build_track_search_result_row(
+            hit,
+            &context,
+            &hit_artist,
+            &hit_album,
+            album_key,
+            hit_path_string,
+            &mut self.album_cover_paths,
+        ));
+    }
 
-                let stats_entry = album_hit_stats.entry(album_key).or_default();
-                if stats_entry.artist_name.is_empty() {
-                    stats_entry.artist_name = context.artist_name.clone();
-                }
-                if stats_entry.artist_key.is_empty() {
-                    stats_entry.artist_key = context.artist_key.clone();
-                }
-                if stats_entry.root_label.is_empty() {
-                    stats_entry.root_label = context.root_label.clone();
-                }
-                if stats_entry.album_title.is_empty() {
-                    stats_entry.album_title = hit_album.clone();
-                }
-                if let Some(year) = hit.year {
-                    *stats_entry.year_counts.entry(year).or_insert(0) += 1;
-                }
-                if !hit.genre.trim().is_empty() {
-                    *stats_entry
-                        .genre_counts
-                        .entry(hit.genre.trim().to_string())
-                        .or_insert(0) += 1;
+    fn finish(self) -> SearchRowBuckets {
+        SearchRowBuckets {
+            track_rows: self.track_rows,
+            artist_groups: self.artist_groups,
+            album_groups: self.album_groups,
+            album_hit_stats: self.album_hit_stats,
+        }
+    }
+}
+
+fn update_album_hit_stats(
+    album_hit_stats: &mut HashMap<String, HitAlbumAcc>,
+    album_key: String,
+    context: &TreePathContext,
+    hit_album: &str,
+    year: Option<i32>,
+    genre: &str,
+) {
+    let stats_entry = album_hit_stats.entry(album_key).or_default();
+    if stats_entry.artist_name.is_empty() {
+        stats_entry.artist_name.clone_from(&context.artist_name);
+    }
+    if stats_entry.artist_key.is_empty() {
+        stats_entry.artist_key.clone_from(&context.artist_key);
+    }
+    if stats_entry.root_label.is_empty() {
+        stats_entry.root_label.clone_from(&context.root_label);
+    }
+    if stats_entry.album_title.is_empty() {
+        stats_entry.album_title.clone_from(&hit_album.to_string());
+    }
+    if let Some(year) = year {
+        *stats_entry.year_counts.entry(year).or_insert(0) += 1;
+    }
+    if !genre.is_empty() {
+        *stats_entry
+            .genre_counts
+            .entry(genre.to_string())
+            .or_insert(0) += 1;
+    }
+}
+
+fn build_track_search_result_row(
+    hit: &LibrarySearchTrack,
+    context: &TreePathContext,
+    hit_artist: &str,
+    hit_album: &str,
+    album_key: Option<String>,
+    hit_path_string: String,
+    album_cover_paths: &mut HashMap<String, String>,
+) -> BridgeSearchResultRow {
+    BridgeSearchResultRow {
+        row_type: BridgeSearchResultRowType::Track,
+        score: hit.score,
+        year: hit.year,
+        track_number: hit.track_no,
+        count: 0,
+        length_seconds: hit.duration_secs,
+        label: if hit.title.trim().is_empty() {
+            hit.path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().to_string())
+        } else {
+            hit.title.trim().to_string()
+        },
+        artist: hit_artist.to_string(),
+        album: hit_album.to_string(),
+        root_label: context.root_label.clone(),
+        genre: hit.genre.trim().to_string(),
+        cover_path: album_key.as_ref().map_or_else(String::new, |key| {
+            cached_album_cover_path(key, context.album_path.as_ref(), album_cover_paths)
+        }),
+        artist_key: context.artist_key.clone(),
+        album_key: album_key.unwrap_or_default(),
+        section_key: context.section_key.clone().unwrap_or_default(),
+        track_key: context.track_key.clone(),
+        track_path: hit_path_string,
+    }
+}
+
+fn empty_search_results_frame(seq: u32) -> SearchBuildOutcome {
+    SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
+        seq,
+        rows: Vec::new(),
+    })
+}
+
+fn search_result_limits(query_text: &str) -> SearchResultLimits {
+    let is_short_query = query_text.chars().count() <= search_short_query_char_threshold();
+    SearchResultLimits {
+        fallback: if is_short_query {
+            search_fallback_limit_short()
+        } else {
+            search_fallback_limit()
+        },
+        artist: if is_short_query {
+            search_artist_row_limit_short()
+        } else {
+            search_artist_row_limit()
+        },
+        album: if is_short_query {
+            search_album_row_limit_short()
+        } else {
+            search_album_row_limit()
+        },
+        track: if is_short_query {
+            search_track_row_limit_short()
+        } else {
+            search_track_row_limit()
+        },
+    }
+}
+
+fn resolve_search_hits(
+    query_text: &str,
+    prepared: &PreparedSearchLibrary,
+    query_rx: &Receiver<SearchWorkerQuery>,
+    fallback_limit: usize,
+) -> SearchBuildOutcome {
+    let use_fts = std::env::var_os("FERROUS_SEARCH_USE_FTS").is_some();
+    let hits = if use_fts {
+        match search_tracks_fts(query_text, fallback_limit) {
+            Ok(rows) if !rows.is_empty() => rows,
+            Ok(_) | Err(_) => {
+                match search_tracks_fallback_prepared(
+                    query_text,
+                    prepared,
+                    fallback_limit,
+                    query_rx,
+                ) {
+                    SearchFallbackOutcome::Hits(rows) => rows,
+                    SearchFallbackOutcome::Cancelled(next) => {
+                        return SearchBuildOutcome::Cancelled(next);
+                    }
                 }
             }
         }
+    } else {
+        match search_tracks_fallback_prepared(query_text, prepared, fallback_limit, query_rx) {
+            SearchFallbackOutcome::Hits(rows) => rows,
+            SearchFallbackOutcome::Cancelled(next) => {
+                return SearchBuildOutcome::Cancelled(next);
+            }
+        }
+    };
 
-        track_rows.push(BridgeSearchResultRow {
-            row_type: BridgeSearchResultRowType::Track,
-            score: hit.score,
-            year: hit.year,
-            track_number: hit.track_no,
-            count: 0,
-            length_seconds: hit.duration_secs,
-            label: if hit.title.trim().is_empty() {
-                hit.path
-                    .file_name()
-                    .map_or_else(String::new, |v| v.to_string_lossy().to_string())
-            } else {
-                hit.title.trim().to_string()
-            },
-            artist: hit_artist,
-            album: hit_album,
-            root_label: context.root_label.clone(),
-            genre: hit.genre.trim().to_string(),
-            cover_path: album_key.as_ref().map_or_else(String::new, |key| {
-                cached_album_cover_path(key, context.album_path.as_ref(), &mut album_cover_paths)
-            }),
-            artist_key: context.artist_key.clone(),
-            album_key: album_key.unwrap_or_default(),
-            section_key: context.section_key.unwrap_or_default(),
-            track_key: context.track_key,
-            track_path: hit_path_string,
-        });
+    SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
+        seq: 0,
+        rows: hits
+            .into_iter()
+            .map(|hit| BridgeSearchResultRow {
+                row_type: BridgeSearchResultRowType::Track,
+                score: hit.score,
+                year: hit.year,
+                track_number: hit.track_no,
+                count: 0,
+                length_seconds: hit.duration_secs,
+                label: hit.title,
+                artist: hit.artist,
+                album: hit.album,
+                root_label: String::new(),
+                genre: hit.genre,
+                cover_path: String::new(),
+                artist_key: String::new(),
+                album_key: String::new(),
+                section_key: String::new(),
+                track_key: String::new(),
+                track_path: hit.path.to_string_lossy().to_string(),
+            })
+            .collect(),
+    })
+}
+
+fn populate_search_rows(
+    prepared: &PreparedSearchLibrary,
+    hits: &[LibrarySearchTrack],
+    query_terms: &[String],
+) -> SearchRowBuckets {
+    let mut rows = SearchRowAccumulator::new(prepared.roots.clone());
+    for hit in hits {
+        rows.push_hit(prepared, hit, query_terms);
     }
+    rows.finish()
+}
 
+fn finalize_search_rows(
+    prepared: &PreparedSearchLibrary,
+    limits: &SearchResultLimits,
+    artist_groups: SearchGroupMap,
+    album_groups: SearchGroupMap,
+    album_hit_stats: &HashMap<String, HitAlbumAcc>,
+    mut track_rows: Vec<BridgeSearchResultRow>,
+) -> Vec<BridgeSearchResultRow> {
     let mut artist_rows = artist_groups
         .into_iter()
         .map(
@@ -2523,12 +2920,10 @@ fn build_search_results_frame(
         .filter_map(|(album_key, (score, fallback_title, root_label))| {
             let stats = album_hit_stats.get(&album_key)?;
             let inventory = prepared.album_inventory.get(&album_key);
-            let year = choose_most_common_year(&stats.year_counts);
-            let genre = choose_most_common_genre(&stats.genre_counts);
             Some(BridgeSearchResultRow {
                 row_type: BridgeSearchResultRowType::Album,
                 score,
-                year,
+                year: choose_most_common_year(&stats.year_counts),
                 track_number: None,
                 count: inventory.map_or(0, |value| value.main_track_count),
                 length_seconds: inventory
@@ -2549,11 +2944,8 @@ fn build_search_results_frame(
                 } else {
                     stats.root_label.clone()
                 },
-                genre,
-                cover_path: album_cover_paths
-                    .get(&album_key)
-                    .cloned()
-                    .unwrap_or_default(),
+                genre: choose_most_common_genre(&stats.genre_counts),
+                cover_path: String::new(),
                 artist_key: stats.artist_key.clone(),
                 album_key,
                 section_key: String::new(),
@@ -2566,14 +2958,65 @@ fn build_search_results_frame(
     artist_rows.sort_by(search_row_cmp);
     album_rows.sort_by(search_row_cmp);
     track_rows.sort_by(search_row_cmp);
-    artist_rows.truncate(artist_limit);
-    album_rows.truncate(album_limit);
-    track_rows.truncate(track_limit);
+    artist_rows.truncate(limits.artist);
+    album_rows.truncate(limits.album);
+    track_rows.truncate(limits.track);
 
     let mut rows = Vec::with_capacity(artist_rows.len() + album_rows.len() + track_rows.len());
     rows.extend(artist_rows);
     rows.extend(album_rows);
     rows.extend(track_rows);
+    rows
+}
+
+fn build_search_results_frame(
+    query: &SearchWorkerQuery,
+    prepared: &PreparedSearchLibrary,
+    query_rx: &Receiver<SearchWorkerQuery>,
+) -> SearchBuildOutcome {
+    let seq = query.seq;
+    let query_text = query.query.trim();
+    if query_text.is_empty() {
+        return empty_search_results_frame(seq);
+    }
+    let query_terms = split_search_terms(query_text);
+    if query_terms.is_empty() {
+        return empty_search_results_frame(seq);
+    }
+    let limits = search_result_limits(query_text);
+    let hits = match resolve_search_hits(query_text, prepared, query_rx, limits.fallback) {
+        SearchBuildOutcome::Frame(frame) => frame
+            .rows
+            .into_iter()
+            .map(|row| LibrarySearchTrack {
+                path: PathBuf::from(row.track_path),
+                score: row.score,
+                title: row.label,
+                artist: row.artist,
+                album: row.album,
+                genre: row.genre,
+                year: row.year,
+                track_no: row.track_number,
+                duration_secs: row.length_seconds,
+            })
+            .collect::<Vec<_>>(),
+        SearchBuildOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
+    };
+    if hits.is_empty() {
+        return empty_search_results_frame(seq);
+    }
+    if prepared.roots.is_empty() {
+        return empty_search_results_frame(seq);
+    }
+    let buckets = populate_search_rows(prepared, &hits, &query_terms);
+    let rows = finalize_search_rows(
+        prepared,
+        &limits,
+        buckets.artist_groups,
+        buckets.album_groups,
+        &buckets.album_hit_stats,
+        buckets.track_rows,
+    );
     SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, rows })
 }
 
@@ -2755,7 +3198,9 @@ fn search_tracks_fallback_prepared(
                 4.0
             };
         }
-        score += (track.path_string.len() as f32) / 10_000.0;
+        score += f32::from(
+            u16::try_from(track.path_string.len().min(usize::from(u16::MAX))).unwrap_or(u16::MAX),
+        ) / 10_000.0;
 
         if heap.len() >= capped_limit {
             if let Some(worst) = heap.peek() {
@@ -2966,7 +3411,7 @@ fn is_main_album_disc_section(section_name: &str) -> bool {
     false
 }
 
-fn pick_root_for_path<'a>(roots: &'a [LibraryRoot], path: &PathBuf) -> Option<&'a LibraryRoot> {
+fn pick_root_for_path<'a>(roots: &'a [LibraryRoot], path: &Path) -> Option<&'a LibraryRoot> {
     roots
         .iter()
         .filter(|root| path.starts_with(&root.path))
@@ -2974,7 +3419,7 @@ fn pick_root_for_path<'a>(roots: &'a [LibraryRoot], path: &PathBuf) -> Option<&'
 }
 
 fn derive_tree_path_context(
-    path: &PathBuf,
+    path: &Path,
     roots: &[LibraryRoot],
     fallback_artist: &str,
 ) -> Option<TreePathContext> {
@@ -3175,8 +3620,8 @@ fn pump_lastfm_events(
                     state.lastfm = runtime.clone();
                     changed = true;
                 }
-                if state.settings.lastfm_username != runtime.username {
-                    state.settings.lastfm_username = runtime.username;
+                if state.settings.integrations.lastfm_username != runtime.username {
+                    state.settings.integrations.lastfm_username = runtime.username;
                     *settings_dirty = true;
                     changed = true;
                 }
@@ -3350,8 +3795,8 @@ fn current_track_number(state: &BridgeState) -> Option<u32> {
 }
 
 fn run_external_queue_detail_worker(
-    req_rx: Receiver<ExternalQueueDetailsRequest>,
-    event_tx: Sender<ExternalQueueDetailsEvent>,
+    req_rx: &Receiver<ExternalQueueDetailsRequest>,
+    event_tx: &Sender<ExternalQueueDetailsEvent>,
 ) {
     while let Ok(request) = req_rx.recv() {
         let indexed =
@@ -3514,7 +3959,7 @@ fn apply_session_restore(
     let Some(session) = session else {
         return;
     };
-    state.queue = session.queue.clone();
+    state.queue.clone_from(&session.queue);
     let restored_current_index = resolve_session_current_index(
         &state.queue,
         session.current_queue_index,
@@ -3553,11 +3998,11 @@ fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
     let selected_queue_index = value
         .get("selected_queue_index")
         .and_then(serde_json::Value::as_u64)
-        .map(|v| v as usize);
+        .and_then(|value| usize::try_from(value).ok());
     let current_queue_index = value
         .get("current_queue_index")
         .and_then(serde_json::Value::as_u64)
-        .map(|v| v as usize);
+        .and_then(|value| usize::try_from(value).ok());
     let current_path = value
         .get("current_path")
         .and_then(serde_json::Value::as_str)
@@ -3648,17 +4093,17 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             }
             "log_scale" => {
                 if let Ok(x) = value.parse::<i32>() {
-                    settings.log_scale = x != 0;
+                    settings.display.log_scale = x != 0;
                 }
             }
             "show_fps" => {
                 if let Ok(x) = value.parse::<i32>() {
-                    settings.show_fps = x != 0;
+                    settings.display.show_fps = x != 0;
                 }
             }
             "system_media_controls_enabled" => {
                 if let Ok(x) = value.parse::<i32>() {
-                    settings.system_media_controls_enabled = x != 0;
+                    settings.integrations.system_media_controls_enabled = x != 0;
                 }
             }
             "library_sort_mode" => {
@@ -3668,11 +4113,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             }
             "lastfm_scrobbling_enabled" => {
                 if let Ok(x) = value.parse::<i32>() {
-                    settings.lastfm_scrobbling_enabled = x != 0;
+                    settings.integrations.lastfm_scrobbling_enabled = x != 0;
                 }
             }
             "lastfm_username" => {
-                settings.lastfm_username = value.to_string();
+                settings.integrations.lastfm_username = value.to_string();
             }
             _ => {}
         }
@@ -3698,12 +4143,12 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.spectrogram_view_mode.settings_value(),
         settings.viewer_fullscreen_mode.settings_value(),
         settings.db_range,
-        i32::from(settings.log_scale),
-        i32::from(settings.show_fps),
-        i32::from(settings.system_media_controls_enabled),
+        i32::from(settings.display.log_scale),
+        i32::from(settings.display.show_fps),
+        i32::from(settings.integrations.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
-        i32::from(settings.lastfm_scrobbling_enabled),
-        settings.lastfm_username,
+        i32::from(settings.integrations.lastfm_scrobbling_enabled),
+        settings.integrations.lastfm_username,
     )
 }
 
@@ -3889,12 +4334,16 @@ mod tests {
             spectrogram_view_mode: SpectrogramViewMode::PerChannel,
             viewer_fullscreen_mode: ViewerFullscreenMode::WholeScreen,
             db_range: 77.5,
-            log_scale: true,
-            show_fps: true,
-            system_media_controls_enabled: false,
+            display: BridgeDisplaySettings {
+                log_scale: true,
+                show_fps: true,
+            },
             library_sort_mode: LibrarySortMode::Title,
-            lastfm_scrobbling_enabled: true,
-            lastfm_username: "tester".to_string(),
+            integrations: BridgeIntegrationSettings {
+                system_media_controls_enabled: false,
+                lastfm_scrobbling_enabled: true,
+                lastfm_username: "tester".to_string(),
+            },
         };
         let text = format_settings_text(&settings);
         let mut parsed = BridgeSettings::default();
@@ -3910,12 +4359,12 @@ mod tests {
             ViewerFullscreenMode::WholeScreen
         );
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
-        assert!(parsed.log_scale);
-        assert!(parsed.show_fps);
-        assert!(!parsed.system_media_controls_enabled);
+        assert!(parsed.display.log_scale);
+        assert!(parsed.display.show_fps);
+        assert!(!parsed.integrations.system_media_controls_enabled);
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
-        assert!(parsed.lastfm_scrobbling_enabled);
-        assert_eq!(parsed.lastfm_username, "tester");
+        assert!(parsed.integrations.lastfm_scrobbling_enabled);
+        assert_eq!(parsed.integrations.lastfm_username, "tester");
     }
 
     #[test]
@@ -3933,12 +4382,12 @@ mod tests {
             ViewerFullscreenMode::WithinWindow
         );
         assert_eq!(settings.db_range, 120.0);
-        assert!(!settings.log_scale);
-        assert!(settings.show_fps);
-        assert!(!settings.system_media_controls_enabled);
+        assert!(!settings.display.log_scale);
+        assert!(settings.display.show_fps);
+        assert!(!settings.integrations.system_media_controls_enabled);
         assert_eq!(settings.library_sort_mode, LibrarySortMode::Year);
-        assert!(!settings.lastfm_scrobbling_enabled);
-        assert!(settings.lastfm_username.is_empty());
+        assert!(!settings.integrations.lastfm_scrobbling_enabled);
+        assert!(settings.integrations.lastfm_username.is_empty());
     }
 
     #[test]
@@ -3948,7 +4397,7 @@ mod tests {
             &mut settings,
             "volume=0.5\nfft_size=2048\nspectrogram_view_mode=per_channel\nviewer_fullscreen_mode=whole_screen\ndb_range=80\nlog_scale=1\nshow_fps=0\nlibrary_sort_mode=1\n",
         );
-        assert!(settings.system_media_controls_enabled);
+        assert!(settings.integrations.system_media_controls_enabled);
         assert_eq!(
             settings.spectrogram_view_mode,
             SpectrogramViewMode::PerChannel

@@ -11,6 +11,7 @@ use super::{
     FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
 use crate::analysis::{SpectrogramChannelLabel, SpectrogramViewMode};
+use crate::library::{IndexedTrack, LibraryTrack};
 use crate::playback::{PlaybackState, RepeatMode};
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
@@ -264,8 +265,10 @@ impl FfiRuntime {
         }
 
         let queue_section = compute_queue_section_data(snapshot);
-        self.queue_section_cache.library_ptr = std::sync::Arc::as_ptr(&snapshot.library) as usize;
-        self.queue_section_cache.queue_paths = snapshot.queue.clone();
+        self.queue_section_cache.library_ptr = std::sync::Arc::as_ptr(&snapshot.library).addr();
+        self.queue_section_cache
+            .queue_paths
+            .clone_from(&snapshot.queue);
         self.queue_section_cache.queue_details_signature = queue_details_signature(snapshot);
         self.queue_section_cache.queue_section = queue_section.clone();
         queue_section
@@ -273,7 +276,7 @@ impl FfiRuntime {
 }
 
 fn queue_section_cache_matches(cache: &QueueSectionCache, snapshot: &BridgeSnapshot) -> bool {
-    cache.library_ptr == std::sync::Arc::as_ptr(&snapshot.library) as usize
+    cache.library_ptr == std::sync::Arc::as_ptr(&snapshot.library).addr()
         && cache.queue_paths == snapshot.queue
         && cache.queue_details_signature == queue_details_signature(snapshot)
 }
@@ -325,6 +328,10 @@ pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `handle` must be a pointer previously returned by
+/// [`ferrous_ffi_bridge_create`] and must not be used again after this call.
 pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridge) {
     if handle.is_null() {
         return;
@@ -333,6 +340,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridg
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `cmd_ptr` must point to `cmd_len` readable bytes for the duration of this call.
 pub unsafe extern "C" fn ferrous_ffi_bridge_send_binary(
     handle: *mut FerrousFfiBridge,
     cmd_ptr: *const c_uchar,
@@ -356,6 +367,9 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_send_binary(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
 pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
     handle: *mut FerrousFfiBridge,
     max_events: u32,
@@ -367,7 +381,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
     let Ok(mut runtime) = bridge.runtime.lock() else {
         return false;
     };
-    runtime.poll(max_events as usize);
+    runtime.poll(usize_from_u32(max_events));
     !runtime.pending_binary_events.is_empty()
         || !runtime.pending_analysis_frames.is_empty()
         || !runtime.pending_library_trees.is_empty()
@@ -375,6 +389,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// If `len_out` is non-null, it must be writable for one `usize`.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_binary_event(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
@@ -403,6 +421,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_binary_event(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer previously returned by
+/// [`ferrous_ffi_bridge_pop_binary_event`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_binary_event(ptr: *mut c_uchar, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
@@ -411,6 +433,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_binary_event(ptr: *mut c_uchar,
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// If `len_out` is non-null, it must be writable for one `usize`.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_analysis_frame(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
@@ -439,6 +465,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_analysis_frame(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer previously returned by
+/// [`ferrous_ffi_bridge_pop_analysis_frame`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_analysis_frame(ptr: *mut c_uchar, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
@@ -447,6 +477,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_analysis_frame(ptr: *mut c_ucha
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// If `len_out` or `version_out` are non-null, each must be writable for one value.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_library_tree(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
@@ -482,6 +516,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_library_tree(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer previously returned by
+/// [`ferrous_ffi_bridge_pop_library_tree`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_library_tree(ptr: *mut c_uchar, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
@@ -490,6 +528,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_library_tree(ptr: *mut c_uchar,
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// If `len_out` or `seq_out` are non-null, each must be writable for one value.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_search_results(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
@@ -525,6 +567,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_search_results(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer previously returned by
+/// [`ferrous_ffi_bridge_pop_search_results`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_search_results(ptr: *mut c_uchar, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
@@ -538,7 +584,7 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
     }
 
     let cmd_id = u16::from_le_bytes([payload[0], payload[1]]);
-    let declared_len = u16::from_le_bytes([payload[2], payload[3]]) as usize;
+    let declared_len = usize::from(u16::from_le_bytes([payload[2], payload[3]]));
     let actual_payload = &payload[4..];
     if actual_payload.len() != declared_len {
         return Err(format!(
@@ -548,260 +594,202 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
     }
 
     let mut reader = BinaryReader::new(actual_payload);
+    let command = if let Some(command) = parse_playback_command(cmd_id, &mut reader)? {
+        command
+    } else if let Some(command) = parse_queue_command(cmd_id, &mut reader)? {
+        command
+    } else if let Some(command) = parse_library_collection_command(cmd_id, &mut reader)? {
+        command
+    } else if let Some(command) = parse_library_ui_command(cmd_id, &mut reader)? {
+        command
+    } else if let Some(command) = parse_settings_command(cmd_id, &mut reader)? {
+        command
+    } else if let Some(command) = parse_system_command(cmd_id, &mut reader)? {
+        command
+    } else {
+        return Err(format!("unknown binary command id {cmd_id}"));
+    };
+
+    Ok(Some(command))
+}
+
+fn parse_playback_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
     let command = match cmd_id {
-        1 => {
-            reader.expect_done()?;
-            BridgeCommand::Playback(BridgePlaybackCommand::Play)
-        }
-        2 => {
-            reader.expect_done()?;
-            BridgeCommand::Playback(BridgePlaybackCommand::Pause)
-        }
-        3 => {
-            reader.expect_done()?;
-            BridgeCommand::Playback(BridgePlaybackCommand::Stop)
-        }
-        4 => {
-            reader.expect_done()?;
-            BridgeCommand::Playback(BridgePlaybackCommand::Next)
-        }
-        5 => {
-            reader.expect_done()?;
-            BridgeCommand::Playback(BridgePlaybackCommand::Previous)
-        }
+        1 => BridgeCommand::Playback(BridgePlaybackCommand::Play),
+        2 => BridgeCommand::Playback(BridgePlaybackCommand::Pause),
+        3 => BridgeCommand::Playback(BridgePlaybackCommand::Stop),
+        4 => BridgeCommand::Playback(BridgePlaybackCommand::Next),
+        5 => BridgeCommand::Playback(BridgePlaybackCommand::Previous),
         6 => {
             let value = reader.read_f64()?;
-            reader.expect_done()?;
             if !value.is_finite() {
                 return Err("set_volume value must be finite".to_string());
             }
-            BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(value as f32))
+            BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(parse_f32(value)?))
         }
         7 => {
             let value = reader.read_f64()?;
-            reader.expect_done()?;
             if !value.is_finite() || value < 0.0 {
                 return Err("seek value must be finite and >= 0".to_string());
             }
             BridgeCommand::Playback(BridgePlaybackCommand::Seek(Duration::from_secs_f64(value)))
         }
-        8 => {
-            let index = reader.read_u32()? as usize;
-            reader.expect_done()?;
-            BridgeCommand::Queue(BridgeQueueCommand::PlayAt(index))
-        }
-        9 => {
-            let index = reader.read_i32()?;
-            reader.expect_done()?;
-            let selected = if index < 0 {
-                None
-            } else {
-                Some(index as usize)
-            };
-            BridgeCommand::Queue(BridgeQueueCommand::Select(selected))
-        }
-        10 => {
-            let index = reader.read_u32()? as usize;
-            reader.expect_done()?;
-            BridgeCommand::Queue(BridgeQueueCommand::Remove(index))
-        }
-        11 => {
-            let from = reader.read_u32()? as usize;
-            let to = reader.read_u32()? as usize;
-            reader.expect_done()?;
-            BridgeCommand::Queue(BridgeQueueCommand::Move { from, to })
-        }
-        12 => {
-            reader.expect_done()?;
-            BridgeCommand::Queue(BridgeQueueCommand::Clear)
-        }
-        13 => {
-            let path = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::AddTrack(PathBuf::from(path)))
-        }
-        14 => {
-            let path = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(PathBuf::from(path)))
-        }
-        15 => {
-            let paths = reader.read_u16_string_vec()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::ReplaceWithAlbum(
-                paths.into_iter().map(PathBuf::from).collect(),
-            ))
-        }
-        16 => {
-            let paths = reader.read_u16_string_vec()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(
-                paths.into_iter().map(PathBuf::from).collect(),
-            ))
-        }
-        17 => {
-            let artist = reader.read_u16_string()?;
-            let album = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAlbumByKey { artist, album })
-        }
-        18 => {
-            let artist = reader.read_u16_string()?;
-            let album = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbumByKey { artist, album })
-        }
-        19 => {
-            let artist = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::ReplaceArtistByKey { artist })
-        }
-        20 => {
-            let artist = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::AppendArtistByKey { artist })
-        }
-        21 => {
-            let path = reader.read_u16_string()?;
-            let name = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::AddRoot {
-                path: PathBuf::from(path),
-                name,
-            })
-        }
-        22 => {
-            let path = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::RemoveRoot(PathBuf::from(path)))
-        }
-        23 => {
-            let path = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::RescanRoot(PathBuf::from(path)))
-        }
-        24 => {
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::RescanAll)
-        }
-        45 => {
-            let path = reader.read_u16_string()?;
-            let name = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::RenameRoot {
-                path: PathBuf::from(path),
-                name,
-            })
-        }
         25 => {
-            let value = reader.read_u8()?;
-            reader.expect_done()?;
-            let mode = match value {
+            let mode = match reader.read_u8()? {
                 1 => RepeatMode::One,
                 2 => RepeatMode::All,
                 _ => RepeatMode::Off,
             };
             BridgeCommand::Playback(BridgePlaybackCommand::SetRepeatMode(mode))
         }
-        26 => {
-            let enabled = reader.read_u8()? != 0;
-            reader.expect_done()?;
-            BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(enabled))
-        }
-        27 => {
-            let value = reader.read_f32()?;
-            reader.expect_done()?;
-            if !value.is_finite() {
-                return Err("set_db_range value must be finite".to_string());
-            }
-            BridgeCommand::Settings(BridgeSettingsCommand::SetDbRange(value))
-        }
-        28 => {
-            let enabled = reader.read_u8()? != 0;
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetLogScale(enabled))
-        }
-        29 => {
-            let enabled = reader.read_u8()? != 0;
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetShowFps(enabled))
-        }
-        30 => {
-            let mode = LibrarySortMode::from_i32(reader.read_i32()?);
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetLibrarySortMode(mode))
-        }
-        31 => {
-            let fft_size = reader.read_u32()? as usize;
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetFftSize(fft_size))
-        }
-        32 => {
-            let mode = SpectrogramViewMode::from_i32(reader.read_u8()? as i32);
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetSpectrogramViewMode(mode))
-        }
-        33 => {
-            reader.expect_done()?;
-            BridgeCommand::RequestSnapshot
-        }
-        34 => {
-            reader.expect_done()?;
-            BridgeCommand::Shutdown
-        }
-        35 => {
-            let key = reader.read_u16_string()?;
-            let expanded = reader.read_u8()? != 0;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { key, expanded })
-        }
-        36 => {
-            let seq = reader.read_u32()?;
-            let query = reader.read_u16_string()?;
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::SetSearchQuery { seq, query })
-        }
-        37 => {
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAllTracks)
-        }
-        38 => {
-            reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::AppendAllTracks)
-        }
-        39 => {
-            let enabled = reader.read_u8()? != 0;
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetSystemMediaControlsEnabled(
-                enabled,
-            ))
-        }
-        40 => {
-            let enabled = reader.read_u8()? != 0;
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmScrobblingEnabled(enabled))
-        }
-        41 => {
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::BeginLastFmAuth)
-        }
-        42 => {
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::CompleteLastFmAuth)
-        }
-        43 => {
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::DisconnectLastFm)
-        }
-        44 => {
-            let mode = ViewerFullscreenMode::from_i32(reader.read_u8()? as i32);
-            reader.expect_done()?;
-            BridgeCommand::Settings(BridgeSettingsCommand::SetViewerFullscreenMode(mode))
-        }
-        _ => return Err(format!("unknown binary command id {cmd_id}")),
+        26 => BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(reader.read_u8()? != 0)),
+        _ => return Ok(None),
     };
-
+    reader.expect_done()?;
     Ok(Some(command))
+}
+
+fn parse_queue_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
+    let command = match cmd_id {
+        8 => BridgeQueueCommand::PlayAt(usize_from_u32(reader.read_u32()?)),
+        9 => {
+            let selected = match reader.read_i32()? {
+                index if index < 0 => None,
+                index => Some(usize_from_i32(index)?),
+            };
+            BridgeQueueCommand::Select(selected)
+        }
+        10 => BridgeQueueCommand::Remove(usize_from_u32(reader.read_u32()?)),
+        11 => {
+            let from = usize_from_u32(reader.read_u32()?);
+            let to = usize_from_u32(reader.read_u32()?);
+            BridgeQueueCommand::Move { from, to }
+        }
+        12 => BridgeQueueCommand::Clear,
+        _ => return Ok(None),
+    };
+    reader.expect_done()?;
+    Ok(Some(BridgeCommand::Queue(command)))
+}
+
+fn parse_library_collection_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
+    let command = match cmd_id {
+        13 => BridgeLibraryCommand::AddTrack(PathBuf::from(reader.read_u16_string()?)),
+        14 => BridgeLibraryCommand::PlayTrack(PathBuf::from(reader.read_u16_string()?)),
+        15 => BridgeLibraryCommand::ReplaceWithAlbum(read_path_vec(reader)?),
+        16 => BridgeLibraryCommand::AppendAlbum(read_path_vec(reader)?),
+        17 => BridgeLibraryCommand::ReplaceAlbumByKey {
+            artist: reader.read_u16_string()?,
+            album: reader.read_u16_string()?,
+        },
+        18 => BridgeLibraryCommand::AppendAlbumByKey {
+            artist: reader.read_u16_string()?,
+            album: reader.read_u16_string()?,
+        },
+        19 => BridgeLibraryCommand::ReplaceArtistByKey {
+            artist: reader.read_u16_string()?,
+        },
+        20 => BridgeLibraryCommand::AppendArtistByKey {
+            artist: reader.read_u16_string()?,
+        },
+        37 => BridgeLibraryCommand::ReplaceAllTracks,
+        38 => BridgeLibraryCommand::AppendAllTracks,
+        _ => return Ok(None),
+    };
+    reader.expect_done()?;
+    Ok(Some(BridgeCommand::Library(command)))
+}
+
+fn parse_library_ui_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
+    let command = match cmd_id {
+        21 => BridgeLibraryCommand::AddRoot {
+            path: PathBuf::from(reader.read_u16_string()?),
+            name: reader.read_u16_string()?,
+        },
+        22 => BridgeLibraryCommand::RemoveRoot(PathBuf::from(reader.read_u16_string()?)),
+        23 => BridgeLibraryCommand::RescanRoot(PathBuf::from(reader.read_u16_string()?)),
+        24 => BridgeLibraryCommand::RescanAll,
+        35 => BridgeLibraryCommand::SetNodeExpanded {
+            key: reader.read_u16_string()?,
+            expanded: reader.read_u8()? != 0,
+        },
+        36 => BridgeLibraryCommand::SetSearchQuery {
+            seq: reader.read_u32()?,
+            query: reader.read_u16_string()?,
+        },
+        45 => BridgeLibraryCommand::RenameRoot {
+            path: PathBuf::from(reader.read_u16_string()?),
+            name: reader.read_u16_string()?,
+        },
+        _ => return Ok(None),
+    };
+    reader.expect_done()?;
+    Ok(Some(BridgeCommand::Library(command)))
+}
+
+fn parse_settings_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
+    let command = match cmd_id {
+        27 => match reader.read_f32()? {
+            value if value.is_finite() => BridgeSettingsCommand::SetDbRange(value),
+            _ => return Err("set_db_range value must be finite".to_string()),
+        },
+        28 => BridgeSettingsCommand::SetLogScale(reader.read_u8()? != 0),
+        29 => BridgeSettingsCommand::SetShowFps(reader.read_u8()? != 0),
+        30 => {
+            BridgeSettingsCommand::SetLibrarySortMode(LibrarySortMode::from_i32(reader.read_i32()?))
+        }
+        31 => BridgeSettingsCommand::SetFftSize(usize_from_u32(reader.read_u32()?)),
+        32 => BridgeSettingsCommand::SetSpectrogramViewMode(SpectrogramViewMode::from_i32(
+            i32::from(reader.read_u8()?),
+        )),
+        39 => BridgeSettingsCommand::SetSystemMediaControlsEnabled(reader.read_u8()? != 0),
+        40 => BridgeSettingsCommand::SetLastFmScrobblingEnabled(reader.read_u8()? != 0),
+        41 => BridgeSettingsCommand::BeginLastFmAuth,
+        42 => BridgeSettingsCommand::CompleteLastFmAuth,
+        43 => BridgeSettingsCommand::DisconnectLastFm,
+        44 => BridgeSettingsCommand::SetViewerFullscreenMode(ViewerFullscreenMode::from_i32(
+            i32::from(reader.read_u8()?),
+        )),
+        _ => return Ok(None),
+    };
+    reader.expect_done()?;
+    Ok(Some(BridgeCommand::Settings(command)))
+}
+
+fn parse_system_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
+    let command = match cmd_id {
+        33 => BridgeCommand::RequestSnapshot,
+        34 => BridgeCommand::Shutdown,
+        _ => return Ok(None),
+    };
+    reader.expect_done()?;
+    Ok(Some(command))
+}
+
+fn read_path_vec(reader: &mut BinaryReader<'_>) -> Result<Vec<PathBuf>, String> {
+    Ok(reader
+        .read_u16_string_vec()?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect())
 }
 
 struct BinaryReader<'a> {
@@ -857,7 +845,7 @@ impl<'a> BinaryReader<'a> {
     }
 
     fn read_u16_string(&mut self) -> Result<String, String> {
-        let len = self.read_u16()? as usize;
+        let len = usize::from(self.read_u16()?);
         if self.offset + len > self.bytes.len() {
             return Err("binary command string truncated".to_string());
         }
@@ -867,7 +855,7 @@ impl<'a> BinaryReader<'a> {
     }
 
     fn read_u16_string_vec(&mut self) -> Result<Vec<String>, String> {
-        let count = self.read_u16()? as usize;
+        let count = usize::from(self.read_u16()?);
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
             out.push(self.read_u16_string()?);
@@ -943,16 +931,16 @@ fn encode_packet(sections: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
         section_mask |= *bit;
         total_length = total_length
             .saturating_add(4)
-            .saturating_add(payload.len() as u32);
+            .saturating_add(clamp_u32(payload.len()));
     }
 
-    let mut out = Vec::with_capacity(total_length as usize);
+    let mut out = Vec::with_capacity(usize_from_u32(total_length));
     push_u32(&mut out, SNAPSHOT_MAGIC);
     push_u32(&mut out, total_length);
     push_u16(&mut out, section_mask);
     push_u16(&mut out, 0);
     for (_, payload) in sections {
-        push_u32(&mut out, payload.len() as u32);
+        push_u32(&mut out, clamp_u32(payload.len()));
         out.extend_from_slice(&payload);
     }
     out
@@ -970,10 +958,7 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         RepeatMode::One => 1u8,
         RepeatMode::All => 2u8,
     };
-    let current_queue_index = snapshot
-        .playback
-        .current_queue_index
-        .map_or(-1, |idx| idx as i32);
+    let current_queue_index = snapshot.playback.current_queue_index.map_or(-1, clamp_i32);
     let current_path = snapshot
         .playback
         .current
@@ -1015,78 +1000,30 @@ fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
         let fallback_title = path_title_fallback(path, &path_str);
 
         if let Some(track) = by_path.get(path.as_path()) {
-            let duration_for_sum = track.duration_secs.and_then(|value| {
-                if value.is_finite() && value > 0.0 {
-                    Some(value)
-                } else {
-                    None
-                }
-            });
-            if let Some(value) = duration_for_sum {
-                total_duration_secs += f64::from(value);
-            } else {
-                unknown_duration_count = unknown_duration_count.saturating_add(1);
-            }
-
-            tracks.push(EncodedQueueTrack {
-                title: if track.title.trim().is_empty() {
-                    fallback_title
-                } else {
-                    track.title.clone()
-                },
-                artist: track.artist.clone(),
-                album: track.album.clone(),
-                cover_path: track.cover_path.clone(),
-                genre: track.genre.clone(),
-                year: track.year,
-                track_number: track.track_no,
-                length_seconds: track.duration_secs.and_then(|value| {
-                    if value.is_finite() && value >= 0.0 {
-                        Some(value)
-                    } else {
-                        None
-                    }
-                }),
-                path: path_str,
-            });
+            update_queue_duration_stats(
+                track.duration_secs,
+                &mut total_duration_secs,
+                &mut unknown_duration_count,
+            );
+            tracks.push(encoded_queue_track_from_library(
+                track,
+                fallback_title,
+                path_str,
+            ));
             continue;
         }
 
         if let Some(track) = snapshot.queue_details.get(path) {
-            let duration_for_sum = track.duration_secs.and_then(|value| {
-                if value.is_finite() && value > 0.0 {
-                    Some(value)
-                } else {
-                    None
-                }
-            });
-            if let Some(value) = duration_for_sum {
-                total_duration_secs += f64::from(value);
-            } else {
-                unknown_duration_count = unknown_duration_count.saturating_add(1);
-            }
-
-            tracks.push(EncodedQueueTrack {
-                title: if track.title.trim().is_empty() {
-                    fallback_title
-                } else {
-                    track.title.clone()
-                },
-                artist: track.artist.clone(),
-                album: track.album.clone(),
-                cover_path: track.cover_path.clone(),
-                genre: track.genre.clone(),
-                year: track.year,
-                track_number: track.track_no,
-                length_seconds: track.duration_secs.and_then(|value| {
-                    if value.is_finite() && value >= 0.0 {
-                        Some(value)
-                    } else {
-                        None
-                    }
-                }),
-                path: path_str,
-            });
+            update_queue_duration_stats(
+                track.duration_secs,
+                &mut total_duration_secs,
+                &mut unknown_duration_count,
+            );
+            tracks.push(encoded_queue_track_from_indexed(
+                track,
+                fallback_title,
+                path_str,
+            ));
             continue;
         }
 
@@ -1111,15 +1048,110 @@ fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
     }
 }
 
+fn update_queue_duration_stats(
+    duration_secs: Option<f32>,
+    total_duration_secs: &mut f64,
+    unknown_duration_count: &mut usize,
+) {
+    if let Some(value) = duration_secs.filter(|value| value.is_finite() && *value > 0.0) {
+        *total_duration_secs += f64::from(value);
+    } else {
+        *unknown_duration_count = unknown_duration_count.saturating_add(1);
+    }
+}
+
+fn encoded_queue_track_from_library(
+    track: &LibraryTrack,
+    fallback_title: String,
+    path: String,
+) -> EncodedQueueTrack {
+    encoded_queue_track(
+        &QueueTrackSource {
+            title: &track.title,
+            artist: &track.artist,
+            album: &track.album,
+            cover_path: &track.cover_path,
+            genre: &track.genre,
+            year: track.year,
+            track_number: track.track_no,
+            duration_secs: track.duration_secs,
+        },
+        fallback_title,
+        path,
+    )
+}
+
+fn encoded_queue_track_from_indexed(
+    track: &IndexedTrack,
+    fallback_title: String,
+    path: String,
+) -> EncodedQueueTrack {
+    encoded_queue_track(
+        &QueueTrackSource {
+            title: &track.title,
+            artist: &track.artist,
+            album: &track.album,
+            cover_path: &track.cover_path,
+            genre: &track.genre,
+            year: track.year,
+            track_number: track.track_no,
+            duration_secs: track.duration_secs,
+        },
+        fallback_title,
+        path,
+    )
+}
+
+struct QueueTrackSource<'a> {
+    title: &'a str,
+    artist: &'a str,
+    album: &'a str,
+    cover_path: &'a str,
+    genre: &'a str,
+    year: Option<i32>,
+    track_number: Option<u32>,
+    duration_secs: Option<f32>,
+}
+
+fn encoded_queue_track(
+    track: &QueueTrackSource<'_>,
+    fallback_title: String,
+    path: String,
+) -> EncodedQueueTrack {
+    EncodedQueueTrack {
+        title: normalized_queue_title(track.title, fallback_title),
+        artist: track.artist.to_string(),
+        album: track.album.to_string(),
+        cover_path: track.cover_path.to_string(),
+        genre: track.genre.to_string(),
+        year: track.year,
+        track_number: track.track_number,
+        length_seconds: normalized_queue_duration(track.duration_secs),
+        path,
+    }
+}
+
+fn normalized_queue_title(title: &str, fallback_title: String) -> String {
+    if title.trim().is_empty() {
+        fallback_title
+    } else {
+        title.to_string()
+    }
+}
+
+fn normalized_queue_duration(duration_secs: Option<f32>) -> Option<f32> {
+    duration_secs.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
 fn encode_queue_section(snapshot: &BridgeSnapshot, queue_section: &QueueSectionData) -> Vec<u8> {
     let mut out = Vec::new();
-    let selected_index = snapshot.selected_queue_index.map_or(-1, |idx| idx as i32);
+    let selected_index = snapshot.selected_queue_index.map_or(-1, clamp_i32);
 
-    push_u32(&mut out, snapshot.queue.len() as u32);
+    push_u32(&mut out, clamp_u32(snapshot.queue.len()));
     push_i32(&mut out, selected_index);
     push_f64(&mut out, queue_section.total_duration_secs);
-    push_u32(&mut out, queue_section.unknown_duration_count as u32);
-    push_u32(&mut out, queue_section.tracks.len() as u32);
+    push_u32(&mut out, clamp_u32(queue_section.unknown_duration_count));
+    push_u32(&mut out, clamp_u32(queue_section.tracks.len()));
 
     for track in &queue_section.tracks {
         push_u16_string(&mut out, &track.title);
@@ -1139,17 +1171,17 @@ fn encode_queue_section(snapshot: &BridgeSnapshot, queue_section: &QueueSectionD
 fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
     let progress = snapshot.library.scan_progress.as_ref();
-    let roots_completed = progress.map_or(0, |p| p.roots_completed as u32);
-    let roots_total = progress.map_or(0, |p| p.roots_total as u32);
-    let files_discovered = progress.map_or(0, |p| p.supported_files_discovered as u32);
-    let files_processed = progress.map_or(0, |p| p.supported_files_processed as u32);
+    let roots_completed = progress.map_or(0, |p| clamp_u32(p.roots_completed));
+    let roots_total = progress.map_or(0, |p| clamp_u32(p.roots_total));
+    let files_discovered = progress.map_or(0, |p| clamp_u32(p.supported_files_discovered));
+    let files_processed = progress.map_or(0, |p| clamp_u32(p.supported_files_processed));
     let files_per_second = progress.and_then(|p| p.files_per_second).unwrap_or(0.0);
     let eta_seconds = progress.and_then(|p| p.eta_seconds).unwrap_or(-1.0);
 
-    push_u32(&mut out, snapshot.library.roots.len() as u32);
-    push_u32(&mut out, snapshot.library.tracks.len() as u32);
-    push_u32(&mut out, snapshot.library_artist_count as u32);
-    push_u32(&mut out, snapshot.library_album_count as u32);
+    push_u32(&mut out, clamp_u32(snapshot.library.roots.len()));
+    push_u32(&mut out, clamp_u32(snapshot.library.tracks.len()));
+    push_u32(&mut out, clamp_u32(snapshot.library_artist_count));
+    push_u32(&mut out, clamp_u32(snapshot.library_album_count));
     push_u8(&mut out, u8::from(snapshot.library.scan_in_progress));
     push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
     push_u16_string(
@@ -1206,22 +1238,22 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
     push_f32(&mut out, snapshot.settings.volume);
-    push_u32(&mut out, snapshot.settings.fft_size as u32);
+    push_u32(&mut out, clamp_u32(snapshot.settings.fft_size));
     push_u8(
         &mut out,
-        snapshot.settings.spectrogram_view_mode.to_i32() as u8,
+        clamp_u8_from_i32(snapshot.settings.spectrogram_view_mode.to_i32()),
     );
     push_f32(&mut out, snapshot.settings.db_range);
-    push_u8(&mut out, u8::from(snapshot.settings.log_scale));
-    push_u8(&mut out, u8::from(snapshot.settings.show_fps));
+    push_u8(&mut out, u8::from(snapshot.settings.display.log_scale));
+    push_u8(&mut out, u8::from(snapshot.settings.display.show_fps));
     push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
     push_u8(
         &mut out,
-        u8::from(snapshot.settings.system_media_controls_enabled),
+        u8::from(snapshot.settings.integrations.system_media_controls_enabled),
     );
     push_u8(
         &mut out,
-        snapshot.settings.viewer_fullscreen_mode.to_i32() as u8,
+        clamp_u8_from_i32(snapshot.settings.viewer_fullscreen_mode.to_i32()),
     );
     out
 }
@@ -1238,7 +1270,7 @@ fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(&mut out, u8::from(snapshot.lastfm.enabled));
     push_u8(&mut out, u8::from(snapshot.lastfm.build_configured));
     push_u8(&mut out, auth_state);
-    push_u32(&mut out, snapshot.lastfm.pending_scrobble_count as u32);
+    push_u32(&mut out, clamp_u32(snapshot.lastfm.pending_scrobble_count));
     push_u16_string(&mut out, &snapshot.lastfm.username);
     push_u16_string(&mut out, &snapshot.lastfm.status_text);
     push_u16_string(&mut out, &snapshot.lastfm.auth_url);
@@ -1246,11 +1278,66 @@ fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 }
 
 fn clamp_u16(value: usize) -> u16 {
-    value.min(u16::MAX as usize) as u16
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 fn clamp_u32_to_u16(value: u32) -> u16 {
-    value.min(u16::MAX as u32) as u16
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
+
+fn clamp_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn clamp_u8(value: usize) -> u8 {
+    u8::try_from(value).unwrap_or(u8::MAX)
+}
+
+fn clamp_i32(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+fn clamp_u8_from_i32(value: i32) -> u8 {
+    u8::try_from(value).unwrap_or_default()
+}
+
+fn usize_from_u32(value: u32) -> usize {
+    match usize::try_from(value) {
+        Ok(value) => value,
+        Err(_) => usize::MAX,
+    }
+}
+
+fn usize_from_u64(value: u64) -> usize {
+    match usize::try_from(value) {
+        Ok(value) => value,
+        Err(_) => usize::MAX,
+    }
+}
+
+fn usize_from_i32(value: i32) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("binary command index out of range: {value}"))
+}
+
+fn parse_f32(value: f64) -> Result<f32, String> {
+    if value < f64::from(f32::MIN) || value > f64::from(f32::MAX) {
+        return Err("set_volume value is out of range".to_string());
+    }
+    value
+        .to_string()
+        .parse::<f32>()
+        .map_err(|_| "set_volume value could not be represented".to_string())
+}
+
+fn waveform_coverage_millis(coverage_seconds: f32) -> u32 {
+    let seconds = if coverage_seconds.is_finite() {
+        coverage_seconds.max(0.0)
+    } else {
+        0.0
+    };
+    let millis = Duration::try_from_secs_f32(seconds)
+        .map_or(u128::from(u32::MAX), |duration| duration.as_millis());
+    u32::try_from(millis).unwrap_or(u32::MAX)
 }
 
 fn push_u8(out: &mut Vec<u8>, value: u8) {
@@ -1279,21 +1366,21 @@ fn push_f64(out: &mut Vec<u8>, value: f64) {
 
 fn push_u16_string(out: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
-    let len = bytes.len().min(u16::MAX as usize);
-    push_u16(out, len as u16);
-    out.extend_from_slice(&bytes[..len]);
+    let len = clamp_u16(bytes.len());
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&bytes[..usize::from(len)]);
 }
 
 fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState) -> AnalysisDelta {
     let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
-    let waveform_coverage_millis = (s.analysis.waveform_coverage_seconds.max(0.0) * 1000.0)
-        .round()
-        .clamp(0.0, u32::MAX as f32) as u32;
+    let waveform_coverage_millis = waveform_coverage_millis(s.analysis.waveform_coverage_seconds);
     let waveform_meta_changed = waveform_coverage_millis
         != emit_state.last_waveform_coverage_millis
         || s.analysis.waveform_complete != emit_state.last_waveform_complete;
     let waveform_peaks_u8 = if waveform_changed {
-        emit_state.last_waveform_peaks = s.analysis.waveform_peaks.clone();
+        emit_state
+            .last_waveform_peaks
+            .clone_from(&s.analysis.waveform_peaks);
         downsample_waveform_peaks(&s.analysis.waveform_peaks, 1024)
             .into_iter()
             .map(to_u8_norm)
@@ -1310,7 +1397,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
             && emit_state.last_spectrogram_seq > 0);
     let spectrogram_seq = s.analysis.spectrogram_seq;
     let spectrogram_delta =
-        spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
+        usize_from_u64(spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq));
     let spectrogram_channels_u8 =
         if spectrogram_delta > 0 && !s.analysis.spectrogram_channels.is_empty() {
             let frame_count = s
@@ -1361,18 +1448,28 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
 
 fn to_u8_norm(v: f32) -> u8 {
     let clamped = v.clamp(0.0, 1.0);
-    (clamped * 255.0).round() as u8
+    round_clamped_to_u8(f64::from(clamped) * 255.0)
 }
 
 fn to_u8_spectrum(v: f32, db_range: f32) -> u8 {
-    let range = db_range.clamp(50.0, 120.0) as f64;
+    let range = f64::from(db_range.clamp(50.0, 120.0));
     let db = if v > 0.0 {
-        (10.0 / std::f64::consts::LN_10) * (v as f64).ln()
+        (10.0 / std::f64::consts::LN_10) * f64::from(v).ln()
     } else {
         -200.0
     };
     let xdb = (db + range - 63.0).clamp(0.0, range);
-    ((xdb / range) * 255.0).round().clamp(0.0, 255.0) as u8
+    round_clamped_to_u8((xdb / range) * 255.0)
+}
+
+fn round_clamped_to_u8(value: f64) -> u8 {
+    let clamped = value.round().clamp(0.0, 255.0);
+    clamped
+        .to_string()
+        .parse::<u16>()
+        .ok()
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(u8::MAX)
 }
 
 fn encode_channel_label(label: SpectrogramChannelLabel) -> u8 {
@@ -1423,21 +1520,21 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
         return Vec::new();
     }
 
-    let waveform_len_u16 = waveform_len.min(u16::MAX as usize) as u16;
-    let row_count_u16 = row_count.min(u16::MAX as usize) as u16;
-    let bin_count_u16 = bin_count.min(u16::MAX as usize) as u16;
-    let channel_count_u8 = channel_count.min(u8::MAX as usize) as u8;
+    let waveform_len_u16 = clamp_u16(waveform_len);
+    let row_count_u16 = clamp_u16(row_count);
+    let bin_count_u16 = clamp_u16(bin_count);
+    let channel_count_u8 = clamp_u8(channel_count);
     let label_bytes = if has_spectrogram || delta.spectrogram_reset {
-        channel_count_u8 as usize
+        usize::from(channel_count_u8)
     } else {
         0
     };
     let spectrogram_bytes =
-        row_count_u16 as usize * channel_count_u8 as usize * bin_count_u16 as usize;
-    let payload_len = 21usize + waveform_len_u16 as usize + label_bytes + spectrogram_bytes;
+        usize::from(row_count_u16) * usize::from(channel_count_u8) * usize::from(bin_count_u16);
+    let payload_len = 21usize + usize::from(waveform_len_u16) + label_bytes + spectrogram_bytes;
 
     let mut out = Vec::with_capacity(4 + payload_len);
-    out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    out.extend_from_slice(&clamp_u32(payload_len).to_le_bytes());
     out.push(ANALYSIS_FRAME_MAGIC);
     out.extend_from_slice(&delta.sample_rate_hz.to_le_bytes());
     out.push(flags);
@@ -1449,25 +1546,25 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     out.push(channel_count_u8);
 
     if (flags & ANALYSIS_FLAG_WAVEFORM) != 0 {
-        out.extend_from_slice(&delta.waveform_peaks_u8[..waveform_len_u16 as usize]);
+        out.extend_from_slice(&delta.waveform_peaks_u8[..usize::from(waveform_len_u16)]);
     }
     if label_bytes > 0 {
         for channel in delta
             .spectrogram_channels_u8
             .iter()
-            .take(channel_count_u8 as usize)
+            .take(usize::from(channel_count_u8))
         {
             out.push(encode_channel_label(channel.label));
         }
     }
     if (flags & ANALYSIS_FLAG_SPECTROGRAM) != 0 {
-        for row_index in 0..row_count_u16 as usize {
+        for row_index in 0..usize::from(row_count_u16) {
             for channel in delta
                 .spectrogram_channels_u8
                 .iter()
-                .take(channel_count_u8 as usize)
+                .take(usize::from(channel_count_u8))
             {
-                out.extend_from_slice(&channel.rows_u8[row_index][..bin_count_u16 as usize]);
+                out.extend_from_slice(&channel.rows_u8[row_index][..usize::from(bin_count_u16)]);
             }
         }
     }
@@ -1584,12 +1681,16 @@ mod tests {
                 spectrogram_view_mode: SpectrogramViewMode::Downmix,
                 viewer_fullscreen_mode: ViewerFullscreenMode::WholeScreen,
                 db_range: 90.0,
-                log_scale: false,
-                show_fps: false,
-                system_media_controls_enabled: true,
+                display: super::super::BridgeDisplaySettings {
+                    log_scale: false,
+                    show_fps: false,
+                },
                 library_sort_mode: LibrarySortMode::Year,
-                lastfm_scrobbling_enabled: true,
-                lastfm_username: "tester".to_string(),
+                integrations: super::super::BridgeIntegrationSettings {
+                    system_media_controls_enabled: true,
+                    lastfm_scrobbling_enabled: true,
+                    lastfm_username: "tester".to_string(),
+                },
             },
             lastfm: crate::lastfm::RuntimeState {
                 enabled: true,
@@ -1613,7 +1714,7 @@ mod tests {
     fn encode_command(cmd_id: u16, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + payload.len());
         out.extend_from_slice(&cmd_id.to_le_bytes());
-        out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        out.extend_from_slice(&clamp_u16(payload.len()).to_le_bytes());
         out.extend_from_slice(payload);
         out
     }
@@ -1658,7 +1759,9 @@ mod tests {
             let start = *offset;
             let end = start + 2;
             *offset = end;
-            u16::from_le_bytes(bytes[start..end].try_into().expect("u16 bytes")) as usize
+            usize::from(u16::from_le_bytes(
+                bytes[start..end].try_into().expect("u16 bytes"),
+            ))
         };
         let start = *offset;
         let end = start + len;
@@ -1783,9 +1886,9 @@ mod tests {
         let first = b"/music/a.flac";
         let second = b"/music/b.flac";
         payload.extend_from_slice(&2u16.to_le_bytes());
-        payload.extend_from_slice(&(first.len() as u16).to_le_bytes());
+        payload.extend_from_slice(&clamp_u16(first.len()).to_le_bytes());
         payload.extend_from_slice(first);
-        payload.extend_from_slice(&(second.len() as u16).to_le_bytes());
+        payload.extend_from_slice(&clamp_u16(second.len()).to_le_bytes());
         payload.extend_from_slice(second);
 
         let cmd = parse_binary_command(&encode_command(15, &payload))
@@ -1809,7 +1912,7 @@ mod tests {
     fn parse_binary_command_supports_set_node_expanded() {
         let key = "artist|/music|Artist A";
         let mut payload = Vec::new();
-        payload.extend_from_slice(&(key.len() as u16).to_le_bytes());
+        payload.extend_from_slice(&clamp_u16(key.len()).to_le_bytes());
         payload.extend_from_slice(key.as_bytes());
         payload.push(1);
 
@@ -1833,7 +1936,7 @@ mod tests {
         let query = "pink floyd";
         let mut payload = Vec::new();
         payload.extend_from_slice(&42u32.to_le_bytes());
-        payload.extend_from_slice(&(query.len() as u16).to_le_bytes());
+        payload.extend_from_slice(&clamp_u16(query.len()).to_le_bytes());
         payload.extend_from_slice(query.as_bytes());
 
         let cmd = parse_binary_command(&encode_command(36, &payload))
@@ -1940,7 +2043,7 @@ mod tests {
         let path = snapshot.queue[0].clone();
 
         let mut cache = QueueSectionCache::default();
-        cache.library_ptr = Arc::as_ptr(&snapshot.library) as usize;
+        cache.library_ptr = Arc::as_ptr(&snapshot.library).addr();
         cache.queue_paths = snapshot.queue.clone();
         cache.queue_details_signature = queue_details_signature(&snapshot);
         cache.queue_section = compute_queue_section_data(&snapshot);
@@ -2005,7 +2108,7 @@ mod tests {
         let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
         let (magic, total_len, mask) = parse_packet_header(&packet);
         assert_eq!(magic, SNAPSHOT_MAGIC);
-        assert_eq!(total_len as usize, packet.len());
+        assert_eq!(usize_from_u32(total_len), packet.len());
         assert_ne!(mask & SECTION_PLAYBACK, 0);
         assert_ne!(mask & SECTION_QUEUE, 0);
         assert_ne!(mask & SECTION_LIBRARY_META, 0);
@@ -2019,20 +2122,20 @@ mod tests {
     #[test]
     fn settings_section_encodes_system_media_controls_flag() {
         let mut snapshot = sample_snapshot();
-        snapshot.settings.system_media_controls_enabled = false;
+        snapshot.settings.integrations.system_media_controls_enabled = false;
         snapshot.settings.viewer_fullscreen_mode = ViewerFullscreenMode::WholeScreen;
         let queue_section = compute_queue_section_data(&snapshot);
         let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
         let mut offset = 12usize;
-        let playback_len = read_u32(&packet, &mut offset) as usize;
+        let playback_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += playback_len;
-        let queue_len = read_u32(&packet, &mut offset) as usize;
+        let queue_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += queue_len;
-        let library_len = read_u32(&packet, &mut offset) as usize;
+        let library_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += library_len;
-        let metadata_len = read_u32(&packet, &mut offset) as usize;
+        let metadata_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += metadata_len;
-        let settings_len = read_u32(&packet, &mut offset) as usize;
+        let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
         assert_eq!(settings.iter().rev().nth(1).copied(), Some(0));
         assert_eq!(settings.last().copied(), Some(1));
@@ -2044,17 +2147,17 @@ mod tests {
         let queue_section = compute_queue_section_data(&snapshot);
         let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
         let mut offset = 12usize;
-        let playback_len = read_u32(&packet, &mut offset) as usize;
+        let playback_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += playback_len;
-        let queue_len = read_u32(&packet, &mut offset) as usize;
+        let queue_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += queue_len;
-        let library_len = read_u32(&packet, &mut offset) as usize;
+        let library_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += library_len;
-        let metadata_len = read_u32(&packet, &mut offset) as usize;
+        let metadata_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += metadata_len;
-        let settings_len = read_u32(&packet, &mut offset) as usize;
+        let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += settings_len;
-        let lastfm_len = read_u32(&packet, &mut offset) as usize;
+        let lastfm_len = usize_from_u32(read_u32(&packet, &mut offset));
         let lastfm = &packet[offset..offset + lastfm_len];
         let mut lastfm_offset = 0usize;
         assert_eq!(lastfm[lastfm_offset], 1);
@@ -2078,7 +2181,7 @@ mod tests {
 
         let packet = encode_binary_snapshot(&snapshot, None);
         let (_, total_len, mask) = parse_packet_header(&packet);
-        assert_eq!(total_len as usize, packet.len());
+        assert_eq!(usize_from_u32(total_len), packet.len());
         assert_ne!(mask & SECTION_PLAYBACK, 0);
         assert_eq!(mask & SECTION_QUEUE, 0);
         assert_ne!(mask & SECTION_METADATA, 0);

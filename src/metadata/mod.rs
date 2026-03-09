@@ -60,153 +60,19 @@ pub struct MetadataService {
 }
 
 impl MetadataService {
+    #[must_use]
     pub fn new() -> (Self, Receiver<MetadataEvent>) {
         Self::new_with_delay(std::time::Duration::ZERO)
     }
 
+    #[must_use]
     pub(crate) fn new_with_delay(delay: std::time::Duration) -> (Self, Receiver<MetadataEvent>) {
         let (req_tx, req_rx) = unbounded::<PathBuf>();
         let (event_tx, event_rx) = unbounded::<MetadataEvent>();
 
         let _ = std::thread::Builder::new()
             .name("ferrous-metadata".to_string())
-            .spawn(move || {
-                while let Ok(mut path) = req_rx.recv() {
-                    while let Ok(newer_path) = req_rx.try_recv() {
-                        path = newer_path;
-                    }
-                    let mut metadata = TrackMetadata {
-                        source_path: Some(path.to_string_lossy().to_string()),
-                        title: path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or_default()
-                            .to_owned(),
-                        ..TrackMetadata::default()
-                    };
-
-                    if let Ok(tagged) = lofty::read_from_path(&path) {
-                        let props = tagged.properties();
-                        metadata.sample_rate_hz = props.sample_rate();
-                        metadata.channels = props.channels();
-                        metadata.bit_depth = props.bit_depth();
-                        metadata.bitrate_kbps = props.audio_bitrate();
-                        metadata.format_label = format_label_from_lofty_file_type(
-                            tagged.file_type(),
-                            path.extension().and_then(|value| value.to_str()),
-                        );
-
-                        if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-                            metadata.title = tag.title().map_or_else(
-                                || "Unknown title".to_string(),
-                                std::borrow::Cow::into_owned,
-                            );
-                            metadata.artist = tag.artist().map_or_else(
-                                || "Unknown artist".to_string(),
-                                std::borrow::Cow::into_owned,
-                            );
-                            metadata.album = tag.album().map_or_else(
-                                || "Unknown album".to_string(),
-                                std::borrow::Cow::into_owned,
-                            );
-                            metadata.genre = tag
-                                .genre()
-                                .map_or_else(String::new, std::borrow::Cow::into_owned);
-                            metadata.year = tag.date().map(|v| i32::from(v.year));
-
-                            if let Some(pic) = tag.pictures().first() {
-                                if let Ok(img) = image::load_from_memory(pic.data()) {
-                                    let rgba = img.to_rgba8();
-                                    let width = rgba.width() as usize;
-                                    let height = rgba.height() as usize;
-                                    let raw = rgba.into_raw();
-                                    metadata.cover_art_path =
-                                        cache_embedded_cover_png(&path, width, height, &raw);
-                                    metadata.cover_art_rgba = Some((width, height, raw));
-                                }
-                            }
-                        }
-                    }
-
-                    if is_raw_surround_file(&path) {
-                        if let Some(tagged) = read_appended_apev2_text_metadata(&path) {
-                            if let Some(title) = tagged.title {
-                                metadata.title = title;
-                            }
-                            if let Some(artist) = tagged.artist {
-                                metadata.artist = artist;
-                            }
-                            if let Some(album) = tagged.album {
-                                metadata.album = album;
-                            }
-                            if let Some(genre) = tagged.genre {
-                                metadata.genre = genre;
-                            }
-                            metadata.year = tagged.year.or(metadata.year);
-                        }
-                    }
-
-                    if metadata.format_label.is_empty() {
-                        metadata.format_label = format_label_from_extension(
-                            path.extension().and_then(|value| value.to_str()),
-                        );
-                    }
-                    if metadata.current_bitrate_kbps.is_none() {
-                        metadata.current_bitrate_kbps = metadata.bitrate_kbps;
-                    }
-
-                    let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
-
-                    if is_raw_surround_file(&path) {
-                        if let Some(details) = probe_raw_surround_technical_details(&path) {
-                            if !details.format_label.is_empty() {
-                                metadata.format_label = details.format_label;
-                            }
-                            metadata.sample_rate_hz =
-                                metadata.sample_rate_hz.or(details.sample_rate_hz);
-                            metadata.channels = metadata.channels.or(details.channels);
-                            metadata.bit_depth = metadata.bit_depth.or(details.bit_depth);
-                            metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
-                            metadata.current_bitrate_kbps = details
-                                .current_bitrate_kbps
-                                .or(metadata.current_bitrate_kbps)
-                                .or(metadata.bitrate_kbps);
-
-                            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
-                        }
-                    }
-
-                    if !is_raw_surround_file(&path) {
-                        if let Some(details) = probe_stream_details(&path) {
-                            if !details.format_label.is_empty() {
-                                metadata.format_label = details.format_label;
-                            }
-                            metadata.sample_rate_hz =
-                                metadata.sample_rate_hz.or(details.sample_rate_hz);
-                            metadata.channels = metadata.channels.or(details.channels);
-                            metadata.bit_depth = metadata.bit_depth.or(details.bit_depth);
-                            metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
-                            metadata.current_bitrate_kbps = details.current_bitrate_kbps;
-                            metadata.bitrate_timeline_kbps = details.bitrate_timeline_kbps;
-
-                            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
-                        }
-                    }
-
-                    if metadata.current_bitrate_kbps.is_none() {
-                        metadata.current_bitrate_kbps = metadata.bitrate_kbps;
-                    }
-
-                    if metadata.cover_art_rgba.is_none() {
-                        metadata.cover_art_rgba = load_folder_cover_art(&path);
-                    }
-
-                    if !delay.is_zero() {
-                        std::thread::sleep(delay);
-                    }
-                    let _ = event_tx.send(MetadataEvent::Loaded(metadata));
-                }
-            });
+            .spawn(move || run_metadata_worker(&req_rx, &event_tx, delay));
 
         (Self { tx: req_tx }, event_rx)
     }
@@ -217,9 +83,10 @@ impl MetadataService {
 }
 
 impl TrackMetadata {
+    #[must_use]
     pub fn displayed_bitrate_kbps(&self, position_seconds: f64) -> Option<u32> {
         if position_seconds.is_finite() && position_seconds >= 0.0 {
-            let index = position_seconds.floor() as usize;
+            let index = floor_f64_to_usize(position_seconds)?;
             if let Some(value) = self.bitrate_timeline_kbps.get(index).copied() {
                 if value > 0 {
                     return Some(u32::from(value));
@@ -227,6 +94,157 @@ impl TrackMetadata {
             }
         }
         self.current_bitrate_kbps.or(self.bitrate_kbps)
+    }
+}
+
+fn run_metadata_worker(
+    req_rx: &Receiver<PathBuf>,
+    event_tx: &Sender<MetadataEvent>,
+    delay: std::time::Duration,
+) {
+    while let Ok(mut path) = req_rx.recv() {
+        while let Ok(newer_path) = req_rx.try_recv() {
+            path = newer_path;
+        }
+
+        let mut metadata = load_metadata_for_path(&path);
+        let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+        apply_technical_details(&path, &mut metadata, event_tx);
+
+        if metadata.current_bitrate_kbps.is_none() {
+            metadata.current_bitrate_kbps = metadata.bitrate_kbps;
+        }
+        if metadata.cover_art_rgba.is_none() {
+            metadata.cover_art_rgba = load_folder_cover_art(&path);
+        }
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        let _ = event_tx.send(MetadataEvent::Loaded(metadata));
+    }
+}
+
+fn load_metadata_for_path(path: &Path) -> TrackMetadata {
+    let mut metadata = TrackMetadata {
+        source_path: Some(path.to_string_lossy().to_string()),
+        title: path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_owned(),
+        ..TrackMetadata::default()
+    };
+    apply_lofty_metadata(path, &mut metadata);
+    apply_raw_surround_tags(path, &mut metadata);
+    if metadata.format_label.is_empty() {
+        metadata.format_label =
+            format_label_from_extension(path.extension().and_then(|value| value.to_str()));
+    }
+    if metadata.current_bitrate_kbps.is_none() {
+        metadata.current_bitrate_kbps = metadata.bitrate_kbps;
+    }
+    metadata
+}
+
+fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
+    let Ok(tagged) = lofty::read_from_path(path) else {
+        return;
+    };
+    let props = tagged.properties();
+    metadata.sample_rate_hz = props.sample_rate();
+    metadata.channels = props.channels();
+    metadata.bit_depth = props.bit_depth();
+    metadata.bitrate_kbps = props.audio_bitrate();
+    metadata.format_label = format_label_from_lofty_file_type(
+        tagged.file_type(),
+        path.extension().and_then(|value| value.to_str()),
+    );
+
+    let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
+        return;
+    };
+    metadata.title = tag
+        .title()
+        .map_or_else(|| "Unknown title".to_string(), std::borrow::Cow::into_owned);
+    metadata.artist = tag.artist().map_or_else(
+        || "Unknown artist".to_string(),
+        std::borrow::Cow::into_owned,
+    );
+    metadata.album = tag
+        .album()
+        .map_or_else(|| "Unknown album".to_string(), std::borrow::Cow::into_owned);
+    metadata.genre = tag
+        .genre()
+        .map_or_else(String::new, std::borrow::Cow::into_owned);
+    metadata.year = tag.date().map(|value| i32::from(value.year));
+
+    if let Some(pic) = tag.pictures().first() {
+        if let Ok(img) = image::load_from_memory(pic.data()) {
+            let rgba = img.to_rgba8();
+            let width = u32_to_usize(rgba.width());
+            let height = u32_to_usize(rgba.height());
+            let raw = rgba.into_raw();
+            metadata.cover_art_path = cache_embedded_cover_png(path, width, height, &raw);
+            metadata.cover_art_rgba = Some((width, height, raw));
+        }
+    }
+}
+
+fn apply_raw_surround_tags(path: &Path, metadata: &mut TrackMetadata) {
+    if !is_raw_surround_file(path) {
+        return;
+    }
+    if let Some(tagged) = read_appended_apev2_text_metadata(path) {
+        if let Some(title) = tagged.title {
+            metadata.title = title;
+        }
+        if let Some(artist) = tagged.artist {
+            metadata.artist = artist;
+        }
+        if let Some(album) = tagged.album {
+            metadata.album = album;
+        }
+        if let Some(genre) = tagged.genre {
+            metadata.genre = genre;
+        }
+        metadata.year = tagged.year.or(metadata.year);
+    }
+}
+
+fn apply_technical_details(
+    path: &Path,
+    metadata: &mut TrackMetadata,
+    event_tx: &Sender<MetadataEvent>,
+) {
+    if is_raw_surround_file(path) {
+        if let Some(details) = probe_raw_surround_technical_details(path) {
+            if !details.format_label.is_empty() {
+                metadata.format_label = details.format_label;
+            }
+            metadata.sample_rate_hz = metadata.sample_rate_hz.or(details.sample_rate_hz);
+            metadata.channels = metadata.channels.or(details.channels);
+            metadata.bit_depth = metadata.bit_depth.or(details.bit_depth);
+            metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
+            metadata.current_bitrate_kbps = details
+                .current_bitrate_kbps
+                .or(metadata.current_bitrate_kbps)
+                .or(metadata.bitrate_kbps);
+            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+        }
+        return;
+    }
+
+    if let Some(details) = probe_stream_details(path) {
+        if !details.format_label.is_empty() {
+            metadata.format_label = details.format_label;
+        }
+        metadata.sample_rate_hz = metadata.sample_rate_hz.or(details.sample_rate_hz);
+        metadata.channels = metadata.channels.or(details.channels);
+        metadata.bit_depth = metadata.bit_depth.or(details.bit_depth);
+        metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
+        metadata.current_bitrate_kbps = details.current_bitrate_kbps;
+        metadata.bitrate_timeline_kbps = details.bitrate_timeline_kbps;
+        let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
     }
 }
 
@@ -239,6 +257,46 @@ struct StreamTechnicalDetails {
     bit_depth: Option<u8>,
     current_bitrate_kbps: Option<u32>,
     bitrate_timeline_kbps: Vec<u16>,
+}
+
+fn u32_to_usize(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    value.to_string().parse::<f64>().unwrap_or(f64::MAX)
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    value.to_string().parse::<f64>().unwrap_or(f64::MAX)
+}
+
+fn floor_f64_to_usize(value: f64) -> Option<usize> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    value.floor().to_string().parse::<usize>().ok()
+}
+
+fn round_f64_to_u32(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    value
+        .round()
+        .clamp(0.0, f64::from(u32::MAX))
+        .to_string()
+        .parse::<u32>()
+        .ok()
+}
+
+fn round_f64_to_u16(value: f64) -> u16 {
+    value
+        .round()
+        .clamp(0.0, f64::from(u16::MAX))
+        .to_string()
+        .parse::<u16>()
+        .unwrap_or(u16::MAX)
 }
 
 fn probe_stream_details(track_path: &Path) -> Option<StreamTechnicalDetails> {
@@ -286,15 +344,15 @@ fn probe_stream_details(track_path: &Path) -> Option<StreamTechnicalDetails> {
             {
                 break;
             }
-            Err(symphonia::core::errors::Error::ResetRequired) => break,
-            Err(_) => break,
+            Err(symphonia::core::errors::Error::ResetRequired | _) => break,
         };
 
         if packet.track_id() != track_id {
             continue;
         }
 
-        total_bytes = total_bytes.saturating_add(packet.buf().len() as u64);
+        total_bytes =
+            total_bytes.saturating_add(u64::try_from(packet.buf().len()).unwrap_or(u64::MAX));
         if let Some(tb) = time_base {
             accumulate_packet_bitrate_bytes(&mut bucket_bytes, tb, &packet);
         }
@@ -329,10 +387,10 @@ fn probe_stream_details(track_path: &Path) -> Option<StreamTechnicalDetails> {
     if total_bytes > 0 {
         if let (Some(tb), Some(frame_count)) = (time_base, n_frames) {
             let duration = tb.calc_time(frame_count);
-            let seconds = duration.seconds as f64 + duration.frac;
+            let seconds = time_to_seconds(duration);
             if seconds > 0.0 {
                 details.bitrate_kbps =
-                    Some(((total_bytes as f64 * 8.0) / seconds / 1000.0).round() as u32);
+                    round_f64_to_u32((u64_to_f64(total_bytes) * 8.0) / seconds / 1000.0);
             }
         }
     }
@@ -348,7 +406,7 @@ fn accumulate_packet_bitrate_bytes(
     let start = time_to_seconds(time_base.calc_time(packet.ts()));
     let duration_ticks = packet.dur().max(1);
     let end = time_to_seconds(time_base.calc_time(packet.ts().saturating_add(duration_ticks)));
-    let byte_len = packet.buf().len() as f64;
+    let byte_len = usize_to_f64(packet.buf().len());
 
     if !start.is_finite() || !end.is_finite() || byte_len <= 0.0 {
         return;
@@ -359,8 +417,10 @@ fn accumulate_packet_bitrate_bytes(
     let mut cursor = start;
 
     while cursor < packet_end {
-        let bucket_index = cursor.floor().max(0.0) as usize;
-        let bucket_end = ((bucket_index + 1) as f64).min(packet_end);
+        let Some(bucket_index) = floor_f64_to_usize(cursor.max(0.0)) else {
+            break;
+        };
+        let bucket_end = usize_to_f64(bucket_index.saturating_add(1)).min(packet_end);
         let share = ((bucket_end - cursor) / total_span).clamp(0.0, 1.0);
         if bucket_bytes.len() <= bucket_index {
             bucket_bytes.resize(bucket_index + 1, 0.0);
@@ -371,11 +431,11 @@ fn accumulate_packet_bitrate_bytes(
 }
 
 fn time_to_seconds(time: symphonia::core::units::Time) -> f64 {
-    time.seconds as f64 + time.frac
+    u64_to_f64(time.seconds) + time.frac
 }
 
 fn bytes_to_kbps(bytes: f64) -> u16 {
-    ((bytes * 8.0) / 1000.0).round().clamp(0.0, u16::MAX as f64) as u16
+    round_f64_to_u16((bytes * 8.0) / 1000.0)
 }
 
 fn format_label_from_lofty_file_type(file_type: FileType, extension: Option<&str>) -> String {
@@ -383,8 +443,6 @@ fn format_label_from_lofty_file_type(file_type: FileType, extension: Option<&str
         FileType::Aac => "AAC".to_string(),
         FileType::Aiff => "AIFF".to_string(),
         FileType::Flac => "FLAC".to_string(),
-        FileType::Mpeg => format_label_from_extension(extension),
-        FileType::Mp4 => format_label_from_extension(extension),
         FileType::Opus => "Opus".to_string(),
         FileType::Vorbis => "Vorbis".to_string(),
         FileType::Wav => "WAV".to_string(),
@@ -400,13 +458,12 @@ fn format_label_from_extension(extension: Option<&str>) -> String {
         .to_ascii_lowercase()
         .as_str()
     {
-        "aac" => "AAC".to_string(),
         "ac3" => raw_surround_format_label(Path::new("a.ac3")),
         "aif" | "aiff" | "aifc" | "afc" => "AIFF".to_string(),
         "alac" => "ALAC".to_string(),
         "dts" => raw_surround_format_label(Path::new("a.dts")),
         "flac" => "FLAC".to_string(),
-        "m4a" | "m4b" | "m4p" | "m4r" | "mp4" => "AAC".to_string(),
+        "aac" | "m4a" | "m4b" | "m4p" | "m4r" | "mp4" => "AAC".to_string(),
         "mp1" => "MP1".to_string(),
         "mp2" => "MP2".to_string(),
         "mp3" => "MP3".to_string(),
@@ -580,7 +637,7 @@ mod tests {
     }
 }
 
-fn load_folder_cover_art(track_path: &PathBuf) -> Option<(usize, usize, Vec<u8>)> {
+fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
     let dir = track_path.parent()?;
     let mut candidates = vec![
         "cover.jpg",
@@ -622,8 +679,8 @@ fn load_folder_cover_art(track_path: &PathBuf) -> Option<(usize, usize, Vec<u8>)
             if let Ok(img) = image::load_from_memory(&bytes) {
                 let rgba = img.to_rgba8();
                 return Some((
-                    rgba.width() as usize,
-                    rgba.height() as usize,
+                    u32_to_usize(rgba.width()),
+                    u32_to_usize(rgba.height()),
                     rgba.into_raw(),
                 ));
             }
@@ -656,7 +713,9 @@ fn cache_embedded_cover_png(
     let out_path = cache_dir.join(format!("{key:016x}.png"));
 
     if !out_path.is_file() {
-        let dims_match = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec())?;
+        let width = u32::try_from(width).ok()?;
+        let height = u32::try_from(height).ok()?;
+        let dims_match = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
         if dims_match
             .save_with_format(&out_path, image::ImageFormat::Png)
             .is_err()

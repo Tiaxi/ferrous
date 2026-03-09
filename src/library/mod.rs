@@ -35,6 +35,7 @@ pub struct LibraryRoot {
 }
 
 impl LibraryRoot {
+    #[must_use]
     pub fn display_name(&self) -> String {
         let trimmed = self.name.trim();
         if trimmed.is_empty() {
@@ -44,6 +45,7 @@ impl LibraryRoot {
         }
     }
 
+    #[must_use]
     pub fn search_label(&self) -> String {
         let trimmed = self.name.trim();
         if !trimmed.is_empty() {
@@ -115,6 +117,7 @@ pub struct LibraryService {
 }
 
 impl LibraryService {
+    #[must_use]
     pub fn new() -> (Self, Receiver<LibraryEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<LibraryCommand>();
         let (event_tx, event_rx) = unbounded::<LibraryEvent>();
@@ -190,8 +193,201 @@ struct RootScanProgress {
     eta_seconds: Option<f32>,
 }
 
+struct ScanProgressReporter<'a, F>
+where
+    F: FnMut(RootScanProgress),
+{
+    previous_index_count: usize,
+    smoothed_rate: Option<f32>,
+    start: Instant,
+    last_emit: Instant,
+    on_progress: &'a mut F,
+}
+
+struct MetadataWorkerPool {
+    task_tx: Option<Sender<MetadataTask>>,
+    result_rx: Option<Receiver<MetadataResult>>,
+    workers: Vec<thread::JoinHandle<()>>,
+    pending_tasks: usize,
+    max_pending_tasks: usize,
+}
+
 fn emit_snapshot(event_tx: &Sender<LibraryEvent>, snapshot: &LibrarySnapshot) {
     let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
+}
+
+impl<'a, F> ScanProgressReporter<'a, F>
+where
+    F: FnMut(RootScanProgress),
+{
+    fn new(previous_index_count: usize, on_progress: &'a mut F) -> Self {
+        Self {
+            previous_index_count,
+            smoothed_rate: None,
+            start: Instant::now(),
+            last_emit: Instant::now()
+                .checked_sub(Duration::from_millis(500))
+                .unwrap_or_else(Instant::now),
+            on_progress,
+        }
+    }
+
+    fn emit(&mut self, force: bool, discovered: usize, processed: usize) {
+        if !force && self.last_emit.elapsed() < Duration::from_millis(180) {
+            return;
+        }
+
+        let elapsed = self.start.elapsed().as_secs_f32();
+        let files_per_second = if processed >= 4 && elapsed >= 0.8 {
+            let instant_rate = usize_to_f32(processed) / elapsed.max(0.001);
+            let next = match self.smoothed_rate {
+                Some(prev) => prev * 0.75 + instant_rate * 0.25,
+                None => instant_rate,
+            };
+            self.smoothed_rate = Some(next);
+            Some(next)
+        } else {
+            None
+        };
+
+        let eta_seconds = if self.previous_index_count > 0 {
+            let estimated_total = discovered.max(self.previous_index_count);
+            if let Some(rate) = files_per_second {
+                if rate >= 0.5 && processed < estimated_total {
+                    Some(usize_to_f32(estimated_total.saturating_sub(processed)) / rate)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        (self.on_progress)(RootScanProgress {
+            discovered,
+            processed,
+            files_per_second,
+            eta_seconds,
+        });
+        self.last_emit = Instant::now();
+    }
+}
+
+impl MetadataWorkerPool {
+    fn new(worker_count: usize) -> Self {
+        let max_pending_tasks = worker_count.saturating_mul(256).clamp(512, 8192);
+        if worker_count <= 1 {
+            return Self {
+                task_tx: None,
+                result_rx: None,
+                workers: Vec::new(),
+                pending_tasks: 0,
+                max_pending_tasks,
+            };
+        }
+
+        let (tx_tasks, rx_tasks) = unbounded::<MetadataTask>();
+        let (tx_results, rx_results) = unbounded::<MetadataResult>();
+        let mut workers = Vec::new();
+        for _ in 0..worker_count {
+            let rx_tasks = rx_tasks.clone();
+            let tx_results = tx_results.clone();
+            workers.push(thread::spawn(move || {
+                while let Ok(task) = rx_tasks.recv() {
+                    let indexed = read_track_info(&task.path);
+                    if tx_results.send(MetadataResult { task, indexed }).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(rx_tasks);
+        drop(tx_results);
+
+        Self {
+            task_tx: Some(tx_tasks),
+            result_rx: Some(rx_results),
+            workers,
+            pending_tasks: 0,
+            max_pending_tasks,
+        }
+    }
+
+    fn submit(&mut self, task: MetadataTask) -> Result<(), MetadataTask> {
+        let Some(task_tx) = self.task_tx.as_ref() else {
+            return Err(task);
+        };
+        match task_tx.send(task) {
+            Ok(()) => {
+                self.pending_tasks = self.pending_tasks.saturating_add(1);
+                Ok(())
+            }
+            Err(err) => Err(err.into_inner()),
+        }
+    }
+
+    fn drain_ready(&mut self) -> Result<Vec<MetadataResult>, String> {
+        let Some(result_rx) = self.result_rx.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut ready = Vec::new();
+        while self.pending_tasks > 0 {
+            match result_rx.try_recv() {
+                Ok(result) => {
+                    self.pending_tasks -= 1;
+                    ready.push(result);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    return Err("metadata scan workers disconnected unexpectedly".to_string());
+                }
+            }
+        }
+        Ok(ready)
+    }
+
+    fn wait_for_capacity(&mut self) -> Result<Option<MetadataResult>, String> {
+        if self.pending_tasks < self.max_pending_tasks {
+            return Ok(None);
+        }
+        let Some(result_rx) = self.result_rx.as_ref() else {
+            return Ok(None);
+        };
+        match result_rx.recv() {
+            Ok(result) => {
+                self.pending_tasks -= 1;
+                Ok(Some(result))
+            }
+            Err(_) => Err("metadata scan workers disconnected unexpectedly".to_string()),
+        }
+    }
+
+    fn finish(&mut self) -> Result<Vec<MetadataResult>, String> {
+        if let Some(task_tx) = self.task_tx.take() {
+            drop(task_tx);
+        }
+        let Some(result_rx) = self.result_rx.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut results = Vec::new();
+        while self.pending_tasks > 0 {
+            match result_rx.recv() {
+                Ok(result) => {
+                    self.pending_tasks -= 1;
+                    results.push(result);
+                }
+                Err(_) => {
+                    return Err("metadata scan workers disconnected unexpectedly".to_string());
+                }
+            }
+        }
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+        Ok(results)
+    }
 }
 
 fn handle_add_root(
@@ -418,6 +614,32 @@ fn build_fts_query(raw: &str) -> Option<String> {
     }
 }
 
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u128_to_i64(value: u128) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn usize_to_f32(value: usize) -> f32 {
+    value.to_string().parse::<f32>().unwrap_or(f32::MAX)
+}
+
+fn f64_to_f32(value: f64) -> f32 {
+    value.to_string().parse::<f32>().unwrap_or_else(|_| {
+        if value.is_sign_negative() {
+            f32::MIN
+        } else {
+            f32::MAX
+        }
+    })
+}
+
 /// Search library tracks through the `SQLite` FTS index.
 ///
 /// # Errors
@@ -428,7 +650,7 @@ pub fn search_tracks_fts(raw_query: &str, limit: usize) -> Result<Vec<LibrarySea
     let Some(query) = build_fts_query(raw_query) else {
         return Ok(Vec::new());
     };
-    let limit = limit.clamp(1, 5000) as i64;
+    let limit = usize_to_i64(limit.clamp(1, 5000));
 
     let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     // Search runs on keystrokes and can coincide with long-running scan writes.
@@ -473,7 +695,7 @@ pub fn search_tracks_fts(raw_query: &str, limit: usize) -> Result<Vec<LibrarySea
                     .get::<_, Option<i64>>(6)?
                     .and_then(|v| u32::try_from(v).ok()),
                 duration_secs: row.get::<_, Option<f32>>(7)?,
-                score: row.get::<_, f64>(8).map_or(0.0, |v| v as f32),
+                score: row.get::<_, f64>(8).map_or(0.0, f64_to_f32),
             })
         })
         .map_err(|e| format!("failed to execute search query: {e}"))?;
@@ -528,6 +750,13 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         ",
     )?;
 
+    run_schema_migrations(conn);
+    create_library_indexes(conn)?;
+    rebuild_fts_if_needed(conn);
+    Ok(())
+}
+
+fn run_schema_migrations(conn: &Connection) {
     // Migrations for existing DBs created before metadata expansion.
     let _ = conn.execute(
         "ALTER TABLE roots ADD COLUMN name TEXT NOT NULL DEFAULT ''",
@@ -551,7 +780,9 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     );
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN track_no INTEGER", []);
+}
 
+fn create_library_indexes(conn: &Connection) -> anyhow::Result<()> {
     // Build indexes after migrations so pre-existing DBs without root_path can initialize.
     conn.execute_batch(
         r"
@@ -589,7 +820,10 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         END;
         ",
     )?;
+    Ok(())
+}
 
+fn rebuild_fts_if_needed(conn: &Connection) {
     let track_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
         .unwrap_or(0);
@@ -599,8 +833,6 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     if track_count > 0 && fts_count == 0 {
         let _ = conn.execute("INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild')", []);
     }
-
-    Ok(())
 }
 
 pub(crate) fn track_file_fingerprint(path: &Path) -> Option<TrackFileFingerprint> {
@@ -610,8 +842,8 @@ pub(crate) fn track_file_fingerprint(path: &Path) -> Option<TrackFileFingerprint
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos() as i64),
-        size_bytes: metadata.len() as i64,
+            .map_or(0, |duration| u128_to_i64(duration.as_nanos())),
+        size_bytes: u64_to_i64(metadata.len()),
     })
 }
 
@@ -930,6 +1162,107 @@ fn scan_snapshot_min_processed_delta() -> usize {
         .map_or(256, |delta| delta.clamp(8, 8192))
 }
 
+fn load_existing_tracks_for_root(
+    conn: &Connection,
+    root_str: &str,
+) -> HashMap<String, (i64, i64, bool)> {
+    let mut existing = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(
+        r"
+        SELECT path, mtime_ns, size_bytes, cover_checked
+        FROM tracks
+        WHERE root_path = ?1
+           OR (root_path = '' AND (path = ?1 OR path LIKE ?1 || '/%'))
+        ",
+    ) {
+        let mapped = stmt.query_map(params![root_str], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        });
+        if let Ok(rows) = mapped {
+            for item in rows.flatten() {
+                existing.insert(item.0, (item.1, item.2, item.3 != 0));
+            }
+        }
+    }
+    existing
+}
+
+fn prepare_track_upsert_statement<'conn>(
+    tx: &'conn rusqlite::Transaction<'conn>,
+) -> Result<rusqlite::CachedStatement<'conn>, String> {
+    tx.prepare_cached(
+        r"
+        INSERT INTO tracks(
+            path,
+            root_path,
+            title,
+            artist,
+            album,
+            cover_path,
+            cover_checked,
+            genre,
+            year,
+            track_no,
+            duration_secs,
+            mtime_ns,
+            size_bytes,
+            indexed_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ON CONFLICT(path) DO UPDATE SET
+            root_path=excluded.root_path,
+            title=excluded.title,
+            artist=excluded.artist,
+            album=excluded.album,
+            cover_path=excluded.cover_path,
+            cover_checked=excluded.cover_checked,
+            genre=excluded.genre,
+            year=excluded.year,
+            track_no=excluded.track_no,
+            duration_secs=excluded.duration_secs,
+            mtime_ns=excluded.mtime_ns,
+            size_bytes=excluded.size_bytes,
+            indexed_at=excluded.indexed_at
+        ",
+    )
+    .map_err(|e| format!("failed to prepare track upsert statement: {e}"))
+}
+
+fn apply_metadata_result<U>(
+    upsert_stmt: &mut rusqlite::CachedStatement<'_>,
+    root_str: &str,
+    now: i64,
+    on_upsert: &mut U,
+    result: MetadataResult,
+) where
+    U: FnMut(&MetadataTask, &IndexedTrack),
+{
+    let task = result.task;
+    let indexed = result.indexed;
+    let _ = upsert_stmt.execute(params![
+        task.path_string.as_str(),
+        root_str,
+        indexed.title.as_str(),
+        indexed.artist.as_str(),
+        indexed.album.as_str(),
+        indexed.cover_path.as_str(),
+        1_i64,
+        indexed.genre.as_str(),
+        indexed.year.map(i64::from),
+        indexed.track_no.map(i64::from),
+        indexed.duration_secs,
+        task.mtime_ns,
+        task.size_bytes,
+        now,
+    ]);
+    on_upsert(&task, &indexed);
+}
+
 fn scan_root<F, U>(
     conn: &Connection,
     root: &Path,
@@ -944,181 +1277,22 @@ where
     insert_root(conn, &root, "")?;
 
     let root_str = root.to_string_lossy().to_string();
-    let mut existing: HashMap<String, (i64, i64, bool)> = HashMap::new();
-    if let Ok(mut stmt) = conn.prepare(
-        r"
-        SELECT path, mtime_ns, size_bytes, cover_checked
-        FROM tracks
-        WHERE root_path = ?1
-           OR (root_path = '' AND (path = ?1 OR path LIKE ?1 || '/%'))
-        ",
-    ) {
-        let mapped = stmt.query_map(params![root_str.clone()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        });
-        if let Ok(rows) = mapped {
-            for item in rows.flatten() {
-                existing.insert(item.0, (item.1, item.2, item.3 != 0));
-            }
-        }
-    }
-
+    let existing = load_existing_tracks_for_root(conn, &root_str);
     let previous_index_count = existing.len();
     let mut seen_paths: HashSet<String> = HashSet::new();
     let tx = match conn.unchecked_transaction() {
         Ok(tx) => tx,
         Err(e) => return Err(format!("failed to begin transaction: {e}")),
     };
-    let mut upsert_stmt = tx
-        .prepare_cached(
-            r"
-            INSERT INTO tracks(
-                path,
-                root_path,
-                title,
-                artist,
-                album,
-                cover_path,
-                cover_checked,
-                genre,
-                year,
-                track_no,
-                duration_secs,
-                mtime_ns,
-                size_bytes,
-                indexed_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-            ON CONFLICT(path) DO UPDATE SET
-                root_path=excluded.root_path,
-                title=excluded.title,
-                artist=excluded.artist,
-                album=excluded.album,
-                cover_path=excluded.cover_path,
-                cover_checked=excluded.cover_checked,
-                genre=excluded.genre,
-                year=excluded.year,
-                track_no=excluded.track_no,
-                duration_secs=excluded.duration_secs,
-                mtime_ns=excluded.mtime_ns,
-                size_bytes=excluded.size_bytes,
-                indexed_at=excluded.indexed_at
-            ",
-        )
-        .map_err(|e| format!("failed to prepare track upsert statement: {e}"))?;
+    let mut upsert_stmt = prepare_track_upsert_statement(&tx)?;
 
     let mut discovered = 0usize;
     let mut processed = 0usize;
-    let mut smoothed_rate = None::<f32>;
-    let start = Instant::now();
-    let mut last_emit = Instant::now()
-        .checked_sub(Duration::from_millis(500))
-        .unwrap_or_else(Instant::now);
-
-    let mut emit_progress = |force: bool, discovered: usize, processed: usize| {
-        if !force && last_emit.elapsed() < Duration::from_millis(180) {
-            return;
-        }
-
-        let elapsed = start.elapsed().as_secs_f32();
-        let files_per_second = if processed >= 4 && elapsed >= 0.8 {
-            let instant_rate = processed as f32 / elapsed.max(0.001);
-            let next = match smoothed_rate {
-                Some(prev) => prev * 0.75 + instant_rate * 0.25,
-                None => instant_rate,
-            };
-            smoothed_rate = Some(next);
-            Some(next)
-        } else {
-            None
-        };
-
-        let eta_seconds = if previous_index_count > 0 {
-            let estimated_total = discovered.max(previous_index_count);
-            if let Some(rate) = files_per_second {
-                if rate >= 0.5 && processed < estimated_total {
-                    Some((estimated_total - processed) as f32 / rate)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        on_progress(RootScanProgress {
-            discovered,
-            processed,
-            files_per_second,
-            eta_seconds,
-        });
-        last_emit = Instant::now();
-    };
-
-    emit_progress(true, discovered, processed);
+    let mut progress = ScanProgressReporter::new(previous_index_count, on_progress);
+    progress.emit(true, discovered, processed);
 
     let now = unix_ts_i64();
-    let worker_count = scan_worker_count();
-    let max_pending_tasks = worker_count.saturating_mul(256).clamp(512, 8192);
-    let mut workers = Vec::new();
-    let mut task_tx: Option<Sender<MetadataTask>> = None;
-    let mut result_rx: Option<Receiver<MetadataResult>> = None;
-    let mut pending_metadata_tasks = 0usize;
-
-    if worker_count > 1 {
-        let (tx_tasks, rx_tasks) = unbounded::<MetadataTask>();
-        let (tx_results, rx_results) = unbounded::<MetadataResult>();
-        for _ in 0..worker_count {
-            let rx_tasks = rx_tasks.clone();
-            let tx_results = tx_results.clone();
-            workers.push(thread::spawn(move || {
-                while let Ok(task) = rx_tasks.recv() {
-                    let indexed = read_track_info(&task.path);
-                    if tx_results.send(MetadataResult { task, indexed }).is_err() {
-                        break;
-                    }
-                }
-            }));
-        }
-        drop(rx_tasks);
-        drop(tx_results);
-        task_tx = Some(tx_tasks);
-        result_rx = Some(rx_results);
-    }
-
-    macro_rules! apply_metadata_result {
-        ($result:expr) => {{
-            let result = $result;
-            let task = result.task;
-            let indexed = result.indexed;
-            let _ = upsert_stmt.execute(params![
-                task.path_string.as_str(),
-                root_str.as_str(),
-                indexed.title.as_str(),
-                indexed.artist.as_str(),
-                indexed.album.as_str(),
-                indexed.cover_path.as_str(),
-                1_i64,
-                indexed.genre.as_str(),
-                indexed.year.map(i64::from),
-                indexed.track_no.map(i64::from),
-                indexed.duration_secs,
-                task.mtime_ns,
-                task.size_bytes,
-                now,
-            ]);
-            on_upsert(&task, &indexed);
-            processed = processed.saturating_add(1);
-            emit_progress(false, discovered, processed);
-        }};
-    }
+    let mut workers = MetadataWorkerPool::new(scan_worker_count());
 
     for entry in WalkDir::new(&root)
         .follow_links(false)
@@ -1137,15 +1311,15 @@ where
 
         let Ok(metadata) = fs::metadata(path) else {
             processed = processed.saturating_add(1);
-            emit_progress(false, discovered, processed);
+            progress.emit(false, discovered, processed);
             continue;
         };
-        let size_bytes = metadata.len() as i64;
+        let size_bytes = u64_to_i64(metadata.len());
         let mtime_ns = metadata
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos() as i64);
+            .map_or(0, |duration| u128_to_i64(duration.as_nanos()));
 
         let path_string = path.to_string_lossy().to_string();
         seen_paths.insert(path_string.clone());
@@ -1164,71 +1338,39 @@ where
                 mtime_ns,
                 size_bytes,
             };
-            if let Some(task_tx_ref) = task_tx.as_ref() {
-                match task_tx_ref.send(task) {
-                    Ok(()) => {
-                        pending_metadata_tasks = pending_metadata_tasks.saturating_add(1);
-                    }
-                    Err(err) => {
-                        let task = err.into_inner();
-                        let indexed = read_track_info(&task.path);
-                        apply_metadata_result!(MetadataResult { task, indexed });
-                    }
-                }
-            } else {
+            if let Err(task) = workers.submit(task) {
                 let indexed = read_track_info(&task.path);
-                apply_metadata_result!(MetadataResult { task, indexed });
+                apply_metadata_result(
+                    &mut upsert_stmt,
+                    &root_str,
+                    now,
+                    on_upsert,
+                    MetadataResult { task, indexed },
+                );
+                processed = processed.saturating_add(1);
+                progress.emit(false, discovered, processed);
             }
         } else {
             processed = processed.saturating_add(1);
-            emit_progress(false, discovered, processed);
+            progress.emit(false, discovered, processed);
         }
 
-        if let Some(result_rx_ref) = result_rx.as_ref() {
-            while pending_metadata_tasks > 0 {
-                match result_rx_ref.try_recv() {
-                    Ok(result) => {
-                        pending_metadata_tasks -= 1;
-                        apply_metadata_result!(result);
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        return Err("metadata scan workers disconnected unexpectedly".to_string());
-                    }
-                }
-            }
-            if pending_metadata_tasks >= max_pending_tasks {
-                match result_rx_ref.recv() {
-                    Ok(result) => {
-                        pending_metadata_tasks -= 1;
-                        apply_metadata_result!(result);
-                    }
-                    Err(_) => {
-                        return Err("metadata scan workers disconnected unexpectedly".to_string());
-                    }
-                }
-            }
+        for result in workers.drain_ready()? {
+            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result);
+            processed = processed.saturating_add(1);
+            progress.emit(false, discovered, processed);
+        }
+        if let Some(result) = workers.wait_for_capacity()? {
+            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result);
+            processed = processed.saturating_add(1);
+            progress.emit(false, discovered, processed);
         }
     }
 
-    if let Some(task_tx) = task_tx.take() {
-        drop(task_tx);
-    }
-    if let Some(result_rx_ref) = result_rx.as_ref() {
-        while pending_metadata_tasks > 0 {
-            match result_rx_ref.recv() {
-                Ok(result) => {
-                    pending_metadata_tasks -= 1;
-                    apply_metadata_result!(result);
-                }
-                Err(_) => {
-                    return Err("metadata scan workers disconnected unexpectedly".to_string());
-                }
-            }
-        }
-    }
-    for worker in workers {
-        let _ = worker.join();
+    for result in workers.finish()? {
+        apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result);
+        processed = processed.saturating_add(1);
+        progress.emit(false, discovered, processed);
     }
     drop(upsert_stmt);
 
@@ -1243,7 +1385,7 @@ where
     tx.commit()
         .map_err(|e| format!("failed to finalize scan transaction: {e}"))?;
 
-    emit_progress(true, discovered, processed);
+    progress.emit(true, discovered, processed);
     Ok(stale)
 }
 
@@ -1385,7 +1527,7 @@ fn find_image_in_dir(dir: &Path) -> Option<String> {
 fn unix_ts_i64() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|duration| u64_to_i64(duration.as_secs()))
         .unwrap_or(0)
 }
 

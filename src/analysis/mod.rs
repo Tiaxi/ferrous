@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossbeam_channel::{select, tick, unbounded, Receiver, Sender};
 use realfft::{num_complex::Complex32, RealFftPlanner, RealToComplex};
 use rusqlite::{params, Connection};
-use symphonia::core::audio::SampleBuffer;
+use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
@@ -139,7 +139,34 @@ struct WaveformDecodeJob {
     path: PathBuf,
 }
 
+struct AnalysisRuntimeState {
+    snapshot: AnalysisSnapshot,
+    pending_channels: Vec<AnalysisSpectrogramChannel>,
+    waveform_dirty: bool,
+    last_emit: std::time::Instant,
+    spectrogram: SpectrogramRuntime,
+    active_track_token: u64,
+    active_track_path: Option<PathBuf>,
+    active_track_stamp: Option<WaveformSourceStamp>,
+    waveform_cache: HashMap<PathBuf, WaveformCacheEntry>,
+    waveform_cache_lru: VecDeque<PathBuf>,
+    waveform_db: Option<Connection>,
+    waveform_db_writes_since_prune: usize,
+    pcm_fifo: VecDeque<f32>,
+    pcm_labels: Vec<SpectrogramChannelLabel>,
+    last_tick_time: std::time::Instant,
+    elapsed_credit_ns: u128,
+    profile_enabled: bool,
+    prof_last: std::time::Instant,
+    prof_pcm: usize,
+    prof_rows: usize,
+    prof_ticks: usize,
+    prof_in_samples: usize,
+    prof_out_samples: usize,
+}
+
 impl AnalysisEngine {
+    #[must_use]
     #[cfg_attr(
         not(feature = "profiling-logs"),
         allow(unused_variables, unused_assignments)
@@ -153,419 +180,18 @@ impl AnalysisEngine {
         let waveform_tx = cmd_tx.clone();
         let (waveform_job_tx, waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = Arc::new(AtomicU64::new(0));
-        {
-            let waveform_tx = waveform_tx.clone();
-            let waveform_decode_active_token = Arc::clone(&waveform_decode_active_token);
-            let _ = std::thread::Builder::new()
-                .name("ferrous-waveform-decode".to_string())
-                .spawn(move || {
-                    while let Ok(mut job) = waveform_job_rx.recv() {
-                        while let Ok(next_job) = waveform_job_rx.try_recv() {
-                            job = next_job;
-                        }
-                        let track_token = job.track_token;
-                        let _ = decode_waveform_peaks_stream(
-                            &job.path,
-                            1024,
-                            |peaks, coverage_seconds, done| {
-                                if waveform_decode_active_token.load(Ordering::Relaxed)
-                                    != track_token
-                                {
-                                    return false;
-                                }
-                                let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
-                                    track_token,
-                                    peaks,
-                                    coverage_seconds,
-                                    complete: done,
-                                    done,
-                                });
-                                true
-                            },
-                            || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
-                        );
-                    }
-                });
-        }
-        let _ = std::thread::Builder::new()
-            .name("ferrous-analysis".to_string())
-            .spawn(move || {
-            let mut snapshot = AnalysisSnapshot {
-                sample_rate_hz: 48_000,
-                spectrogram_view_mode: SpectrogramViewMode::Downmix,
-                ..AnalysisSnapshot::default()
-            };
-            let mut pending_channels: Vec<AnalysisSpectrogramChannel> = Vec::new();
-            let mut waveform_dirty = false;
-            let mut last_emit = std::time::Instant::now();
-
-            let mut spectrogram =
-                SpectrogramRuntime::new(8192, 1024, SpectrogramViewMode::Downmix, &[]);
-            let mut active_track_token = 0u64;
-            let mut active_track_path: Option<PathBuf> = None;
-            let mut active_track_stamp: Option<WaveformSourceStamp> = None;
-            let mut waveform_cache: HashMap<PathBuf, WaveformCacheEntry> = HashMap::new();
-            let mut waveform_cache_lru: VecDeque<PathBuf> = VecDeque::new();
-            let mut waveform_db = open_waveform_cache_db().ok();
-            let mut waveform_db_writes_since_prune = 0usize;
-            let ticker = tick(Duration::from_millis(16));
-            let mut pcm_fifo: VecDeque<f32> = VecDeque::with_capacity(48_000);
-            let mut pcm_labels = vec![SpectrogramChannelLabel::Mono];
-            let mut last_tick_time = std::time::Instant::now();
-            let mut sample_credit = 0.0f64;
-            let profile_enabled =
-                cfg!(feature = "profiling-logs") && std::env::var_os("FERROUS_PROFILE").is_some();
-            let mut prof_last = std::time::Instant::now();
-            #[allow(unused_variables, unused_assignments)]
-            let mut prof_pcm = 0usize;
-            #[allow(unused_variables, unused_assignments)]
-            let mut prof_rows = 0usize;
-            #[allow(unused_variables, unused_assignments)]
-            let mut prof_ticks = 0usize;
-            #[allow(unused_variables, unused_assignments)]
-            let mut prof_in_samples = 0usize;
-            #[allow(unused_variables, unused_assignments)]
-            let mut prof_out_samples = 0usize;
-            let mut ticks_without_row = 0usize;
-
-            loop {
-                select! {
-                    recv(cmd_rx) -> msg => {
-                        let Ok(cmd) = msg else { break; };
-                        match cmd {
-                            AnalysisCommand::SetTrack {
-                                path,
-                                reset_spectrogram,
-                            } => {
-                                active_track_token = active_track_token.wrapping_add(1);
-                                let track_token = active_track_token;
-                                waveform_decode_active_token.store(track_token, Ordering::Relaxed);
-                                active_track_stamp = source_stamp(&path);
-                                active_track_path = Some(path.clone());
-
-                                snapshot.waveform_peaks.clear();
-                                snapshot.waveform_coverage_seconds = 0.0;
-                                snapshot.waveform_complete = false;
-                                waveform_dirty = true;
-                                if reset_spectrogram {
-                                    snapshot.spectrogram_seq = 0;
-                                    pending_channels.clear();
-                                    spectrogram.reset();
-                                    drain_pcm_queue(&pcm_rx);
-                                    pcm_fifo.clear();
-                                    pcm_labels = vec![SpectrogramChannelLabel::Mono];
-                                    last_tick_time = std::time::Instant::now();
-                                    sample_credit = 0.0;
-                                }
-                                emit_snapshot(
-                                    &event_tx,
-                                    &snapshot,
-                                    &mut pending_channels,
-                                    &mut waveform_dirty,
-                                    &mut last_emit,
-                                    true,
-                                );
-
-                                let cache_hit = waveform_cache
-                                    .get(&path)
-                                    .filter(|entry| entry.stamp == active_track_stamp)
-                                    .map(|entry| entry.peaks.clone())
-                                    .filter(|peaks| !peaks.is_empty());
-                                let peaks = if let Some(peaks) = cache_hit {
-                                    touch_waveform_cache_lru(&mut waveform_cache_lru, &path);
-                                    Some(peaks)
-                                } else if let (Some(conn), Some(stamp)) =
-                                    (waveform_db.as_ref(), active_track_stamp)
-                                {
-                                    let disk_hit = load_waveform_from_db(conn, &path, stamp);
-                                    if let Some(peaks) = disk_hit.as_ref() {
-                                        insert_waveform_cache_entry(
-                                            &mut waveform_cache,
-                                            &mut waveform_cache_lru,
-                                            path.clone(),
-                                            WaveformCacheEntry {
-                                                stamp: Some(stamp),
-                                                peaks: peaks.clone(),
-                                            },
-                                        );
-                                    }
-                                    disk_hit
-                                } else {
-                                    None
-                                };
-
-                                if let Some(peaks) = peaks {
-                                    snapshot.waveform_peaks = peaks;
-                                    snapshot.waveform_coverage_seconds = 0.0;
-                                    snapshot.waveform_complete = true;
-                                    waveform_dirty = true;
-                                    emit_snapshot(
-                                        &event_tx,
-                                        &snapshot,
-                                        &mut pending_channels,
-                                        &mut waveform_dirty,
-                                        &mut last_emit,
-                                        true,
-                                    );
-                                } else {
-                                    let _ = waveform_job_tx.send(WaveformDecodeJob {
-                                        track_token,
-                                        path,
-                                    });
-                                }
-                            }
-                            AnalysisCommand::SetSampleRate(rate) => {
-                                if rate > 0 {
-                                    snapshot.sample_rate_hz = rate;
-                                    emit_snapshot(
-                                        &event_tx,
-                                        &snapshot,
-                                        &mut pending_channels,
-                                        &mut waveform_dirty,
-                                        &mut last_emit,
-                                        true,
-                                    );
-                                }
-                            }
-                            AnalysisCommand::SetFftSize(size) => {
-                                let fft = size.clamp(512, 8192).next_power_of_two();
-                                let hop = (fft / 8).max(64);
-                                spectrogram.set_fft_size(fft, hop);
-                                pending_channels.clear();
-                                snapshot.spectrogram_seq = 0;
-                                drain_pcm_queue(&pcm_rx);
-                                pcm_fifo.clear();
-                                sample_credit = 0.0;
-                                last_tick_time = std::time::Instant::now();
-                                emit_snapshot(
-                                    &event_tx,
-                                    &snapshot,
-                                    &mut pending_channels,
-                                    &mut waveform_dirty,
-                                    &mut last_emit,
-                                    true,
-                                );
-                            }
-                            AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
-                                snapshot.spectrogram_view_mode = view_mode;
-                                spectrogram.set_view_mode(view_mode);
-                                pending_channels.clear();
-                                snapshot.spectrogram_seq = 0;
-                                drain_pcm_queue(&pcm_rx);
-                                pcm_fifo.clear();
-                                sample_credit = 0.0;
-                                last_tick_time = std::time::Instant::now();
-                                emit_snapshot(
-                                    &event_tx,
-                                    &snapshot,
-                                    &mut pending_channels,
-                                    &mut waveform_dirty,
-                                    &mut last_emit,
-                                    true,
-                                );
-                            }
-                            AnalysisCommand::WaveformProgress {
-                                track_token,
-                                peaks,
-                                coverage_seconds,
-                                complete,
-                                done,
-                            } => {
-                                if track_token == active_track_token {
-                                    if peaks.is_empty() {
-                                        if done {
-                                            // Ignore and do not persist empty waveform snapshots.
-                                            // A zero-point waveform is treated as a decode miss.
-                                        }
-                                        continue;
-                                    }
-                                    snapshot.waveform_peaks = peaks;
-                                    snapshot.waveform_coverage_seconds = coverage_seconds;
-                                    snapshot.waveform_complete = complete;
-                                    if done {
-                                        if let Some(path) = active_track_path.as_ref() {
-                                            let cached_peaks = snapshot.waveform_peaks.clone();
-                                            insert_waveform_cache_entry(
-                                                &mut waveform_cache,
-                                                &mut waveform_cache_lru,
-                                                path.clone(),
-                                                WaveformCacheEntry {
-                                                    stamp: active_track_stamp,
-                                                    peaks: cached_peaks.clone(),
-                                                },
-                                            );
-                                            if let (Some(conn), Some(stamp)) =
-                                                (waveform_db.as_mut(), active_track_stamp)
-                                            {
-                                                let _ = persist_waveform_to_db(
-                                                    conn,
-                                                    path,
-                                                    stamp,
-                                                    &cached_peaks,
-                                                );
-                                                waveform_db_writes_since_prune = waveform_db_writes_since_prune
-                                                    .saturating_add(1);
-                                                if waveform_db_writes_since_prune
-                                                    >= PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL
-                                                {
-                                                    let _ = prune_persistent_waveform_cache(
-                                                        conn,
-                                                        PERSISTENT_WAVEFORM_CACHE_MAX_ROWS,
-                                                    );
-                                                    waveform_db_writes_since_prune = 0;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    waveform_dirty = true;
-                                    if done || snapshot.waveform_peaks.len() >= 24 {
-                                        emit_snapshot(
-                                            &event_tx,
-                                            &snapshot,
-                                            &mut pending_channels,
-                                            &mut waveform_dirty,
-                                            &mut last_emit,
-                                            true,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    recv(ticker) -> _ => {
-                        prof_ticks += 1;
-
-                        // Pull available PCM chunks into a sample FIFO first.
-                        for _ in 0..64 {
-                            let Ok(chunk) = pcm_rx.try_recv() else {
-                                break;
-                            };
-                            if chunk.samples.is_empty() {
-                                continue;
-                            }
-                            prof_pcm += 1;
-                            prof_in_samples += chunk.samples.len();
-                            let chunk_labels = if chunk.channel_labels.is_empty() {
-                                vec![SpectrogramChannelLabel::Mono]
-                            } else {
-                                chunk.channel_labels.clone()
-                            };
-                            if chunk_labels != pcm_labels {
-                                pcm_labels = chunk_labels.clone();
-                                pcm_fifo.clear();
-                                pending_channels.clear();
-                                spectrogram.update_channel_labels(&chunk_labels);
-                                spectrogram.reset();
-                                snapshot.spectrogram_seq = 0;
-                            }
-                            pcm_fifo.extend(chunk.samples);
-                        }
-
-                        // Keep FIFO bounded to roughly 0.5s to avoid visual lead/lag buildup.
-                        let channel_count = pcm_labels.len().max(1);
-                        let fifo_max_frames = (snapshot.sample_rate_hz as usize / 2).max(4096);
-                        while (pcm_fifo.len() / channel_count) > fifo_max_frames {
-                            for _ in 0..channel_count {
-                                let _ = pcm_fifo.pop_front();
-                            }
-                        }
-
-                        // Feed STFT at real-time cadence from elapsed clock time to minimize drift.
-                        let now = std::time::Instant::now();
-                        let dt = now.duration_since(last_tick_time).as_secs_f64();
-                        last_tick_time = now;
-                        sample_credit += dt * snapshot.sample_rate_hz as f64;
-                        let mut target_samples = sample_credit.floor() as usize;
-                        sample_credit -= target_samples as f64;
-                        target_samples = target_samples.clamp(256, 2048);
-
-                        // Keep visuals slightly behind output to compensate sink/device buffering.
-                        let visual_delay_ms = BASE_VISUAL_DELAY_MS as usize;
-                        let effective_delay_frames =
-                            (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
-                        // Enforce configured visual delay by consuming only from samples older
-                        // than the delay horizon.
-                        let available_frames =
-                            (pcm_fifo.len() / channel_count).saturating_sub(effective_delay_frames);
-
-                        // Closed-loop backlog control: steer FIFO depth toward configured delay
-                        // to limit drift when producer/consumer pacing differs.
-                        let backlog_error =
-                            (pcm_fifo.len() / channel_count) as isize - effective_delay_frames as isize;
-                        let correction = (backlog_error / 8).clamp(-512, 512);
-                        let adjusted_target =
-                            (target_samples as isize + correction).clamp(0, 4096) as usize;
-
-                        let to_feed_frames = adjusted_target.min(available_frames);
-                        if to_feed_frames > 0 {
-                            let mut feed =
-                                Vec::with_capacity(to_feed_frames.saturating_mul(channel_count));
-                            for _ in 0..to_feed_frames.saturating_mul(channel_count) {
-                                if let Some(v) = pcm_fifo.pop_front() {
-                                    feed.push(v);
-                                }
-                            }
-                            prof_out_samples += feed.len();
-                            spectrogram.feed_chunk(
-                                &AnalysisPcmChunk {
-                                    samples: feed,
-                                    channel_labels: pcm_labels.clone(),
-                                },
-                                snapshot.sample_rate_hz,
-                            );
-                        }
-
-                        let channels = spectrogram.take_channels(8);
-                        let row_count = channels.first().map_or(0, |channel| channel.rows.len());
-                        prof_rows += row_count;
-                        if row_count == 0 {
-                            ticks_without_row = ticks_without_row.saturating_add(1);
-                        } else {
-                            ticks_without_row = 0;
-                        }
-                        if row_count > 0 {
-                            snapshot.spectrogram_seq = snapshot
-                                .spectrogram_seq
-                                .wrapping_add(row_count as u64);
-                            merge_pending_channels(&mut pending_channels, channels);
-                        }
-                        emit_snapshot(
-                            &event_tx,
-                            &snapshot,
-                            &mut pending_channels,
-                            &mut waveform_dirty,
-                            &mut last_emit,
-                            false,
-                        );
-
-                        if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
-                            profile_eprintln!(
-                                "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_frames={} fft={} hop={} channels={}",
-                                prof_ticks,
-                                prof_pcm,
-                                prof_in_samples,
-                                prof_out_samples,
-                                prof_rows,
-                                spectrogram
-                                    .pipelines
-                                    .first()
-                                    .map_or(0, |pipeline| pipeline.stft.pending_len()),
-                                pcm_fifo.len() / channel_count,
-                                spectrogram.fft_size,
-                                spectrogram.hop_size,
-                                spectrogram.labels.len()
-                            );
-                            prof_last = std::time::Instant::now();
-                            prof_pcm = 0;
-                            prof_in_samples = 0;
-                            prof_out_samples = 0;
-                            prof_rows = 0;
-                            prof_ticks = 0;
-                        }
-                    }
-                }
-            }
-        });
+        spawn_waveform_decode_worker(
+            waveform_job_rx,
+            waveform_tx,
+            Arc::clone(&waveform_decode_active_token),
+        );
+        spawn_analysis_worker(
+            cmd_rx,
+            pcm_rx,
+            event_tx,
+            waveform_job_tx,
+            waveform_decode_active_token,
+        );
 
         (Self { tx: cmd_tx, pcm_tx }, event_rx)
     }
@@ -574,13 +200,457 @@ impl AnalysisEngine {
         let _ = self.tx.send(cmd);
     }
 
+    #[must_use]
     pub fn sender(&self) -> Sender<AnalysisCommand> {
         self.tx.clone()
     }
 
+    #[must_use]
     pub fn pcm_sender(&self) -> Sender<AnalysisPcmChunk> {
         self.pcm_tx.clone()
     }
+}
+
+impl AnalysisRuntimeState {
+    fn new() -> Self {
+        Self {
+            snapshot: AnalysisSnapshot {
+                sample_rate_hz: 48_000,
+                spectrogram_view_mode: SpectrogramViewMode::Downmix,
+                ..AnalysisSnapshot::default()
+            },
+            pending_channels: Vec::new(),
+            waveform_dirty: false,
+            last_emit: std::time::Instant::now(),
+            spectrogram: SpectrogramRuntime::new(8192, 1024, SpectrogramViewMode::Downmix, &[]),
+            active_track_token: 0,
+            active_track_path: None,
+            active_track_stamp: None,
+            waveform_cache: HashMap::new(),
+            waveform_cache_lru: VecDeque::new(),
+            waveform_db: open_waveform_cache_db().ok(),
+            waveform_db_writes_since_prune: 0,
+            pcm_fifo: VecDeque::with_capacity(48_000),
+            pcm_labels: vec![SpectrogramChannelLabel::Mono],
+            last_tick_time: std::time::Instant::now(),
+            elapsed_credit_ns: 0,
+            profile_enabled: cfg!(feature = "profiling-logs")
+                && std::env::var_os("FERROUS_PROFILE").is_some(),
+            prof_last: std::time::Instant::now(),
+            prof_pcm: 0,
+            prof_rows: 0,
+            prof_ticks: 0,
+            prof_in_samples: 0,
+            prof_out_samples: 0,
+        }
+    }
+
+    fn handle_command(
+        &mut self,
+        cmd: AnalysisCommand,
+        pcm_rx: &Receiver<AnalysisPcmChunk>,
+        event_tx: &Sender<AnalysisEvent>,
+        waveform_job_tx: &Sender<WaveformDecodeJob>,
+        waveform_decode_active_token: &AtomicU64,
+    ) {
+        match cmd {
+            AnalysisCommand::SetTrack {
+                path,
+                reset_spectrogram,
+            } => self.handle_track_change(
+                path,
+                reset_spectrogram,
+                pcm_rx,
+                event_tx,
+                waveform_job_tx,
+                waveform_decode_active_token,
+            ),
+            AnalysisCommand::SetSampleRate(rate) => {
+                if rate > 0 {
+                    self.snapshot.sample_rate_hz = rate;
+                    self.emit_snapshot(event_tx, true);
+                }
+            }
+            AnalysisCommand::SetFftSize(size) => {
+                let fft = size.clamp(512, 8192).next_power_of_two();
+                let hop = (fft / 8).max(64);
+                self.spectrogram.set_fft_size(fft, hop);
+                self.reset_spectrogram_state(pcm_rx);
+                self.emit_snapshot(event_tx, true);
+            }
+            AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
+                self.snapshot.spectrogram_view_mode = view_mode;
+                self.spectrogram.set_view_mode(view_mode);
+                self.reset_spectrogram_state(pcm_rx);
+                self.emit_snapshot(event_tx, true);
+            }
+            AnalysisCommand::WaveformProgress {
+                track_token,
+                peaks,
+                coverage_seconds,
+                complete,
+                done,
+            } => self.handle_waveform_progress(
+                track_token,
+                peaks,
+                coverage_seconds,
+                complete,
+                done,
+                event_tx,
+            ),
+        }
+    }
+
+    fn handle_track_change(
+        &mut self,
+        path: PathBuf,
+        reset_spectrogram: bool,
+        pcm_rx: &Receiver<AnalysisPcmChunk>,
+        event_tx: &Sender<AnalysisEvent>,
+        waveform_job_tx: &Sender<WaveformDecodeJob>,
+        waveform_decode_active_token: &AtomicU64,
+    ) {
+        self.active_track_token = self.active_track_token.wrapping_add(1);
+        let track_token = self.active_track_token;
+        waveform_decode_active_token.store(track_token, Ordering::Relaxed);
+        self.active_track_stamp = source_stamp(&path);
+        self.active_track_path = Some(path.clone());
+
+        self.snapshot.waveform_peaks.clear();
+        self.snapshot.waveform_coverage_seconds = 0.0;
+        self.snapshot.waveform_complete = false;
+        self.waveform_dirty = true;
+        if reset_spectrogram {
+            self.reset_spectrogram_state(pcm_rx);
+        }
+        self.emit_snapshot(event_tx, true);
+
+        if let Some(peaks) = self.load_cached_waveform(&path) {
+            self.snapshot.waveform_peaks = peaks;
+            self.snapshot.waveform_coverage_seconds = 0.0;
+            self.snapshot.waveform_complete = true;
+            self.waveform_dirty = true;
+            self.emit_snapshot(event_tx, true);
+            return;
+        }
+
+        let _ = waveform_job_tx.send(WaveformDecodeJob { track_token, path });
+    }
+
+    fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
+        let cache_hit = self
+            .waveform_cache
+            .get(path)
+            .filter(|entry| entry.stamp == self.active_track_stamp)
+            .map(|entry| entry.peaks.clone())
+            .filter(|peaks| !peaks.is_empty());
+        if let Some(peaks) = cache_hit {
+            touch_waveform_cache_lru(&mut self.waveform_cache_lru, path);
+            return Some(peaks);
+        }
+
+        let (Some(conn), Some(stamp)) = (self.waveform_db.as_ref(), self.active_track_stamp) else {
+            return None;
+        };
+        let disk_hit = load_waveform_from_db(conn, path, stamp);
+        if let Some(peaks) = disk_hit.as_ref() {
+            insert_waveform_cache_entry(
+                &mut self.waveform_cache,
+                &mut self.waveform_cache_lru,
+                path,
+                WaveformCacheEntry {
+                    stamp: Some(stamp),
+                    peaks: peaks.clone(),
+                },
+            );
+        }
+        disk_hit
+    }
+
+    fn handle_waveform_progress(
+        &mut self,
+        track_token: u64,
+        peaks: Vec<f32>,
+        coverage_seconds: f32,
+        complete: bool,
+        done: bool,
+        event_tx: &Sender<AnalysisEvent>,
+    ) {
+        if track_token != self.active_track_token || peaks.is_empty() {
+            return;
+        }
+
+        self.snapshot.waveform_peaks = peaks;
+        self.snapshot.waveform_coverage_seconds = coverage_seconds;
+        self.snapshot.waveform_complete = complete;
+        if done {
+            self.persist_active_waveform();
+        }
+        self.waveform_dirty = true;
+        if done || self.snapshot.waveform_peaks.len() >= 24 {
+            self.emit_snapshot(event_tx, true);
+        }
+    }
+
+    fn persist_active_waveform(&mut self) {
+        let Some(path) = self.active_track_path.as_ref() else {
+            return;
+        };
+
+        let cached_peaks = self.snapshot.waveform_peaks.clone();
+        insert_waveform_cache_entry(
+            &mut self.waveform_cache,
+            &mut self.waveform_cache_lru,
+            path,
+            WaveformCacheEntry {
+                stamp: self.active_track_stamp,
+                peaks: cached_peaks.clone(),
+            },
+        );
+
+        let (Some(conn), Some(stamp)) = (self.waveform_db.as_mut(), self.active_track_stamp) else {
+            return;
+        };
+        let _ = persist_waveform_to_db(conn, path, stamp, &cached_peaks);
+        self.waveform_db_writes_since_prune = self.waveform_db_writes_since_prune.saturating_add(1);
+        if self.waveform_db_writes_since_prune >= PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL {
+            let _ = prune_persistent_waveform_cache(conn, PERSISTENT_WAVEFORM_CACHE_MAX_ROWS);
+            self.waveform_db_writes_since_prune = 0;
+        }
+    }
+
+    fn reset_spectrogram_state(&mut self, pcm_rx: &Receiver<AnalysisPcmChunk>) {
+        self.pending_channels.clear();
+        self.snapshot.spectrogram_seq = 0;
+        self.spectrogram.reset();
+        drain_pcm_queue(pcm_rx);
+        self.pcm_fifo.clear();
+        self.pcm_labels = vec![SpectrogramChannelLabel::Mono];
+        self.last_tick_time = std::time::Instant::now();
+        self.elapsed_credit_ns = 0;
+    }
+
+    fn handle_tick(
+        &mut self,
+        pcm_rx: &Receiver<AnalysisPcmChunk>,
+        event_tx: &Sender<AnalysisEvent>,
+    ) {
+        self.prof_ticks += 1;
+        self.pull_pcm_chunks(pcm_rx);
+
+        let channel_count = self.pcm_labels.len().max(1);
+        self.trim_pcm_fifo(channel_count);
+        let to_feed_frames = self.frames_to_feed(channel_count);
+        self.feed_spectrogram(channel_count, to_feed_frames);
+        self.collect_spectrogram_rows();
+        self.emit_snapshot(event_tx, false);
+        self.maybe_log_profile(channel_count);
+    }
+
+    fn pull_pcm_chunks(&mut self, pcm_rx: &Receiver<AnalysisPcmChunk>) {
+        for _ in 0..64 {
+            let Ok(chunk) = pcm_rx.try_recv() else {
+                break;
+            };
+            if chunk.samples.is_empty() {
+                continue;
+            }
+            self.prof_pcm += 1;
+            self.prof_in_samples += chunk.samples.len();
+            let chunk_labels = if chunk.channel_labels.is_empty() {
+                vec![SpectrogramChannelLabel::Mono]
+            } else {
+                chunk.channel_labels.clone()
+            };
+            if chunk_labels != self.pcm_labels {
+                self.pcm_labels.clone_from(&chunk_labels);
+                self.pcm_fifo.clear();
+                self.pending_channels.clear();
+                self.spectrogram.update_channel_labels(&chunk_labels);
+                self.spectrogram.reset();
+                self.snapshot.spectrogram_seq = 0;
+            }
+            self.pcm_fifo.extend(chunk.samples);
+        }
+    }
+
+    fn trim_pcm_fifo(&mut self, channel_count: usize) {
+        let fifo_max_frames = (u32_to_usize(self.snapshot.sample_rate_hz) / 2).max(4096);
+        while (self.pcm_fifo.len() / channel_count) > fifo_max_frames {
+            for _ in 0..channel_count {
+                let _ = self.pcm_fifo.pop_front();
+            }
+        }
+    }
+
+    fn frames_to_feed(&mut self, channel_count: usize) -> usize {
+        let now = std::time::Instant::now();
+        self.elapsed_credit_ns = self
+            .elapsed_credit_ns
+            .saturating_add(now.duration_since(self.last_tick_time).as_nanos());
+        self.last_tick_time = now;
+
+        let sample_rate = u128::from(self.snapshot.sample_rate_hz);
+        let accrued_samples_u128 =
+            (self.elapsed_credit_ns.saturating_mul(sample_rate)) / 1_000_000_000;
+        let accrued_samples = usize::try_from(accrued_samples_u128).unwrap_or(usize::MAX);
+        let consumed_ns = (u128::from(usize_to_u64(accrued_samples)) * 1_000_000_000) / sample_rate;
+        self.elapsed_credit_ns = self.elapsed_credit_ns.saturating_sub(consumed_ns);
+        let target_samples = accrued_samples.clamp(256, 2048);
+
+        let visual_delay_ms = u32_to_usize(BASE_VISUAL_DELAY_MS.unsigned_abs());
+        let effective_delay_frames =
+            u32_to_usize(self.snapshot.sample_rate_hz).saturating_mul(visual_delay_ms) / 1000;
+        let available_frames =
+            (self.pcm_fifo.len() / channel_count).saturating_sub(effective_delay_frames);
+
+        let backlog_error = usize_to_i64(self.pcm_fifo.len() / channel_count)
+            - usize_to_i64(effective_delay_frames);
+        let correction = (backlog_error / 8).clamp(-512, 512);
+        let adjusted_target = (usize_to_i64(target_samples) + correction).clamp(0, 4096);
+        let adjusted_target = usize::try_from(adjusted_target).unwrap_or(4096);
+
+        adjusted_target.min(available_frames)
+    }
+
+    fn feed_spectrogram(&mut self, channel_count: usize, to_feed_frames: usize) {
+        if to_feed_frames == 0 {
+            return;
+        }
+
+        let mut feed = Vec::with_capacity(to_feed_frames.saturating_mul(channel_count));
+        for _ in 0..to_feed_frames.saturating_mul(channel_count) {
+            if let Some(sample) = self.pcm_fifo.pop_front() {
+                feed.push(sample);
+            }
+        }
+        self.prof_out_samples += feed.len();
+        self.spectrogram.feed_chunk(
+            &AnalysisPcmChunk {
+                samples: feed,
+                channel_labels: self.pcm_labels.clone(),
+            },
+            self.snapshot.sample_rate_hz,
+        );
+    }
+
+    fn collect_spectrogram_rows(&mut self) {
+        let channels = self.spectrogram.take_channels(8);
+        let row_count = channels.first().map_or(0, |channel| channel.rows.len());
+        self.prof_rows += row_count;
+        if row_count > 0 {
+            self.snapshot.spectrogram_seq = self
+                .snapshot
+                .spectrogram_seq
+                .wrapping_add(usize_to_u64(row_count));
+            merge_pending_channels(&mut self.pending_channels, channels);
+        }
+    }
+
+    fn maybe_log_profile(&mut self, _channel_count: usize) {
+        if !self.profile_enabled || self.prof_last.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+
+        profile_eprintln!(
+            "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_frames={} fft={} hop={} channels={}",
+            self.prof_ticks,
+            self.prof_pcm,
+            self.prof_in_samples,
+            self.prof_out_samples,
+            self.prof_rows,
+            self.spectrogram
+                .pipelines
+                .first()
+                .map_or(0, |pipeline| pipeline.stft.pending_len()),
+            self.pcm_fifo.len() / _channel_count,
+            self.spectrogram.fft_size,
+            self.spectrogram.hop_size,
+            self.spectrogram.labels.len()
+        );
+        self.prof_last = std::time::Instant::now();
+        self.prof_pcm = 0;
+        self.prof_in_samples = 0;
+        self.prof_out_samples = 0;
+        self.prof_rows = 0;
+        self.prof_ticks = 0;
+    }
+
+    fn emit_snapshot(&mut self, event_tx: &Sender<AnalysisEvent>, force: bool) {
+        emit_snapshot(
+            event_tx,
+            &self.snapshot,
+            &mut self.pending_channels,
+            &mut self.waveform_dirty,
+            &mut self.last_emit,
+            force,
+        );
+    }
+}
+
+fn spawn_waveform_decode_worker(
+    waveform_job_rx: Receiver<WaveformDecodeJob>,
+    waveform_tx: Sender<AnalysisCommand>,
+    waveform_decode_active_token: Arc<AtomicU64>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("ferrous-waveform-decode".to_string())
+        .spawn(move || {
+            while let Ok(mut job) = waveform_job_rx.recv() {
+                while let Ok(next_job) = waveform_job_rx.try_recv() {
+                    job = next_job;
+                }
+                let track_token = job.track_token;
+                let _ = decode_waveform_peaks_stream(
+                    &job.path,
+                    1024,
+                    |peaks, coverage_seconds, done| {
+                        if waveform_decode_active_token.load(Ordering::Relaxed) != track_token {
+                            return false;
+                        }
+                        let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
+                            track_token,
+                            peaks,
+                            coverage_seconds,
+                            complete: done,
+                            done,
+                        });
+                        true
+                    },
+                    || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
+                );
+            }
+        });
+}
+
+fn spawn_analysis_worker(
+    cmd_rx: Receiver<AnalysisCommand>,
+    pcm_rx: Receiver<AnalysisPcmChunk>,
+    event_tx: Sender<AnalysisEvent>,
+    waveform_job_tx: Sender<WaveformDecodeJob>,
+    waveform_decode_active_token: Arc<AtomicU64>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("ferrous-analysis".to_string())
+        .spawn(move || {
+            let ticker = tick(Duration::from_millis(16));
+            let mut state = AnalysisRuntimeState::new();
+            loop {
+                select! {
+                    recv(cmd_rx) -> msg => {
+                        let Ok(cmd) = msg else { break; };
+                        state.handle_command(
+                            cmd,
+                            &pcm_rx,
+                            &event_tx,
+                            &waveform_job_tx,
+                            waveform_decode_active_token.as_ref(),
+                        );
+                    }
+                    recv(ticker) -> _ => state.handle_tick(&pcm_rx, &event_tx),
+                }
+            }
+        });
 }
 
 fn decimation_factor_for_hop(hop: usize) -> usize {
@@ -603,6 +673,42 @@ fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {
         modified_secs: since_epoch.as_secs(),
         modified_nanos: since_epoch.subsec_nanos(),
     })
+}
+
+fn u32_to_usize(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn small_usize_to_f32(value: usize) -> f32 {
+    f32::from(u16::try_from(value).expect("value fits into u16"))
+}
+
+fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
+    if sample_rate_hz == 0 {
+        return 0.0;
+    }
+
+    let secs = frames / sample_rate_hz;
+    let remainder = frames % sample_rate_hz;
+    let nanos = (u128::from(remainder) * 1_000_000_000) / u128::from(sample_rate_hz);
+    let nanos = u32::try_from(nanos).unwrap_or(u32::MAX);
+    Duration::new(secs, nanos).as_secs_f32()
+}
+
+fn seconds_from_nanoseconds(span_ns: u64) -> f32 {
+    Duration::from_nanos(span_ns).as_secs_f32()
 }
 
 fn open_waveform_cache_db() -> anyhow::Result<Connection> {
@@ -671,8 +777,8 @@ fn load_waveform_from_db(
             ",
             params![
                 path,
-                stamp.size_bytes as i64,
-                stamp.modified_secs as i64,
+                u64_to_i64(stamp.size_bytes),
+                u64_to_i64(stamp.modified_secs),
                 i64::from(stamp.modified_nanos),
             ],
             |row| {
@@ -727,11 +833,11 @@ fn persist_waveform_to_db(
         ",
         params![
             path.to_string_lossy().to_string(),
-            stamp.size_bytes as i64,
-            stamp.modified_secs as i64,
+            u64_to_i64(stamp.size_bytes),
+            u64_to_i64(stamp.modified_secs),
             i64::from(stamp.modified_nanos),
             WAVEFORM_CACHE_FORMAT_VERSION,
-            peaks.len() as i64,
+            usize_to_i64(peaks.len()),
             blob,
             now,
         ],
@@ -750,7 +856,7 @@ fn prune_persistent_waveform_cache(conn: &Connection, max_rows: usize) -> rusqli
             LIMIT -1 OFFSET ?1
         )
         ",
-        params![max_rows as i64],
+        params![usize_to_i64(max_rows)],
     )?;
     Ok(())
 }
@@ -777,7 +883,7 @@ fn decode_peaks_blob(blob: &[u8], peak_count: usize) -> Option<Vec<f32>> {
 fn unix_ts_i64() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|duration| u64_to_i64(duration.as_secs()))
         .unwrap_or(0)
 }
 
@@ -791,18 +897,19 @@ fn touch_waveform_cache_lru(lru: &mut VecDeque<PathBuf>, path: &Path) {
 fn insert_waveform_cache_entry(
     cache: &mut HashMap<PathBuf, WaveformCacheEntry>,
     lru: &mut VecDeque<PathBuf>,
-    path: PathBuf,
+    path: &Path,
     entry: WaveformCacheEntry,
 ) {
     if entry.peaks.is_empty() {
-        cache.remove(&path);
-        if let Some(pos) = lru.iter().position(|p| p == &path) {
+        cache.remove(path);
+        if let Some(pos) = lru.iter().position(|p| p == path) {
             lru.remove(pos);
         }
         return;
     }
-    cache.insert(path.clone(), entry);
-    touch_waveform_cache_lru(lru, &path);
+    let owned_path = path.to_path_buf();
+    cache.insert(owned_path.clone(), entry);
+    touch_waveform_cache_lru(lru, &owned_path);
 
     while cache.len() > MAX_WAVEFORM_CACHE_TRACKS {
         let Some(evicted) = lru.pop_front() else {
@@ -1051,7 +1158,7 @@ fn downmix_interleaved_samples(samples: &[f32], channels: usize) -> Vec<f32> {
         for sample in frame {
             sum += *sample;
         }
-        out.push(sum / channels as f32);
+        out.push(sum / small_usize_to_f32(channels));
     }
     out
 }
@@ -1118,7 +1225,7 @@ impl StftComputer {
         self.compact_pending_if_needed();
         self.pending.extend_from_slice(samples);
         // Keep pending bounded to avoid latency creep: max ~0.5s audio.
-        let max_pending = (sample_rate_hz as usize / 2).max(self.fft_size * 4);
+        let max_pending = (u32_to_usize(sample_rate_hz) / 2).max(self.fft_size * 4);
         let available = self.pending_available();
         if available > max_pending {
             let drop = available - max_pending;
@@ -1234,7 +1341,7 @@ impl SpectrogramDecimator {
             return None;
         }
 
-        let inv = 1.0 / self.count as f32;
+        let inv = 1.0 / small_usize_to_f32(self.count);
         let mut out = Vec::with_capacity(self.accum.len());
         for v in &self.accum {
             out.push(v * inv);
@@ -1247,14 +1354,101 @@ impl SpectrogramDecimator {
 }
 
 fn blackman_harris_window(size: usize) -> Vec<f32> {
-    let n = size as f32;
+    let n = small_usize_to_f32(size);
     (0..size)
         .map(|i| {
-            let phase = (2.0 * std::f32::consts::PI * i as f32) / n;
+            let phase = (2.0 * std::f32::consts::PI * small_usize_to_f32(i)) / n;
             0.35875 - 0.48829 * phase.cos() + 0.14128 * (2.0 * phase).cos()
                 - 0.01168 * (3.0 * phase).cos()
         })
         .collect()
+}
+
+struct WaveformAccumulator {
+    peaks: Vec<f32>,
+    bucket_peak: f32,
+    bucket_count: u64,
+    covered_frames: u64,
+    block_size: u64,
+    max_points: usize,
+    sample_rate_hz: u64,
+    last_preview_emit: std::time::Instant,
+}
+
+impl WaveformAccumulator {
+    fn new(max_points: usize, estimated_frames: u64, sample_rate_hz: u64) -> Self {
+        Self {
+            peaks: Vec::with_capacity(max_points),
+            bucket_peak: 0.0,
+            bucket_count: 0,
+            covered_frames: 0,
+            block_size: (estimated_frames / usize_to_u64(max_points.max(1))).max(1),
+            max_points,
+            sample_rate_hz,
+            last_preview_emit: std::time::Instant::now(),
+        }
+    }
+
+    fn push_sample<F>(&mut self, amp: f32, sample_stride: usize, on_update: &mut F) -> bool
+    where
+        F: FnMut(Vec<f32>, f32, bool) -> bool,
+    {
+        if amp > self.bucket_peak {
+            self.bucket_peak = amp;
+        }
+        let sample_stride = usize_to_u64(sample_stride);
+        self.bucket_count = self.bucket_count.saturating_add(sample_stride);
+        self.covered_frames = self.covered_frames.saturating_add(sample_stride);
+
+        if self.bucket_count < self.block_size {
+            return true;
+        }
+
+        self.peaks.push(self.bucket_peak.clamp(0.0, 1.0));
+        self.bucket_peak = 0.0;
+        self.bucket_count = 0;
+        while self.peaks.len() > self.max_points {
+            self.peaks = fold_waveform_peaks(&self.peaks);
+            self.block_size = self.block_size.saturating_mul(2).max(1);
+        }
+        if self.peaks.len() < 12
+            || self.last_preview_emit.elapsed() < std::time::Duration::from_millis(240)
+        {
+            return true;
+        }
+
+        self.last_preview_emit = std::time::Instant::now();
+        on_update(
+            self.peaks.clone(),
+            seconds_from_frames(self.covered_frames, self.sample_rate_hz),
+            false,
+        )
+    }
+
+    fn finish(mut self) -> Vec<f32> {
+        if self.bucket_count > 0 {
+            self.peaks.push(self.bucket_peak.clamp(0.0, 1.0));
+        }
+        reduce_waveform_peaks(&self.peaks, self.max_points)
+    }
+}
+
+fn ensure_sample_buffer(
+    sample_buf: &mut Option<SampleBuffer<f32>>,
+    capacity: usize,
+    spec: SignalSpec,
+) -> &mut SampleBuffer<f32> {
+    let capacity_u64 = usize_to_u64(capacity);
+    if sample_buf
+        .as_ref()
+        .is_none_or(|buffer| buffer.capacity() < capacity)
+    {
+        *sample_buf = Some(SampleBuffer::<f32>::new(capacity_u64, spec));
+    }
+
+    sample_buf
+        .as_mut()
+        .expect("sample buffer is initialized above")
 }
 
 fn decode_waveform_peaks_stream<F, C>(
@@ -1297,18 +1491,13 @@ where
         .ok_or_else(|| anyhow::anyhow!("no default track"))?;
     let track_id = track.id;
 
-    let mut decoder =
+    let mut audio_decoder =
         symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-    let sample_rate_hz = track.codec_params.sample_rate.unwrap_or(48_000) as u64;
+    let sample_rate_hz = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
     let estimated_frames = track.codec_params.n_frames.unwrap_or(sample_rate_hz * 240);
-    let mut block_size = (estimated_frames / max_points.max(1) as u64).max(1);
 
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
-    let mut peaks = Vec::with_capacity(max_points);
-    let mut bucket_peak = 0.0f32;
-    let mut bucket_count = 0u64;
-    let mut covered_frames = 0u64;
-    let mut last_preview_emit = std::time::Instant::now();
+    let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate_hz);
 
     let mut packet_counter = 0usize;
     loop {
@@ -1318,8 +1507,7 @@ where
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
-            Err(SymphoniaError::ResetRequired) => break,
-            Err(_) => break,
+            Err(SymphoniaError::ResetRequired | _) => break,
         };
 
         if packet.track_id() != track_id {
@@ -1327,30 +1515,19 @@ where
         }
         packet_counter += 1;
 
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
+        let decoded_audio = match audio_decoder.decode(&packet) {
+            Ok(decoded_audio) => decoded_audio,
             Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(_) => break,
         };
 
-        let spec = *decoded.spec();
+        let spec = *decoded_audio.spec();
         let channels = spec.channels.count().max(1);
         let sample_stride = if channels >= 2 { 8usize } else { 4usize };
-        let cap = decoded.capacity() as u64;
-        let cap_usize = decoded.capacity();
-
-        if sample_buf.is_none() {
-            sample_buf = Some(SampleBuffer::<f32>::new(cap, spec));
-        }
-        let Some(buf) = sample_buf.as_mut() else {
-            continue;
-        };
-        if buf.capacity() < cap_usize {
-            *buf = SampleBuffer::<f32>::new(cap, spec);
-        }
-
-        buf.copy_interleaved_ref(decoded);
+        let decoded_capacity = decoded_audio.capacity();
+        let buf = ensure_sample_buffer(&mut sample_buf, decoded_capacity, spec);
+        buf.copy_interleaved_ref(decoded_audio);
 
         let samples = buf.samples();
         let frame_width = channels.saturating_mul(sample_stride).max(1);
@@ -1358,44 +1535,8 @@ where
             if base.is_multiple_of(4096) && is_cancelled() {
                 return Ok(());
             }
-            let amp = samples[base].abs();
-            if amp > bucket_peak {
-                bucket_peak = amp;
-            }
-            bucket_count += sample_stride as u64;
-            covered_frames = covered_frames.saturating_add(sample_stride as u64);
-
-            if bucket_count >= block_size {
-                peaks.push(bucket_peak.clamp(0.0, 1.0));
-                bucket_peak = 0.0;
-                bucket_count = 0;
-                // Keep waveform memory bounded even when duration/frame estimates are inaccurate.
-                while peaks.len() > max_points {
-                    let mut reduced = Vec::with_capacity(peaks.len().div_ceil(2));
-                    for chunk in peaks.chunks(2) {
-                        let mut p = 0.0f32;
-                        for &v in chunk {
-                            if v > p {
-                                p = v;
-                            }
-                        }
-                        reduced.push(p);
-                    }
-                    peaks = reduced;
-                    block_size = block_size.saturating_mul(2).max(1);
-                }
-                if peaks.len() >= 12
-                    && last_preview_emit.elapsed() >= std::time::Duration::from_millis(240)
-                {
-                    if !on_update(
-                        peaks.clone(),
-                        covered_frames as f32 / sample_rate_hz as f32,
-                        false,
-                    ) {
-                        return Ok(());
-                    }
-                    last_preview_emit = std::time::Instant::now();
-                }
+            if !waveform.push_sample(samples[base].abs(), sample_stride, &mut on_update) {
+                return Ok(());
             }
         }
 
@@ -1405,43 +1546,89 @@ where
         }
     }
 
-    if bucket_count > 0 {
-        peaks.push(bucket_peak.clamp(0.0, 1.0));
-    }
-
-    if peaks.len() > max_points {
-        let stride = peaks.len() as f32 / max_points as f32;
-        let mut reduced = Vec::with_capacity(max_points);
-        for i in 0..max_points {
-            let idx = (i as f32 * stride) as usize;
-            reduced.push(peaks[idx.min(peaks.len() - 1)]);
-        }
-        peaks = reduced;
-    }
-
     if !is_cancelled() {
-        let _ = on_update(peaks, 0.0, true);
+        let _ = on_update(waveform.finish(), 0.0, true);
     }
     Ok(())
 }
 
 #[cfg(feature = "gst")]
-fn decode_waveform_peaks_stream_gst<F, C>(
-    path: &Path,
+struct GstWaveformAccumulator {
+    observed_span_ns: u64,
+    peak_events: Vec<(u64, f32)>,
+    fallback_peaks: Vec<f32>,
+    level_messages_seen: usize,
+    last_preview_emit: std::time::Instant,
     max_points: usize,
-    mut on_update: F,
-    mut is_cancelled: C,
-) -> anyhow::Result<()>
-where
-    F: FnMut(Vec<f32>, f32, bool) -> bool,
-    C: FnMut() -> bool,
-{
-    if is_cancelled() {
-        return Ok(());
+}
+
+#[cfg(feature = "gst")]
+impl GstWaveformAccumulator {
+    fn new(max_points: usize, duration_ns: Option<u64>) -> Self {
+        Self {
+            observed_span_ns: duration_ns.unwrap_or(0),
+            peak_events: Vec::with_capacity(max_points.saturating_mul(2)),
+            fallback_peaks: Vec::with_capacity(max_points),
+            level_messages_seen: 0,
+            last_preview_emit: std::time::Instant::now(),
+            max_points,
+        }
     }
 
-    gst::init()?;
+    fn record_peak(&mut self, structure: &gst::StructureRef, peak: f32) {
+        self.level_messages_seen = self.level_messages_seen.saturating_add(1);
+        if let Some((time_ns, end_ns)) = level_message_time_range_ns(structure) {
+            self.observed_span_ns = self.observed_span_ns.max(end_ns);
+            self.peak_events.push((time_ns, peak));
+            return;
+        }
 
+        self.fallback_peaks.push(peak);
+        if self.fallback_peaks.len() > self.max_points {
+            self.fallback_peaks = reduce_waveform_peaks(&self.fallback_peaks, self.max_points);
+        }
+    }
+
+    fn preview_ready(&self) -> bool {
+        self.level_messages_seen >= 12
+            && self.last_preview_emit.elapsed() >= Duration::from_millis(240)
+    }
+
+    fn take_preview(&mut self) -> Vec<f32> {
+        self.last_preview_emit = std::time::Instant::now();
+        if self.observed_span_ns > 0 && !self.peak_events.is_empty() {
+            return materialize_waveform_peaks(
+                &self.peak_events,
+                self.observed_span_ns,
+                self.max_points,
+            );
+        }
+        self.fallback_peaks.clone()
+    }
+
+    fn coverage_seconds(&self) -> f32 {
+        seconds_from_nanoseconds(self.observed_span_ns)
+    }
+
+    fn finish(self) -> Vec<f32> {
+        if self.observed_span_ns > 0 && !self.peak_events.is_empty() {
+            return materialize_waveform_peaks(
+                &self.peak_events,
+                self.observed_span_ns,
+                self.max_points,
+            );
+        }
+        if self.fallback_peaks.len() > self.max_points {
+            return reduce_waveform_peaks(&self.fallback_peaks, self.max_points);
+        }
+        self.fallback_peaks
+    }
+}
+
+#[cfg(feature = "gst")]
+fn build_waveform_gst_pipeline(
+    path: &Path,
+) -> anyhow::Result<(gst::Pipeline, gst::Bus, gst::Element)> {
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("filesrc")
         .build()
@@ -1511,6 +1698,15 @@ where
     let bus = pipeline
         .bus()
         .ok_or_else(|| anyhow::anyhow!("waveform pipeline has no bus"))?;
+    Ok((pipeline, bus, level))
+}
+
+#[cfg(feature = "gst")]
+fn configure_waveform_gst_pipeline(
+    pipeline: &gst::Pipeline,
+    level: &gst::Element,
+    max_points: usize,
+) -> anyhow::Result<Option<u64>> {
     pipeline.set_state(gst::State::Paused)?;
     let _ = pipeline.state(gst::ClockTime::from_seconds(2));
 
@@ -1523,12 +1719,28 @@ where
     );
     level.set_property("post-messages", true);
     pipeline.set_state(gst::State::Playing)?;
+    Ok(duration_ns)
+}
 
-    let mut observed_span_ns = duration_ns.unwrap_or(0);
-    let mut peak_events: Vec<(u64, f32)> = Vec::with_capacity(max_points.saturating_mul(2));
-    let mut fallback_peaks = Vec::with_capacity(max_points);
-    let mut level_messages_seen = 0usize;
-    let mut last_preview_emit = std::time::Instant::now();
+#[cfg(feature = "gst")]
+fn decode_waveform_peaks_stream_gst<F, C>(
+    path: &Path,
+    max_points: usize,
+    mut on_update: F,
+    mut is_cancelled: C,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<f32>, f32, bool) -> bool,
+    C: FnMut() -> bool,
+{
+    if is_cancelled() {
+        return Ok(());
+    }
+
+    gst::init()?;
+    let (pipeline, bus, level) = build_waveform_gst_pipeline(path)?;
+    let duration_ns = configure_waveform_gst_pipeline(&pipeline, &level, max_points)?;
+    let mut waveform = GstWaveformAccumulator::new(max_points, duration_ns);
     loop {
         if is_cancelled() {
             let _ = pipeline.set_state(gst::State::Null);
@@ -1547,37 +1759,17 @@ where
                 gst::MessageView::Element(element) => {
                     if let Some(structure) = element.message().structure() {
                         if let Some(peak) = level_message_peak(structure) {
-                            level_messages_seen = level_messages_seen.saturating_add(1);
-                            if let Some((time_ns, end_ns)) = level_message_time_range_ns(structure)
-                            {
-                                observed_span_ns = observed_span_ns.max(end_ns);
-                                peak_events.push((time_ns, peak));
-                            } else {
-                                fallback_peaks.push(peak);
-                                if fallback_peaks.len() > max_points {
-                                    fallback_peaks =
-                                        reduce_waveform_peaks(&fallback_peaks, max_points);
-                                }
-                            }
+                            waveform.record_peak(structure, peak);
                         }
-                        if level_messages_seen >= 12
-                            && last_preview_emit.elapsed() >= Duration::from_millis(240)
+                        if waveform.preview_ready()
+                            && !on_update(
+                                waveform.take_preview(),
+                                waveform.coverage_seconds(),
+                                false,
+                            )
                         {
-                            let preview = if observed_span_ns > 0 && !peak_events.is_empty() {
-                                materialize_waveform_peaks(
-                                    &peak_events,
-                                    observed_span_ns,
-                                    max_points,
-                                )
-                            } else {
-                                fallback_peaks.clone()
-                            };
-                            if !on_update(preview, observed_span_ns as f32 / 1_000_000_000.0, false)
-                            {
-                                let _ = pipeline.set_state(gst::State::Null);
-                                return Ok(());
-                            }
-                            last_preview_emit = std::time::Instant::now();
+                            let _ = pipeline.set_state(gst::State::Null);
+                            return Ok(());
                         }
                     }
                 }
@@ -1595,18 +1787,13 @@ where
         }
     }
 
-    let peaks = if observed_span_ns > 0 && !peak_events.is_empty() {
-        materialize_waveform_peaks(&peak_events, observed_span_ns, max_points)
-    } else if fallback_peaks.len() > max_points {
-        reduce_waveform_peaks(&fallback_peaks, max_points)
-    } else {
-        fallback_peaks
-    };
+    let coverage_seconds = waveform.coverage_seconds();
+    let peaks = waveform.finish();
 
     let _ = pipeline.set_state(gst::State::Null);
 
     if !is_cancelled() {
-        let _ = on_update(peaks, observed_span_ns as f32 / 1_000_000_000.0, true);
+        let _ = on_update(peaks, coverage_seconds, true);
     }
     Ok(())
 }
@@ -1614,7 +1801,7 @@ where
 #[cfg(feature = "gst")]
 fn level_message_interval_ns(max_points: usize, duration_ns: Option<u64>) -> u64 {
     let fallback_duration_ns = 240u64 * 1_000_000_000;
-    (duration_ns.unwrap_or(fallback_duration_ns) / max_points.max(1) as u64)
+    (duration_ns.unwrap_or(fallback_duration_ns) / usize_to_u64(max_points.max(1)))
         .clamp(20_000_000, 500_000_000)
 }
 
@@ -1624,10 +1811,10 @@ fn level_message_bin_index(time_ns: u64, duration_ns: u64, max_points: usize) ->
         return None;
     }
 
-    Some(
-        ((time_ns.saturating_mul(max_points as u64)) / duration_ns).min(max_points as u64 - 1)
-            as usize,
-    )
+    let max_points_u64 = usize_to_u64(max_points);
+    let raw_index = (time_ns.saturating_mul(max_points_u64) / duration_ns)
+        .min(max_points_u64.saturating_sub(1));
+    usize::try_from(raw_index).ok()
 }
 
 #[cfg(feature = "gst")]
@@ -1725,7 +1912,22 @@ fn dbfs_peak_to_linear(db: f64) -> f32 {
     if !db.is_finite() || db <= -120.0 {
         return 0.0;
     }
-    10f32.powf((db as f32) / 20.0).clamp(0.0, 1.0)
+    let linear = 10f64.powf(db / 20.0).clamp(0.0, 1.0);
+    linear.to_string().parse::<f32>().unwrap_or(1.0)
+}
+
+fn fold_waveform_peaks(peaks: &[f32]) -> Vec<f32> {
+    let mut reduced = Vec::with_capacity(peaks.len().div_ceil(2));
+    for chunk in peaks.chunks(2) {
+        let mut peak = 0.0f32;
+        for &value in chunk {
+            if value > peak {
+                peak = value;
+            }
+        }
+        reduced.push(peak);
+    }
+    reduced
 }
 
 fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
@@ -1733,10 +1935,9 @@ fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
         return peaks.to_vec();
     }
 
-    let stride = peaks.len() as f32 / max_points as f32;
     let mut reduced = Vec::with_capacity(max_points);
     for i in 0..max_points {
-        let idx = (i as f32 * stride) as usize;
+        let idx = i.saturating_mul(peaks.len()) / max_points;
         reduced.push(peaks[idx.min(peaks.len() - 1)]);
     }
     reduced
@@ -1768,8 +1969,8 @@ mod tests {
     fn peaks_blob_roundtrip() {
         let peaks = vec![0.0f32, 0.25, 0.5, 1.0];
         let blob = encode_peaks_blob(&peaks);
-        let decoded = decode_peaks_blob(&blob, peaks.len()).expect("decode");
-        assert_eq!(decoded, peaks);
+        let decoded_peaks = decode_peaks_blob(&blob, peaks.len()).expect("decode");
+        assert_eq!(decoded_peaks, peaks);
     }
 
     #[test]
@@ -1802,7 +2003,7 @@ mod tests {
         let mut stft = StftComputer::new(512, 128);
         let mut samples = Vec::new();
         for i in 0..4096usize {
-            let x = (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / 48_000.0)).sin();
+            let x = (2.0 * std::f32::consts::PI * 440.0 * (small_usize_to_f32(i) / 48_000.0)).sin();
             samples.push(x);
         }
         stft.enqueue_samples(&samples, 48_000);
@@ -1814,7 +2015,7 @@ mod tests {
     #[test]
     fn stft_computer_keeps_row_count_with_chunked_input() {
         let mut stft = StftComputer::new(8, 4);
-        let input: Vec<f32> = (0..24).map(|v| v as f32).collect();
+        let input: Vec<f32> = (0u16..24).map(f32::from).collect();
         let mut rows = 0usize;
 
         for chunk in input.chunks(3) {

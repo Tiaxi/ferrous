@@ -8,7 +8,8 @@ use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
 
 const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
-const APE_TAG_HEADER_BYTES: u64 = 32;
+const APE_TAG_HEADER_BYTES: usize = 32;
+const APE_TAG_HEADER_BYTES_U64: u64 = 32;
 const APE_MIN_ITEM_BYTES: u64 = 11;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -58,11 +59,20 @@ pub(crate) fn is_dts_file(path: &Path) -> bool {
 }
 
 fn raw_surround_extension(path: &Path) -> Option<String> {
-    let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
-        return None;
-    };
-
+    let ext = path.extension().and_then(|value| value.to_str())?;
     Some(ext.to_ascii_lowercase())
+}
+
+fn round_f64_to_u32(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    value
+        .round()
+        .clamp(0.0, f64::from(u32::MAX))
+        .to_string()
+        .parse::<u32>()
+        .ok()
 }
 
 pub(crate) fn raw_surround_format_label(path: &Path) -> String {
@@ -82,7 +92,7 @@ pub(crate) fn read_appended_apev2_text_metadata(path: &Path) -> Option<RawAudioT
     let file_len = file.seek(SeekFrom::End(0)).ok()?;
     let footer = read_apev2_footer(&mut file, file_len)?;
     let items_start = locate_apev2_items_start(&mut file, file_len, footer.tag_size)?;
-    let items_end = file_len.checked_sub(APE_TAG_HEADER_BYTES)?;
+    let items_end = file_len.checked_sub(APE_TAG_HEADER_BYTES_U64)?;
     if items_start >= items_end {
         return None;
     }
@@ -112,7 +122,9 @@ pub(crate) fn probe_raw_surround_technical_details(
     Some(RawAudioTechnicalDetails {
         duration_secs: info
             .duration()
-            .map(|duration| duration.seconds_f64() as f32)
+            .map(gst::ClockTime::nseconds)
+            .map(std::time::Duration::from_nanos)
+            .map(|duration| duration.as_secs_f32())
             .filter(|value| *value > 0.0),
         sample_rate_hz: Some(audio_info.sample_rate()).filter(|value| *value > 0),
         bitrate_kbps,
@@ -135,13 +147,13 @@ pub(crate) fn probe_raw_surround_technical_details(
 }
 
 fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
-    if file_len < APE_TAG_HEADER_BYTES {
+    if file_len < APE_TAG_HEADER_BYTES_U64 {
         return None;
     }
 
-    file.seek(SeekFrom::End(-(APE_TAG_HEADER_BYTES as i64)))
+    file.seek(SeekFrom::End(-i64::try_from(APE_TAG_HEADER_BYTES).ok()?))
         .ok()?;
-    let mut footer = [0u8; APE_TAG_HEADER_BYTES as usize];
+    let mut footer = [0u8; APE_TAG_HEADER_BYTES];
     file.read_exact(&mut footer).ok()?;
     if &footer[..8] != APE_PREAMBLE {
         return None;
@@ -154,7 +166,9 @@ fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
 
     let tag_size = u32::from_le_bytes(footer[12..16].try_into().ok()?);
     let item_count = u32::from_le_bytes(footer[16..20].try_into().ok()?);
-    if tag_size < APE_TAG_HEADER_BYTES as u32 || tag_size > u32::try_from(file_len).ok()? {
+    if tag_size < u32::try_from(APE_TAG_HEADER_BYTES).ok()?
+        || tag_size > u32::try_from(file_len).ok()?
+    {
         return None;
     }
 
@@ -167,11 +181,13 @@ fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
 fn locate_apev2_items_start(file: &mut File, file_len: u64, tag_size: u32) -> Option<u64> {
     let tag_size = u64::from(tag_size);
 
-    if let Some(header_start) = file_len.checked_sub(tag_size.checked_add(APE_TAG_HEADER_BYTES)?) {
-        if header_start < file_len.saturating_sub(APE_TAG_HEADER_BYTES)
+    if let Some(header_start) =
+        file_len.checked_sub(tag_size.checked_add(APE_TAG_HEADER_BYTES_U64)?)
+    {
+        if header_start < file_len.saturating_sub(APE_TAG_HEADER_BYTES_U64)
             && has_ape_preamble(file, header_start)
         {
-            return header_start.checked_add(APE_TAG_HEADER_BYTES);
+            return header_start.checked_add(APE_TAG_HEADER_BYTES_U64);
         }
     }
 
@@ -227,7 +243,7 @@ fn parse_apev2_text_items(
             break;
         }
 
-        let mut value = vec![0u8; value_size as usize];
+        let mut value = vec![0u8; usize::try_from(value_size).ok()?];
         file.read_exact(&mut value).ok()?;
 
         let item_type = (flags >> 1) & 0b11;
@@ -311,7 +327,9 @@ fn parse_ape_track_number(value: &str) -> Option<u32> {
 
 #[cfg(feature = "gst")]
 fn kbps_from_bits_per_second(bits_per_second: u32) -> Option<u32> {
-    (bits_per_second > 0).then(|| ((bits_per_second as f64) / 1000.0).round() as u32)
+    (bits_per_second > 0)
+        .then(|| round_f64_to_u32(f64::from(bits_per_second) / 1000.0))
+        .flatten()
 }
 
 #[cfg(test)]
@@ -326,20 +344,36 @@ pub(crate) fn write_test_apev2_file(path: &Path, items: &[(&str, &str)], header:
 fn build_test_apev2_tag(items: &[(&str, &str)], header: bool) -> Vec<u8> {
     let mut item_bytes = Vec::new();
     for (key, value) in items {
-        item_bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        item_bytes.extend_from_slice(
+            &u32::try_from(value.len())
+                .expect("test APE value length fits into u32")
+                .to_le_bytes(),
+        );
         item_bytes.extend_from_slice(&0u32.to_le_bytes());
         item_bytes.extend_from_slice(key.as_bytes());
         item_bytes.push(0);
         item_bytes.extend_from_slice(value.as_bytes());
     }
 
-    let size_field = item_bytes.len() as u32 + APE_TAG_HEADER_BYTES as u32;
+    let size_field = u32::try_from(item_bytes.len())
+        .expect("test APE item payload fits into u32")
+        .saturating_add(
+            u32::try_from(APE_TAG_HEADER_BYTES).expect("APE header size fits into u32"),
+        );
     let mut out = Vec::new();
     if header {
-        out.extend_from_slice(&build_test_ape_block(size_field, items.len() as u32, 0xA0));
+        out.extend_from_slice(&build_test_ape_block(
+            size_field,
+            u32::try_from(items.len()).expect("test item count fits into u32"),
+            0xA0,
+        ));
     }
     out.extend_from_slice(&item_bytes);
-    out.extend_from_slice(&build_test_ape_block(size_field, items.len() as u32, 0x80));
+    out.extend_from_slice(&build_test_ape_block(
+        size_field,
+        u32::try_from(items.len()).expect("test item count fits into u32"),
+        0x80,
+    ));
     out
 }
 

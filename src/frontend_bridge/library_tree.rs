@@ -120,7 +120,7 @@ impl FlatTreeRow {
             source_index: -1,
             track_number: 0,
             child_count: clamp_u16(child_count),
-            title: format!("{} ({})", artist_name, album_count),
+            title: format!("{artist_name} ({album_count})"),
             key,
             artist: artist_name.to_string(),
             path: path.to_string(),
@@ -134,10 +134,9 @@ impl FlatTreeRow {
         depth: u16,
         key: String,
         artist_name: &str,
-        title: &str,
-        path: &str,
-        cover_path: Option<&str>,
-        child_count: usize,
+        album_title: &str,
+        album_path: &str,
+        album: &ResolvedAlbum,
         play_paths: Vec<String>,
     ) -> Self {
         Self {
@@ -145,12 +144,12 @@ impl FlatTreeRow {
             depth,
             source_index: -1,
             track_number: 0,
-            child_count: clamp_u16(child_count),
-            title: title.to_string(),
+            child_count: clamp_u16(album.root_tracks.len() + album.sections.len()),
+            title: album_title.to_string(),
             key,
             artist: artist_name.to_string(),
-            path: path.to_string(),
-            cover_path: cover_path.unwrap_or_default().to_string(),
+            path: album_path.to_string(),
+            cover_path: album.cover_path.as_deref().unwrap_or_default().to_string(),
             track_path: String::new(),
             play_paths,
         }
@@ -205,6 +204,16 @@ struct TrackOrderCandidate {
     number: u32,
 }
 
+struct AlbumRowConfig<'a, S> {
+    artist_name: &'a str,
+    root_path: &'a str,
+    lazy_hydration: bool,
+    expanded_keys: Option<&'a HashSet<String, S>>,
+    album_depth: u16,
+    section_depth: u16,
+    section_track_depth: u16,
+}
+
 fn root_row_key(root_path: &str) -> String {
     format!("root|{root_path}")
 }
@@ -226,6 +235,7 @@ fn section_row_key(
     format!("section|{root_path}|{artist_name}|{folder_name}|{section_name}")
 }
 
+#[must_use]
 pub fn build_library_tree_flat_binary<S: BuildHasher>(
     library: &LibrarySnapshot,
     sort_mode: LibrarySortMode,
@@ -235,6 +245,7 @@ pub fn build_library_tree_flat_binary<S: BuildHasher>(
     encode_flat_rows(&rows)
 }
 
+#[must_use]
 pub fn compute_artist_album_counts(library: &LibrarySnapshot) -> (usize, usize) {
     let roots = library.roots.clone();
     if roots.is_empty() {
@@ -346,106 +357,7 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
         return Vec::new();
     }
 
-    let mut builders: BTreeMap<String, RootNodeBuilder> = BTreeMap::new();
-    for root in &roots {
-        builders.insert(
-            root.path.to_string_lossy().to_string(),
-            RootNodeBuilder {
-                root_path: root.path.clone(),
-                root_name: root.display_name(),
-                artists: BTreeMap::new(),
-            },
-        );
-    }
-
-    for track in &library.tracks {
-        let Some(root) = pick_root_for_track(&roots, track) else {
-            continue;
-        };
-        let root_key = root.path.to_string_lossy().to_string();
-        let Some(root_builder) = builders.get_mut(&root_key) else {
-            continue;
-        };
-
-        let Ok(rel) = track.path.strip_prefix(&root.path) else {
-            continue;
-        };
-        let components = rel
-            .components()
-            .filter_map(|component| {
-                let std::path::Component::Normal(name) = component else {
-                    return None;
-                };
-                Some(name.to_string_lossy().to_string())
-            })
-            .collect::<Vec<_>>();
-
-        let leaf = TrackLeaf {
-            path: track.path.clone(),
-            title: normalized_track_title(track),
-            file_stem: track
-                .path
-                .file_stem()
-                .map_or_else(String::new, |s| s.to_string_lossy().into_owned()),
-            album_tag: track.album.trim().to_string(),
-            cover_path: track.cover_path.clone(),
-            year: track.year,
-            track_no: track.track_no,
-        };
-
-        if components.is_empty() {
-            continue;
-        }
-
-        let (artist_name, artist_path) = if components.len() >= 2 {
-            (components[0].clone(), root.path.join(&components[0]))
-        } else {
-            let fallback = if track.artist.trim().is_empty() {
-                String::from("Unknown Artist")
-            } else {
-                track.artist.trim().to_string()
-            };
-            (fallback, root.path.clone())
-        };
-
-        let artist_entry = root_builder
-            .artists
-            .entry(artist_name.clone())
-            .or_insert_with(|| ArtistNodeBuilder {
-                artist_name: artist_name.clone(),
-                artist_path,
-                loose_tracks: Vec::new(),
-                albums: BTreeMap::new(),
-            });
-
-        if components.len() <= 2 {
-            artist_entry.loose_tracks.push(leaf);
-            continue;
-        }
-
-        let album_folder = components[1].clone();
-        let album_path = root.path.join(&artist_name).join(&album_folder);
-        let album_entry = artist_entry
-            .albums
-            .entry(album_folder.clone())
-            .or_insert_with(|| AlbumNodeBuilder {
-                folder_name: album_folder.clone(),
-                folder_path: album_path,
-                root_tracks: Vec::new(),
-                sections: BTreeMap::new(),
-            });
-
-        if components.len() >= 4 {
-            let section_name = components[2].clone();
-            album_entry
-                .sections
-                .entry(section_name)
-                .or_default()
-                .push(leaf);
-        } else {
-            album_entry.root_tracks.push(leaf);
-        }
-    }
+    let builders = build_root_builders(&roots, &library.tracks);
 
     let multi_root = roots.len() >= 2;
     let mut rows = Vec::new();
@@ -473,6 +385,122 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
     }
 
     rows
+}
+
+fn build_root_builders(
+    roots: &[LibraryRoot],
+    tracks: &[LibraryTrack],
+) -> BTreeMap<String, RootNodeBuilder> {
+    let mut builders: BTreeMap<String, RootNodeBuilder> = roots
+        .iter()
+        .map(|root| {
+            (
+                root.path.to_string_lossy().to_string(),
+                RootNodeBuilder {
+                    root_path: root.path.clone(),
+                    root_name: root.display_name(),
+                    artists: BTreeMap::new(),
+                },
+            )
+        })
+        .collect();
+
+    for track in tracks {
+        let Some(root) = pick_root_for_track(roots, track) else {
+            continue;
+        };
+        let root_key = root.path.to_string_lossy().to_string();
+        let Some(root_builder) = builders.get_mut(&root_key) else {
+            continue;
+        };
+        insert_track_leaf(root_builder, root, track);
+    }
+
+    builders
+}
+
+fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, track: &LibraryTrack) {
+    let Ok(rel) = track.path.strip_prefix(&root.path) else {
+        return;
+    };
+    let components = rel
+        .components()
+        .filter_map(|component| {
+            let std::path::Component::Normal(name) = component else {
+                return None;
+            };
+            Some(name.to_string_lossy().to_string())
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return;
+    }
+
+    let leaf = TrackLeaf {
+        path: track.path.clone(),
+        title: normalized_track_title(track),
+        file_stem: track
+            .path
+            .file_stem()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+        album_tag: track.album.trim().to_string(),
+        cover_path: track.cover_path.clone(),
+        year: track.year,
+        track_no: track.track_no,
+    };
+    let (artist_name, artist_path) = artist_parts(root, track, &components);
+    let artist_entry = root_builder
+        .artists
+        .entry(artist_name.clone())
+        .or_insert_with(|| ArtistNodeBuilder {
+            artist_name: artist_name.clone(),
+            artist_path,
+            loose_tracks: Vec::new(),
+            albums: BTreeMap::new(),
+        });
+
+    if components.len() <= 2 {
+        artist_entry.loose_tracks.push(leaf);
+        return;
+    }
+
+    let album_folder = components[1].clone();
+    let album_path = root.path.join(&artist_name).join(&album_folder);
+    let album_entry = artist_entry
+        .albums
+        .entry(album_folder.clone())
+        .or_insert_with(|| AlbumNodeBuilder {
+            folder_name: album_folder.clone(),
+            folder_path: album_path,
+            root_tracks: Vec::new(),
+            sections: BTreeMap::new(),
+        });
+
+    if components.len() >= 4 {
+        album_entry
+            .sections
+            .entry(components[2].clone())
+            .or_default()
+            .push(leaf);
+    } else {
+        album_entry.root_tracks.push(leaf);
+    }
+}
+
+fn artist_parts(
+    root: &LibraryRoot,
+    track: &LibraryTrack,
+    components: &[String],
+) -> (String, PathBuf) {
+    if components.len() >= 2 {
+        return (components[0].clone(), root.path.join(&components[0]));
+    }
+    let fallback = if track.artist.trim().is_empty() {
+        String::from("Unknown Artist")
+    } else {
+        track.artist.trim().to_string()
+    };
+    (fallback, root.path.clone())
 }
 
 fn build_artist_rows_flat<S: BuildHasher>(
@@ -535,91 +563,127 @@ fn build_artist_rows_flat<S: BuildHasher>(
             ));
         }
 
-        for album in resolved_albums {
-            let album_path = album.folder_path.to_string_lossy().to_string();
-            let album_title = if let Some(year) = album.year {
-                format!("{} ({year})", album.title)
-            } else {
-                album.title.clone()
-            };
-            let album_key = album_row_key(root_path, &artist.artist_name, &album.folder_name);
-            let album_child_count = album.root_tracks.len() + album.sections.len();
-            let mut album_play_paths = Vec::with_capacity(
-                album.root_tracks.len() + album.sections.len().saturating_mul(8),
-            );
-            for track in &album.root_tracks {
-                album_play_paths.push(track.path.clone());
-            }
-            for section in &album.sections {
-                for track in &section.tracks {
-                    album_play_paths.push(track.path.clone());
-                }
-            }
-            out.push(FlatTreeRow::album(
+        append_album_rows(
+            &mut out,
+            resolved_albums,
+            &AlbumRowConfig {
+                artist_name: &artist.artist_name,
+                root_path,
+                lazy_hydration,
+                expanded_keys,
                 album_depth,
-                album_key.clone(),
-                &artist.artist_name,
-                &album_title,
-                &album_path,
-                album.cover_path.as_deref(),
-                album_child_count,
-                album_play_paths,
-            ));
-
-            let album_expanded = expanded_keys.is_none_or(|keys| keys.contains(&album_key));
-            if lazy_hydration && !album_expanded {
-                continue;
-            }
-
-            for track in &album.root_tracks {
-                out.push(FlatTreeRow::track(
-                    section_depth,
-                    &artist.artist_name,
-                    &track.label,
-                    &track.path,
-                    track.number,
-                ));
-            }
-
-            for section in &album.sections {
-                let section_path = section.path.to_string_lossy().to_string();
-                let section_play_paths = section
-                    .tracks
-                    .iter()
-                    .map(|track| track.path.clone())
-                    .collect::<Vec<_>>();
-                out.push(FlatTreeRow::section(
-                    section_depth,
-                    section_row_key(
-                        root_path,
-                        &artist.artist_name,
-                        &album.folder_name,
-                        &section.name,
-                    ),
-                    &section.name,
-                    &section_path,
-                    section_play_paths,
-                    section.tracks.len(),
-                ));
-                for track in &section.tracks {
-                    out.push(FlatTreeRow::track(
-                        section_track_depth,
-                        &artist.artist_name,
-                        &track.label,
-                        &track.path,
-                        track.number,
-                    ));
-                }
-            }
-        }
+                section_depth,
+                section_track_depth,
+            },
+        );
     }
 
     out
 }
 
+fn append_album_rows<S: BuildHasher>(
+    out: &mut Vec<FlatTreeRow>,
+    resolved_albums: Vec<ResolvedAlbum>,
+    config: &AlbumRowConfig<'_, S>,
+) {
+    for album in resolved_albums {
+        let album_path = album.folder_path.to_string_lossy().to_string();
+        let album_title = if let Some(year) = album.year {
+            format!("{} ({year})", album.title)
+        } else {
+            album.title.clone()
+        };
+        let album_key = album_row_key(config.root_path, config.artist_name, &album.folder_name);
+        let album_play_paths = album_play_paths(&album);
+        out.push(FlatTreeRow::album(
+            config.album_depth,
+            album_key.clone(),
+            config.artist_name,
+            &album_title,
+            &album_path,
+            &album,
+            album_play_paths,
+        ));
+
+        let album_expanded = config
+            .expanded_keys
+            .is_none_or(|keys| keys.contains(&album_key));
+        if config.lazy_hydration && !album_expanded {
+            continue;
+        }
+        append_album_tracks(
+            out,
+            config.artist_name,
+            &album,
+            config.root_path,
+            config.section_depth,
+            config.section_track_depth,
+        );
+    }
+}
+
+fn album_play_paths(album: &ResolvedAlbum) -> Vec<String> {
+    let mut play_paths =
+        Vec::with_capacity(album.root_tracks.len() + album.sections.len().saturating_mul(8));
+    for track in &album.root_tracks {
+        play_paths.push(track.path.clone());
+    }
+    for section in &album.sections {
+        for track in &section.tracks {
+            play_paths.push(track.path.clone());
+        }
+    }
+    play_paths
+}
+
+fn append_album_tracks(
+    out: &mut Vec<FlatTreeRow>,
+    artist_name: &str,
+    album: &ResolvedAlbum,
+    root_path: &str,
+    section_depth: u16,
+    section_track_depth: u16,
+) {
+    for track in &album.root_tracks {
+        out.push(FlatTreeRow::track(
+            section_depth,
+            artist_name,
+            &track.label,
+            &track.path,
+            track.number,
+        ));
+    }
+
+    for section in &album.sections {
+        let section_path = section.path.to_string_lossy().to_string();
+        let section_play_paths = section
+            .tracks
+            .iter()
+            .map(|track| track.path.clone())
+            .collect::<Vec<_>>();
+        out.push(FlatTreeRow::section(
+            section_depth,
+            section_row_key(root_path, artist_name, &album.folder_name, &section.name),
+            &section.name,
+            &section_path,
+            section_play_paths,
+            section.tracks.len(),
+        ));
+        for track in &section.tracks {
+            out.push(FlatTreeRow::track(
+                section_track_depth,
+                artist_name,
+                &track.label,
+                &track.path,
+                track.number,
+            ));
+        }
+    }
+}
+
 fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rows.len() * 96 + 4);
-    push_u32(&mut out, rows.len() as u32);
+    push_u32(&mut out, u32::try_from(rows.len()).unwrap_or(u32::MAX));
     for row in rows {
         push_u8(&mut out, row.row_type);
         push_u16(&mut out, row.depth);
@@ -641,7 +705,7 @@ fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
 }
 
 fn clamp_u16(value: usize) -> u16 {
-    value.min(u16::MAX as usize) as u16
+    u16::try_from(value.min(usize::from(u16::MAX))).unwrap_or(u16::MAX)
 }
 
 fn push_u8(out: &mut Vec<u8>, value: u8) {
@@ -662,8 +726,8 @@ fn push_i32(out: &mut Vec<u8>, value: i32) {
 
 fn push_u16_string(out: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
-    let len = bytes.len().min(u16::MAX as usize);
-    push_u16(out, len as u16);
+    let len = bytes.len().min(usize::from(u16::MAX));
+    push_u16(out, u16::try_from(len).unwrap_or(u16::MAX));
     out.extend_from_slice(&bytes[..len]);
 }
 
@@ -863,7 +927,7 @@ fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
                 width = width
             ),
             path: candidate.path,
-            number: candidate.number.min(u16::MAX as u32) as u16,
+            number: u16::try_from(candidate.number.min(u32::from(u16::MAX))).unwrap_or(u16::MAX),
         })
         .collect()
 }
@@ -1033,7 +1097,7 @@ mod tests {
     }
 
     fn read_u16_string(input: &[u8], offset: &mut usize) -> Option<String> {
-        let len = read_u16(input, offset)? as usize;
+        let len = usize::from(read_u16(input, offset)?);
         if *offset + len > input.len() {
             return None;
         }
@@ -1047,7 +1111,7 @@ mod tests {
         let Some(row_count) = read_u32(bytes, &mut offset) else {
             return Vec::new();
         };
-        let mut rows = Vec::with_capacity(row_count as usize);
+        let mut rows = Vec::with_capacity(usize::try_from(row_count).unwrap_or(usize::MAX));
         for _ in 0..row_count {
             let Some(row_type) = read_u8(bytes, &mut offset) else {
                 break;
@@ -1085,7 +1149,7 @@ mod tests {
             let Some(play_path_count) = read_u16(bytes, &mut offset) else {
                 break;
             };
-            let mut play_paths = Vec::with_capacity(play_path_count as usize);
+            let mut play_paths = Vec::with_capacity(usize::from(play_path_count));
             let mut ok = true;
             for _ in 0..play_path_count {
                 let Some(play_path) = read_u16_string(bytes, &mut offset) else {

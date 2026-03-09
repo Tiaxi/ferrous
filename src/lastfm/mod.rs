@@ -129,6 +129,7 @@ enum RequestError {
     Keyring(String),
 }
 
+#[must_use]
 pub fn app_credentials() -> Option<AppCredentials> {
     let api_key = option_env!("FERROUS_LASTFM_API_KEY")?.trim();
     let shared_secret = option_env!("FERROUS_LASTFM_SHARED_SECRET")?.trim();
@@ -141,10 +142,12 @@ pub fn app_credentials() -> Option<AppCredentials> {
     })
 }
 
+#[must_use]
 pub fn queue_path(config_base: &Path) -> PathBuf {
     config_base.join("lastfm_queue.json")
 }
 
+#[must_use]
 pub fn scrobble_threshold_seconds(duration_seconds: u32) -> Option<u32> {
     if duration_seconds <= 30 {
         return None;
@@ -152,16 +155,17 @@ pub fn scrobble_threshold_seconds(duration_seconds: u32) -> Option<u32> {
     Some((duration_seconds / 2).min(240))
 }
 
+#[must_use]
 pub fn spawn(options: ServiceOptions) -> (Handle, Receiver<Event>) {
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
     let _ = std::thread::Builder::new()
         .name("ferrous-lastfm".to_string())
-        .spawn(move || run_service_loop(cmd_rx, event_tx, options));
+        .spawn(move || run_service_loop(&cmd_rx, &event_tx, options));
     (Handle { tx: cmd_tx }, event_rx)
 }
 
-fn run_service_loop(cmd_rx: Receiver<Command>, event_tx: Sender<Event>, options: ServiceOptions) {
+fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, options: ServiceOptions) {
     let queue = options
         .queue_path
         .as_ref()
@@ -191,11 +195,11 @@ fn run_service_loop(cmd_rx: Receiver<Command>, event_tx: Sender<Event>, options:
         },
     };
     service.state.pending_scrobble_count = service.queue.len();
-    let _ = emit_state(&event_tx, &service.state);
+    let _ = emit_state(event_tx, &service.state);
 
     while let Ok(command) = cmd_rx.recv() {
         let keep_running = service.handle_command(command);
-        let _ = emit_state(&event_tx, &service.state);
+        let _ = emit_state(event_tx, &service.state);
         if !keep_running {
             break;
         }
@@ -219,7 +223,7 @@ impl Service {
             Command::BeginDesktopAuth => self.begin_desktop_auth(),
             Command::CompleteDesktopAuth => self.complete_desktop_auth(),
             Command::Disconnect { clear_queue } => self.disconnect(clear_queue),
-            Command::SendNowPlaying(track) => self.send_now_playing(track),
+            Command::SendNowPlaying(track) => self.send_now_playing(&track),
             Command::QueueScrobble(entry) => {
                 self.queue.push(entry);
                 self.save_queue();
@@ -339,7 +343,7 @@ impl Service {
         self.state.pending_scrobble_count = self.queue.len();
     }
 
-    fn send_now_playing(&mut self, track: NowPlayingTrack) {
+    fn send_now_playing(&mut self, track: &NowPlayingTrack) {
         if !self.state.enabled {
             return;
         }
@@ -352,7 +356,7 @@ impl Service {
         if track.artist.trim().is_empty() || track.track.trim().is_empty() {
             return;
         }
-        match send_now_playing_request(&self.client, credentials, session, &track) {
+        match send_now_playing_request(&self.client, credentials, session, track) {
             Ok(()) => {
                 self.state.status_text = format!("Now playing: {} - {}", track.artist, track.track);
             }

@@ -87,6 +87,7 @@ pub struct PlaybackEngine {
 }
 
 impl PlaybackEngine {
+    #[must_use]
     pub fn new(
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
@@ -892,7 +893,7 @@ mod backend {
             }
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
+                .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
                 .unwrap_or(0x9E37_79B9_7F4A_7C15);
             self.rng_state = nanos ^ 0xA5A5_A5A5_5A5A_5A5A;
             if self.rng_state == 0 {
@@ -906,7 +907,7 @@ mod backend {
                 .rng_state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
-            (self.rng_state % (max as u64)) as usize
+            usize::try_from(self.rng_state % u64::try_from(max).unwrap_or(u64::MAX)).unwrap_or(0)
         }
 
         fn advance_shuffle_or_forward(&mut self, allow_repeat_cycle: bool) -> Option<PathBuf> {
@@ -952,6 +953,17 @@ mod backend {
         }
     }
 
+    struct GstPlaybackRuntime {
+        playbin: gst::Element,
+        queue_state: Arc<Mutex<GaplessQueue>>,
+        event_tx: Sender<PlaybackEvent>,
+        snapshot: PlaybackSnapshot,
+        target_volume: f32,
+        applied_volume: f32,
+        startup_gain_ramp: bool,
+        seek_hold: Option<(Instant, Duration)>,
+    }
+
     pub fn spawn_engine(
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
@@ -962,7 +974,7 @@ mod backend {
         let _ = std::thread::Builder::new()
             .name("ferrous-playback-gst".to_string())
             .spawn(move || {
-                if let Err(err) = run_gst_engine(cmd_rx, event_tx.clone(), analysis_tx, pcm_tx) {
+                if let Err(err) = run_gst_engine(&cmd_rx, event_tx.clone(), analysis_tx, pcm_tx) {
                     tracing::error!("gstreamer playback engine failed: {err:#}");
                 }
             });
@@ -970,8 +982,426 @@ mod backend {
         (cmd_tx, event_rx)
     }
 
+    impl GstPlaybackRuntime {
+        fn new(
+            playbin: gst::Element,
+            queue_state: Arc<Mutex<GaplessQueue>>,
+            event_tx: Sender<PlaybackEvent>,
+        ) -> Self {
+            Self {
+                playbin,
+                queue_state,
+                event_tx,
+                snapshot: PlaybackSnapshot {
+                    volume: 1.0,
+                    ..PlaybackSnapshot::default()
+                },
+                target_volume: 1.0,
+                applied_volume: 1.0,
+                startup_gain_ramp: false,
+                seek_hold: None,
+            }
+        }
+
+        fn emit_snapshot(&self) {
+            let _ = self
+                .event_tx
+                .send(PlaybackEvent::Snapshot(self.snapshot.clone()));
+        }
+
+        fn emit_track_changed(&self, path: PathBuf, queue_index: usize, kind: TrackChangeKind) {
+            let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                path,
+                queue_index,
+                kind,
+            });
+        }
+
+        fn set_queue_flags(&mut self, repeat_mode: RepeatMode, shuffle_enabled: bool) {
+            self.snapshot.repeat_mode = repeat_mode;
+            self.snapshot.shuffle_enabled = shuffle_enabled;
+        }
+
+        fn switch_to_path(
+            &mut self,
+            path: PathBuf,
+            queue_index: usize,
+            kind: TrackChangeKind,
+            force_play: bool,
+        ) {
+            let Some(uri) = file_uri(&path) else {
+                return;
+            };
+            self.snapshot.current_queue_index = Some(queue_index);
+            switch_track(
+                &self.playbin,
+                &mut self.snapshot,
+                path.as_path(),
+                &uri,
+                &mut self.applied_volume,
+                &mut self.startup_gain_ramp,
+                force_play,
+            );
+            self.emit_track_changed(path, queue_index, kind);
+            self.emit_snapshot();
+        }
+
+        fn stop_with_empty_queue(&mut self) {
+            soft_mute(&self.playbin, &mut self.applied_volume);
+            let _ = self.playbin.set_state(gst::State::Ready);
+            self.startup_gain_ramp = false;
+            self.snapshot.current = None;
+            self.snapshot.current_queue_index = None;
+            self.snapshot.state = PlaybackState::Stopped;
+            self.snapshot.position = Duration::ZERO;
+            self.snapshot.duration = Duration::ZERO;
+        }
+
+        fn load_queue(&mut self, paths: Vec<PathBuf>) {
+            if paths.is_empty() {
+                return;
+            }
+            let Ok(mut state) = self.queue_state.lock() else {
+                return;
+            };
+            state.set_queue(paths);
+            let repeat_mode = state.repeat_mode;
+            let shuffle_enabled = state.shuffle_enabled;
+            let first = state.current();
+            let current_index = state.current_index().unwrap_or(0);
+            drop(state);
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+            let Some(first) = first else {
+                return;
+            };
+            self.switch_to_path(first, current_index, TrackChangeKind::Manual, false);
+        }
+
+        fn add_to_queue(&mut self, paths: Vec<PathBuf>) {
+            let Some((repeat_mode, shuffle_enabled)) = (match self.queue_state.lock() {
+                Ok(mut state) => {
+                    state.add_to_queue(paths);
+                    Some((state.repeat_mode, state.shuffle_enabled))
+                }
+                Err(_) => None,
+            }) else {
+                return;
+            };
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+        }
+
+        fn remove_at(&mut self, idx: usize) {
+            let old_current = self.snapshot.current.clone();
+            let Some((next_current, repeat_mode, shuffle_enabled, current_index)) =
+                (match self.queue_state.lock() {
+                    Ok(mut state) => {
+                        let next_current = state.remove_at(idx);
+                        Some((
+                            next_current,
+                            state.repeat_mode,
+                            state.shuffle_enabled,
+                            state.current_index(),
+                        ))
+                    }
+                    Err(_) => None,
+                })
+            else {
+                return;
+            };
+            self.snapshot.current_queue_index = current_index;
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+            if let Some(path) = next_current {
+                if old_current.as_ref() == Some(&path) {
+                    self.snapshot.current = Some(path);
+                } else {
+                    self.switch_to_path(
+                        path,
+                        current_index.unwrap_or(0),
+                        TrackChangeKind::Manual,
+                        false,
+                    );
+                    return;
+                }
+            } else {
+                self.stop_with_empty_queue();
+            }
+            self.emit_snapshot();
+        }
+
+        fn move_queue_item(&mut self, from: usize, to: usize) {
+            let Some((repeat_mode, shuffle_enabled, current_index)) = (match self.queue_state.lock()
+            {
+                Ok(mut state) => {
+                    state.move_item(from, to);
+                    Some((
+                        state.repeat_mode,
+                        state.shuffle_enabled,
+                        state.current_index(),
+                    ))
+                }
+                Err(_) => None,
+            }) else {
+                return;
+            };
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+            self.snapshot.current_queue_index = current_index;
+        }
+
+        fn clear_queue(&mut self) {
+            let flags = if let Ok(mut state) = self.queue_state.lock() {
+                state.clear();
+                Some((state.repeat_mode, state.shuffle_enabled))
+            } else {
+                None
+            };
+            if let Some((repeat_mode, shuffle_enabled)) = flags {
+                self.set_queue_flags(repeat_mode, shuffle_enabled);
+            }
+            self.stop_with_empty_queue();
+            self.emit_snapshot();
+        }
+
+        fn play_at(&mut self, idx: usize) {
+            let Ok(mut state) = self.queue_state.lock() else {
+                return;
+            };
+            let repeat_mode = state.repeat_mode;
+            let shuffle_enabled = state.shuffle_enabled;
+            let path = state.set_current(idx);
+            let current_index = state.current_index().unwrap_or(idx);
+            drop(state);
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+            let Some(path) = path else {
+                return;
+            };
+            self.switch_to_path(path, current_index, TrackChangeKind::Manual, false);
+        }
+
+        fn advance_manual(&mut self, next: bool) {
+            let Ok(mut state) = self.queue_state.lock() else {
+                return;
+            };
+            let repeat_mode = state.repeat_mode;
+            let shuffle_enabled = state.shuffle_enabled;
+            let resume_from_pause = self.snapshot.state == PlaybackState::Paused;
+            let next_path = if next {
+                state.next_manual()
+            } else {
+                state.previous_manual()
+            };
+            let current_index = state.current_index().unwrap_or(0);
+            drop(state);
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+            let Some(path) = next_path else {
+                return;
+            };
+            self.switch_to_path(
+                path,
+                current_index,
+                TrackChangeKind::Manual,
+                resume_from_pause,
+            );
+        }
+
+        fn play(&mut self) {
+            let was_stopped = self.snapshot.state == PlaybackState::Stopped;
+            if let Ok(state) = self.queue_state.lock() {
+                self.snapshot.current_queue_index = state.current_index();
+            }
+            if was_stopped {
+                self.applied_volume = 0.0;
+                self.playbin
+                    .set_property("volume", f64::from(self.applied_volume));
+                self.startup_gain_ramp = true;
+            }
+            if self.playbin.set_state(gst::State::Playing).is_ok() {
+                self.snapshot.state = PlaybackState::Playing;
+                if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
+                    self.startup_gain_ramp = true;
+                }
+                self.emit_snapshot();
+            }
+        }
+
+        fn pause(&mut self) {
+            if self.playbin.set_state(gst::State::Paused).is_ok() {
+                self.snapshot.state = PlaybackState::Paused;
+                self.emit_snapshot();
+            }
+        }
+
+        fn stop(&mut self) {
+            soft_mute(&self.playbin, &mut self.applied_volume);
+            if self.playbin.set_state(gst::State::Ready).is_ok() {
+                self.startup_gain_ramp = false;
+                self.seek_hold = None;
+                self.snapshot.state = PlaybackState::Stopped;
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.current_queue_index = None;
+                self.emit_snapshot();
+            }
+        }
+
+        fn seek(&mut self, pos: Duration) {
+            let nanos = u64::try_from(pos.as_nanos().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
+            let target = gst::ClockTime::from_nseconds(nanos);
+            let seek_flags = if self
+                .snapshot
+                .current
+                .as_ref()
+                .is_some_and(|path| is_dts_file(path))
+            {
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+            } else {
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+            };
+            let _ = self.playbin.seek_simple(seek_flags, target);
+            self.snapshot.position = pos.min(self.snapshot.duration);
+            self.seek_hold = Some((
+                Instant::now() + Duration::from_millis(220),
+                self.snapshot.position,
+            ));
+            let _ = self.event_tx.send(PlaybackEvent::Seeked);
+        }
+
+        fn set_volume(&mut self, volume: f32) {
+            self.target_volume = volume.clamp(0.0, 1.0);
+            self.snapshot.volume = self.target_volume;
+            self.emit_snapshot();
+        }
+
+        fn set_repeat_mode(&mut self, mode: RepeatMode) {
+            if let Ok(mut state) = self.queue_state.lock() {
+                state.set_repeat_mode(mode);
+                self.snapshot.repeat_mode = state.repeat_mode;
+            } else {
+                self.snapshot.repeat_mode = mode;
+            }
+            self.emit_snapshot();
+        }
+
+        fn set_shuffle(&mut self, enabled: bool) {
+            if let Ok(mut state) = self.queue_state.lock() {
+                state.set_shuffle_enabled(enabled);
+                self.snapshot.shuffle_enabled = state.shuffle_enabled;
+            } else {
+                self.snapshot.shuffle_enabled = enabled;
+            }
+            self.emit_snapshot();
+        }
+
+        fn poll(&mut self) {
+            if self.snapshot.state == PlaybackState::Stopped
+                && !self.startup_gain_ramp
+                && self.seek_hold.is_none()
+            {
+                return;
+            }
+
+            let mut snapshot_changed = false;
+            let delta = self.target_volume - self.applied_volume;
+            if delta.abs() > f32::EPSILON
+                && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp)
+            {
+                let step = if self.startup_gain_ramp { 0.45 } else { 0.18 };
+                if delta.abs() <= step {
+                    self.applied_volume = self.target_volume;
+                    self.startup_gain_ramp = false;
+                } else {
+                    self.applied_volume += delta.signum() * step;
+                }
+                self.playbin
+                    .set_property("volume", f64::from(self.applied_volume));
+                if (self.snapshot.volume - self.applied_volume).abs() > f32::EPSILON {
+                    self.snapshot.volume = self.applied_volume;
+                    snapshot_changed = true;
+                }
+            }
+
+            let mut position_locked = false;
+            if let Some((until, target)) = self.seek_hold.as_ref().copied() {
+                if Instant::now() < until {
+                    if self.snapshot.position != target {
+                        self.snapshot.position = target;
+                        snapshot_changed = true;
+                    }
+                    position_locked = true;
+                } else {
+                    self.seek_hold = None;
+                }
+            }
+            if !position_locked && self.snapshot.state != PlaybackState::Stopped {
+                if let Some(pos) = self.playbin.query_position::<gst::ClockTime>() {
+                    let next_pos = Duration::from_nanos(pos.nseconds());
+                    if self.snapshot.position != next_pos {
+                        self.snapshot.position = next_pos;
+                        snapshot_changed = true;
+                    }
+                }
+            }
+            if self.snapshot.state != PlaybackState::Stopped
+                || self.snapshot.duration == Duration::ZERO
+            {
+                if let Some(dur) = self.playbin.query_duration::<gst::ClockTime>() {
+                    let next_dur = Duration::from_nanos(dur.nseconds());
+                    if self.snapshot.duration != next_dur {
+                        self.snapshot.duration = next_dur;
+                        snapshot_changed = true;
+                    }
+                }
+            }
+            snapshot_changed |=
+                maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot, &self.event_tx);
+            if snapshot_changed {
+                self.emit_snapshot();
+            }
+        }
+
+        fn apply_command(&mut self, cmd: PlaybackCommand) {
+            match cmd {
+                PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
+                PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
+                PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
+                PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
+                PlaybackCommand::ClearQueue => self.clear_queue(),
+                PlaybackCommand::PlayAt(idx) => self.play_at(idx),
+                PlaybackCommand::Next => self.advance_manual(true),
+                PlaybackCommand::Previous => self.advance_manual(false),
+                PlaybackCommand::Play => self.play(),
+                PlaybackCommand::Pause => self.pause(),
+                PlaybackCommand::Stop => self.stop(),
+                PlaybackCommand::Seek(pos) => self.seek(pos),
+                PlaybackCommand::SetVolume(volume) => self.set_volume(volume),
+                PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
+                PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
+                PlaybackCommand::Poll => self.poll(),
+            }
+        }
+
+        fn handle_bus_message(&mut self, msg: &gst::Message) {
+            match msg.view() {
+                gst::MessageView::Eos(..) => {
+                    self.snapshot.state = PlaybackState::Stopped;
+                    self.snapshot.position = Duration::ZERO;
+                    self.emit_snapshot();
+                }
+                gst::MessageView::Error(err) => {
+                    tracing::error!(
+                        "gstreamer error from {:?}: {} ({:?})",
+                        err.src().map(gstreamer::prelude::GstObjectExt::path_string),
+                        err.error(),
+                        err.debug()
+                    );
+                    self.snapshot.state = PlaybackState::Stopped;
+                    self.emit_snapshot();
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn run_gst_engine(
-        cmd_rx: Receiver<PlaybackCommand>,
+        cmd_rx: &Receiver<PlaybackCommand>,
         event_tx: Sender<PlaybackEvent>,
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
@@ -991,9 +1421,7 @@ mod backend {
             let queue_state = Arc::clone(&queue_state);
             playbin.connect("about-to-finish", false, move |values| {
                 let maybe_playbin = values.first().and_then(|v| v.get::<gst::Element>().ok());
-                let Some(playbin_obj) = maybe_playbin else {
-                    return None;
-                };
+                let playbin_obj = maybe_playbin?;
 
                 let next = queue_state.lock().ok().and_then(|mut q| q.next_natural());
                 if let Some(next_path) = next {
@@ -1006,384 +1434,25 @@ mod backend {
         }
 
         let bus = playbin.bus().context("playbin has no bus")?;
-        let mut snapshot = PlaybackSnapshot {
-            volume: 1.0,
-            ..PlaybackSnapshot::default()
-        };
-        let mut target_volume = 1.0f64;
-        let mut applied_volume = 1.0f64;
-        let mut startup_gain_ramp = false;
-        let mut seek_hold: Option<(Instant, Duration)> = None;
-        playbin.set_property("volume", applied_volume);
+        let mut runtime = GstPlaybackRuntime::new(playbin, queue_state, event_tx);
+        runtime
+            .playbin
+            .set_property("volume", f64::from(runtime.applied_volume));
 
         loop {
             match cmd_rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(cmd) => {
-                    apply_command(
-                        &playbin,
-                        &queue_state,
-                        &event_tx,
-                        &mut snapshot,
-                        &mut target_volume,
-                        &mut applied_volume,
-                        &mut startup_gain_ramp,
-                        &mut seek_hold,
-                        cmd,
-                    );
-                }
+                Ok(cmd) => runtime.apply_command(cmd),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
             while let Some(msg) = bus.pop() {
-                handle_bus_message(&playbin, &event_tx, &mut snapshot, msg);
+                runtime.handle_bus_message(&msg);
             }
         }
 
-        let _ = playbin.set_state(gst::State::Null);
+        let _ = runtime.playbin.set_state(gst::State::Null);
         Ok(())
-    }
-
-    fn apply_command(
-        playbin: &gst::Element,
-        queue_state: &Arc<Mutex<GaplessQueue>>,
-        event_tx: &Sender<PlaybackEvent>,
-        snapshot: &mut PlaybackSnapshot,
-        target_volume: &mut f64,
-        applied_volume: &mut f64,
-        startup_gain_ramp: &mut bool,
-        seek_hold: &mut Option<(Instant, Duration)>,
-        cmd: PlaybackCommand,
-    ) {
-        match cmd {
-            PlaybackCommand::LoadQueue(paths) => {
-                if paths.is_empty() {
-                    return;
-                }
-
-                if let Ok(mut state) = queue_state.lock() {
-                    state.set_queue(paths);
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                    if let Some(first) = state.current() {
-                        if let Some(uri) = file_uri(&first) {
-                            snapshot.current_queue_index = state.current_index();
-                            switch_track(
-                                playbin,
-                                snapshot,
-                                &first,
-                                &uri,
-                                applied_volume,
-                                startup_gain_ramp,
-                                false,
-                            );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path: first.clone(),
-                                queue_index: state.current_index().unwrap_or(0),
-                                kind: TrackChangeKind::Manual,
-                            });
-                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                        }
-                    }
-                }
-            }
-            PlaybackCommand::AddToQueue(paths) => {
-                if let Ok(mut state) = queue_state.lock() {
-                    state.add_to_queue(paths);
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                }
-            }
-            PlaybackCommand::RemoveAt(idx) => {
-                if let Ok(mut state) = queue_state.lock() {
-                    let old_current = snapshot.current.clone();
-                    let next_current = state.remove_at(idx);
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                    snapshot.current_queue_index = state.current_index();
-                    if let Some(path) = next_current {
-                        if old_current.as_ref() == Some(&path) {
-                            snapshot.current = Some(path);
-                        } else {
-                            if let Some(uri) = file_uri(&path) {
-                                switch_track(
-                                    playbin,
-                                    snapshot,
-                                    &path,
-                                    &uri,
-                                    applied_volume,
-                                    startup_gain_ramp,
-                                    false,
-                                );
-                            }
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path: path.clone(),
-                                queue_index: snapshot.current_queue_index.unwrap_or(0),
-                                kind: TrackChangeKind::Manual,
-                            });
-                        }
-                    } else {
-                        soft_mute(playbin, applied_volume);
-                        let _ = playbin.set_state(gst::State::Ready);
-                        *startup_gain_ramp = false;
-                        snapshot.current = None;
-                        snapshot.state = PlaybackState::Stopped;
-                        snapshot.position = Duration::ZERO;
-                        snapshot.duration = Duration::ZERO;
-                    }
-                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                }
-            }
-            PlaybackCommand::MoveQueue { from, to } => {
-                if let Ok(mut state) = queue_state.lock() {
-                    state.move_item(from, to);
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                    snapshot.current_queue_index = state.current_index();
-                }
-            }
-            PlaybackCommand::ClearQueue => {
-                if let Ok(mut state) = queue_state.lock() {
-                    state.clear();
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                }
-                soft_mute(playbin, applied_volume);
-                let _ = playbin.set_state(gst::State::Ready);
-                *startup_gain_ramp = false;
-                snapshot.current = None;
-                snapshot.current_queue_index = None;
-                snapshot.state = PlaybackState::Stopped;
-                snapshot.position = Duration::ZERO;
-                snapshot.duration = Duration::ZERO;
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-            }
-            PlaybackCommand::PlayAt(idx) => {
-                if let Ok(mut state) = queue_state.lock() {
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                    if let Some(path) = state.set_current(idx) {
-                        if let Some(uri) = file_uri(&path) {
-                            snapshot.current_queue_index = state.current_index();
-                            switch_track(
-                                playbin,
-                                snapshot,
-                                &path,
-                                &uri,
-                                applied_volume,
-                                startup_gain_ramp,
-                                false,
-                            );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path: path.clone(),
-                                queue_index: state.current_index().unwrap_or(idx),
-                                kind: TrackChangeKind::Manual,
-                            });
-                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                        }
-                    }
-                }
-            }
-            PlaybackCommand::Next => {
-                if let Ok(mut state) = queue_state.lock() {
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                    let resume_from_pause = snapshot.state == PlaybackState::Paused;
-                    if let Some(path) = state.next_manual() {
-                        if let Some(uri) = file_uri(&path) {
-                            snapshot.current_queue_index = state.current_index();
-                            switch_track(
-                                playbin,
-                                snapshot,
-                                &path,
-                                &uri,
-                                applied_volume,
-                                startup_gain_ramp,
-                                resume_from_pause,
-                            );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path: path.clone(),
-                                queue_index: state.current_index().unwrap_or(0),
-                                kind: TrackChangeKind::Manual,
-                            });
-                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                        }
-                    }
-                }
-            }
-            PlaybackCommand::Previous => {
-                if let Ok(mut state) = queue_state.lock() {
-                    snapshot.repeat_mode = state.repeat_mode;
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                    let resume_from_pause = snapshot.state == PlaybackState::Paused;
-                    if let Some(path) = state.previous_manual() {
-                        if let Some(uri) = file_uri(&path) {
-                            snapshot.current_queue_index = state.current_index();
-                            switch_track(
-                                playbin,
-                                snapshot,
-                                &path,
-                                &uri,
-                                applied_volume,
-                                startup_gain_ramp,
-                                resume_from_pause,
-                            );
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path: path.clone(),
-                                queue_index: state.current_index().unwrap_or(0),
-                                kind: TrackChangeKind::Manual,
-                            });
-                            let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                        }
-                    }
-                }
-            }
-            PlaybackCommand::Play => {
-                let was_stopped = snapshot.state == PlaybackState::Stopped;
-                if let Ok(state) = queue_state.lock() {
-                    snapshot.current_queue_index = state.current_index();
-                }
-                if was_stopped {
-                    // Prime startup gain before entering Playing so first output buffer starts silent.
-                    *applied_volume = 0.0;
-                    playbin.set_property("volume", *applied_volume);
-                    *startup_gain_ramp = true;
-                }
-                if playbin.set_state(gst::State::Playing).is_ok() {
-                    snapshot.state = PlaybackState::Playing;
-                    if (*target_volume - *applied_volume).abs() > f64::EPSILON {
-                        *startup_gain_ramp = true;
-                    }
-                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                }
-            }
-            PlaybackCommand::Pause => {
-                if playbin.set_state(gst::State::Paused).is_ok() {
-                    snapshot.state = PlaybackState::Paused;
-                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                }
-            }
-            PlaybackCommand::Stop => {
-                soft_mute(playbin, applied_volume);
-                if playbin.set_state(gst::State::Ready).is_ok() {
-                    *startup_gain_ramp = false;
-                    *seek_hold = None;
-                    snapshot.state = PlaybackState::Stopped;
-                    snapshot.position = Duration::ZERO;
-                    snapshot.current_queue_index = None;
-                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                }
-            }
-            PlaybackCommand::Seek(pos) => {
-                let nanos = pos.as_nanos().min(u64::MAX as u128) as u64;
-                let target = gst::ClockTime::from_nseconds(nanos);
-                let seek_flags = if snapshot
-                    .current
-                    .as_ref()
-                    .is_some_and(|path| is_dts_file(path))
-                {
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
-                } else {
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
-                };
-                let _ = playbin.seek_simple(seek_flags, target);
-                snapshot.position = pos.min(snapshot.duration);
-                *seek_hold = Some((
-                    Instant::now() + Duration::from_millis(220),
-                    snapshot.position,
-                ));
-                let _ = event_tx.send(PlaybackEvent::Seeked);
-            }
-            PlaybackCommand::SetVolume(vol) => {
-                *target_volume = vol.clamp(0.0, 1.0) as f64;
-                snapshot.volume = *target_volume as f32;
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-            }
-            PlaybackCommand::SetRepeatMode(mode) => {
-                if let Ok(mut state) = queue_state.lock() {
-                    state.set_repeat_mode(mode);
-                    snapshot.repeat_mode = state.repeat_mode;
-                } else {
-                    snapshot.repeat_mode = mode;
-                }
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-            }
-            PlaybackCommand::SetShuffle(enabled) => {
-                if let Ok(mut state) = queue_state.lock() {
-                    state.set_shuffle_enabled(enabled);
-                    snapshot.shuffle_enabled = state.shuffle_enabled;
-                } else {
-                    snapshot.shuffle_enabled = enabled;
-                }
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-            }
-            PlaybackCommand::Poll => {
-                if snapshot.state == PlaybackState::Stopped
-                    && !*startup_gain_ramp
-                    && seek_hold.is_none()
-                {
-                    return;
-                }
-                let mut snapshot_changed = false;
-                let delta = *target_volume - *applied_volume;
-                if delta.abs() > f64::EPSILON
-                    && (snapshot.state == PlaybackState::Playing || *startup_gain_ramp)
-                {
-                    // Apply a short gain ramp to avoid zipper noise / clicks when dragging volume.
-                    let step = if *startup_gain_ramp {
-                        0.45_f64
-                    } else {
-                        0.18_f64
-                    };
-                    if delta.abs() <= step {
-                        *applied_volume = *target_volume;
-                        *startup_gain_ramp = false;
-                    } else {
-                        *applied_volume += delta.signum() * step;
-                    }
-                    playbin.set_property("volume", *applied_volume);
-                    let volume = *applied_volume as f32;
-                    if (snapshot.volume - volume).abs() > f32::EPSILON {
-                        snapshot.volume = volume;
-                        snapshot_changed = true;
-                    }
-                }
-                let mut position_locked = false;
-                if let Some((until, target)) = seek_hold.as_ref().copied() {
-                    if Instant::now() < until {
-                        if snapshot.position != target {
-                            snapshot.position = target;
-                            snapshot_changed = true;
-                        }
-                        position_locked = true;
-                    } else {
-                        *seek_hold = None;
-                    }
-                }
-                if !position_locked && snapshot.state != PlaybackState::Stopped {
-                    if let Some(pos) = playbin.query_position::<gst::ClockTime>() {
-                        let next_pos = Duration::from_nanos(pos.nseconds());
-                        if snapshot.position != next_pos {
-                            snapshot.position = next_pos;
-                            snapshot_changed = true;
-                        }
-                    }
-                }
-                if snapshot.state != PlaybackState::Stopped || snapshot.duration == Duration::ZERO {
-                    if let Some(dur) = playbin.query_duration::<gst::ClockTime>() {
-                        let next_dur = Duration::from_nanos(dur.nseconds());
-                        if snapshot.duration != next_dur {
-                            snapshot.duration = next_dur;
-                            snapshot_changed = true;
-                        }
-                    }
-                }
-                snapshot_changed |= maybe_emit_natural_handoff(queue_state, snapshot, event_tx);
-                if snapshot_changed {
-                    let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-                }
-            }
-        }
     }
 
     fn maybe_emit_natural_handoff(
@@ -1421,9 +1490,9 @@ mod backend {
     fn switch_track(
         playbin: &gst::Element,
         snapshot: &mut PlaybackSnapshot,
-        path: &PathBuf,
+        path: &Path,
         uri: &str,
-        applied_volume: &mut f64,
+        applied_volume: &mut f32,
         startup_gain_ramp: &mut bool,
         force_play: bool,
     ) {
@@ -1441,15 +1510,15 @@ mod backend {
         } else {
             *startup_gain_ramp = false;
         }
-        snapshot.current = Some(path.clone());
+        snapshot.current = Some(path.to_path_buf());
         snapshot.position = Duration::ZERO;
         snapshot.duration = Duration::ZERO;
     }
 
-    fn soft_mute(playbin: &gst::Element, applied_volume: &mut f64) {
+    fn soft_mute(playbin: &gst::Element, applied_volume: &mut f32) {
         if *applied_volume <= 0.0001 {
             *applied_volume = 0.0;
-            playbin.set_property("volume", *applied_volume);
+            playbin.set_property("volume", f64::from(*applied_volume));
             return;
         }
         for _ in 0..3 {
@@ -1457,40 +1526,14 @@ mod backend {
             if *applied_volume <= 0.0001 {
                 *applied_volume = 0.0;
             }
-            playbin.set_property("volume", *applied_volume);
+            playbin.set_property("volume", f64::from(*applied_volume));
             std::thread::sleep(Duration::from_millis(4));
             if *applied_volume == 0.0 {
                 break;
             }
         }
         *applied_volume = 0.0;
-        playbin.set_property("volume", *applied_volume);
-    }
-
-    fn handle_bus_message(
-        _playbin: &gst::Element,
-        event_tx: &Sender<PlaybackEvent>,
-        snapshot: &mut PlaybackSnapshot,
-        msg: gst::Message,
-    ) {
-        match msg.view() {
-            gst::MessageView::Eos(..) => {
-                snapshot.state = PlaybackState::Stopped;
-                snapshot.position = Duration::ZERO;
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-            }
-            gst::MessageView::Error(err) => {
-                tracing::error!(
-                    "gstreamer error from {:?}: {} ({:?})",
-                    err.src().map(gstreamer::prelude::GstObjectExt::path_string),
-                    err.error(),
-                    err.debug()
-                );
-                snapshot.state = PlaybackState::Stopped;
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
-            }
-            _ => {}
-        }
+        playbin.set_property("volume", f64::from(*applied_volume));
     }
 
     fn decode_interleaved_f32(bytes: &[u8]) -> Vec<f32> {
@@ -1499,6 +1542,16 @@ mod backend {
             pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         pcm
+    }
+
+    fn positive_i32_to_usize(value: i32) -> Option<usize> {
+        usize::try_from(value)
+            .ok()
+            .filter(|converted| *converted > 0)
+    }
+
+    fn positive_i32_to_u32(value: i32) -> Option<u32> {
+        u32::try_from(value).ok().filter(|converted| *converted > 0)
     }
 
     fn fallback_channel_labels(channels: usize) -> Vec<SpectrogramChannelLabel> {
@@ -1575,6 +1628,125 @@ mod backend {
         }
     }
 
+    struct AnalysisTapState {
+        analysis_tx: Sender<AnalysisCommand>,
+        pcm_tx: Sender<AnalysisPcmChunk>,
+        last_rate_hz: u32,
+        tap_chunk_samples: usize,
+        profile_enabled: bool,
+        prof_last: Instant,
+        prof_sent: usize,
+        prof_dropped: usize,
+        prof_samples: usize,
+    }
+
+    impl AnalysisTapState {
+        fn new(
+            analysis_tx: Sender<AnalysisCommand>,
+            pcm_tx: Sender<AnalysisPcmChunk>,
+            tap_chunk_samples: usize,
+        ) -> Self {
+            Self {
+                analysis_tx,
+                pcm_tx,
+                last_rate_hz: 0,
+                tap_chunk_samples,
+                profile_enabled: cfg!(feature = "profiling-logs")
+                    && std::env::var_os("FERROUS_PROFILE").is_some(),
+                prof_last: Instant::now(),
+                prof_sent: 0,
+                prof_dropped: 0,
+                prof_samples: 0,
+            }
+        }
+
+        fn handle_sample(&mut self, sink: &gst_app::AppSink) -> gst::FlowSuccess {
+            if let Ok(sample) = sink.pull_sample() {
+                self.process_sample(&sample);
+            }
+            self.maybe_log_profile();
+            gst::FlowSuccess::Ok
+        }
+
+        fn process_sample(&mut self, sample: &gst::Sample) {
+            let Some(buffer) = sample.buffer() else {
+                return;
+            };
+            let Ok(map) = buffer.map_readable() else {
+                return;
+            };
+            let bytes = map.as_slice();
+            if bytes.is_empty() {
+                return;
+            }
+
+            let channel_labels = self.channel_labels_for_sample(sample);
+            let pcm = decode_interleaved_f32(bytes);
+            if pcm.is_empty() {
+                return;
+            }
+
+            let channels = channel_labels.len().max(1);
+            let chunk_width = self.tap_chunk_samples.saturating_mul(channels);
+            for part in pcm.chunks(chunk_width.max(channels)) {
+                if self
+                    .pcm_tx
+                    .try_send(AnalysisPcmChunk {
+                        samples: part.to_vec(),
+                        channel_labels: channel_labels.clone(),
+                    })
+                    .is_ok()
+                {
+                    self.prof_sent += 1;
+                    self.prof_samples += part.len();
+                } else {
+                    self.prof_dropped += 1;
+                }
+            }
+        }
+
+        fn channel_labels_for_sample(
+            &mut self,
+            sample: &gst::Sample,
+        ) -> Vec<SpectrogramChannelLabel> {
+            let Some(caps) = sample.caps() else {
+                return vec![SpectrogramChannelLabel::Mono];
+            };
+
+            let channel_labels = channel_labels_from_caps(caps);
+            if let Some(structure) = caps.structure(0) {
+                if let Ok(rate) = structure.get::<i32>("rate") {
+                    if let Some(rate_hz) = positive_i32_to_u32(rate) {
+                        if self.last_rate_hz != rate_hz {
+                            self.last_rate_hz = rate_hz;
+                            let _ = self
+                                .analysis_tx
+                                .send(AnalysisCommand::SetSampleRate(rate_hz));
+                        }
+                    }
+                }
+            }
+            channel_labels
+        }
+
+        fn maybe_log_profile(&mut self) {
+            if !self.profile_enabled || self.prof_last.elapsed() < Duration::from_secs(1) {
+                return;
+            }
+            profile_eprintln!(
+                "[gst] pcm_chunks sent/s={} dropped/s={} samples/s={} rate={}Hz",
+                self.prof_sent,
+                self.prof_dropped,
+                self.prof_samples,
+                self.last_rate_hz
+            );
+            self.prof_last = Instant::now();
+            self.prof_sent = 0;
+            self.prof_dropped = 0;
+            self.prof_samples = 0;
+        }
+    }
+
     fn channel_labels_from_caps(caps: &gst::CapsRef) -> Vec<SpectrogramChannelLabel> {
         if let Ok(info) = gst_audio::AudioInfo::from_caps(caps) {
             if let Some(positions) = info.positions() {
@@ -1587,16 +1759,50 @@ mod backend {
                     return labels;
                 }
             }
-            return fallback_channel_labels(info.channels() as usize);
+            return fallback_channel_labels(usize::try_from(info.channels()).unwrap_or(usize::MAX));
         }
         if let Some(structure) = caps.structure(0) {
             if let Ok(channels) = structure.get::<i32>("channels") {
-                if channels > 0 {
-                    return fallback_channel_labels(channels as usize);
+                if let Some(channel_count) = positive_i32_to_usize(channels) {
+                    return fallback_channel_labels(channel_count);
                 }
             }
         }
         vec![SpectrogramChannelLabel::Mono]
+    }
+
+    fn build_output_sink() -> anyhow::Result<gst::Element> {
+        let output_sink_name = std::env::var("FERROUS_GST_OUTPUT_SINK")
+            .ok()
+            .filter(|sink| !sink.trim().is_empty())
+            .unwrap_or_else(|| "autoaudiosink".to_string());
+        gst::ElementFactory::make(&output_sink_name)
+            .build()
+            .or_else(|_| {
+                tracing::warn!(
+                    "failed to build output sink '{}', falling back to autoaudiosink",
+                    output_sink_name
+                );
+                gst::ElementFactory::make("autoaudiosink").build()
+            })
+            .map_err(|_| anyhow!("missing output sink element"))
+    }
+
+    fn link_tee_branch(
+        tee: &gst::Element,
+        branch_sink: &gst::Element,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        let tee_pad = tee
+            .request_pad_simple("src_%u")
+            .ok_or_else(|| anyhow!("failed requesting tee src pad for {label}"))?;
+        let branch_sink_pad = branch_sink
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("missing {label} sink pad"))?;
+        tee_pad
+            .link(&branch_sink_pad)
+            .map_err(|err| anyhow!("failed linking tee->{label}: {err:?}"))?;
+        Ok(())
     }
 
     #[cfg_attr(
@@ -1622,20 +1828,7 @@ mod backend {
         let resample_out = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|_| anyhow!("missing audioresample element"))?;
-        let output_sink_name = std::env::var("FERROUS_GST_OUTPUT_SINK")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "autoaudiosink".to_string());
-        let sink_out = gst::ElementFactory::make(&output_sink_name)
-            .build()
-            .or_else(|_| {
-                tracing::warn!(
-                    "failed to build output sink '{}', falling back to autoaudiosink",
-                    output_sink_name
-                );
-                gst::ElementFactory::make("autoaudiosink").build()
-            })
-            .map_err(|_| anyhow!("missing output sink element"))?;
+        let sink_out = build_output_sink()?;
 
         let queue_tap = gst::ElementFactory::make("queue")
             .build()
@@ -1681,84 +1874,11 @@ mod backend {
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
             .map_or(2048, |v| v.clamp(256, 16384));
+        let mut tap_state = AnalysisTapState::new(analysis_tx, pcm_tx, tap_chunk_samples);
 
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
-                .new_sample({
-                    let mut last_rate_hz: u32 = 0;
-                    let profile_enabled = cfg!(feature = "profiling-logs")
-                        && std::env::var_os("FERROUS_PROFILE").is_some();
-                    let mut prof_last = std::time::Instant::now();
-                    #[allow(unused_variables, unused_assignments)]
-                    let mut prof_sent = 0usize;
-                    #[allow(unused_variables, unused_assignments)]
-                    let mut prof_dropped = 0usize;
-                    #[allow(unused_variables, unused_assignments)]
-                    let mut prof_samples = 0usize;
-                    move |sink| {
-                        if let Ok(sample) = sink.pull_sample() {
-                            if let Some(buffer) = sample.buffer() {
-                                if let Ok(map) = buffer.map_readable() {
-                                    let bytes = map.as_slice();
-                                    if !bytes.is_empty() {
-                                        let mut channel_labels =
-                                            vec![SpectrogramChannelLabel::Mono];
-                                        if let Some(caps) = sample.caps() {
-                                            channel_labels = channel_labels_from_caps(caps);
-                                            if let Some(s) = caps.structure(0) {
-                                                if let Ok(rate) = s.get::<i32>("rate") {
-                                                    if rate > 0 && last_rate_hz != rate as u32 {
-                                                        last_rate_hz = rate as u32;
-                                                        let _ = analysis_tx.send(
-                                                            AnalysisCommand::SetSampleRate(
-                                                                rate as u32,
-                                                            ),
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        let pcm = decode_interleaved_f32(bytes);
-                                        if !pcm.is_empty() {
-                                            // Chunking balances analysis pacing against per-chunk allocation overhead.
-                                            let channels = channel_labels.len().max(1);
-                                            let chunk_width =
-                                                tap_chunk_samples.saturating_mul(channels);
-                                            for part in pcm.chunks(chunk_width.max(channels)) {
-                                                if pcm_tx
-                                                    .try_send(AnalysisPcmChunk {
-                                                        samples: part.to_vec(),
-                                                        channel_labels: channel_labels.clone(),
-                                                    })
-                                                    .is_ok()
-                                                {
-                                                    prof_sent += 1;
-                                                    prof_samples += part.len();
-                                                } else {
-                                                    prof_dropped += 1;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
-                            profile_eprintln!(
-                                "[gst] pcm_chunks sent/s={} dropped/s={} samples/s={} rate={}Hz",
-                                prof_sent,
-                                prof_dropped,
-                                prof_samples,
-                                last_rate_hz
-                            );
-                            prof_last = std::time::Instant::now();
-                            prof_sent = 0;
-                            prof_dropped = 0;
-                            prof_samples = 0;
-                        }
-                        Ok(gst::FlowSuccess::Ok)
-                    }
-                })
+                .new_sample(move |sink| Ok(tap_state.handle_sample(sink)))
                 .build(),
         );
 
@@ -1787,25 +1907,8 @@ mod backend {
         ])
         .context("failed to link analysis branch")?;
 
-        let tee_out_pad = tee
-            .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("failed requesting tee src pad for output"))?;
-        let queue_out_sink_pad = queue_out
-            .static_pad("sink")
-            .ok_or_else(|| anyhow!("missing queue_out sink pad"))?;
-        tee_out_pad
-            .link(&queue_out_sink_pad)
-            .map_err(|e| anyhow!("failed linking tee->output queue: {e:?}"))?;
-
-        let tee_tap_pad = tee
-            .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("failed requesting tee src pad for analysis"))?;
-        let queue_tap_sink_pad = queue_tap
-            .static_pad("sink")
-            .ok_or_else(|| anyhow!("missing queue_tap sink pad"))?;
-        tee_tap_pad
-            .link(&queue_tap_sink_pad)
-            .map_err(|e| anyhow!("failed linking tee->analysis queue: {e:?}"))?;
+        link_tee_branch(&tee, &queue_out, "output queue")?;
+        link_tee_branch(&tee, &queue_tap, "analysis queue")?;
 
         let tee_sink_pad = tee
             .static_pad("sink")
@@ -1826,12 +1929,12 @@ mod backend {
         use super::*;
         use crossbeam_channel::unbounded;
 
-        fn setup_queue_two_tracks(a: &PathBuf, b: &PathBuf) -> Arc<Mutex<GaplessQueue>> {
+        fn setup_queue_two_tracks(a: &Path, b: &Path) -> Arc<Mutex<GaplessQueue>> {
             let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
             let mut queue = queue_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            queue.set_queue(vec![a.clone(), b.clone()]);
+            queue.set_queue(vec![a.to_path_buf(), b.to_path_buf()]);
             let _ = queue.next_manual();
             drop(queue);
             queue_state
