@@ -597,7 +597,8 @@ bool LibraryTreeModel::isExpanded(const TreeNode &node, bool autoExpand) const {
     if (autoExpand) {
         return true;
     }
-    return m_expandedByKey.value(node.key, false);
+    const bool defaultExpanded = node.rowType == QStringLiteral("root");
+    return m_expandedByKey.value(node.key, defaultExpanded);
 }
 
 void LibraryTreeModel::appendFlatRows(

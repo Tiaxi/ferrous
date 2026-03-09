@@ -186,6 +186,67 @@ QByteArray artistOnlyLazyBinary() {
     return encodeRows(rows);
 }
 
+QByteArray multiRootBinary() {
+    QVector<BinaryTreeRow> rows;
+    rows.push_back(BinaryTreeRow{
+        0,
+        0,
+        -1,
+        0,
+        1,
+        QStringLiteral("/music-a"),
+        QStringLiteral("root|/music-a"),
+        {},
+        QStringLiteral("/music-a"),
+        {},
+        {},
+        {},
+    });
+    rows.push_back(BinaryTreeRow{
+        1,
+        1,
+        -1,
+        0,
+        0,
+        QStringLiteral("Artist A (0)"),
+        QStringLiteral("artist|/music-a|Artist A"),
+        QStringLiteral("Artist A"),
+        QStringLiteral("/music-a/Artist A"),
+        {},
+        {},
+        {},
+    });
+    rows.push_back(BinaryTreeRow{
+        0,
+        0,
+        -1,
+        0,
+        1,
+        QStringLiteral("/music-b"),
+        QStringLiteral("root|/music-b"),
+        {},
+        QStringLiteral("/music-b"),
+        {},
+        {},
+        {},
+    });
+    rows.push_back(BinaryTreeRow{
+        1,
+        1,
+        -1,
+        0,
+        0,
+        QStringLiteral("Artist B (0)"),
+        QStringLiteral("artist|/music-b|Artist B"),
+        QStringLiteral("Artist B"),
+        QStringLiteral("/music-b/Artist B"),
+        {},
+        {},
+        {},
+    });
+    return encodeRows(rows);
+}
+
 } // namespace
 
 class QmlSmokeTest : public QObject {
@@ -194,6 +255,7 @@ class QmlSmokeTest : public QObject {
 private slots:
     void loadsMainQmlWithFallbackBridge();
     void libraryTreeStartsCollapsedByDefault();
+    void rootRowsStartExpandedByDefault();
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
 };
@@ -220,6 +282,17 @@ void QmlSmokeTest::libraryTreeStartsCollapsedByDefault() {
 
     QTRY_COMPARE(model.rowCount(), 1);
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("artist"));
+}
+
+void QmlSmokeTest::rootRowsStartExpandedByDefault() {
+    LibraryTreeModel model;
+    model.setLibraryTreeFromBinary(multiRootBinary());
+
+    QTRY_COMPARE(model.rowCount(), 4);
+    QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("root"));
+    QCOMPARE(model.data(model.index(1, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("artist"));
+    QCOMPARE(model.data(model.index(2, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("root"));
+    QCOMPARE(model.data(model.index(3, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("artist"));
 }
 
 void QmlSmokeTest::artistExpansionPopulatesInBatches() {
