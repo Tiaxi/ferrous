@@ -2900,7 +2900,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!metadataMatchesCurrentPath && !currentPath.isEmpty() && nextTrackFormatLabel.isEmpty()) {
         nextTrackFormatLabel = formatLabelFromPath(currentPath);
     }
-    if (!currentPath.isEmpty() && (!isStopped || stoppedTrackAdvanced)) {
+    if (!currentPath.isEmpty()) {
         int detailIndex = playing;
         if (detailIndex < 0 && !m_queuePaths.isEmpty()) {
             detailIndex = m_queuePaths.indexOf(currentPath);
@@ -3008,7 +3008,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (currentCover.isEmpty() && !queueTrackCover.isEmpty()) {
         currentCover = queueTrackCover;
     }
-    if (isStopped && !stoppedTrackAdvanced) {
+    if (isStopped && !stoppedTrackAdvanced && currentCover.isEmpty()) {
         currentCover = m_currentTrackCoverPath;
     } else if (currentCover.isEmpty() && !currentPath.isEmpty()) {
         const auto cached = m_trackCoverByPath.constFind(currentPath);
