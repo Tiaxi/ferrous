@@ -59,6 +59,9 @@ Kirigami.ApplicationWindow {
     property real albumArtPanY: 0.0
     property bool albumArtInitialViewPending: false
     property bool albumArtViewerOpen: false
+    property bool albumArtInfoVisible: false
+    property var albumArtFileInfo: ({})
+    property string albumArtInfoSource: ""
     property bool spectrogramViewerOpen: false
     property string pendingFolderDialogContext: ""
     property string pendingFileDialogContext: ""
@@ -358,6 +361,7 @@ Kirigami.ApplicationWindow {
         function setGlobalSearchQuery(query) {}
         function openInFileBrowser(path) {}
         function openContainingFolder(path) {}
+        function imageFileDetails(path) { return ({}) }
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
@@ -2482,6 +2486,40 @@ Kirigami.ApplicationWindow {
         albumArtInitialViewPending = false
     }
 
+    function refreshAlbumArtFileInfo() {
+        const coverPath = uiBridge.currentTrackCoverPath || ""
+        albumArtInfoSource = coverPath
+        albumArtFileInfo = coverPath.length > 0
+            ? (uiBridge.imageFileDetails(coverPath) || ({}))
+            : ({})
+    }
+
+    function albumArtInfoOverlayText() {
+        const info = root.albumArtFileInfo || ({})
+        const lines = []
+
+        if ((info.fileName || "").length > 0) {
+            lines.push("File: " + info.fileName)
+        }
+        if ((info.resolutionText || "").length > 0) {
+            lines.push("Resolution: " + info.resolutionText)
+        }
+        if ((info.fileSizeText || "").length > 0) {
+            lines.push("Size: " + info.fileSizeText)
+        }
+        if ((info.fileType || "").length > 0) {
+            lines.push("Type: " + info.fileType)
+        }
+        if ((info.mimeType || "").length > 0) {
+            lines.push("MIME: " + info.mimeType)
+        }
+        if ((info.path || "").length > 0) {
+            lines.push("Path: " + info.path)
+        }
+
+        return lines.join("\n")
+    }
+
     function openExternalFiles() {
         pendingFileDialogContext = "open"
         externalFileDialog.open()
@@ -2509,7 +2547,9 @@ Kirigami.ApplicationWindow {
         albumArtZoom = 1.0
         albumArtPanX = 0.0
         albumArtPanY = 0.0
+        albumArtInfoVisible = false
         albumArtInitialViewPending = true
+        refreshAlbumArtFileInfo()
         albumArtViewerOpen = true
     }
 
@@ -6036,12 +6076,13 @@ Kirigami.ApplicationWindow {
             width: 40
             height: 40
             radius: 8
-            color: Qt.rgba(0, 0, 0, 0.45)
-            border.color: Qt.rgba(1, 1, 1, 0.24)
+            color: Qt.rgba(1, 1, 1, 0.16)
+            border.color: Qt.rgba(1, 1, 1, 0.52)
 
             ToolButton {
                 anchors.fill: parent
                 icon.name: "window-close"
+                icon.color: "#ffffff"
                 onClicked: root.closeAlbumArtViewer()
             }
         }
@@ -6095,12 +6136,13 @@ Kirigami.ApplicationWindow {
             width: 40
             height: 40
             radius: 8
-            color: Qt.rgba(0, 0, 0, 0.45)
-            border.color: Qt.rgba(1, 1, 1, 0.24)
+            color: Qt.rgba(1, 1, 1, 0.16)
+            border.color: Qt.rgba(1, 1, 1, 0.52)
 
             ToolButton {
                 anchors.fill: parent
                 icon.name: "window-close"
+                icon.color: "#ffffff"
                 onClicked: root.closeAlbumArtViewer()
             }
         }
@@ -6230,6 +6272,64 @@ Kirigami.ApplicationWindow {
                 }
             }
         }
+
+        Column {
+            z: 30
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.margins: 12
+            spacing: 8
+
+            Rectangle {
+                width: 40
+                height: 40
+                radius: 8
+                color: Qt.rgba(1, 1, 1, 0.16)
+                border.color: Qt.rgba(1, 1, 1, 0.52)
+
+                ToolButton {
+                    anchors.fill: parent
+                    contentItem: Text {
+                        text: "i"
+                        color: "#ffffff"
+                        font.pixelSize: 16
+                        font.weight: Font.DemiBold
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    onClicked: root.albumArtInfoVisible = !root.albumArtInfoVisible
+                }
+            }
+
+            Rectangle {
+                visible: root.albumArtInfoVisible && albumArtInfoLabel.text.length > 0
+                width: Math.min(540, albumArtSurface.width - 24)
+                color: Qt.rgba(0, 0, 0, 0.58)
+                border.color: Qt.rgba(1, 1, 1, 0.24)
+                radius: 10
+                implicitHeight: albumArtInfoLabel.implicitHeight + 20
+
+                Text {
+                    id: albumArtInfoLabel
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    color: "#f2f2f2"
+                    text: root.albumArtInfoOverlayText()
+                    wrapMode: Text.WrapAnywhere
+                    textFormat: Text.PlainText
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+                    hoverEnabled: true
+                    preventStealing: true
+                    onWheel: function(wheel) {
+                        wheel.accepted = true
+                    }
+                }
+            }
+        }
     }
 
     Item {
@@ -6252,6 +6352,10 @@ Kirigami.ApplicationWindow {
         }
         function onSnapshotChanged() {
             root.syncMutedVolumeState()
+            if (root.albumArtViewerOpen
+                    && root.albumArtInfoSource !== (uiBridge.currentTrackCoverPath || "")) {
+                root.refreshAlbumArtFileInfo()
+            }
             const incomingPosition = uiBridge.positionSeconds
             const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath
             const nowMs = Date.now()

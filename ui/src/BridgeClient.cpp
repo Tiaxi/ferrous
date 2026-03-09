@@ -17,7 +17,10 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QImageReader>
+#include <QLocale>
 #include <QMetaObject>
+#include <QMimeDatabase>
 #include <QProcess>
 #include <QSet>
 #include <QThread>
@@ -73,6 +76,31 @@ QString normalizeLocalPathArg(const QString &path) {
     }
 
     return trimmed;
+}
+
+QString formatBinaryFileSize(qint64 sizeBytes) {
+    if (sizeBytes < 0) {
+        return {};
+    }
+
+    static constexpr const char *kUnits[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    double scaled = static_cast<double>(sizeBytes);
+    int unitIndex = 0;
+    while (scaled >= 1024.0 && unitIndex < 4) {
+        scaled /= 1024.0;
+        ++unitIndex;
+    }
+
+    const QLocale locale = QLocale::system();
+    if (unitIndex == 0) {
+        return QStringLiteral("%1 B").arg(locale.toString(sizeBytes));
+    }
+
+    const int precision = scaled >= 10.0 ? 0 : 1;
+    return QStringLiteral("%1 %2 (%3 bytes)")
+        .arg(locale.toString(scaled, 'f', precision),
+             QString::fromLatin1(kUnits[unitIndex]),
+             locale.toString(sizeBytes));
 }
 
 QString canonicalizeSearchQuery(const QString &query) {
@@ -1817,6 +1845,73 @@ void BridgeClient::openContainingFolder(const QString &path) {
         emit bridgeError(QStringLiteral("failed to open containing folder in %1: %2")
                              .arg(m_fileBrowserName, path));
     }
+}
+
+QVariantMap BridgeClient::imageFileDetails(const QString &path) const {
+    QVariantMap out;
+
+    const QString localPath = normalizeLocalPathArg(path);
+    if (localPath.isEmpty()) {
+        return out;
+    }
+
+    const QFileInfo info(localPath);
+    if (!info.exists() || !info.isFile()) {
+        return out;
+    }
+
+    const QString resolvedPath = info.canonicalFilePath().isEmpty()
+        ? info.absoluteFilePath()
+        : info.canonicalFilePath();
+    out.insert(QStringLiteral("path"), resolvedPath);
+    out.insert(QStringLiteral("fileName"), info.fileName());
+
+    const qint64 sizeBytes = info.size();
+    if (sizeBytes >= 0) {
+        out.insert(QStringLiteral("fileSizeBytes"), sizeBytes);
+        out.insert(QStringLiteral("fileSizeText"), formatBinaryFileSize(sizeBytes));
+    }
+
+    const QString suffix = info.suffix().trimmed().toUpper();
+    if (!suffix.isEmpty()) {
+        out.insert(QStringLiteral("extension"), suffix);
+    }
+
+    const QMimeDatabase mimeDb;
+    const auto mimeType = mimeDb.mimeTypeForFile(info, QMimeDatabase::MatchDefault);
+    const QString mimeName = mimeType.name().trimmed();
+    if (!mimeName.isEmpty() && mimeName != QStringLiteral("application/octet-stream")) {
+        out.insert(QStringLiteral("mimeType"), mimeName);
+    }
+
+    QString fileType = mimeType.comment().trimmed();
+    QImageReader reader(resolvedPath);
+    const QSize imageSize = reader.size();
+    if (imageSize.isValid()) {
+        out.insert(QStringLiteral("width"), imageSize.width());
+        out.insert(QStringLiteral("height"), imageSize.height());
+        out.insert(
+            QStringLiteral("resolutionText"),
+            QStringLiteral("%1 x %2").arg(imageSize.width()).arg(imageSize.height()));
+    }
+
+    const QString format = QString::fromLatin1(reader.format()).trimmed().toUpper();
+    if (!format.isEmpty()) {
+        out.insert(QStringLiteral("format"), format);
+    }
+
+    if (fileType.isEmpty()) {
+        if (!format.isEmpty()) {
+            fileType = QStringLiteral("%1 image").arg(format);
+        } else if (!suffix.isEmpty()) {
+            fileType = QStringLiteral("%1 image").arg(suffix);
+        }
+    }
+    if (!fileType.isEmpty()) {
+        out.insert(QStringLiteral("fileType"), fileType);
+    }
+
+    return out;
 }
 
 void BridgeClient::scanRoot(const QString &path) {

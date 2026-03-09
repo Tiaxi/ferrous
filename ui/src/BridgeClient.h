@@ -271,6 +271,7 @@ public:
     Q_INVOKABLE void setGlobalSearchQuery(const QString &query);
     Q_INVOKABLE void openInFileBrowser(const QString &path);
     Q_INVOKABLE void openContainingFolder(const QString &path);
+    Q_INVOKABLE QVariantMap imageFileDetails(const QString &path) const;
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
     Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();
