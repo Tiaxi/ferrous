@@ -2794,272 +2794,447 @@ Kirigami.ApplicationWindow {
             NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
         }
 
-        contentItem: ScrollView {
-            id: preferencesScrollView
-            clip: true
-            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        contentItem: ColumnLayout {
+            spacing: 14
 
-            ColumnLayout {
-                width: preferencesScrollView.availableWidth
-                spacing: 12
+            TabBar {
+                id: preferencesTabBar
+                Layout.fillWidth: true
+                spacing: 0
+                leftPadding: 0
+                rightPadding: 0
+                topPadding: 0
+                bottomPadding: 0
+                readonly property int tabCount: 4
+                readonly property real tabBaseWidth: Math.floor(width / tabCount)
+                readonly property real trailingTabWidth: width - (tabBaseWidth * (tabCount - 1))
 
-                GroupBox {
-                    title: "Library"
+                background: Rectangle {
+                    color: root.uiSurfaceAltColor
+                    radius: 8
+                    border.color: root.uiBorderColor
+                    clip: true
+                }
+
+                TabButton {
+                    text: "Library"
+                    width: preferencesTabBar.tabBaseWidth
+                }
+                TabButton {
+                    text: "Spectrogram"
+                    width: preferencesTabBar.tabBaseWidth
+                }
+                TabButton {
+                    text: "Last.fm"
+                    width: preferencesTabBar.tabBaseWidth
+                }
+                TabButton {
+                    text: "System Media"
+                    width: preferencesTabBar.trailingTabWidth
+                }
+            }
+
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: preferencesTabBar.currentIndex
+
+                ScrollView {
+                    id: libraryPrefsScroll
+                    clip: true
+                    contentWidth: availableWidth
                     Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                     ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 8
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Button {
-                                text: "Add Root..."
-                                onClicked: root.promptAddLibraryRoot("preferences")
-                            }
-                            Button {
-                                text: "Rescan All"
-                                onClicked: uiBridge.rescanAllLibraryRoots()
-                            }
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Label { text: "Album Sort:" }
-                            ComboBox {
-                                model: ["Year", "Title"]
-                                currentIndex: Math.max(0, Math.min(1, uiBridge.librarySortMode))
-                                onActivated: uiBridge.setLibrarySortMode(currentIndex)
-                                Layout.preferredWidth: 160
-                            }
-                        }
-
-                        Label {
-                            Layout.fillWidth: true
-                            text: uiBridge.libraryRoots.length === 0
-                                ? "No library roots configured."
-                                : "Configured roots:"
-                            color: Kirigami.Theme.disabledTextColor
-                        }
+                        width: libraryPrefsScroll.availableWidth
+                        spacing: 0
 
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: Math.min(180, 30 * Math.max(1, uiBridge.libraryRoots.length))
-                            color: Qt.rgba(0, 0, 0, 0.03)
-                            border.color: Qt.rgba(0, 0, 0, 0.08)
-                            visible: uiBridge.libraryRoots.length > 0
+                            color: root.uiSurfaceColor
+                            radius: 10
+                            border.color: root.uiBorderColor
+                            implicitHeight: libraryPrefsColumn.implicitHeight + 36
 
-                            ListView {
+                            ColumnLayout {
+                                id: libraryPrefsColumn
                                 anchors.fill: parent
-                                clip: true
-                                model: uiBridge.libraryRoots
-                                boundsBehavior: Flickable.StopAtBounds
-                                boundsMovement: Flickable.StopAtBounds
-                                flickDeceleration: root.snappyScrollFlickDeceleration
-                                maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                                pixelAligned: true
-                                MouseArea {
-                                    anchors.fill: parent
-                                    acceptedButtons: Qt.NoButton
-                                    preventStealing: true
-                                    onWheel: function(wheel) {
-                                        root.stepScrollView(parent, wheel, 30, 3)
-                                    }
+                                anchors.margins: 18
+                                spacing: 14
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "Library"
+                                    font.pixelSize: 16
+                                    font.weight: Font.DemiBold
                                 }
-                                delegate: RowLayout {
-                                    width: ListView.view.width
-                                    spacing: 6
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Button {
+                                        text: "Add Root..."
+                                        onClicked: root.promptAddLibraryRoot("preferences")
+                                    }
+                                    Button {
+                                        text: "Rescan All"
+                                        onClicked: uiBridge.rescanAllLibraryRoots()
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
                                     Label {
+                                        text: "Album Sort"
+                                        Layout.preferredWidth: 120
+                                    }
+                                    ComboBox {
+                                        model: ["Year", "Title"]
+                                        currentIndex: Math.max(0, Math.min(1, uiBridge.librarySortMode))
+                                        onActivated: uiBridge.setLibrarySortMode(currentIndex)
+                                        Layout.preferredWidth: 180
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: uiBridge.libraryRoots.length === 0
+                                        ? "No library roots configured."
+                                        : "Configured roots"
+                                    color: Kirigami.Theme.disabledTextColor
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: Math.min(220, (48 * Math.max(1, uiBridge.libraryRoots.length)) + 12)
+                                    color: root.uiSurfaceAltColor
+                                    border.color: root.uiBorderColor
+                                    radius: 8
+                                    visible: uiBridge.libraryRoots.length > 0
+
+                                    ListView {
+                                        anchors.fill: parent
+                                        anchors.margins: 8
+                                        clip: true
+                                        model: uiBridge.libraryRoots
+                                        boundsBehavior: Flickable.StopAtBounds
+                                        boundsMovement: Flickable.StopAtBounds
+                                        flickDeceleration: root.snappyScrollFlickDeceleration
+                                        maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
+                                        pixelAligned: true
+                                        spacing: 4
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            acceptedButtons: Qt.NoButton
+                                            preventStealing: true
+                                            onWheel: function(wheel) {
+                                                root.stepScrollView(parent, wheel, 30, 3)
+                                            }
+                                        }
+                                        delegate: Rectangle {
+                                            width: ListView.view.width
+                                            height: 40
+                                            radius: 6
+                                            color: root.uiSurfaceRaisedColor
+                                            border.color: Qt.rgba(0, 0, 0, 0.06)
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 10
+                                                anchors.rightMargin: 10
+                                                spacing: 8
+                                                Label {
+                                                    Layout.fillWidth: true
+                                                    text: modelData
+                                                    elide: Text.ElideMiddle
+                                                }
+                                                ToolButton {
+                                                    text: "Open"
+                                                    onClicked: uiBridge.openInFileBrowser(modelData)
+                                                }
+                                                ToolButton {
+                                                    text: "Rescan"
+                                                    onClicked: uiBridge.rescanLibraryRoot(modelData)
+                                                }
+                                                ToolButton {
+                                                    text: "Remove"
+                                                    onClicked: uiBridge.removeLibraryRoot(modelData)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ScrollView {
+                    id: spectrogramPrefsScroll
+                    clip: true
+                    contentWidth: availableWidth
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                    ColumnLayout {
+                        width: spectrogramPrefsScroll.availableWidth
+                        spacing: 0
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            color: root.uiSurfaceColor
+                            radius: 10
+                            border.color: root.uiBorderColor
+                            implicitHeight: spectrogramPrefsColumn.implicitHeight + 36
+
+                            ColumnLayout {
+                                id: spectrogramPrefsColumn
+                                anchors.fill: parent
+                                anchors.margins: 18
+                                spacing: 14
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "Spectrogram"
+                                    font.pixelSize: 16
+                                    font.weight: Font.DemiBold
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Label {
+                                        text: "View"
+                                        Layout.preferredWidth: 120
+                                    }
+                                    ComboBox {
+                                        Layout.preferredWidth: 220
+                                        model: ["Downmix", "Per-channel"]
+                                        currentIndex: Math.max(0, Math.min(1, uiBridge.spectrogramViewMode))
+                                        onActivated: uiBridge.setSpectrogramViewMode(currentIndex)
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Label {
+                                        text: "FFT Window"
+                                        Layout.preferredWidth: 120
+                                    }
+                                    ComboBox {
+                                        Layout.preferredWidth: 220
+                                        model: root.spectrogramFftChoices
+                                        currentIndex: {
+                                            const index = root.spectrogramFftChoices.indexOf(uiBridge.fftSize)
+                                            return index >= 0 ? index : 0
+                                        }
+                                        onActivated: uiBridge.setFftSize(
+                                            root.spectrogramFftChoices[Math.max(0, currentIndex)])
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Label {
+                                        text: "dB Range"
+                                        Layout.preferredWidth: 120
+                                    }
+                                    Slider {
+                                        id: prefsDbRangeSlider
                                         Layout.fillWidth: true
-                                        text: modelData
-                                        elide: Text.ElideMiddle
+                                        from: 50
+                                        to: 120
+                                        stepSize: 1
+                                        value: uiBridge.dbRange
+                                        onMoved: uiBridge.setDbRange(value)
+                                        onPressedChanged: {
+                                            if (!pressed) {
+                                                uiBridge.setDbRange(value)
+                                            }
+                                        }
                                     }
-                                    ToolButton {
-                                        text: "Open"
-                                        onClicked: uiBridge.openInFileBrowser(modelData)
+                                    Label {
+                                        text: Math.round(prefsDbRangeSlider.value).toString()
+                                        Layout.preferredWidth: 32
+                                        horizontalAlignment: Text.AlignRight
                                     }
-                                    ToolButton {
-                                        text: "Rescan"
-                                        onClicked: uiBridge.rescanLibraryRoot(modelData)
-                                    }
-                                    ToolButton {
-                                        text: "Remove"
-                                        onClicked: uiBridge.removeLibraryRoot(modelData)
-                                    }
+                                }
+
+                                CheckBox {
+                                    text: "Log Scale Spectrogram"
+                                    focusPolicy: Qt.NoFocus
+                                    checked: uiBridge.logScale
+                                    onToggled: uiBridge.setLogScale(checked)
+                                }
+                                CheckBox {
+                                    text: "Show Spectrogram FPS Overlay"
+                                    focusPolicy: Qt.NoFocus
+                                    checked: uiBridge.showFps
+                                    onToggled: uiBridge.setShowFps(checked)
                                 }
                             }
                         }
                     }
                 }
 
-                GroupBox {
-                    title: "Spectrogram"
+                ScrollView {
+                    id: lastFmPrefsScroll
+                    clip: true
+                    contentWidth: availableWidth
                     Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                     ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 8
+                        width: lastFmPrefsScroll.availableWidth
+                        spacing: 0
 
-                        RowLayout {
+                        Rectangle {
                             Layout.fillWidth: true
-                            Label { text: "View:" }
-                            ComboBox {
-                                Layout.preferredWidth: 180
-                                model: ["Downmix", "Per-channel"]
-                                currentIndex: Math.max(0, Math.min(1, uiBridge.spectrogramViewMode))
-                                onActivated: uiBridge.setSpectrogramViewMode(currentIndex)
-                            }
-                        }
+                            color: root.uiSurfaceColor
+                            radius: 10
+                            border.color: root.uiBorderColor
+                            implicitHeight: lastFmPrefsColumn.implicitHeight + 36
 
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Label { text: "FFT Window:" }
-                            ComboBox {
-                                Layout.preferredWidth: 180
-                                model: root.spectrogramFftChoices
-                                currentIndex: {
-                                    const index = root.spectrogramFftChoices.indexOf(uiBridge.fftSize)
-                                    return index >= 0 ? index : 0
+                            ColumnLayout {
+                                id: lastFmPrefsColumn
+                                anchors.fill: parent
+                                anchors.margins: 18
+                                spacing: 14
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "Last.fm"
+                                    font.pixelSize: 16
+                                    font.weight: Font.DemiBold
                                 }
-                                onActivated: uiBridge.setFftSize(
-                                    root.spectrogramFftChoices[Math.max(0, currentIndex)])
-                            }
-                        }
 
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Label { text: "dB Range:" }
-                            Slider {
-                                id: prefsDbRangeSlider
-                                Layout.fillWidth: true
-                                from: 50
-                                to: 120
-                                stepSize: 1
-                                value: uiBridge.dbRange
-                                onMoved: uiBridge.setDbRange(value)
-                                onPressedChanged: {
-                                    if (!pressed) {
-                                        uiBridge.setDbRange(value)
+                                CheckBox {
+                                    text: "Enable Last.fm scrobbling"
+                                    focusPolicy: Qt.NoFocus
+                                    checked: uiBridge.lastFmScrobblingEnabled
+                                    onToggled: uiBridge.setLastFmScrobblingEnabled(checked)
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    color: Kirigami.Theme.disabledTextColor
+                                    text: "Ferrous follows Last.fm's rule: only tracks longer than 30 seconds are eligible, and a scrobble is sent when playback stops or the track ends after at least half the track or 4 minutes has been listened, whichever comes first."
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    text: !uiBridge.lastFmBuildConfigured
+                                        ? "Last.fm is not configured in this build."
+                                        : (uiBridge.lastFmUsername.length > 0
+                                            ? "Connected account: " + uiBridge.lastFmUsername
+                                            : "No Last.fm account connected.")
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    visible: uiBridge.lastFmStatusText.length > 0
+                                    color: Kirigami.Theme.disabledTextColor
+                                    text: uiBridge.lastFmStatusText
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: uiBridge.lastFmPendingScrobbleCount > 0
+                                    color: Kirigami.Theme.disabledTextColor
+                                    text: "Pending scrobbles: " + uiBridge.lastFmPendingScrobbleCount
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Button {
+                                        text: uiBridge.lastFmUsername.length > 0 ? "Reconnect" : "Connect"
+                                        enabled: uiBridge.lastFmBuildConfigured
+                                        onClicked: uiBridge.beginLastFmAuth()
                                     }
+
+                                    Button {
+                                        text: "Complete Connection"
+                                        enabled: uiBridge.lastFmBuildConfigured && uiBridge.lastFmAuthState === 1
+                                        onClicked: uiBridge.completeLastFmAuth()
+                                    }
+
+                                    Button {
+                                        text: "Disconnect"
+                                        enabled: uiBridge.lastFmUsername.length > 0 || uiBridge.lastFmAuthState !== 0
+                                        onClicked: uiBridge.disconnectLastFm()
+                                    }
+
+                                    Item { Layout.fillWidth: true }
                                 }
                             }
-                            Label {
-                                text: Math.round(prefsDbRangeSlider.value).toString()
-                                Layout.preferredWidth: 32
-                                horizontalAlignment: Text.AlignRight
-                            }
-                        }
-
-                        CheckBox {
-                            text: "Log Scale Spectrogram"
-                            focusPolicy: Qt.NoFocus
-                            checked: uiBridge.logScale
-                            onToggled: uiBridge.setLogScale(checked)
-                        }
-                        CheckBox {
-                            text: "Show Spectrogram FPS Overlay"
-                            focusPolicy: Qt.NoFocus
-                            checked: uiBridge.showFps
-                            onToggled: uiBridge.setShowFps(checked)
                         }
                     }
                 }
 
-                GroupBox {
-                    title: "Last.fm"
+                ScrollView {
+                    id: systemMediaPrefsScroll
+                    clip: true
+                    contentWidth: availableWidth
                     Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                     ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 8
+                        width: systemMediaPrefsScroll.availableWidth
+                        spacing: 0
 
-                        CheckBox {
-                            text: "Enable Last.fm scrobbling"
-                            focusPolicy: Qt.NoFocus
-                            checked: uiBridge.lastFmScrobblingEnabled
-                            onToggled: uiBridge.setLastFmScrobblingEnabled(checked)
-                        }
-
-                        Label {
+                        Rectangle {
                             Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                            color: Kirigami.Theme.disabledTextColor
-                            text: "Ferrous follows Last.fm's rule: only tracks longer than 30 seconds are eligible, and a scrobble is sent when playback stops or the track ends after at least half the track or 4 minutes has been listened, whichever comes first."
-                        }
+                            color: root.uiSurfaceColor
+                            radius: 10
+                            border.color: root.uiBorderColor
+                            implicitHeight: systemMediaPrefsColumn.implicitHeight + 36
 
-                        Label {
-                            Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                            text: !uiBridge.lastFmBuildConfigured
-                                ? "Last.fm is not configured in this build."
-                                : (uiBridge.lastFmUsername.length > 0
-                                    ? "Connected account: " + uiBridge.lastFmUsername
-                                    : "No Last.fm account connected.")
-                        }
+                            ColumnLayout {
+                                id: systemMediaPrefsColumn
+                                anchors.fill: parent
+                                anchors.margins: 18
+                                spacing: 14
 
-                        Label {
-                            Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                            visible: uiBridge.lastFmStatusText.length > 0
-                            color: Kirigami.Theme.disabledTextColor
-                            text: uiBridge.lastFmStatusText
-                        }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "System Media"
+                                    font.pixelSize: 16
+                                    font.weight: Font.DemiBold
+                                }
 
-                        Label {
-                            Layout.fillWidth: true
-                            visible: uiBridge.lastFmPendingScrobbleCount > 0
-                            color: Kirigami.Theme.disabledTextColor
-                            text: "Pending scrobbles: " + uiBridge.lastFmPendingScrobbleCount
-                        }
+                                CheckBox {
+                                    text: "Enable KDE media controls and media buttons"
+                                    focusPolicy: Qt.NoFocus
+                                    checked: uiBridge.systemMediaControlsEnabled
+                                    onToggled: uiBridge.setSystemMediaControlsEnabled(checked)
+                                }
 
-                        RowLayout {
-                            Layout.fillWidth: true
-
-                            Button {
-                                text: uiBridge.lastFmUsername.length > 0 ? "Reconnect" : "Connect"
-                                enabled: uiBridge.lastFmBuildConfigured
-                                onClicked: uiBridge.beginLastFmAuth()
-                            }
-
-                            Button {
-                                text: "Complete Connection"
-                                enabled: uiBridge.lastFmBuildConfigured && uiBridge.lastFmAuthState === 1
-                                onClicked: uiBridge.completeLastFmAuth()
-                            }
-
-                            Button {
-                                text: "Disconnect"
-                                enabled: uiBridge.lastFmUsername.length > 0 || uiBridge.lastFmAuthState !== 0
-                                onClicked: uiBridge.disconnectLastFm()
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    color: Kirigami.Theme.disabledTextColor
+                                    text: "When enabled, Ferrous appears in Plasma's media controls and responds to Play/Pause, Previous, Next, and Stop media buttons. Keyboard volume buttons always control system volume, not Ferrous volume."
+                                }
                             }
                         }
                     }
                 }
-
-                GroupBox {
-                    title: "System Media"
-                    Layout.fillWidth: true
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 8
-
-                        CheckBox {
-                            text: "Enable KDE media controls and media buttons"
-                            focusPolicy: Qt.NoFocus
-                            checked: uiBridge.systemMediaControlsEnabled
-                            onToggled: uiBridge.setSystemMediaControlsEnabled(checked)
-                        }
-
-                        Label {
-                            Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                            color: Kirigami.Theme.disabledTextColor
-                            text: "When enabled, Ferrous appears in Plasma's media controls and responds to Play/Pause, Previous, Next, and Stop media buttons. Keyboard volume buttons always control system volume, not Ferrous volume."
-                        }
-                    }
-                }
-
             }
         }
     }
