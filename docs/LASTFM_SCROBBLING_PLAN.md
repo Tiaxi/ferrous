@@ -3,7 +3,7 @@
 ## Summary
 
 - Do not store a Last.fm password. Use Last.fm desktop auth (`auth.getToken` -> browser approval -> `auth.getSession`) and store only the returned session key in the OS keyring. Persist only `lastfm_scrobbling_enabled` and the connected username in Ferrous's plain-text settings file.
-- Keep scrobble timing fixed to Last.fm's documented rule: only tracks longer than 30 seconds are eligible, and a scrobble is submitted once actual listened time reaches `min(240s, 50% of track length)`. Show that rule in Preferences as help text; do not make it user-editable.
+- Keep scrobble timing fixed to Last.fm's documented rule: only tracks longer than 30 seconds are eligible, and a scrobble is sent when playback stops or the track changes after actual listened time reaches `min(240s, 50% of track length)`. Show that rule in Preferences as help text; do not make it user-editable.
 - API payloads for v1:
   - `track.updateNowPlaying`: send `artist`, `track`, `api_key`, `api_sig`, `sk`; also send `album`, `trackNumber`, and `duration` when available.
   - `track.scrobble`: send `artist`, `track`, `timestamp`, `api_key`, `api_sig`, `sk`; also send `album`, `trackNumber`, and `duration` when available.
@@ -46,7 +46,7 @@
 - Use only structured metadata for submission. Do not derive artist/title from filenames or paths. If required metadata is still missing, defer submission; if the track changes before enough metadata arrives, skip that submission.
 - Submission policy:
   - send `track.updateNowPlaying` once per active track after playback is actually `Playing` and required metadata is available
-  - queue a scrobble once the fixed threshold is crossed
+  - mark a scrobble eligible once the fixed threshold is crossed, then queue it when playback stops or the active track changes
   - flush cached scrobbles oldest-first, batching up to 50 per Last.fm request
   - never retry failed now-playing calls
   - retry cached scrobbles on transient failures; keep them ordered
@@ -65,7 +65,7 @@
 - Last.fm client tests: signature generation, exclusion of `format` from `api_sig`, auth-response parsing, and error mapping.
 - Bridge/service tests:
   - no scrobble for tracks `<= 30s`
-  - scrobble at `min(240s, 50%)`
+  - scrobble eligibility at `min(240s, 50%)`, with submission deferred until playback stops or the track changes
   - pause/resume preserves listened time
   - forward seek does not trigger a false scrobble
   - metadata arriving late still allows now-playing/scrobble for the same active track

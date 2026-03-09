@@ -2949,7 +2949,7 @@ Kirigami.ApplicationWindow {
                             Layout.fillWidth: true
                             wrapMode: Text.Wrap
                             color: Kirigami.Theme.disabledTextColor
-                            text: "Ferrous follows Last.fm's rule: only tracks longer than 30 seconds are eligible, and a scrobble is submitted after half the track or 4 minutes, whichever comes first."
+                            text: "Ferrous follows Last.fm's rule: only tracks longer than 30 seconds are eligible, and a scrobble is sent when playback stops or the track ends after at least half the track or 4 minutes has been listened, whichever comes first."
                         }
 
                         Label {

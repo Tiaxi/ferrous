@@ -2944,7 +2944,7 @@ fn tick_lastfm_playback_at(
 ) {
     let current_path = state.playback.current.clone();
     if tracker.active_path != current_path {
-        queue_lastfm_scrobble_if_ready(lastfm_handle, tracker);
+        finalize_lastfm_track(state, lastfm_handle, tracker, now);
         *tracker = LastFmPlaybackTracker::default();
         tracker.active_path = current_path;
         tracker.duration_seconds = match u32::try_from(state.playback.duration.as_secs()) {
@@ -2954,7 +2954,7 @@ fn tick_lastfm_playback_at(
     }
 
     if state.playback.state == PlaybackState::Stopped || tracker.active_path.is_none() {
-        queue_lastfm_scrobble_if_ready(lastfm_handle, tracker);
+        finalize_lastfm_track(state, lastfm_handle, tracker, now);
         tracker.active_path = None;
         tracker.artist.clear();
         tracker.track.clear();
@@ -2995,11 +2995,7 @@ fn tick_lastfm_playback_at(
         if tracker.started_at_utc.is_none() {
             tracker.started_at_utc = Some(now_utc);
         }
-        if let Some(previous_tick) = tracker.last_listen_tick {
-            tracker.listened_duration = tracker
-                .listened_duration
-                .saturating_add(now.saturating_duration_since(previous_tick));
-        }
+        advance_lastfm_listened_duration(tracker, now);
         tracker.last_listen_tick = Some(now);
     } else {
         tracker.last_listen_tick = None;
@@ -3021,15 +3017,32 @@ fn tick_lastfm_playback_at(
         }));
         tracker.now_playing_sent = true;
     }
+}
 
-    queue_lastfm_scrobble_if_ready(lastfm_handle, tracker);
+fn finalize_lastfm_track(
+    state: &BridgeState,
+    lastfm_handle: &LastFmHandle,
+    tracker: &mut LastFmPlaybackTracker,
+    now: Instant,
+) {
+    advance_lastfm_listened_duration(tracker, now);
+    queue_lastfm_scrobble_if_ready(state, lastfm_handle, tracker);
+}
+
+fn advance_lastfm_listened_duration(tracker: &mut LastFmPlaybackTracker, now: Instant) {
+    if let Some(previous_tick) = tracker.last_listen_tick {
+        tracker.listened_duration = tracker
+            .listened_duration
+            .saturating_add(now.saturating_duration_since(previous_tick));
+    }
 }
 
 fn queue_lastfm_scrobble_if_ready(
+    state: &BridgeState,
     lastfm_handle: &LastFmHandle,
     tracker: &mut LastFmPlaybackTracker,
 ) {
-    if tracker.scrobble_queued || tracker.started_at_utc.is_none() {
+    if !state.lastfm.enabled || tracker.scrobble_queued || tracker.started_at_utc.is_none() {
         return;
     }
     let Some(duration_seconds) = tracker.duration_seconds else {
@@ -4343,6 +4356,19 @@ mod tests {
         last
     }
 
+    fn wait_for_scrobble_queue(path: &Path, timeout: Duration) -> Option<Vec<LastFmScrobbleEntry>> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(text) = fs::read_to_string(path) {
+                if let Ok(entries) = serde_json::from_str::<Vec<LastFmScrobbleEntry>>(&text) {
+                    return Some(entries);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
     #[test]
     fn bridge_queue_roundtrip_snapshot_integration() {
         let _guard = test_guard();
@@ -4647,10 +4673,12 @@ mod tests {
 
     #[test]
     fn lastfm_scrobble_requires_actual_listened_time_instead_of_seek_position() {
-        let (_guard, lastfm_handle) = (
-            test_guard(),
-            lastfm::spawn(LastFmServiceOptions::default()).0,
-        );
+        let _guard = test_guard();
+        let queue_path = test_dir("lastfm-seek-scrobble").join("lastfm_queue.json");
+        let (lastfm_handle, _lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
+            queue_path: Some(queue_path.clone()),
+            initial_enabled: false,
+        });
         let track_path = p("/music/seek-test.flac");
         let mut state = BridgeState::default();
         state.lastfm.enabled = true;
@@ -4688,7 +4716,70 @@ mod tests {
             1_700_000_120,
         );
         assert!(tracker.listened_duration >= Duration::from_secs(120));
-        assert!(tracker.scrobble_queued);
+        assert!(!tracker.scrobble_queued);
+        assert!(!queue_path.exists());
+
+        state.playback.state = PlaybackState::Stopped;
+        state.playback.current = None;
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(121),
+            1_700_000_121,
+        );
+        assert!(tracker.active_path.is_none());
+        assert!(!tracker.scrobble_queued);
+
+        let queued = wait_for_scrobble_queue(&queue_path, Duration::from_secs(1))
+            .expect("scrobble queued on stop");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].artist, "Artist");
+        assert_eq!(queued[0].track, "Track");
+
+        lastfm_handle.command(LastFmCommand::Shutdown);
+    }
+
+    #[test]
+    fn lastfm_scrobble_does_not_queue_when_disabled() {
+        let _guard = test_guard();
+        let queue_path = test_dir("lastfm-disabled-scrobble").join("lastfm_queue.json");
+        let (lastfm_handle, _lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
+            queue_path: Some(queue_path.clone()),
+            initial_enabled: false,
+        });
+        let track_path = p("/music/disabled-scrobble.flac");
+        let mut state = BridgeState::default();
+        state.playback.current = Some(track_path.clone());
+        state.playback.state = PlaybackState::Playing;
+        state.playback.duration = Duration::from_secs(200);
+        state.metadata.source_path = Some(track_path.to_string_lossy().into_owned());
+        state.metadata.artist = "Artist".to_string();
+        state.metadata.title = "Track".to_string();
+        state.metadata.album = "Album".to_string();
+
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, start, 1_700_000_000);
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(101),
+            1_700_000_101,
+        );
+        state.playback.state = PlaybackState::Stopped;
+        state.playback.current = None;
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(102),
+            1_700_000_102,
+        );
+        assert!(!tracker.scrobble_queued);
+        assert!(wait_for_scrobble_queue(&queue_path, Duration::from_millis(150)).is_none());
+        assert!(!queue_path.exists());
 
         lastfm_handle.command(LastFmCommand::Shutdown);
     }
