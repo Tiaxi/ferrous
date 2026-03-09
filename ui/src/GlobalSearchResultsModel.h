@@ -18,6 +18,7 @@ public:
         QString label;
         QString artist;
         QString album;
+        QString rootLabel;
         QString genre;
         QString coverPath;
         QString coverUrl;
@@ -40,6 +41,7 @@ public:
                 && label == other.label
                 && artist == other.artist
                 && album == other.album
+                && rootLabel == other.rootLabel
                 && genre == other.genre
                 && coverPath == other.coverPath
                 && coverUrl == other.coverUrl
@@ -66,6 +68,7 @@ public:
                 && label == other.label
                 && artist == other.artist
                 && album == other.album
+                && rootLabel == other.rootLabel
                 && genre == other.genre
                 && coverPath == other.coverPath
                 && coverUrl == other.coverUrl
@@ -90,6 +93,7 @@ public:
         LabelRole,
         ArtistRole,
         AlbumRole,
+        RootLabelRole,
         GenreRole,
         CoverPathRole,
         CoverUrlRole,

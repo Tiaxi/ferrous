@@ -280,12 +280,15 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
 
     QStringList rootPaths;
     rootPaths.reserve(rootPathCount);
+    QVector<DecodedLibraryRoot> rootEntries;
+    rootEntries.reserve(rootPathCount);
     for (quint16 i = 0; i < rootPathCount; ++i) {
-        QString root;
-        if (!reader.readUtf8U16(&root)) {
+        DecodedLibraryRoot root;
+        if (!reader.readUtf8U16(&root.path) || !reader.readUtf8U16(&root.name)) {
             return false;
         }
-        rootPaths.push_back(root);
+        rootPaths.push_back(root.path);
+        rootEntries.push_back(std::move(root));
     }
     if (!reader.atEnd()) {
         return false;
@@ -306,6 +309,7 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     out->filesPerSecond = static_cast<double>(filesPerSecond);
     out->etaSeconds = static_cast<double>(etaSeconds);
     out->rootPaths = rootPaths;
+    out->rootEntries = rootEntries;
     return true;
 }
 
@@ -666,7 +670,7 @@ bool decodeSearchResultsFrame(
         }
         return false;
     }
-    if (version != 1) {
+    if (version != 2) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("unsupported search frame version: %1").arg(version);
         }
@@ -685,6 +689,7 @@ bool decodeSearchResultsFrame(
         QString label;
         QString artist;
         QString album;
+        QString rootLabel;
         QString genre;
         QString coverPath;
         QString artistKey;
@@ -702,6 +707,7 @@ bool decodeSearchResultsFrame(
             || !reader.readUtf8U16(&label)
             || !reader.readUtf8U16(&artist)
             || !reader.readUtf8U16(&album)
+            || !reader.readUtf8U16(&rootLabel)
             || !reader.readUtf8U16(&genre)
             || !reader.readUtf8U16(&coverPath)
             || !reader.readUtf8U16(&artistKey)
@@ -734,6 +740,7 @@ bool decodeSearchResultsFrame(
         row.label = label;
         row.artist = artist;
         row.album = album;
+        row.rootLabel = rootLabel;
         row.genre = genre;
         row.coverPath = coverPath;
         row.artistKey = artistKey;

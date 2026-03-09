@@ -28,6 +28,34 @@ pub struct LibraryTrack {
     pub duration_secs: Option<f32>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryRoot {
+    pub path: PathBuf,
+    pub name: String,
+}
+
+impl LibraryRoot {
+    pub fn display_name(&self) -> String {
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() {
+            self.path.to_string_lossy().to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    pub fn search_label(&self) -> String {
+        let trimmed = self.name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+        self.path.file_name().map_or_else(
+            || self.path.to_string_lossy().to_string(),
+            |value| value.to_string_lossy().to_string(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LibrarySearchTrack {
     pub path: PathBuf,
@@ -54,7 +82,7 @@ pub struct LibraryScanProgress {
 
 #[derive(Debug, Clone, Default)]
 pub struct LibrarySnapshot {
-    pub roots: Vec<PathBuf>,
+    pub roots: Vec<LibraryRoot>,
     pub tracks: Vec<LibraryTrack>,
     pub scan_in_progress: bool,
     pub scan_progress: Option<LibraryScanProgress>,
@@ -70,7 +98,8 @@ pub(crate) struct TrackFileFingerprint {
 #[derive(Debug, Clone)]
 pub enum LibraryCommand {
     ScanRoot(PathBuf),
-    AddRoot(PathBuf),
+    AddRoot { path: PathBuf, name: String },
+    RenameRoot { path: PathBuf, name: String },
     RemoveRoot(PathBuf),
     RescanRoot(PathBuf),
     RescanAll,
@@ -108,8 +137,14 @@ impl LibraryService {
                         while let Ok(cmd) = cmd_rx.recv() {
                             snapshot.last_error = None;
                             let result = match cmd {
-                                LibraryCommand::ScanRoot(root) | LibraryCommand::AddRoot(root) => {
-                                    handle_add_root(&conn, &root, &mut snapshot, &event_tx)
+                                LibraryCommand::ScanRoot(root) => {
+                                    handle_add_root(&conn, &root, "", &mut snapshot, &event_tx)
+                                }
+                                LibraryCommand::AddRoot { path, name } => {
+                                    handle_add_root(&conn, &path, &name, &mut snapshot, &event_tx)
+                                }
+                                LibraryCommand::RenameRoot { path, name } => {
+                                    rename_root(&conn, &path, &name)
                                 }
                                 LibraryCommand::RemoveRoot(root) => {
                                     remove_root_and_purge(&conn, &root)
@@ -162,14 +197,24 @@ fn emit_snapshot(event_tx: &Sender<LibraryEvent>, snapshot: &LibrarySnapshot) {
 fn handle_add_root(
     conn: &Connection,
     root: &Path,
+    name: &str,
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<(), String> {
     let root = canonicalize_root(root)?;
-    insert_root(conn, &root)?;
+    insert_root(conn, &root, name)?;
     // Reflect the newly-added root in UI state immediately, before scan completion.
     snapshot.roots = load_roots(conn);
     run_scans(conn, &[root], snapshot, event_tx)
+}
+
+fn rename_root(conn: &Connection, root: &Path, name: &str) -> Result<(), String> {
+    let root = if root.exists() {
+        root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    } else {
+        root.to_path_buf()
+    };
+    update_root_name(conn, &root, name)
 }
 
 fn handle_rescan_root(
@@ -185,7 +230,8 @@ fn handle_rescan_root(
     };
     let roots = load_roots(conn)
         .into_iter()
-        .filter(|known| known == &root)
+        .filter(|known| known.path == root)
+        .map(|known| known.path)
         .collect::<Vec<_>>();
     if roots.is_empty() {
         return Err(format!("root '{}' is not configured", root.display()));
@@ -198,7 +244,10 @@ fn handle_rescan_all(
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<(), String> {
-    let roots = load_roots(conn);
+    let roots = load_roots(conn)
+        .into_iter()
+        .map(|root| root.path)
+        .collect::<Vec<_>>();
     if roots.is_empty() {
         return Ok(());
     }
@@ -441,6 +490,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         r"
         CREATE TABLE IF NOT EXISTS roots (
             path TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
             added_at INTEGER NOT NULL
         );
 
@@ -479,6 +529,10 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     )?;
 
     // Migrations for existing DBs created before metadata expansion.
+    let _ = conn.execute(
+        "ALTER TABLE roots ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE tracks ADD COLUMN root_path TEXT NOT NULL DEFAULT ''",
         [],
@@ -698,12 +752,18 @@ fn store_external_track_cache_in_conn(
     Ok(())
 }
 
-fn load_roots(conn: &Connection) -> Vec<PathBuf> {
+fn load_roots(conn: &Connection) -> Vec<LibraryRoot> {
     let mut roots = Vec::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT path FROM roots ORDER BY path COLLATE NOCASE") {
-        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+    if let Ok(mut stmt) = conn.prepare("SELECT path, name FROM roots ORDER BY path COLLATE NOCASE")
+    {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok(LibraryRoot {
+                path: PathBuf::from(row.get::<_, String>(0)?),
+                name: normalize_root_name(&row.get::<_, String>(1)?),
+            })
+        }) {
             for row in rows.flatten() {
-                roots.push(PathBuf::from(row));
+                roots.push(row);
             }
         }
     }
@@ -758,14 +818,37 @@ fn canonicalize_root(root: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn insert_root(conn: &Connection, root: &Path) -> Result<(), String> {
+fn normalize_root_name(name: &str) -> String {
+    name.trim().to_string()
+}
+
+fn insert_root(conn: &Connection, root: &Path, name: &str) -> Result<(), String> {
     let now = unix_ts_i64();
     let root_str = root.to_string_lossy().to_string();
+    let trimmed_name = normalize_root_name(name);
     conn.execute(
-        "INSERT OR IGNORE INTO roots(path, added_at) VALUES (?1, ?2)",
-        params![root_str, now],
+        "INSERT OR IGNORE INTO roots(path, name, added_at) VALUES (?1, ?2, ?3)",
+        params![root_str.clone(), trimmed_name, now],
     )
     .map_err(|e| format!("failed to save root '{}': {e}", root.display()))?;
+    if !name.trim().is_empty() {
+        update_root_name(conn, root, name)?;
+    }
+    Ok(())
+}
+
+fn update_root_name(conn: &Connection, root: &Path, name: &str) -> Result<(), String> {
+    let root_str = root.to_string_lossy().to_string();
+    let trimmed_name = normalize_root_name(name);
+    let changed = conn
+        .execute(
+            "UPDATE roots SET name = ?1 WHERE path = ?2",
+            params![trimmed_name, root_str],
+        )
+        .map_err(|e| format!("failed to rename root '{}': {e}", root.display()))?;
+    if changed == 0 {
+        return Err(format!("root '{}' is not configured", root.display()));
+    }
     Ok(())
 }
 
@@ -858,7 +941,7 @@ where
     U: FnMut(&MetadataTask, &IndexedTrack),
 {
     let root = canonicalize_root(root)?;
-    insert_root(conn, &root)?;
+    insert_root(conn, &root, "")?;
 
     let root_str = root.to_string_lossy().to_string();
     let mut existing: HashMap<String, (i64, i64, bool)> = HashMap::new();
@@ -1740,7 +1823,10 @@ mod tests {
 
         assert_eq!(
             snapshot.roots,
-            vec![root_b.canonicalize().expect("canon b")]
+            vec![LibraryRoot {
+                path: root_b.canonicalize().expect("canon b"),
+                name: String::new(),
+            }]
         );
         assert_eq!(snapshot.tracks.len(), 1);
         assert!(snapshot

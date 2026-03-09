@@ -21,7 +21,7 @@ use crate::lastfm::{
 use crate::library::{
     is_supported_audio, load_external_track_cache, load_external_track_caches, read_track_info,
     search_tracks_fts, store_external_track_cache, track_file_fingerprint, IndexedTrack,
-    LibraryCommand, LibraryEvent, LibrarySearchTrack, LibraryService, LibrarySnapshot,
+    LibraryCommand, LibraryEvent, LibraryRoot, LibrarySearchTrack, LibraryService, LibrarySnapshot,
     LibraryTrack, TrackFileFingerprint,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
@@ -112,7 +112,8 @@ pub enum BridgeQueueCommand {
 #[derive(Debug, Clone)]
 pub enum BridgeLibraryCommand {
     ScanRoot(PathBuf),
-    AddRoot(PathBuf),
+    AddRoot { path: PathBuf, name: String },
+    RenameRoot { path: PathBuf, name: String },
     RemoveRoot(PathBuf),
     RescanRoot(PathBuf),
     RescanAll,
@@ -254,6 +255,7 @@ pub struct BridgeSearchResultRow {
     pub label: String,
     pub artist: String,
     pub album: String,
+    pub root_label: String,
     pub genre: String,
     pub cover_path: String,
     pub artist_key: String,
@@ -406,7 +408,7 @@ struct PreparedSearchTrack {
 
 #[derive(Debug, Clone, Default)]
 struct PreparedSearchLibrary {
-    roots: Vec<PathBuf>,
+    roots: Vec<LibraryRoot>,
     tracks: Vec<PreparedSearchTrack>,
     context_by_path: HashMap<String, TreePathContext>,
     album_inventory: HashMap<String, AlbumInventoryAcc>,
@@ -2144,8 +2146,12 @@ fn handle_library_command(
             library.command(LibraryCommand::ScanRoot(path));
             false
         }
-        BridgeLibraryCommand::AddRoot(path) => {
-            library.command(LibraryCommand::AddRoot(path));
+        BridgeLibraryCommand::AddRoot { path, name } => {
+            library.command(LibraryCommand::AddRoot { path, name });
+            false
+        }
+        BridgeLibraryCommand::RenameRoot { path, name } => {
+            library.command(LibraryCommand::RenameRoot { path, name });
             false
         }
         BridgeLibraryCommand::RemoveRoot(path) => {
@@ -2268,6 +2274,7 @@ fn handle_library_command(
 struct TreePathContext {
     artist_name: String,
     artist_key: String,
+    root_label: String,
     album_folder: Option<String>,
     album_key: Option<String>,
     section_key: Option<String>,
@@ -2287,6 +2294,7 @@ fn build_search_results_frame(
         artist_name: String,
         album_title: String,
         artist_key: String,
+        root_label: String,
         year_counts: HashMap<i32, usize>,
         genre_counts: HashMap<String, usize>,
     }
@@ -2370,8 +2378,8 @@ fn build_search_results_frame(
     }
 
     let mut album_cover_paths: HashMap<String, String> = HashMap::new();
-    let mut artist_groups: HashMap<String, (f32, String)> = HashMap::new();
-    let mut album_groups: HashMap<String, (f32, String)> = HashMap::new();
+    let mut artist_groups: HashMap<String, (f32, String, String)> = HashMap::new();
+    let mut album_groups: HashMap<String, (f32, String, String)> = HashMap::new();
     let mut album_hit_stats: HashMap<String, HitAlbumAcc> = HashMap::new();
     let mut track_rows = Vec::new();
 
@@ -2402,12 +2410,15 @@ fn build_search_results_frame(
         let artist_query_match = query_terms_match_text(&query_terms, &context.artist_name);
 
         if artist_query_match {
-            let artist_entry = artist_groups
-                .entry(context.artist_key.clone())
-                .or_insert((hit.score, context.artist_name.clone()));
+            let artist_entry = artist_groups.entry(context.artist_key.clone()).or_insert((
+                hit.score,
+                context.artist_name.clone(),
+                context.root_label.clone(),
+            ));
             if hit.score < artist_entry.0 {
                 artist_entry.0 = hit.score;
                 artist_entry.1 = context.artist_name.clone();
+                artist_entry.2 = context.root_label.clone();
             }
         }
 
@@ -2417,12 +2428,15 @@ fn build_search_results_frame(
                 &format!("{} {}", context.artist_name, hit_album),
             );
             if album_query_match {
-                let album_entry = album_groups
-                    .entry(album_key.clone())
-                    .or_insert((hit.score, hit_album.clone()));
+                let album_entry = album_groups.entry(album_key.clone()).or_insert((
+                    hit.score,
+                    hit_album.clone(),
+                    context.root_label.clone(),
+                ));
                 if hit.score < album_entry.0 {
                     album_entry.0 = hit.score;
                     album_entry.1 = hit_album.clone();
+                    album_entry.2 = context.root_label.clone();
                 }
 
                 let stats_entry = album_hit_stats.entry(album_key).or_default();
@@ -2431,6 +2445,9 @@ fn build_search_results_frame(
                 }
                 if stats_entry.artist_key.is_empty() {
                     stats_entry.artist_key = context.artist_key.clone();
+                }
+                if stats_entry.root_label.is_empty() {
+                    stats_entry.root_label = context.root_label.clone();
                 }
                 if stats_entry.album_title.is_empty() {
                     stats_entry.album_title = hit_album.clone();
@@ -2463,6 +2480,7 @@ fn build_search_results_frame(
             },
             artist: hit_artist,
             album: hit_album,
+            root_label: context.root_label.clone(),
             genre: hit.genre.trim().to_string(),
             cover_path: album_key.as_ref().map_or_else(String::new, |key| {
                 cached_album_cover_path(key, context.album_path.as_ref(), &mut album_cover_paths)
@@ -2477,29 +2495,32 @@ fn build_search_results_frame(
 
     let mut artist_rows = artist_groups
         .into_iter()
-        .map(|(artist_key, (score, artist_name))| BridgeSearchResultRow {
-            row_type: BridgeSearchResultRowType::Artist,
-            score,
-            year: None,
-            track_number: None,
-            count: 0,
-            length_seconds: None,
-            label: artist_name.clone(),
-            artist: artist_name,
-            album: String::new(),
-            genre: String::new(),
-            cover_path: String::new(),
-            artist_key,
-            album_key: String::new(),
-            section_key: String::new(),
-            track_key: String::new(),
-            track_path: String::new(),
-        })
+        .map(
+            |(artist_key, (score, artist_name, root_label))| BridgeSearchResultRow {
+                row_type: BridgeSearchResultRowType::Artist,
+                score,
+                year: None,
+                track_number: None,
+                count: 0,
+                length_seconds: None,
+                label: artist_name.clone(),
+                artist: artist_name,
+                album: String::new(),
+                root_label,
+                genre: String::new(),
+                cover_path: String::new(),
+                artist_key,
+                album_key: String::new(),
+                section_key: String::new(),
+                track_key: String::new(),
+                track_path: String::new(),
+            },
+        )
         .collect::<Vec<_>>();
 
     let mut album_rows = album_groups
         .into_iter()
-        .filter_map(|(album_key, (score, fallback_title))| {
+        .filter_map(|(album_key, (score, fallback_title, root_label))| {
             let stats = album_hit_stats.get(&album_key)?;
             let inventory = prepared.album_inventory.get(&album_key);
             let year = choose_most_common_year(&stats.year_counts);
@@ -2522,6 +2543,11 @@ fn build_search_results_frame(
                     String::new()
                 } else {
                     stats.album_title.clone()
+                },
+                root_label: if stats.root_label.is_empty() {
+                    root_label
+                } else {
+                    stats.root_label.clone()
                 },
                 genre,
                 cover_path: album_cover_paths
@@ -2940,20 +2966,20 @@ fn is_main_album_disc_section(section_name: &str) -> bool {
     false
 }
 
-fn pick_root_for_path<'a>(roots: &'a [PathBuf], path: &PathBuf) -> Option<&'a PathBuf> {
+fn pick_root_for_path<'a>(roots: &'a [LibraryRoot], path: &PathBuf) -> Option<&'a LibraryRoot> {
     roots
         .iter()
-        .filter(|root| path.starts_with(root))
-        .max_by_key(|root| root.components().count())
+        .filter(|root| path.starts_with(&root.path))
+        .max_by_key(|root| root.path.components().count())
 }
 
 fn derive_tree_path_context(
     path: &PathBuf,
-    roots: &[PathBuf],
+    roots: &[LibraryRoot],
     fallback_artist: &str,
 ) -> Option<TreePathContext> {
     let root = pick_root_for_path(roots, path)?;
-    let rel = path.strip_prefix(root).ok()?;
+    let rel = path.strip_prefix(&root.path).ok()?;
     let components = rel
         .components()
         .filter_map(|component| {
@@ -2967,7 +2993,8 @@ fn derive_tree_path_context(
         return None;
     }
 
-    let root_key = root.to_string_lossy().to_string();
+    let root_key = root.path.to_string_lossy().to_string();
+    let root_label = root.search_label();
     let artist_name = if components.len() >= 2 {
         components[0].clone()
     } else if fallback_artist.trim().is_empty() {
@@ -2983,6 +3010,7 @@ fn derive_tree_path_context(
         return Some(TreePathContext {
             artist_name,
             artist_key,
+            root_label,
             album_folder: None,
             album_key: None,
             section_key: None,
@@ -3009,10 +3037,11 @@ fn derive_tree_path_context(
     Some(TreePathContext {
         artist_name: artist_name.clone(),
         artist_key,
+        root_label,
         album_folder: Some(album_folder.clone()),
         album_key: Some(album_key),
         section_key,
-        album_path: Some(root.join(&artist_name).join(album_folder)),
+        album_path: Some(root.path.join(&artist_name).join(album_folder)),
         track_key,
         is_main_level_album_track,
         is_disc_section_album_track,
@@ -3682,6 +3711,7 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
 mod tests {
     use super::*;
     use crate::lastfm::ServiceOptions as LastFmServiceOptions;
+    use crate::library::LibraryRoot;
     use std::io::Write;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
@@ -3731,6 +3761,13 @@ mod tests {
         }
     }
 
+    fn library_root(path: &PathBuf) -> LibraryRoot {
+        LibraryRoot {
+            path: path.clone(),
+            name: String::new(),
+        }
+    }
+
     #[test]
     fn disc_section_detection_accepts_common_main_disc_names() {
         assert!(is_main_album_disc_section("CD1"));
@@ -3745,7 +3782,7 @@ mod tests {
     fn prepare_search_library_counts_main_album_tracks_with_cd_sections() {
         let root = p("/music");
         let snapshot = LibrarySnapshot {
-            roots: vec![root.clone()],
+            roots: vec![library_root(&root)],
             tracks: vec![
                 crate::library::LibraryTrack {
                     path: p("/music/Artist/Album/01 - Intro.flac"),
@@ -3804,7 +3841,7 @@ mod tests {
     fn fallback_search_cancels_when_newer_query_arrives() {
         let root = p("/music");
         let snapshot = LibrarySnapshot {
-            roots: vec![root.clone()],
+            roots: vec![library_root(&root)],
             tracks: vec![crate::library::LibraryTrack {
                 path: p("/music/Artist/Album/01 - Song.flac"),
                 root_path: root,
@@ -4257,7 +4294,7 @@ mod tests {
     fn collect_artist_paths_for_queue_respects_year_sort_mode() {
         let root = p("/music");
         let library = LibrarySnapshot {
-            roots: vec![root.clone()],
+            roots: vec![library_root(&root)],
             tracks: vec![
                 library_track(
                     "/music/Artist/Alpha/01 - One.flac",
@@ -4295,7 +4332,7 @@ mod tests {
     fn collect_artist_paths_for_queue_treats_mixed_year_album_as_unknown() {
         let root = p("/music");
         let library = LibrarySnapshot {
-            roots: vec![root.clone()],
+            roots: vec![library_root(&root)],
             tracks: vec![
                 library_track(
                     "/music/Artist/Alpha/01 - One.flac",
@@ -4342,7 +4379,7 @@ mod tests {
     fn collect_artist_paths_for_queue_respects_title_sort_mode() {
         let root = p("/music");
         let library = LibrarySnapshot {
-            roots: vec![root.clone()],
+            roots: vec![library_root(&root)],
             tracks: vec![
                 library_track(
                     "/music/Artist/Alpha/01 - One.flac",
@@ -4396,7 +4433,7 @@ mod tests {
             Some(1),
         );
         let library = LibrarySnapshot {
-            roots: vec![root.clone()],
+            roots: vec![library_root(&root)],
             tracks: vec![sampler, blackfield],
             scan_in_progress: false,
             scan_progress: None,
@@ -4416,7 +4453,7 @@ mod tests {
         let root_a = p("/music-a");
         let root_b = p("/music-b");
         let library = LibrarySnapshot {
-            roots: vec![root_a.clone(), root_b.clone()],
+            roots: vec![library_root(&root_a), library_root(&root_b)],
             tracks: vec![
                 library_track(
                     "/music-a/Same Artist/Alpha/01 - One.flac",
@@ -4452,7 +4489,7 @@ mod tests {
     fn collect_album_paths_for_queue_honors_album_key_scope() {
         let root = p("/music");
         let library = LibrarySnapshot {
-            roots: vec![root.clone()],
+            roots: vec![library_root(&root)],
             tracks: vec![
                 library_track(
                     "/music/Porcupine Tree/Muut/Porcupine Tree Sampler 2005/01 - Hello.flac",

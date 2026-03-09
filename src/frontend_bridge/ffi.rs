@@ -663,8 +663,12 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
         }
         21 => {
             let path = reader.read_u16_string()?;
+            let name = reader.read_u16_string()?;
             reader.expect_done()?;
-            BridgeCommand::Library(BridgeLibraryCommand::AddRoot(PathBuf::from(path)))
+            BridgeCommand::Library(BridgeLibraryCommand::AddRoot {
+                path: PathBuf::from(path),
+                name,
+            })
         }
         22 => {
             let path = reader.read_u16_string()?;
@@ -679,6 +683,15 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
         24 => {
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::RescanAll)
+        }
+        45 => {
+            let path = reader.read_u16_string()?;
+            let name = reader.read_u16_string()?;
+            reader.expect_done()?;
+            BridgeCommand::Library(BridgeLibraryCommand::RenameRoot {
+                path: PathBuf::from(path),
+                name,
+            })
         }
         25 => {
             let value = reader.read_u8()?;
@@ -893,7 +906,7 @@ fn encode_stopped_event() -> Vec<u8> {
 fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + frame.rows.len() * 128);
     push_u8(&mut out, b'S');
-    push_u8(&mut out, 1);
+    push_u8(&mut out, 2);
     push_u16(&mut out, clamp_u16(frame.rows.len()));
     push_u32(&mut out, frame.seq);
     for row in &frame.rows {
@@ -911,6 +924,7 @@ fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
         push_u16_string(&mut out, &row.label);
         push_u16_string(&mut out, &row.artist);
         push_u16_string(&mut out, &row.album);
+        push_u16_string(&mut out, &row.root_label);
         push_u16_string(&mut out, &row.genre);
         push_u16_string(&mut out, &row.cover_path);
         push_u16_string(&mut out, &row.artist_key);
@@ -1150,8 +1164,9 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_f32(&mut out, eta_seconds);
     push_u16(&mut out, clamp_u16(snapshot.library.roots.len()));
     for root in &snapshot.library.roots {
-        let root_str = root.to_string_lossy().to_string();
+        let root_str = root.path.to_string_lossy().to_string();
         push_u16_string(&mut out, &root_str);
+        push_u16_string(&mut out, &root.name);
     }
 
     out
@@ -1486,11 +1501,18 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
 mod tests {
     use super::*;
     use crate::analysis::{AnalysisSnapshot, AnalysisSpectrogramChannel, SpectrogramChannelLabel};
-    use crate::library::{LibrarySnapshot, LibraryTrack};
+    use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
     use crate::playback::{PlaybackSnapshot, PlaybackState};
     use std::sync::Arc;
     use std::thread;
     use std::time::Instant;
+
+    fn root(path: &str) -> LibraryRoot {
+        LibraryRoot {
+            path: PathBuf::from(path),
+            name: String::new(),
+        }
+    }
 
     fn sample_snapshot() -> BridgeSnapshot {
         BridgeSnapshot {
@@ -1534,7 +1556,7 @@ mod tests {
                 cover_art_rgba: None,
             },
             library: Arc::new(LibrarySnapshot {
-                roots: vec![PathBuf::from("/music")],
+                roots: vec![root("/music")],
                 tracks: vec![LibraryTrack {
                     path: PathBuf::from("/music/a.flac"),
                     root_path: PathBuf::from("/music"),

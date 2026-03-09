@@ -65,6 +65,9 @@ Kirigami.ApplicationWindow {
     property bool spectrogramViewerOpen: false
     property string pendingFolderDialogContext: ""
     property string pendingFileDialogContext: ""
+    property string pendingLibraryRootDialogMode: ""
+    property string pendingLibraryRootPath: ""
+    property string pendingLibraryRootName: ""
     property string transientBridgeError: ""
     property real rememberedVolumeBeforeMute: 1.0
     property bool volumeMuted: false
@@ -287,6 +290,7 @@ Kirigami.ApplicationWindow {
         property int libraryArtistCount: 0
         property int libraryAlbumCount: 0
         property var libraryRoots: []
+        property var libraryRootEntries: []
         property int librarySortMode: 0
         property string fileBrowserName: "File Manager"
         property int libraryScanRootsCompleted: 0
@@ -352,7 +356,8 @@ Kirigami.ApplicationWindow {
         function libraryAlbumCoverAt(index) { return "" }
         function queueTrackNumberAt(index) { return null }
         function queuePathAt(index) { return "" }
-        function addLibraryRoot(path) {}
+        function addLibraryRoot(path, name) {}
+        function setLibraryRootName(path, name) {}
         function removeLibraryRoot(path) {}
         function rescanLibraryRoot(path) {}
         function rescanAllLibraryRoots() {}
@@ -436,11 +441,23 @@ Kirigami.ApplicationWindow {
         const headerWidth = playlistOrderFontMetrics.boundingRect("#").width
         return Math.max(28, Math.ceil(Math.max(valueWidth, headerWidth) + 10))
     }
-    readonly property int globalSearchTrackLengthColumnWidth: Math.max(
+    readonly property bool globalSearchShowsRootColumn: (uiBridge.libraryRootCount || 0) >= 2
+    readonly property int globalSearchTrackNumberColumnWidth: Math.max(
         34,
-        Math.ceil(playlistOrderFontMetrics.boundingRect("00:00").width + 6))
+        Math.ceil(Math.max(
+            playlistOrderFontMetrics.boundingRect("#").width,
+            playlistOrderFontMetrics.boundingRect("00").width) + 10))
+    readonly property int globalSearchCoverColumnWidth: 26
+    readonly property int globalSearchArtistColumnWidth: 170
+    readonly property int globalSearchAlbumColumnWidth: 182
+    readonly property int globalSearchYearColumnWidth: 52
+    readonly property int globalSearchRootColumnWidth: 140
+    readonly property int globalSearchAlbumCountColumnWidth: 40
+    readonly property int globalSearchTrackLengthColumnWidth: Math.max(
+        40,
+        Math.ceil(playlistOrderFontMetrics.boundingRect("00:00").width + 12))
     readonly property int globalSearchTrackGenreColumnWidth: Math.max(
-        116,
+        124,
         Math.ceil(Math.max(
             playlistOrderFontMetrics.boundingRect("Genre").width,
             playlistOrderFontMetrics.boundingRect("Alternative country").width) + 8))
@@ -2540,6 +2557,19 @@ Kirigami.ApplicationWindow {
         scanFolderDialog.open()
     }
 
+    function openLibraryRootNameDialog(modeValue, pathValue, nameValue) {
+        pendingLibraryRootDialogMode = modeValue || ""
+        pendingLibraryRootPath = pathValue || ""
+        pendingLibraryRootName = nameValue || ""
+        libraryRootNameDialog.open()
+    }
+
+    function resetLibraryRootNameDialog() {
+        pendingLibraryRootDialogMode = ""
+        pendingLibraryRootPath = ""
+        pendingLibraryRootName = ""
+    }
+
     function openAlbumArtViewer() {
         if (!uiBridge.currentTrackCoverPath || uiBridge.currentTrackCoverPath.length === 0) {
             return
@@ -3038,7 +3068,7 @@ Kirigami.ApplicationWindow {
 
                                 Label {
                                     Layout.fillWidth: true
-                                    text: uiBridge.libraryRoots.length === 0
+                                    text: uiBridge.libraryRootEntries.length === 0
                                         ? "No library roots configured."
                                         : "Configured roots"
                                     color: Kirigami.Theme.disabledTextColor
@@ -3046,17 +3076,17 @@ Kirigami.ApplicationWindow {
 
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: Math.min(220, (48 * Math.max(1, uiBridge.libraryRoots.length)) + 12)
+                                    Layout.preferredHeight: Math.min(260, (60 * Math.max(1, uiBridge.libraryRootEntries.length)) + 12)
                                     color: root.uiSurfaceAltColor
                                     border.color: root.uiBorderColor
                                     radius: 8
-                                    visible: uiBridge.libraryRoots.length > 0
+                                    visible: uiBridge.libraryRootEntries.length > 0
 
                                     ListView {
                                         anchors.fill: parent
                                         anchors.margins: 8
                                         clip: true
-                                        model: uiBridge.libraryRoots
+                                        model: uiBridge.libraryRootEntries
                                         boundsBehavior: Flickable.StopAtBounds
                                         boundsMovement: Flickable.StopAtBounds
                                         flickDeceleration: root.snappyScrollFlickDeceleration
@@ -3072,8 +3102,12 @@ Kirigami.ApplicationWindow {
                                             }
                                         }
                                         delegate: Rectangle {
+                                            readonly property var rootEntry: modelData || ({})
+                                            readonly property string rootPath: rootEntry.path || ""
+                                            readonly property string rootName: rootEntry.name || ""
+                                            readonly property string rootDisplayName: rootEntry.displayName || rootPath
                                             width: ListView.view.width
-                                            height: 40
+                                            height: 52
                                             radius: 6
                                             color: root.uiSurfaceRaisedColor
                                             border.color: Qt.rgba(0, 0, 0, 0.06)
@@ -3083,22 +3117,42 @@ Kirigami.ApplicationWindow {
                                                 anchors.leftMargin: 10
                                                 anchors.rightMargin: 10
                                                 spacing: 8
-                                                Label {
+
+                                                ColumnLayout {
                                                     Layout.fillWidth: true
-                                                    text: modelData
-                                                    elide: Text.ElideMiddle
+                                                    spacing: 2
+                                                    Label {
+                                                        Layout.fillWidth: true
+                                                        text: rootDisplayName
+                                                        elide: Text.ElideRight
+                                                    }
+                                                    Label {
+                                                        Layout.fillWidth: true
+                                                        visible: rootName.length > 0
+                                                        text: rootPath
+                                                        elide: Text.ElideMiddle
+                                                        color: root.uiMutedTextColor
+                                                        font.pixelSize: Math.max(11, root.font.pixelSize - 1)
+                                                    }
                                                 }
                                                 ToolButton {
                                                     text: "Open"
-                                                    onClicked: uiBridge.openInFileBrowser(modelData)
+                                                    onClicked: uiBridge.openInFileBrowser(rootPath)
+                                                }
+                                                ToolButton {
+                                                    text: "Rename"
+                                                    onClicked: root.openLibraryRootNameDialog(
+                                                        "rename",
+                                                        rootPath,
+                                                        rootName)
                                                 }
                                                 ToolButton {
                                                     text: "Rescan"
-                                                    onClicked: uiBridge.rescanLibraryRoot(modelData)
+                                                    onClicked: uiBridge.rescanLibraryRoot(rootPath)
                                                 }
                                                 ToolButton {
                                                     text: "Remove"
-                                                    onClicked: uiBridge.removeLibraryRoot(modelData)
+                                                    onClicked: uiBridge.removeLibraryRoot(rootPath)
                                                 }
                                             }
                                         }
@@ -3442,11 +3496,74 @@ Kirigami.ApplicationWindow {
     }
 
     Dialog {
+        id: libraryRootNameDialog
+        modal: true
+        title: pendingLibraryRootDialogMode === "rename"
+            ? "Rename Library Root"
+            : "Add Library Root"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        width: Math.min(560, root.width - 80)
+        enter: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
+        exit: Transition {
+            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
+        }
+        onOpened: {
+            libraryRootNameField.forceActiveFocus()
+            libraryRootNameField.selectAll()
+        }
+        onAccepted: {
+            const resolvedPath = pendingLibraryRootPath || ""
+            const resolvedName = (libraryRootNameField.text || "").trim()
+            if (resolvedPath.length > 0) {
+                if (pendingLibraryRootDialogMode === "rename") {
+                    uiBridge.setLibraryRootName(resolvedPath, resolvedName)
+                } else {
+                    uiBridge.addLibraryRoot(resolvedPath, resolvedName)
+                }
+            }
+            root.resetLibraryRootNameDialog()
+        }
+        onRejected: root.resetLibraryRootNameDialog()
+
+        contentItem: ColumnLayout {
+            spacing: 10
+
+            Label {
+                Layout.fillWidth: true
+                text: "Path"
+                color: root.uiMutedTextColor
+            }
+            TextField {
+                Layout.fillWidth: true
+                readOnly: true
+                text: pendingLibraryRootPath || ""
+                selectByMouse: true
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: "Custom Name (optional)"
+                color: root.uiMutedTextColor
+            }
+            TextField {
+                id: libraryRootNameField
+                Layout.fillWidth: true
+                text: pendingLibraryRootName || ""
+                placeholderText: "Leave blank to use the path"
+                selectByMouse: true
+                onAccepted: libraryRootNameDialog.accept()
+            }
+        }
+    }
+
+    Dialog {
         id: globalSearchDialog
         modal: true
         title: "Global Search"
         standardButtons: Dialog.Close
-        width: Math.min(1080, root.width - 80)
+        width: Math.min(1240, root.width - 64)
         height: Math.min(720, root.height - 80)
         enter: Transition {
             NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
@@ -3666,6 +3783,7 @@ Kirigami.ApplicationWindow {
                         readonly property string labelValue: label || ""
                         readonly property string artistValue: artist || ""
                         readonly property string albumValue: album || ""
+                        readonly property string rootLabelValue: rootLabel || ""
                         readonly property string genreValue: genre || ""
                         readonly property string coverUrlValue: coverUrl || ""
                         readonly property string lengthTextValue: lengthText || ""
@@ -3720,18 +3838,32 @@ Kirigami.ApplicationWindow {
                                     font.weight: Font.DemiBold
                                     color: root.uiMutedTextColor
                                 }
+                                Label {
+                                    visible: root.globalSearchShowsRootColumn
+                                    text: "Root"
+                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                }
                             }
 
                             RowLayout {
                                 visible: rowKind === "columns" && rowTypeValue === "album"
                                 Layout.fillWidth: true
                                 spacing: 8
-                                Label { text: ""; Layout.preferredWidth: 26; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: ""; Layout.preferredWidth: root.globalSearchCoverColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
                                 Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Artist"; Layout.preferredWidth: 170; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Artist"; Layout.preferredWidth: root.globalSearchArtistColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label {
+                                    visible: root.globalSearchShowsRootColumn
+                                    text: "Root"
+                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                }
                                 Label {
                                     text: "Year"
-                                    Layout.preferredWidth: 52
+                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
                                     font.weight: Font.DemiBold
                                     color: root.uiMutedTextColor
                                     horizontalAlignment: Text.AlignRight
@@ -3742,7 +3874,7 @@ Kirigami.ApplicationWindow {
                                     font.weight: Font.DemiBold
                                     color: root.uiMutedTextColor
                                 }
-                                Label { text: "#"; Layout.preferredWidth: 34; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
+                                Label { text: "#"; Layout.preferredWidth: root.globalSearchAlbumCountColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
                                 Label {
                                     text: "Length"
                                     Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
@@ -3758,18 +3890,25 @@ Kirigami.ApplicationWindow {
                                 spacing: 8
                                 Label {
                                     text: "#"
-                                    Layout.preferredWidth: 34
+                                    Layout.preferredWidth: root.globalSearchTrackNumberColumnWidth
                                     font.weight: Font.DemiBold
                                     color: root.uiMutedTextColor
                                     horizontalAlignment: Text.AlignRight
                                 }
                                 Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Artist"; Layout.preferredWidth: 160; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: ""; Layout.preferredWidth: 20; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Album"; Layout.preferredWidth: 182; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Artist"; Layout.preferredWidth: root.globalSearchArtistColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: ""; Layout.preferredWidth: root.globalSearchCoverColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label { text: "Album"; Layout.preferredWidth: root.globalSearchAlbumColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
+                                Label {
+                                    visible: root.globalSearchShowsRootColumn
+                                    text: "Root"
+                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
+                                    font.weight: Font.DemiBold
+                                    color: root.uiMutedTextColor
+                                }
                                 Label {
                                     text: "Year"
-                                    Layout.preferredWidth: 52
+                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
                                     font.weight: Font.DemiBold
                                     color: root.uiMutedTextColor
                                     horizontalAlignment: Text.AlignRight
@@ -3780,7 +3919,7 @@ Kirigami.ApplicationWindow {
                                     font.weight: Font.DemiBold
                                     color: root.uiMutedTextColor
                                 }
-                                Label { text: "Length"; Layout.preferredWidth: 76; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Length"; Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
                             }
 
                             Loader {
@@ -3804,6 +3943,13 @@ Kirigami.ApplicationWindow {
                                     elide: Text.ElideRight
                                     color: rowTextColor
                                 }
+                                Label {
+                                    visible: root.globalSearchShowsRootColumn
+                                    text: rootLabelValue || ""
+                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
+                                    elide: Text.ElideRight
+                                    color: rowTextColor
+                                }
                             }
                         }
 
@@ -3812,7 +3958,7 @@ Kirigami.ApplicationWindow {
                             RowLayout {
                                 spacing: 8
                                 Item {
-                                    Layout.preferredWidth: 26
+                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
                                     Layout.preferredHeight: 20
                                     Image {
                                         anchors.fill: parent
@@ -3832,25 +3978,32 @@ Kirigami.ApplicationWindow {
                                 }
                                 Label {
                                     text: artistValue || ""
-                                    Layout.preferredWidth: 170
+                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
+                                    elide: Text.ElideRight
+                                    color: rowTextColor
+                                }
+                                Label {
+                                    visible: root.globalSearchShowsRootColumn
+                                    text: rootLabelValue || ""
+                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
                                     elide: Text.ElideRight
                                     color: rowTextColor
                                 }
                                 Label {
                                     text: yearValue !== undefined && yearValue !== null ? yearValue : ""
-                                    Layout.preferredWidth: 52
+                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
                                     horizontalAlignment: Text.AlignRight
                                     color: rowTextColor
                                 }
                                 Label {
                                     text: genreValue || ""
-                                    Layout.preferredWidth: 120
+                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
                                     elide: Text.ElideRight
                                     color: rowTextColor
                                 }
                                 Label {
                                     text: countValue !== undefined ? countValue : ""
-                                    Layout.preferredWidth: 34
+                                    Layout.preferredWidth: root.globalSearchAlbumCountColumnWidth
                                     horizontalAlignment: Text.AlignRight
                                     color: rowTextColor
                                 }
@@ -3871,7 +4024,7 @@ Kirigami.ApplicationWindow {
                                     text: trackNumberValue !== undefined && trackNumberValue !== null
                                         ? String(trackNumberValue).padStart(2, "0")
                                         : ""
-                                    Layout.preferredWidth: 34
+                                    Layout.preferredWidth: root.globalSearchTrackNumberColumnWidth
                                     horizontalAlignment: Text.AlignRight
                                     color: rowTextColor
                                 }
@@ -3883,12 +4036,12 @@ Kirigami.ApplicationWindow {
                                 }
                                 Label {
                                     text: artistValue || ""
-                                    Layout.preferredWidth: 160
+                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
                                     elide: Text.ElideRight
                                     color: rowTextColor
                                 }
                                 Item {
-                                    Layout.preferredWidth: 20
+                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
                                     Layout.preferredHeight: 18
                                     Image {
                                         anchors.fill: parent
@@ -3902,13 +4055,20 @@ Kirigami.ApplicationWindow {
                                 }
                                 Label {
                                     text: albumValue || ""
-                                    Layout.preferredWidth: 182
+                                    Layout.preferredWidth: root.globalSearchAlbumColumnWidth
+                                    elide: Text.ElideRight
+                                    color: rowTextColor
+                                }
+                                Label {
+                                    visible: root.globalSearchShowsRootColumn
+                                    text: rootLabelValue || ""
+                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
                                     elide: Text.ElideRight
                                     color: rowTextColor
                                 }
                                 Label {
                                     text: yearValue !== undefined && yearValue !== null ? yearValue : ""
-                                    Layout.preferredWidth: 52
+                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
                                     horizontalAlignment: Text.AlignRight
                                     color: rowTextColor
                                 }
@@ -4174,7 +4334,7 @@ Kirigami.ApplicationWindow {
                 if (pendingFolderDialogContext === "append-external-folder") {
                     root.submitExternalImport([localPath], false)
                 } else {
-                    uiBridge.addLibraryRoot(localPath)
+                    root.openLibraryRootNameDialog("add", localPath, "")
                 }
             }
             pendingFolderDialogContext = ""

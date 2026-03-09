@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
-use crate::library::{LibrarySnapshot, LibraryTrack};
+use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
 
 use super::LibrarySortMode;
 
@@ -43,6 +43,7 @@ struct ArtistNodeBuilder {
 #[derive(Debug, Clone)]
 struct RootNodeBuilder {
     root_path: PathBuf,
+    root_name: String,
     artists: BTreeMap<String, ArtistNodeBuilder>,
 }
 
@@ -88,14 +89,14 @@ struct FlatTreeRow {
 }
 
 impl FlatTreeRow {
-    fn root(depth: u16, path: &str, child_count: usize) -> Self {
+    fn root(depth: u16, path: &str, title: &str, child_count: usize) -> Self {
         Self {
             row_type: ROW_TYPE_ROOT,
             depth,
             source_index: -1,
             track_number: 0,
             child_count: clamp_u16(child_count),
-            title: path.to_string(),
+            title: title.to_string(),
             key: root_row_key(path),
             artist: String::new(),
             path: path.to_string(),
@@ -246,7 +247,7 @@ pub fn compute_artist_album_counts(library: &LibrarySnapshot) -> (usize, usize) 
         let Some(root) = pick_root_for_track(&roots, track) else {
             continue;
         };
-        let Ok(rel) = track.path.strip_prefix(root) else {
+        let Ok(rel) = track.path.strip_prefix(&root.path) else {
             continue;
         };
         let components = rel
@@ -263,7 +264,7 @@ pub fn compute_artist_album_counts(library: &LibrarySnapshot) -> (usize, usize) 
             continue;
         }
 
-        let root_key = root.to_string_lossy().to_string();
+        let root_key = root.path.to_string_lossy().to_string();
         let artist_name = if components.len() >= 2 {
             components[0].clone()
         } else if track.artist.trim().is_empty() {
@@ -300,7 +301,7 @@ pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
         let Some(root) = pick_root_for_track(&roots, track) else {
             continue;
         };
-        let Ok(rel) = track.path.strip_prefix(root) else {
+        let Ok(rel) = track.path.strip_prefix(&root.path) else {
             continue;
         };
         let components = rel
@@ -317,7 +318,7 @@ pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
             continue;
         }
 
-        let root_key = root.to_string_lossy().to_string();
+        let root_key = root.path.to_string_lossy().to_string();
         let artist_name = if components.len() >= 2 {
             components[0].clone()
         } else if track.artist.trim().is_empty() {
@@ -348,9 +349,10 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
     let mut builders: BTreeMap<String, RootNodeBuilder> = BTreeMap::new();
     for root in &roots {
         builders.insert(
-            root.to_string_lossy().to_string(),
+            root.path.to_string_lossy().to_string(),
             RootNodeBuilder {
-                root_path: root.clone(),
+                root_path: root.path.clone(),
+                root_name: root.display_name(),
                 artists: BTreeMap::new(),
             },
         );
@@ -360,12 +362,12 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
         let Some(root) = pick_root_for_track(&roots, track) else {
             continue;
         };
-        let root_key = root.to_string_lossy().to_string();
+        let root_key = root.path.to_string_lossy().to_string();
         let Some(root_builder) = builders.get_mut(&root_key) else {
             continue;
         };
 
-        let Ok(rel) = track.path.strip_prefix(root) else {
+        let Ok(rel) = track.path.strip_prefix(&root.path) else {
             continue;
         };
         let components = rel
@@ -396,14 +398,14 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
         }
 
         let (artist_name, artist_path) = if components.len() >= 2 {
-            (components[0].clone(), root.join(&components[0]))
+            (components[0].clone(), root.path.join(&components[0]))
         } else {
             let fallback = if track.artist.trim().is_empty() {
                 String::from("Unknown Artist")
             } else {
                 track.artist.trim().to_string()
             };
-            (fallback, root.clone())
+            (fallback, root.path.clone())
         };
 
         let artist_entry = root_builder
@@ -422,7 +424,7 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
         }
 
         let album_folder = components[1].clone();
-        let album_path = root.join(&artist_name).join(&album_folder);
+        let album_path = root.path.join(&artist_name).join(&album_folder);
         let album_entry = artist_entry
             .albums
             .entry(album_folder.clone())
@@ -463,6 +465,7 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
             rows.push(FlatTreeRow::root(
                 root_depth,
                 &root_path,
+                &root_builder.root_name,
                 root_builder.artists.len(),
             ));
         }
@@ -875,17 +878,20 @@ fn normalized_track_title(track: &LibraryTrack) -> String {
     )
 }
 
-fn pick_root_for_track<'a>(roots: &'a [PathBuf], track: &LibraryTrack) -> Option<&'a PathBuf> {
+fn pick_root_for_track<'a>(
+    roots: &'a [LibraryRoot],
+    track: &LibraryTrack,
+) -> Option<&'a LibraryRoot> {
     if !track.root_path.as_os_str().is_empty() {
-        if let Some(root) = roots.iter().find(|root| *root == &track.root_path) {
+        if let Some(root) = roots.iter().find(|root| root.path == track.root_path) {
             return Some(root);
         }
     }
 
     roots
         .iter()
-        .filter(|root| track.path.starts_with(root))
-        .max_by_key(|root| root.components().count())
+        .filter(|root| track.path.starts_with(&root.path))
+        .max_by_key(|root| root.path.components().count())
 }
 
 fn leading_track_number(input: &str) -> Option<u32> {
@@ -962,7 +968,7 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::LibrarySnapshot;
+    use crate::library::{LibraryRoot, LibrarySnapshot};
 
     #[derive(Debug)]
     struct DecodedRow {
@@ -1130,6 +1136,13 @@ mod tests {
         }
     }
 
+    fn root(path: &str) -> LibraryRoot {
+        LibraryRoot {
+            path: PathBuf::from(path),
+            name: String::new(),
+        }
+    }
+
     #[test]
     fn mixed_album_years_omit_album_year() {
         let album = AlbumNodeBuilder {
@@ -1195,7 +1208,7 @@ mod tests {
     #[test]
     fn single_root_hides_root_rows() {
         let library = LibrarySnapshot {
-            roots: vec![PathBuf::from("/music")],
+            roots: vec![root("/music")],
             tracks: vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",
@@ -1219,7 +1232,7 @@ mod tests {
     #[test]
     fn multi_root_keeps_roots_split() {
         let library = LibrarySnapshot {
-            roots: vec![PathBuf::from("/music-a"), PathBuf::from("/music-b")],
+            roots: vec![root("/music-a"), root("/music-b")],
             tracks: vec![
                 LibraryTrack {
                     path: PathBuf::from("/music-a/Artist/Album/01.flac"),
@@ -1265,7 +1278,7 @@ mod tests {
     #[test]
     fn artist_keys_include_root_identity() {
         let library = LibrarySnapshot {
-            roots: vec![PathBuf::from("/music-a"), PathBuf::from("/music-b")],
+            roots: vec![root("/music-a"), root("/music-b")],
             tracks: vec![
                 LibraryTrack {
                     path: PathBuf::from("/music-a/Same Artist/Album A/01.flac"),
@@ -1313,7 +1326,7 @@ mod tests {
     #[test]
     fn lazy_hydration_emits_artist_then_album_then_tracks() {
         let library = LibrarySnapshot {
-            roots: vec![PathBuf::from("/music")],
+            roots: vec![root("/music")],
             tracks: vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",
@@ -1351,7 +1364,7 @@ mod tests {
     #[test]
     fn retain_valid_expanded_keys_prunes_missing_nodes() {
         let library = LibrarySnapshot {
-            roots: vec![PathBuf::from("/music")],
+            roots: vec![root("/music")],
             tracks: vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",
@@ -1407,7 +1420,7 @@ mod tests {
     #[test]
     fn binary_row_tracks_include_paths_and_play_paths() {
         let library = LibrarySnapshot {
-            roots: vec![PathBuf::from("/music")],
+            roots: vec![root("/music")],
             tracks: vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",

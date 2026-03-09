@@ -44,6 +44,8 @@ QVariant GlobalSearchResultsModel::data(const QModelIndex &index, int role) cons
         return row.artist;
     case AlbumRole:
         return row.album;
+    case RootLabelRole:
+        return row.rootLabel;
     case GenreRole:
         return row.genre;
     case CoverPathRole:
@@ -96,6 +98,7 @@ QHash<int, QByteArray> GlobalSearchResultsModel::roleNames() const {
         {LabelRole, "label"},
         {ArtistRole, "artist"},
         {AlbumRole, "album"},
+        {RootLabelRole, "rootLabel"},
         {GenreRole, "genre"},
         {CoverPathRole, "coverPath"},
         {CoverUrlRole, "coverUrl"},
@@ -241,6 +244,7 @@ QVariantMap GlobalSearchResultsModel::rowDataAt(int index) const {
     out.insert(QStringLiteral("label"), row.label);
     out.insert(QStringLiteral("artist"), row.artist);
     out.insert(QStringLiteral("album"), row.album);
+    out.insert(QStringLiteral("rootLabel"), row.rootLabel);
     out.insert(QStringLiteral("genre"), row.genre);
     out.insert(QStringLiteral("count"), row.count);
     out.insert(QStringLiteral("coverPath"), row.coverPath);

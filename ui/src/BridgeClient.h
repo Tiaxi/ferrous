@@ -123,6 +123,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int libraryArtistCount READ libraryArtistCount NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryAlbumCount READ libraryAlbumCount NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryRoots READ libraryRoots NOTIFY snapshotChanged)
+    Q_PROPERTY(QVariantList libraryRootEntries READ libraryRootEntries NOTIFY snapshotChanged)
     Q_PROPERTY(int librarySortMode READ librarySortMode NOTIFY snapshotChanged)
     Q_PROPERTY(QString fileBrowserName READ fileBrowserName NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryScanRootsCompleted READ libraryScanRootsCompleted NOTIFY snapshotChanged)
@@ -201,6 +202,7 @@ public:
     int libraryArtistCount() const;
     int libraryAlbumCount() const;
     QStringList libraryRoots() const;
+    QVariantList libraryRootEntries() const;
     int librarySortMode() const;
     QString fileBrowserName() const;
     int libraryScanRootsCompleted() const;
@@ -262,7 +264,8 @@ public:
     Q_INVOKABLE QString libraryThumbnailSource(const QString &path) const;
     Q_INVOKABLE QString queuePathAt(int index) const;
     Q_INVOKABLE QVariant queueTrackNumberAt(int index) const;
-    Q_INVOKABLE void addLibraryRoot(const QString &path);
+    Q_INVOKABLE void addLibraryRoot(const QString &path, const QString &name = QString());
+    Q_INVOKABLE void setLibraryRootName(const QString &path, const QString &name);
     Q_INVOKABLE void removeLibraryRoot(const QString &path);
     Q_INVOKABLE void rescanLibraryRoot(const QString &path);
     Q_INVOKABLE void rescanAllLibraryRoots();
@@ -356,6 +359,7 @@ private:
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     void sendBinaryCommand(const QByteArray &payload);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path);
+    void sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name);
     static QString formatSeconds(double seconds);
     static QString formatDurationCompact(double seconds);
 
@@ -425,6 +429,7 @@ private:
     int m_libraryArtistCount{0};
     int m_libraryAlbumCount{0};
     QStringList m_libraryRoots;
+    QVariantList m_libraryRootEntries;
     int m_librarySortMode{0};
     QString m_fileBrowserName{QStringLiteral("File Manager")};
     int m_libraryScanRootsCompleted{0};

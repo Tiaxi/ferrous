@@ -78,6 +78,20 @@ QString normalizeLocalPathArg(const QString &path) {
     return trimmed;
 }
 
+QString normalizeRootNameArg(const QString &name) {
+    return name.trimmed();
+}
+
+QString rootSearchLabel(const QString &path, const QString &name) {
+    const QString trimmedName = normalizeRootNameArg(name);
+    if (!trimmedName.isEmpty()) {
+        return trimmedName;
+    }
+    const QFileInfo info(path);
+    const QString base = info.fileName().trimmed();
+    return base.isEmpty() ? path : base;
+}
+
 QString formatBinaryFileSize(qint64 sizeBytes) {
     if (sizeBytes < 0) {
         return {};
@@ -805,6 +819,7 @@ void BridgeClient::searchApplyWorkerLoop() {
                 item.label = row.label;
                 item.artist = row.artist;
                 item.album = row.album;
+                item.rootLabel = row.rootLabel;
                 item.genre = row.genre;
                 item.coverPath = row.coverPath;
                 item.coverUrl = searchCoverUrlFast(row.coverPath);
@@ -828,6 +843,7 @@ void BridgeClient::searchApplyWorkerLoop() {
                     legacyItem.insert(QStringLiteral("label"), row.label);
                     legacyItem.insert(QStringLiteral("artist"), row.artist);
                     legacyItem.insert(QStringLiteral("album"), row.album);
+                    legacyItem.insert(QStringLiteral("rootLabel"), row.rootLabel);
                     legacyItem.insert(QStringLiteral("genre"), row.genre);
                     legacyItem.insert(QStringLiteral("count"), row.count);
                     legacyItem.insert(QStringLiteral("coverPath"), row.coverPath);
@@ -1222,6 +1238,10 @@ int BridgeClient::libraryAlbumCount() const {
 
 QStringList BridgeClient::libraryRoots() const {
     return m_libraryRoots;
+}
+
+QVariantList BridgeClient::libraryRootEntries() const {
+    return m_libraryRootEntries;
 }
 
 int BridgeClient::librarySortMode() const {
@@ -1711,14 +1731,28 @@ QVariant BridgeClient::queueTrackNumberAt(int index) const {
     return m_queueRowsModel.trackNumberAt(index);
 }
 
-void BridgeClient::addLibraryRoot(const QString &path) {
+void BridgeClient::addLibraryRoot(const QString &path, const QString &name) {
     const QString normalized = normalizeLocalPathArg(path);
     if (normalized.isEmpty()) {
         return;
     }
     m_pendingAddRootPath = normalized;
     m_pendingAddRootIssuedMs = QDateTime::currentMSecsSinceEpoch();
-    sendLibraryRootCommand(BinaryBridgeCodec::CmdAddRoot, normalized);
+    sendLibraryRootCommand(
+        BinaryBridgeCodec::CmdAddRoot,
+        normalized,
+        normalizeRootNameArg(name));
+}
+
+void BridgeClient::setLibraryRootName(const QString &path, const QString &name) {
+    const QString normalized = normalizeLocalPathArg(path);
+    if (normalized.isEmpty()) {
+        return;
+    }
+    sendLibraryRootCommand(
+        BinaryBridgeCodec::CmdRenameRoot,
+        normalized,
+        normalizeRootNameArg(name));
 }
 
 void BridgeClient::removeLibraryRoot(const QString &path) {
@@ -2061,6 +2095,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         item.label = row.label;
         item.artist = row.artist;
         item.album = row.album;
+        item.rootLabel = row.rootLabel;
         item.genre = row.genre;
         item.coverPath = row.coverPath;
         item.coverUrl = searchCoverUrlFast(row.coverPath);
@@ -2084,6 +2119,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
             legacyItem.insert(QStringLiteral("label"), row.label);
             legacyItem.insert(QStringLiteral("artist"), row.artist);
             legacyItem.insert(QStringLiteral("album"), row.album);
+            legacyItem.insert(QStringLiteral("rootLabel"), row.rootLabel);
             legacyItem.insert(QStringLiteral("genre"), row.genre);
             legacyItem.insert(QStringLiteral("count"), row.count);
             legacyItem.insert(QStringLiteral("coverPath"), row.coverPath);
@@ -2632,6 +2668,10 @@ void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
 
 void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(cmdId, path));
+}
+
+void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name) {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringPair(cmdId, path, name));
 }
 
 void BridgeClient::applyLibraryTreeFrame(int version, const QByteArray &treeBytes) {
@@ -3193,6 +3233,27 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const QStringList rootPaths = snapshot.library.present ? snapshot.library.rootPaths : m_libraryRoots;
     if (m_libraryRoots != rootPaths) {
         m_libraryRoots = rootPaths;
+        changed = true;
+    }
+
+    QVariantList rootEntries = m_libraryRootEntries;
+    if (snapshot.library.present) {
+        rootEntries.clear();
+        rootEntries.reserve(snapshot.library.rootEntries.size());
+        for (const auto &root : snapshot.library.rootEntries) {
+            const QString trimmedName = normalizeRootNameArg(root.name);
+            QVariantMap entry;
+            entry.insert(QStringLiteral("path"), root.path);
+            entry.insert(QStringLiteral("name"), trimmedName);
+            entry.insert(
+                QStringLiteral("displayName"),
+                trimmedName.isEmpty() ? root.path : trimmedName);
+            entry.insert(QStringLiteral("searchLabel"), rootSearchLabel(root.path, trimmedName));
+            rootEntries.push_back(entry);
+        }
+    }
+    if (m_libraryRootEntries != rootEntries) {
+        m_libraryRootEntries = rootEntries;
         changed = true;
     }
 

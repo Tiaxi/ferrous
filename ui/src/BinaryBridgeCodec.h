@@ -68,6 +68,7 @@ enum CommandId : quint16 {
     CmdCompleteLastFmAuth = 42,
     CmdDisconnectLastFm = 43,
     CmdSetViewerFullscreenMode = 44,
+    CmdRenameRoot = 45,
 };
 
 struct DecodedPlayback {
@@ -103,6 +104,11 @@ struct DecodedQueue {
     QVector<DecodedQueueTrack> tracks;
 };
 
+struct DecodedLibraryRoot {
+    QString path;
+    QString name;
+};
+
 struct DecodedLibraryMeta {
     bool present{false};
     int rootCount{0};
@@ -119,6 +125,7 @@ struct DecodedLibraryMeta {
     double filesPerSecond{0.0};
     double etaSeconds{-1.0};
     QStringList rootPaths;
+    QVector<DecodedLibraryRoot> rootEntries;
 };
 
 struct DecodedMetadata {
@@ -190,6 +197,7 @@ struct DecodedSearchRow {
     QString label;
     QString artist;
     QString album;
+    QString rootLabel;
     QString genre;
     QString coverPath;
     QString artistKey;
