@@ -140,6 +140,7 @@ pub enum BridgeSettingsCommand {
     SetVolume(f32),
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
+    SetViewerFullscreenMode(ViewerFullscreenMode),
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
@@ -178,6 +179,43 @@ impl SpectrogramViewMode {
         match self {
             Self::Downmix => "downmix",
             Self::PerChannel => "per_channel",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerFullscreenMode {
+    WithinWindow,
+    WholeScreen,
+}
+
+impl ViewerFullscreenMode {
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            1 => Self::WholeScreen,
+            _ => Self::WithinWindow,
+        }
+    }
+
+    pub fn to_i32(self) -> i32 {
+        match self {
+            Self::WithinWindow => 0,
+            Self::WholeScreen => 1,
+        }
+    }
+
+    fn parse_settings_value(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "within_window" => Some(Self::WithinWindow),
+            "whole_screen" => Some(Self::WholeScreen),
+            _ => None,
+        }
+    }
+
+    fn settings_value(self) -> &'static str {
+        match self {
+            Self::WithinWindow => "within_window",
+            Self::WholeScreen => "whole_screen",
         }
     }
 }
@@ -245,6 +283,7 @@ pub struct BridgeSettings {
     pub volume: f32,
     pub fft_size: usize,
     pub spectrogram_view_mode: SpectrogramViewMode,
+    pub viewer_fullscreen_mode: ViewerFullscreenMode,
     pub db_range: f32,
     pub log_scale: bool,
     pub show_fps: bool,
@@ -263,6 +302,7 @@ impl Default for BridgeSettings {
             volume: 1.0,
             fft_size: 8192,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
+            viewer_fullscreen_mode: ViewerFullscreenMode::WithinWindow,
             db_range: 90.0,
             log_scale: false,
             show_fps,
@@ -1161,6 +1201,10 @@ fn handle_bridge_command(
                     context
                         .analysis
                         .command(AnalysisCommand::SetSpectrogramViewMode(view_mode));
+                    *context.settings_dirty = true;
+                }
+                BridgeSettingsCommand::SetViewerFullscreenMode(mode) => {
+                    state.settings.viewer_fullscreen_mode = mode;
                     *context.settings_dirty = true;
                 }
                 BridgeSettingsCommand::SetDbRange(v) => {
@@ -3349,6 +3393,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.spectrogram_view_mode = mode;
                 }
             }
+            "viewer_fullscreen_mode" => {
+                if let Some(mode) = ViewerFullscreenMode::parse_settings_value(value) {
+                    settings.viewer_fullscreen_mode = mode;
+                }
+            }
             "db_range" => {
                 if let Ok(x) = value.parse::<f32>() {
                     settings.db_range = x.clamp(50.0, 120.0);
@@ -3400,10 +3449,11 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
+        settings.viewer_fullscreen_mode.settings_value(),
         settings.db_range,
         i32::from(settings.log_scale),
         i32::from(settings.show_fps),
@@ -3586,6 +3636,7 @@ mod tests {
             volume: 0.42,
             fft_size: 2048,
             spectrogram_view_mode: SpectrogramViewMode::PerChannel,
+            viewer_fullscreen_mode: ViewerFullscreenMode::WholeScreen,
             db_range: 77.5,
             log_scale: true,
             show_fps: true,
@@ -3603,6 +3654,10 @@ mod tests {
             parsed.spectrogram_view_mode,
             SpectrogramViewMode::PerChannel
         );
+        assert_eq!(
+            parsed.viewer_fullscreen_mode,
+            ViewerFullscreenMode::WholeScreen
+        );
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.log_scale);
         assert!(parsed.show_fps);
@@ -3617,11 +3672,15 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=2.5\nfft_size=111\nspectrogram_view_mode=bad\ndb_range=500\nlog_scale=0\nshow_fps=1\nsystem_media_controls_enabled=0\nlibrary_sort_mode=0\n",
+            "volume=2.5\nfft_size=111\nspectrogram_view_mode=bad\nviewer_fullscreen_mode=bad\ndb_range=500\nlog_scale=0\nshow_fps=1\nsystem_media_controls_enabled=0\nlibrary_sort_mode=0\n",
         );
         assert_eq!(settings.volume, 1.0);
         assert_eq!(settings.fft_size, 512);
         assert_eq!(settings.spectrogram_view_mode, SpectrogramViewMode::Downmix);
+        assert_eq!(
+            settings.viewer_fullscreen_mode,
+            ViewerFullscreenMode::WithinWindow
+        );
         assert_eq!(settings.db_range, 120.0);
         assert!(!settings.log_scale);
         assert!(settings.show_fps);
@@ -3636,12 +3695,16 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=0.5\nfft_size=2048\nspectrogram_view_mode=per_channel\ndb_range=80\nlog_scale=1\nshow_fps=0\nlibrary_sort_mode=1\n",
+            "volume=0.5\nfft_size=2048\nspectrogram_view_mode=per_channel\nviewer_fullscreen_mode=whole_screen\ndb_range=80\nlog_scale=1\nshow_fps=0\nlibrary_sort_mode=1\n",
         );
         assert!(settings.system_media_controls_enabled);
         assert_eq!(
             settings.spectrogram_view_mode,
             SpectrogramViewMode::PerChannel
+        );
+        assert_eq!(
+            settings.viewer_fullscreen_mode,
+            ViewerFullscreenMode::WholeScreen
         );
     }
 

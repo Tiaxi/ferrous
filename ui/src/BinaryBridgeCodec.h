@@ -67,6 +67,7 @@ enum CommandId : quint16 {
     CmdBeginLastFmAuth = 41,
     CmdCompleteLastFmAuth = 42,
     CmdDisconnectLastFm = 43,
+    CmdSetViewerFullscreenMode = 44,
 };
 
 struct DecodedPlayback {
@@ -142,6 +143,7 @@ struct DecodedSettings {
     float volume{1.0f};
     int fftSize{8192};
     int spectrogramViewMode{0};
+    int viewerFullscreenMode{0};
     float dbRange{90.0f};
     bool logScale{false};
     bool showFps{false};

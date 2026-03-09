@@ -350,6 +350,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     }
     Reader reader(payload);
     quint8 spectrogramViewMode = 0;
+    quint8 viewerFullscreenMode = 0;
     quint8 logScale = 0;
     quint8 showFps = 0;
     quint8 systemMediaControlsEnabled = 1;
@@ -367,12 +368,16 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&systemMediaControlsEnabled)) {
         return false;
     }
+    if (!reader.atEnd() && !reader.readU8(&viewerFullscreenMode)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
     out->present = true;
     out->fftSize = static_cast<int>(fftSize);
     out->spectrogramViewMode = static_cast<int>(spectrogramViewMode);
+    out->viewerFullscreenMode = static_cast<int>(viewerFullscreenMode);
     out->logScale = logScale != 0;
     out->showFps = showFps != 0;
     out->librarySortMode = static_cast<int>(librarySortMode);

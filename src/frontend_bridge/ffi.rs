@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
-    FrontendBridgeHandle, LibrarySortMode,
+    FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
 use crate::analysis::{SpectrogramChannelLabel, SpectrogramViewMode};
 use crate::playback::{PlaybackState, RepeatMode};
@@ -756,6 +756,11 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
             reader.expect_done()?;
             BridgeCommand::Settings(BridgeSettingsCommand::DisconnectLastFm)
         }
+        44 => {
+            let mode = ViewerFullscreenMode::from_i32(reader.read_u8()? as i32);
+            reader.expect_done()?;
+            BridgeCommand::Settings(BridgeSettingsCommand::SetViewerFullscreenMode(mode))
+        }
         _ => return Err(format!("unknown binary command id {cmd_id}")),
     };
 
@@ -1175,6 +1180,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.system_media_controls_enabled),
     );
+    push_u8(
+        &mut out,
+        snapshot.settings.viewer_fullscreen_mode.to_i32() as u8,
+    );
     out
 }
 
@@ -1527,6 +1536,7 @@ mod tests {
                 volume: 0.75,
                 fft_size: 2048,
                 spectrogram_view_mode: SpectrogramViewMode::Downmix,
+                viewer_fullscreen_mode: ViewerFullscreenMode::WholeScreen,
                 db_range: 90.0,
                 log_scale: false,
                 show_fps: false,
@@ -1682,6 +1692,16 @@ mod tests {
         match cmd {
             BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmScrobblingEnabled(v)) => {
                 assert!(v);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_binary_command(&encode_command(44, &[1]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetViewerFullscreenMode(mode)) => {
+                assert_eq!(mode, ViewerFullscreenMode::WholeScreen);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1922,6 +1942,7 @@ mod tests {
     fn settings_section_encodes_system_media_controls_flag() {
         let mut snapshot = sample_snapshot();
         snapshot.settings.system_media_controls_enabled = false;
+        snapshot.settings.viewer_fullscreen_mode = ViewerFullscreenMode::WholeScreen;
         let queue_section = compute_queue_section_data(&snapshot);
         let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
         let mut offset = 12usize;
@@ -1935,7 +1956,8 @@ mod tests {
         offset += metadata_len;
         let settings_len = read_u32(&packet, &mut offset) as usize;
         let settings = &packet[offset..offset + settings_len];
-        assert_eq!(settings.last().copied(), Some(0));
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(0));
+        assert_eq!(settings.last().copied(), Some(1));
     }
 
     #[test]

@@ -57,6 +57,9 @@ Kirigami.ApplicationWindow {
     property real albumArtZoom: 1.0
     property real albumArtPanX: 0.0
     property real albumArtPanY: 0.0
+    property bool albumArtInitialViewPending: false
+    property bool albumArtViewerOpen: false
+    property bool spectrogramViewerOpen: false
     property string pendingFolderDialogContext: ""
     property string pendingFileDialogContext: ""
     property string transientBridgeError: ""
@@ -125,6 +128,7 @@ Kirigami.ApplicationWindow {
     property string globalSearchOpenInitialText: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
+    readonly property bool useWholeScreenViewerMode: uiBridge.viewerFullscreenMode === 1
     readonly property var uiBridge: bridge ? bridge : bridgeFallback
     readonly property var globalSearchModelApi: (uiBridge
         && uiBridge.globalSearchModel
@@ -258,6 +262,7 @@ Kirigami.ApplicationWindow {
         property real dbRange: 90
         property int fftSize: 8192
         property int spectrogramViewMode: 0
+        property int viewerFullscreenMode: 0
         property bool logScale: false
         property int repeatMode: 0
         property bool shuffleEnabled: false
@@ -313,6 +318,7 @@ Kirigami.ApplicationWindow {
         function setVolume(value) {}
         function setFftSize(value) {}
         function setSpectrogramViewMode(value) {}
+        function setViewerFullscreenMode(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
         function setRepeatMode(mode) {}
@@ -2403,6 +2409,79 @@ Kirigami.ApplicationWindow {
         return true
     }
 
+    function syncAlbumArtViewerPresentation() {
+        const useWholeScreen = root.useWholeScreenViewerMode
+        if (albumArtViewerOpen && !useWholeScreen) {
+            if (!albumArtViewer.visible) {
+                albumArtViewer.open()
+            }
+        } else if (albumArtViewer.visible) {
+            albumArtViewer.close()
+        }
+        if (albumArtViewerOpen && useWholeScreen) {
+            albumArtFullscreenWindow.requestActivate()
+            root.applyAlbumArtInitialView()
+        }
+    }
+
+    function syncSpectrogramViewerPresentation() {
+        const useWholeScreen = root.useWholeScreenViewerMode
+        if (spectrogramViewerOpen && !useWholeScreen) {
+            if (!spectrogramViewer.visible) {
+                spectrogramViewer.open()
+            }
+        } else if (spectrogramViewer.visible) {
+            spectrogramViewer.close()
+        }
+        if (spectrogramViewerOpen && useWholeScreen) {
+            spectrogramFullscreenWindow.requestActivate()
+        }
+    }
+
+    function closeAlbumArtViewer() {
+        albumArtViewerOpen = false
+    }
+
+    function closeSpectrogramViewer() {
+        spectrogramViewerOpen = false
+    }
+
+    function clampAlbumArtPan() {
+        const scaledW = albumArtTransform.width * root.albumArtZoom
+        const scaledH = albumArtTransform.height * root.albumArtZoom
+        const limitX = Math.max(0, (scaledW - albumArtViewport.width) / 2)
+        const limitY = Math.max(0, (scaledH - albumArtViewport.height) / 2)
+        root.albumArtPanX = Math.max(-limitX, Math.min(limitX, root.albumArtPanX))
+        root.albumArtPanY = Math.max(-limitY, Math.min(limitY, root.albumArtPanY))
+    }
+
+    function isPointOnAlbumArtImage(item, x, y) {
+        const p = albumArtImageFull.mapFromItem(item, x, y)
+        const xOff = (albumArtImageFull.width - albumArtImageFull.paintedWidth) / 2
+        const yOff = (albumArtImageFull.height - albumArtImageFull.paintedHeight) / 2
+        return p.x >= xOff
+            && p.y >= yOff
+            && p.x <= xOff + albumArtImageFull.paintedWidth
+            && p.y <= yOff + albumArtImageFull.paintedHeight
+    }
+
+    function applyAlbumArtInitialView() {
+        if (!albumArtInitialViewPending || !albumArtViewerOpen) {
+            return
+        }
+        if (albumArtViewport.width <= 0 || albumArtViewport.height <= 0) {
+            return
+        }
+        if (albumArtImageFull.status === Image.Loading) {
+            return
+        }
+        root.albumArtZoom = 1.0
+        root.albumArtPanX = 0.0
+        root.albumArtPanY = 0.0
+        root.clampAlbumArtPan()
+        albumArtInitialViewPending = false
+    }
+
     function openExternalFiles() {
         pendingFileDialogContext = "open"
         externalFileDialog.open()
@@ -2430,12 +2509,23 @@ Kirigami.ApplicationWindow {
         albumArtZoom = 1.0
         albumArtPanX = 0.0
         albumArtPanY = 0.0
-        albumArtViewer.initialViewPending = true
-        albumArtViewer.open()
+        albumArtInitialViewPending = true
+        albumArtViewerOpen = true
     }
 
     function openSpectrogramViewer() {
-        spectrogramViewer.open()
+        spectrogramViewerOpen = true
+    }
+
+    onAlbumArtViewerOpenChanged: syncAlbumArtViewerPresentation()
+    onSpectrogramViewerOpenChanged: syncSpectrogramViewerPresentation()
+    onUseWholeScreenViewerModeChanged: {
+        if (albumArtViewerOpen) {
+            syncAlbumArtViewerPresentation()
+        }
+        if (spectrogramViewerOpen) {
+            syncSpectrogramViewerPresentation()
+        }
     }
 
     Action {
@@ -2785,6 +2875,7 @@ Kirigami.ApplicationWindow {
         modal: true
         title: "Preferences"
         standardButtons: Dialog.Close
+        property int pageIndex: 0
         width: Math.min(760, root.width - 80)
         height: Math.min(620, root.height - 80)
         enter: Transition {
@@ -2797,47 +2888,52 @@ Kirigami.ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 14
 
-            TabBar {
-                id: preferencesTabBar
+            Rectangle {
                 Layout.fillWidth: true
-                spacing: 0
-                leftPadding: 0
-                rightPadding: 0
-                topPadding: 0
-                bottomPadding: 0
-                readonly property int tabCount: 4
-                readonly property real tabBaseWidth: Math.floor(width / tabCount)
-                readonly property real trailingTabWidth: width - (tabBaseWidth * (tabCount - 1))
+                implicitHeight: preferencesTabsRow.implicitHeight
+                color: root.uiSurfaceAltColor
+                radius: 8
+                border.color: root.uiBorderColor
+                clip: true
 
-                background: Rectangle {
-                    color: root.uiSurfaceAltColor
-                    radius: 8
-                    border.color: root.uiBorderColor
-                    clip: true
-                }
+                RowLayout {
+                    id: preferencesTabsRow
+                    anchors.fill: parent
+                    spacing: 0
 
-                TabButton {
-                    text: "Library"
-                    width: preferencesTabBar.tabBaseWidth
-                }
-                TabButton {
-                    text: "Spectrogram"
-                    width: preferencesTabBar.tabBaseWidth
-                }
-                TabButton {
-                    text: "Last.fm"
-                    width: preferencesTabBar.tabBaseWidth
-                }
-                TabButton {
-                    text: "System Media"
-                    width: preferencesTabBar.trailingTabWidth
+                    Repeater {
+                        model: ["Library", "Spectrogram", "Display", "Last.fm", "System Media"]
+
+                        delegate: Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 40
+                            color: preferencesDialog.pageIndex === index
+                                ? root.uiSelectionColor
+                                : "transparent"
+
+                            Label {
+                                anchors.centerIn: parent
+                                text: modelData
+                                color: root.uiTextColor
+                                font.weight: preferencesDialog.pageIndex === index
+                                    ? Font.DemiBold
+                                    : Font.Normal
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: preferencesDialog.pageIndex = index
+                            }
+                        }
+                    }
                 }
             }
 
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                currentIndex: preferencesTabBar.currentIndex
+                currentIndex: preferencesDialog.pageIndex
 
                 ScrollView {
                     id: libraryPrefsScroll
@@ -3005,6 +3101,13 @@ Kirigami.ApplicationWindow {
                                     font.weight: Font.DemiBold
                                 }
 
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    color: Kirigami.Theme.disabledTextColor
+                                    text: "Spectrogram-specific rendering and analysis options."
+                                }
+
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 12
@@ -3080,6 +3183,65 @@ Kirigami.ApplicationWindow {
                                     focusPolicy: Qt.NoFocus
                                     checked: uiBridge.showFps
                                     onToggled: uiBridge.setShowFps(checked)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ScrollView {
+                    id: displayPrefsScroll
+                    clip: true
+                    contentWidth: availableWidth
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                    ColumnLayout {
+                        width: displayPrefsScroll.availableWidth
+                        spacing: 0
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            color: root.uiSurfaceColor
+                            radius: 10
+                            border.color: root.uiBorderColor
+                            implicitHeight: displayPrefsColumn.implicitHeight + 36
+
+                            ColumnLayout {
+                                id: displayPrefsColumn
+                                anchors.fill: parent
+                                anchors.margins: 18
+                                spacing: 14
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "Display"
+                                    font.pixelSize: 16
+                                    font.weight: Font.DemiBold
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    color: Kirigami.Theme.disabledTextColor
+                                    text: "Shared viewer presentation options for album art and spectrogram."
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Label {
+                                        text: "Viewer Fullscreen"
+                                        Layout.preferredWidth: 120
+                                    }
+                                    ComboBox {
+                                        Layout.preferredWidth: 220
+                                        model: ["Within app window", "Whole screen"]
+                                        currentIndex: Math.max(0, Math.min(1, uiBridge.viewerFullscreenMode))
+                                        onActivated: uiBridge.setViewerFullscreenMode(currentIndex)
+                                    }
+                                    Item { Layout.fillWidth: true }
                                 }
                             }
                         }
@@ -5543,7 +5705,9 @@ Kirigami.ApplicationWindow {
 
     Item {
         id: spectrogramSurface
-        parent: spectrogramViewer.visible ? spectrogramFullscreenHost : spectrogramMainHost
+        parent: root.spectrogramViewerOpen
+            ? (root.useWholeScreenViewerMode ? spectrogramWindowHost : spectrogramFullscreenHost)
+            : spectrogramMainHost
         visible: parent !== null
         anchors.fill: parent
         property var channelDescriptors: []
@@ -5693,6 +5857,11 @@ Kirigami.ApplicationWindow {
                 duration: root.uiPopupTransitionMs
             }
         }
+        onClosed: {
+            if (root.spectrogramViewerOpen && !root.useWholeScreenViewerMode) {
+                root.spectrogramViewerOpen = false
+            }
+        }
         background: Rectangle {
             color: "#000000"
             opacity: 0.87
@@ -5701,7 +5870,7 @@ Kirigami.ApplicationWindow {
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton
-            onClicked: spectrogramViewer.close()
+            onClicked: root.closeSpectrogramViewer()
         }
 
         Rectangle {
@@ -5718,13 +5887,12 @@ Kirigami.ApplicationWindow {
             ToolButton {
                 anchors.fill: parent
                 icon.name: "window-close"
-                onClicked: spectrogramViewer.close()
+                onClicked: root.closeSpectrogramViewer()
             }
         }
 
         Rectangle {
             anchors.fill: parent
-            anchors.margins: 20
             color: "#0b0b0f"
             border.color: Qt.rgba(1, 1, 1, 0.12)
 
@@ -5738,7 +5906,80 @@ Kirigami.ApplicationWindow {
                 acceptedButtons: Qt.LeftButton
                 onDoubleClicked: function(mouse) {
                     if (mouse.button === Qt.LeftButton) {
-                        spectrogramViewer.close()
+                        root.closeSpectrogramViewer()
+                    }
+                }
+            }
+        }
+    }
+
+    Window {
+        id: spectrogramFullscreenWindow
+        screen: root.screen
+        transientParent: root
+        modality: Qt.ApplicationModal
+        flags: Qt.Window | Qt.FramelessWindowHint
+        visibility: root.spectrogramViewerOpen && root.useWholeScreenViewerMode
+            ? Window.FullScreen
+            : Window.Hidden
+        color: "#000000"
+        title: root.title
+        onVisibilityChanged: function() {
+            if (spectrogramFullscreenWindow.visibility === Window.FullScreen) {
+                requestActivate()
+            }
+        }
+        onClosing: function(close) {
+            if (root.spectrogramViewerOpen && root.useWholeScreenViewerMode) {
+                root.spectrogramViewerOpen = false
+            }
+        }
+
+        Shortcut {
+            sequence: "Escape"
+            context: Qt.WindowShortcut
+            onActivated: root.closeSpectrogramViewer()
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            onClicked: root.closeSpectrogramViewer()
+        }
+
+        Rectangle {
+            z: 20
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: 12
+            width: 40
+            height: 40
+            radius: 8
+            color: Qt.rgba(0, 0, 0, 0.45)
+            border.color: Qt.rgba(1, 1, 1, 0.24)
+
+            ToolButton {
+                anchors.fill: parent
+                icon.name: "window-close"
+                onClicked: root.closeSpectrogramViewer()
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#0b0b0f"
+
+            Item {
+                id: spectrogramWindowHost
+                anchors.fill: parent
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                onDoubleClicked: function(mouse) {
+                    if (mouse.button === Qt.LeftButton) {
+                        root.closeSpectrogramViewer()
                     }
                 }
             }
@@ -5748,7 +5989,6 @@ Kirigami.ApplicationWindow {
     Popup {
         id: albumArtViewer
         parent: Overlay.overlay
-        property bool initialViewPending: false
         x: 0
         y: 0
         width: root.width
@@ -5769,55 +6009,23 @@ Kirigami.ApplicationWindow {
                 duration: root.uiPopupTransitionMs
             }
         }
+        onOpened: root.applyAlbumArtInitialView()
+        onClosed: {
+            if (root.albumArtViewerOpen && !root.useWholeScreenViewerMode) {
+                root.albumArtViewerOpen = false
+            }
+        }
         background: Rectangle {
             color: "#000000"
             opacity: 0.87
         }
-        function clampPan() {
-            const scaledW = albumArtTransform.width * root.albumArtZoom
-            const scaledH = albumArtTransform.height * root.albumArtZoom
-            const limitX = Math.max(0, (scaledW - albumArtViewport.width) / 2)
-            const limitY = Math.max(0, (scaledH - albumArtViewport.height) / 2)
-            root.albumArtPanX = Math.max(-limitX, Math.min(limitX, root.albumArtPanX))
-            root.albumArtPanY = Math.max(-limitY, Math.min(limitY, root.albumArtPanY))
-        }
-        function isPointOnImage(item, x, y) {
-            const p = albumArtImageFull.mapFromItem(item, x, y)
-            const xOff = (albumArtImageFull.width - albumArtImageFull.paintedWidth) / 2
-            const yOff = (albumArtImageFull.height - albumArtImageFull.paintedHeight) / 2
-            return p.x >= xOff
-                && p.y >= yOff
-                && p.x <= xOff + albumArtImageFull.paintedWidth
-                && p.y <= yOff + albumArtImageFull.paintedHeight
-        }
-        function applyInitialView() {
-            if (!initialViewPending) {
-                return
-            }
-            if (albumArtViewport.width <= 0 || albumArtViewport.height <= 0) {
-                return
-            }
-            if (albumArtImageFull.status === Image.Loading) {
-                return
-            }
-            root.albumArtZoom = 1.0
-            root.albumArtPanX = 0.0
-            root.albumArtPanY = 0.0
-            clampPan()
-            initialViewPending = false
-        }
-        onOpened: {
-            applyInitialView()
-        }
-        onWidthChanged: applyInitialView()
-        onHeightChanged: applyInitialView()
 
         MouseArea {
             id: albumArtDismissArea
             z: 0
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton
-            onClicked: albumArtViewer.close()
+            onClicked: root.closeAlbumArtViewer()
         }
 
         Rectangle {
@@ -5834,18 +6042,95 @@ Kirigami.ApplicationWindow {
             ToolButton {
                 anchors.fill: parent
                 icon.name: "window-close"
-                onClicked: albumArtViewer.close()
+                onClicked: root.closeAlbumArtViewer()
             }
         }
 
         Item {
-            id: albumArtViewport
-            z: 1
+            id: albumArtPopupHost
             anchors.fill: parent
-            anchors.margins: 0
+        }
+    }
+
+    Window {
+        id: albumArtFullscreenWindow
+        screen: root.screen
+        transientParent: root
+        modality: Qt.ApplicationModal
+        flags: Qt.Window | Qt.FramelessWindowHint
+        visibility: root.albumArtViewerOpen && root.useWholeScreenViewerMode
+            ? Window.FullScreen
+            : Window.Hidden
+        color: "#000000"
+        title: root.title
+        onVisibilityChanged: function() {
+            if (albumArtFullscreenWindow.visibility === Window.FullScreen) {
+                requestActivate()
+                root.applyAlbumArtInitialView()
+            }
+        }
+        onClosing: function(close) {
+            if (root.albumArtViewerOpen && root.useWholeScreenViewerMode) {
+                root.albumArtViewerOpen = false
+            }
+        }
+
+        Shortcut {
+            sequence: "Escape"
+            context: Qt.WindowShortcut
+            onActivated: root.closeAlbumArtViewer()
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            onClicked: root.closeAlbumArtViewer()
+        }
+
+        Rectangle {
+            z: 20
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: 12
+            width: 40
+            height: 40
+            radius: 8
+            color: Qt.rgba(0, 0, 0, 0.45)
+            border.color: Qt.rgba(1, 1, 1, 0.24)
+
+            ToolButton {
+                anchors.fill: parent
+                icon.name: "window-close"
+                onClicked: root.closeAlbumArtViewer()
+            }
+        }
+
+        Item {
+            anchors.fill: parent
+            Item {
+                id: albumArtWindowHost
+                anchors.fill: parent
+            }
+        }
+    }
+
+    Item {
+        id: albumArtSurface
+        parent: root.albumArtViewerOpen
+            ? (root.useWholeScreenViewerMode ? albumArtWindowHost : albumArtPopupHost)
+            : albumArtMainHost
+        visible: root.albumArtViewerOpen
+        anchors.fill: parent
+        clip: true
+        onWidthChanged: root.applyAlbumArtInitialView()
+        onHeightChanged: root.applyAlbumArtInitialView()
+
+        Item {
+            id: albumArtViewport
+            anchors.fill: parent
             clip: true
-            onWidthChanged: albumArtViewer.applyInitialView()
-            onHeightChanged: albumArtViewer.applyInitialView()
+            onWidthChanged: root.applyAlbumArtInitialView()
+            onHeightChanged: root.applyAlbumArtInitialView()
 
             Item {
                 id: albumArtTransform
@@ -5878,7 +6163,7 @@ Kirigami.ApplicationWindow {
                     asynchronous: true
                     cache: true
                     retainWhileLoading: true
-                    onStatusChanged: albumArtViewer.applyInitialView()
+                    onStatusChanged: root.applyAlbumArtInitialView()
                 }
             }
 
@@ -5892,8 +6177,8 @@ Kirigami.ApplicationWindow {
                 property real lastY: 0
                 cursorShape: root.albumArtZoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
                 onPressed: function(mouse) {
-                    if (!albumArtViewer.isPointOnImage(albumArtPanArea, mouse.x, mouse.y)) {
-                        albumArtViewer.close()
+                    if (!root.isPointOnAlbumArtImage(albumArtPanArea, mouse.x, mouse.y)) {
+                        root.closeAlbumArtViewer()
                         return
                     }
                     lastX = mouse.x
@@ -5911,7 +6196,7 @@ Kirigami.ApplicationWindow {
                     root.albumArtPanY += mouse.y - lastY
                     lastX = mouse.x
                     lastY = mouse.y
-                    albumArtViewer.clampPan()
+                    root.clampAlbumArtPan()
                 }
                 onDoubleClicked: function(mouse) {
                     if (mouse.button !== Qt.LeftButton) {
@@ -5923,7 +6208,7 @@ Kirigami.ApplicationWindow {
                         root.albumArtPanY = 0.0
                     } else {
                         root.albumArtZoom = 2.0
-                        albumArtViewer.clampPan()
+                        root.clampAlbumArtPan()
                     }
                 }
                 onWheel: function(wheel) {
@@ -5940,11 +6225,16 @@ Kirigami.ApplicationWindow {
                     root.albumArtZoom = nextZoom
                     root.albumArtPanX = (root.albumArtPanX + pivotX) * ratio - pivotX
                     root.albumArtPanY = (root.albumArtPanY + pivotY) * ratio - pivotY
-                    albumArtViewer.clampPan()
+                    root.clampAlbumArtPan()
                     wheel.accepted = true
                 }
             }
         }
+    }
+
+    Item {
+        id: albumArtMainHost
+        visible: false
     }
 
     onClosing: function(close) { uiBridge.shutdown() }

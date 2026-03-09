@@ -1108,6 +1108,10 @@ int BridgeClient::spectrogramViewMode() const {
     return m_spectrogramViewMode;
 }
 
+int BridgeClient::viewerFullscreenMode() const {
+    return m_viewerFullscreenMode;
+}
+
 double BridgeClient::dbRange() const {
     return m_dbRange;
 }
@@ -1334,6 +1338,17 @@ void BridgeClient::setSpectrogramViewMode(int value) {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramViewMode,
+        static_cast<quint8>(clamped)));
+}
+
+void BridgeClient::setViewerFullscreenMode(int value) {
+    const int clamped = std::clamp(value, 0, 1);
+    if (m_viewerFullscreenMode != clamped) {
+        m_viewerFullscreenMode = clamped;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetViewerFullscreenMode,
         static_cast<quint8>(clamped)));
 }
 
@@ -2946,6 +2961,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         1);
     if (m_spectrogramViewMode != spectrogramViewMode) {
         m_spectrogramViewMode = spectrogramViewMode;
+        changed = true;
+    }
+
+    const int viewerFullscreenMode = std::clamp(
+        snapshot.settings.present
+            ? snapshot.settings.viewerFullscreenMode
+            : m_viewerFullscreenMode,
+        0,
+        1);
+    if (m_viewerFullscreenMode != viewerFullscreenMode) {
+        m_viewerFullscreenMode = viewerFullscreenMode;
         changed = true;
     }
 
