@@ -19,8 +19,10 @@ use crate::lastfm::{
     ScrobbleEntry as LastFmScrobbleEntry, ServiceOptions as LastFmServiceOptions,
 };
 use crate::library::{
-    is_supported_audio, read_track_info, search_tracks_fts, IndexedTrack, LibraryCommand,
-    LibraryEvent, LibrarySearchTrack, LibraryService, LibrarySnapshot, LibraryTrack,
+    is_supported_audio, load_external_track_cache, load_external_track_caches, read_track_info,
+    search_tracks_fts, store_external_track_cache, track_file_fingerprint, IndexedTrack,
+    LibraryCommand, LibraryEvent, LibrarySearchTrack, LibraryService, LibrarySnapshot,
+    LibraryTrack, TrackFileFingerprint,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -321,6 +323,8 @@ struct BridgeState {
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
     queue_details: HashMap<PathBuf, IndexedTrack>,
+    queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
+    pending_queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     library_artist_count: usize,
     library_album_count: usize,
     pre_built_tree_bytes: Arc<Vec<u8>>,
@@ -359,6 +363,19 @@ struct SearchWorkerQuery {
     seq: u32,
     query: String,
     library: Arc<LibrarySnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalQueueDetailsRequest {
+    path: PathBuf,
+    fingerprint: TrackFileFingerprint,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalQueueDetailsEvent {
+    path: PathBuf,
+    fingerprint: TrackFileFingerprint,
+    indexed: IndexedTrack,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -573,9 +590,21 @@ fn run_bridge_loop(
     let (library, library_rx) = LibraryService::new();
     let (search_query_tx, search_query_rx) = unbounded::<SearchWorkerQuery>();
     let (search_results_tx, search_results_rx) = unbounded::<BridgeSearchResultsFrame>();
+    let (external_queue_details_tx, external_queue_details_rx) =
+        unbounded::<ExternalQueueDetailsRequest>();
+    let (external_queue_details_event_tx, external_queue_details_event_rx) =
+        unbounded::<ExternalQueueDetailsEvent>();
     let _ = std::thread::Builder::new()
         .name("ferrous-bridge-search".to_string())
         .spawn(move || run_search_worker(search_query_rx, search_results_tx));
+    let _ = std::thread::Builder::new()
+        .name("ferrous-queue-details".to_string())
+        .spawn(move || {
+            run_external_queue_detail_worker(
+                external_queue_details_rx,
+                external_queue_details_event_tx,
+            )
+        });
 
     let mut state = BridgeState::default();
     load_settings_into(&mut state.settings);
@@ -597,6 +626,9 @@ fn run_bridge_loop(
         state.settings.spectrogram_view_mode,
     ));
     apply_session_restore(&mut state, &playback, load_session_snapshot().as_ref());
+    if !state.queue.is_empty() {
+        let _ = sync_queue_details(&mut state, &external_queue_details_tx);
+    }
     state.rebuild_pre_built_tree();
     let mut lastfm_tracker = LastFmPlaybackTracker::default();
 
@@ -632,6 +664,8 @@ fn run_bridge_loop(
     let mut snapshot_dirty = false;
     let mut include_tree_in_next_snapshot = true;
     let mut include_queue_in_next_snapshot = true;
+    let queue_detail_revalidate_interval = Duration::from_secs(2);
+    let mut last_queue_detail_revalidate = Instant::now();
     let tree_emit_interval = scan_tree_emit_interval();
     let tree_emit_min_track_delta = scan_tree_emit_min_track_delta();
     let mut last_tree_emit_at: Option<Instant> = None;
@@ -667,6 +701,7 @@ fn run_bridge_loop(
                             library: &library,
                             lastfm: &lastfm,
                             search_query_tx: &search_query_tx,
+                            external_queue_details_tx: &external_queue_details_tx,
                             event_tx: &event_tx,
                             running: &mut running,
                             settings_dirty: &mut settings_dirty,
@@ -727,20 +762,31 @@ fn run_bridge_loop(
         let playback_changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         let analysis_changed = pump_analysis_events(&analysis_rx, &mut state);
         let metadata_changed = pump_metadata_events(&metadata_rx, &mut state);
-        let library_changed = pump_library_events(&library_rx, &mut state);
+        let library_changed =
+            pump_library_events(&library_rx, &external_queue_details_tx, &mut state);
+        let external_queue_details_changed =
+            pump_external_queue_detail_events(&external_queue_details_event_rx, &mut state);
         let lastfm_changed = pump_lastfm_events(&lastfm_rx, &mut state, &mut settings_dirty);
         let _ = pump_search_results(&search_results_rx, &mut state);
         tick_lastfm_playback(&state, &lastfm, &mut lastfm_tracker);
         let _ = flush_pending_search_results_event(&event_tx, &mut state.pending_search_results);
+        if last_queue_detail_revalidate.elapsed() >= queue_detail_revalidate_interval {
+            let queue_details_revalidated =
+                sync_queue_details(&mut state, &external_queue_details_tx);
+            if queue_details_revalidated {
+                include_queue_in_next_snapshot = true;
+                snapshot_dirty = true;
+            }
+            last_queue_detail_revalidate = Instant::now();
+        }
         let changed = playback_changed
             || analysis_changed
             || metadata_changed
             || library_changed
+            || external_queue_details_changed
             || lastfm_changed;
         if library_changed {
-            if !state.queue.is_empty() {
-                include_queue_in_next_snapshot = true;
-            }
+            include_queue_in_next_snapshot = true;
             let now = Instant::now();
             let track_delta = state
                 .library
@@ -756,6 +802,9 @@ fn run_bridge_loop(
                 state.rebuild_pre_built_tree();
                 include_tree_in_next_snapshot = true;
             }
+        }
+        if external_queue_details_changed {
+            include_queue_in_next_snapshot = true;
         }
 
         if changed {
@@ -1088,6 +1137,7 @@ struct BridgeCommandContext<'a> {
     library: &'a LibraryService,
     lastfm: &'a LastFmHandle,
     search_query_tx: &'a Sender<SearchWorkerQuery>,
+    external_queue_details_tx: &'a Sender<ExternalQueueDetailsRequest>,
     event_tx: &'a Sender<BridgeEvent>,
     running: &'a mut bool,
     settings_dirty: &'a mut bool,
@@ -1135,14 +1185,19 @@ fn handle_bridge_command(
             }
             false
         }
-        BridgeCommand::Queue(cmd) => {
-            handle_queue_command(cmd, state, context.playback, context.event_tx)
-        }
+        BridgeCommand::Queue(cmd) => handle_queue_command(
+            cmd,
+            state,
+            context.playback,
+            context.external_queue_details_tx,
+            context.event_tx,
+        ),
         BridgeCommand::Library(cmd) => handle_library_command(
             cmd,
             state,
             context.playback,
             context.library,
+            context.external_queue_details_tx,
             context.search_query_tx,
             context.event_tx,
         ),
@@ -1259,6 +1314,7 @@ fn handle_queue_command(
     cmd: BridgeQueueCommand,
     state: &mut BridgeState,
     playback: &PlaybackEngine,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
     let outcome = apply_queue_command_state(
@@ -1268,7 +1324,7 @@ fn handle_queue_command(
         state.playback.state,
     );
     if outcome.changed {
-        refresh_queue_details(state);
+        let _ = sync_queue_details(state, external_queue_details_tx);
     }
     for op in &outcome.playback_ops {
         match op {
@@ -1939,7 +1995,10 @@ fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<
     }
 }
 
-fn refresh_queue_details(state: &mut BridgeState) {
+fn sync_queue_details(
+    state: &mut BridgeState,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+) -> bool {
     let queue_paths: HashSet<&Path> = state.queue.iter().map(PathBuf::as_path).collect();
     let library_paths: HashSet<&Path> = state
         .library
@@ -1947,30 +2006,92 @@ fn refresh_queue_details(state: &mut BridgeState) {
         .iter()
         .map(|track| track.path.as_path())
         .collect();
+    let mut changed = false;
 
+    let previous_len = state.queue_details.len();
     state
         .queue_details
         .retain(|path, _| queue_paths.contains(path.as_path()));
+    changed |= state.queue_details.len() != previous_len;
+    state
+        .queue_detail_fingerprints
+        .retain(|path, _| queue_paths.contains(path.as_path()));
+    state
+        .pending_queue_detail_fingerprints
+        .retain(|path, _| queue_paths.contains(path.as_path()));
+    let mut pending_requests = Vec::<(PathBuf, TrackFileFingerprint)>::new();
 
     for path in &state.queue {
-        if state.queue_details.contains_key(path) {
-            continue;
-        }
         if library_paths.contains(path.as_path()) {
+            changed |= state.queue_details.remove(path).is_some();
+            state.queue_detail_fingerprints.remove(path);
+            state.pending_queue_detail_fingerprints.remove(path);
             continue;
         }
         if !path.is_file() || !is_supported_audio(path) {
+            changed |= state.queue_details.remove(path).is_some();
+            state.queue_detail_fingerprints.remove(path);
+            state.pending_queue_detail_fingerprints.remove(path);
             continue;
         }
-        state
-            .queue_details
-            .insert(path.clone(), read_track_info(path));
+        let Some(fingerprint) = track_file_fingerprint(path) else {
+            changed |= state.queue_details.remove(path).is_some();
+            state.queue_detail_fingerprints.remove(path);
+            state.pending_queue_detail_fingerprints.remove(path);
+            continue;
+        };
+
+        let cached_fingerprint = state.queue_detail_fingerprints.get(path).copied();
+        if cached_fingerprint == Some(fingerprint) && state.queue_details.contains_key(path) {
+            continue;
+        }
+
+        if cached_fingerprint.is_some() && cached_fingerprint != Some(fingerprint) {
+            changed |= state.queue_details.remove(path).is_some();
+            state.queue_detail_fingerprints.remove(path);
+        }
+
+        if state.pending_queue_detail_fingerprints.get(path) == Some(&fingerprint) {
+            continue;
+        }
+        pending_requests.push((path.clone(), fingerprint));
     }
+
+    let cached_rows = load_external_track_caches(&pending_requests);
+    for (path, fingerprint) in pending_requests {
+        if let Some(indexed) = cached_rows.get(&path) {
+            let needs_update = state.queue_details.get(&path) != Some(indexed);
+            state
+                .queue_detail_fingerprints
+                .insert(path.clone(), fingerprint);
+            state.pending_queue_detail_fingerprints.remove(&path);
+            if needs_update {
+                state.queue_details.insert(path, indexed.clone());
+                changed = true;
+            }
+            continue;
+        }
+
+        state
+            .pending_queue_detail_fingerprints
+            .insert(path.clone(), fingerprint);
+        if external_queue_details_tx
+            .send(ExternalQueueDetailsRequest {
+                path: path.clone(),
+                fingerprint,
+            })
+            .is_err()
+        {
+            state.pending_queue_detail_fingerprints.remove(&path);
+        }
+    }
+    changed
 }
 
 fn replace_queue_paths(
     state: &mut BridgeState,
     playback: &PlaybackEngine,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     paths: Vec<PathBuf>,
     autoplay: bool,
 ) -> bool {
@@ -1979,7 +2100,7 @@ fn replace_queue_paths(
     }
     state.queue = paths;
     state.selected_queue_index = Some(0);
-    refresh_queue_details(state);
+    let _ = sync_queue_details(state, external_queue_details_tx);
     playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
     if autoplay {
         playback.command(PlaybackCommand::PlayAt(0));
@@ -1991,6 +2112,7 @@ fn replace_queue_paths(
 fn append_queue_paths(
     state: &mut BridgeState,
     playback: &PlaybackEngine,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     paths: Vec<PathBuf>,
 ) -> bool {
     if paths.is_empty() {
@@ -1998,11 +2120,11 @@ fn append_queue_paths(
     }
     if state.queue.is_empty() {
         state.queue.extend(paths);
-        refresh_queue_details(state);
+        let _ = sync_queue_details(state, external_queue_details_tx);
         playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
     } else {
         state.queue.extend(paths.clone());
-        refresh_queue_details(state);
+        let _ = sync_queue_details(state, external_queue_details_tx);
         playback.command(PlaybackCommand::AddToQueue(paths));
     }
     true
@@ -2013,6 +2135,7 @@ fn handle_library_command(
     state: &mut BridgeState,
     playback: &PlaybackEngine,
     library: &LibraryService,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     search_query_tx: &Sender<SearchWorkerQuery>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
@@ -2042,36 +2165,48 @@ fn handle_library_command(
             if let Some(message) = format_import_warning("append", &outcome) {
                 let _ = try_send_event(event_tx, BridgeEvent::Error(message));
             }
-            append_queue_paths(state, playback, outcome.tracks)
+            append_queue_paths(state, playback, external_queue_details_tx, outcome.tracks)
         }
         BridgeLibraryCommand::PlayTrack(path) => {
             let outcome = expand_import_paths(vec![path]);
             if let Some(message) = format_import_warning("open", &outcome) {
                 let _ = try_send_event(event_tx, BridgeEvent::Error(message));
             }
-            replace_queue_paths(state, playback, outcome.tracks, true)
+            replace_queue_paths(
+                state,
+                playback,
+                external_queue_details_tx,
+                outcome.tracks,
+                true,
+            )
         }
         BridgeLibraryCommand::ReplaceWithAlbum(paths) => {
             let outcome = expand_import_paths(paths);
             if let Some(message) = format_import_warning("open", &outcome) {
                 let _ = try_send_event(event_tx, BridgeEvent::Error(message));
             }
-            replace_queue_paths(state, playback, outcome.tracks, true)
+            replace_queue_paths(
+                state,
+                playback,
+                external_queue_details_tx,
+                outcome.tracks,
+                true,
+            )
         }
         BridgeLibraryCommand::AppendAlbum(paths) => {
             let outcome = expand_import_paths(paths);
             if let Some(message) = format_import_warning("append", &outcome) {
                 let _ = try_send_event(event_tx, BridgeEvent::Error(message));
             }
-            append_queue_paths(state, playback, outcome.tracks)
+            append_queue_paths(state, playback, external_queue_details_tx, outcome.tracks)
         }
         BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => {
             let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
-            replace_queue_paths(state, playback, paths, true)
+            replace_queue_paths(state, playback, external_queue_details_tx, paths, true)
         }
         BridgeLibraryCommand::AppendAlbumByKey { artist, album } => {
             let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
-            append_queue_paths(state, playback, paths)
+            append_queue_paths(state, playback, external_queue_details_tx, paths)
         }
         BridgeLibraryCommand::ReplaceArtistByKey { artist } => {
             let paths = collect_artist_paths_for_queue(
@@ -2079,7 +2214,7 @@ fn handle_library_command(
                 &artist,
                 state.settings.library_sort_mode,
             );
-            replace_queue_paths(state, playback, paths, true)
+            replace_queue_paths(state, playback, external_queue_details_tx, paths, true)
         }
         BridgeLibraryCommand::AppendArtistByKey { artist } => {
             let paths = collect_artist_paths_for_queue(
@@ -2087,7 +2222,7 @@ fn handle_library_command(
                 &artist,
                 state.settings.library_sort_mode,
             );
-            append_queue_paths(state, playback, paths)
+            append_queue_paths(state, playback, external_queue_details_tx, paths)
         }
         BridgeLibraryCommand::ReplaceAllTracks => {
             let paths: Vec<PathBuf> = state
@@ -2096,7 +2231,7 @@ fn handle_library_command(
                 .iter()
                 .map(|track| track.path.clone())
                 .collect();
-            replace_queue_paths(state, playback, paths, true)
+            replace_queue_paths(state, playback, external_queue_details_tx, paths, true)
         }
         BridgeLibraryCommand::AppendAllTracks => {
             let paths: Vec<PathBuf> = state
@@ -2105,7 +2240,7 @@ fn handle_library_command(
                 .iter()
                 .map(|track| track.path.clone())
                 .collect();
-            append_queue_paths(state, playback, paths)
+            append_queue_paths(state, playback, external_queue_details_tx, paths)
         }
         BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
             let normalized = key.trim();
@@ -3185,6 +3320,25 @@ fn current_track_number(state: &BridgeState) -> Option<u32> {
         })
 }
 
+fn run_external_queue_detail_worker(
+    req_rx: Receiver<ExternalQueueDetailsRequest>,
+    event_tx: Sender<ExternalQueueDetailsEvent>,
+) {
+    while let Ok(request) = req_rx.recv() {
+        let indexed =
+            load_external_track_cache(&request.path, request.fingerprint).unwrap_or_else(|| {
+                let indexed = read_track_info(&request.path);
+                let _ = store_external_track_cache(&request.path, request.fingerprint, &indexed);
+                indexed
+            });
+        let _ = event_tx.send(ExternalQueueDetailsEvent {
+            path: request.path,
+            fingerprint: request.fingerprint,
+            indexed,
+        });
+    }
+}
+
 fn unix_timestamp_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3192,7 +3346,11 @@ fn unix_timestamp_now() -> i64 {
         .unwrap_or(0)
 }
 
-fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeState) -> bool {
+fn pump_library_events(
+    library_rx: &Receiver<LibraryEvent>,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+    state: &mut BridgeState,
+) -> bool {
     let mut latest_snapshot: Option<LibrarySnapshot> = None;
     while let Ok(event) = library_rx.try_recv() {
         match event {
@@ -3207,11 +3365,67 @@ fn pump_library_events(library_rx: &Receiver<LibraryEvent>, state: &mut BridgeSt
         state.library_artist_count = artist_count;
         state.library_album_count = album_count;
         if !state.queue.is_empty() {
-            refresh_queue_details(state);
+            let _ = sync_queue_details(state, external_queue_details_tx);
         }
         return true;
     }
     false
+}
+
+fn pump_external_queue_detail_events(
+    queue_detail_rx: &Receiver<ExternalQueueDetailsEvent>,
+    state: &mut BridgeState,
+) -> bool {
+    let library_paths: HashSet<&Path> = state
+        .library
+        .tracks
+        .iter()
+        .map(|track| track.path.as_path())
+        .collect();
+    let queue_paths: HashSet<&Path> = state.queue.iter().map(PathBuf::as_path).collect();
+    let mut changed = false;
+
+    while let Ok(event) = queue_detail_rx.try_recv() {
+        let pending = state
+            .pending_queue_detail_fingerprints
+            .get(&event.path)
+            .copied();
+        if pending != Some(event.fingerprint) {
+            continue;
+        }
+        state.pending_queue_detail_fingerprints.remove(&event.path);
+
+        if !queue_paths.contains(event.path.as_path())
+            || library_paths.contains(event.path.as_path())
+            || !event.path.is_file()
+            || !is_supported_audio(&event.path)
+            || track_file_fingerprint(&event.path) != Some(event.fingerprint)
+        {
+            changed |= state.queue_details.remove(&event.path).is_some();
+            state.queue_detail_fingerprints.remove(&event.path);
+            continue;
+        }
+
+        state
+            .queue_detail_fingerprints
+            .insert(event.path.clone(), event.fingerprint);
+        let needs_update = state.queue_details.get(&event.path).is_none_or(|existing| {
+            existing.title != event.indexed.title
+                || existing.artist != event.indexed.artist
+                || existing.album != event.indexed.album
+                || existing.cover_path != event.indexed.cover_path
+                || existing.genre != event.indexed.genre
+                || existing.year != event.indexed.year
+                || existing.track_no != event.indexed.track_no
+                || existing.duration_secs != event.indexed.duration_secs
+        });
+        if needs_update {
+            state.queue_details.insert(event.path, event.indexed);
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 fn config_base_path() -> Option<PathBuf> {
@@ -3805,35 +4019,65 @@ mod tests {
     }
 
     #[test]
-    fn refresh_queue_details_populates_external_tracks_and_prunes_removed_entries() {
+    fn sync_queue_details_requests_external_tracks_and_prunes_removed_entries() {
         let root = test_dir("queue-details");
         fs::create_dir_all(&root).expect("mkdir root");
         let track = root.join("song.flac");
         let cover = root.join("cover.jpg");
         write_stub(&track, b"not-real-audio");
         write_stub(&cover, b"not-real-jpg");
+        let (request_tx, request_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
 
         let mut state = BridgeState::default();
         state.queue = vec![track.clone()];
-        refresh_queue_details(&mut state);
+        assert!(!sync_queue_details(&mut state, &request_tx));
+        let request = request_rx.try_recv().expect("external detail request");
+        assert_eq!(request.path, track);
 
-        let details = state
-            .queue_details
-            .get(&track)
-            .expect("external queue details inserted");
-        assert_eq!(details.title, "song");
-        assert_eq!(details.cover_path, cover.to_string_lossy());
+        event_tx
+            .send(ExternalQueueDetailsEvent {
+                path: request.path.clone(),
+                fingerprint: request.fingerprint,
+                indexed: IndexedTrack {
+                    title: "song".to_string(),
+                    artist: String::new(),
+                    album: String::new(),
+                    cover_path: cover.to_string_lossy().to_string(),
+                    genre: String::new(),
+                    year: None,
+                    track_no: None,
+                    duration_secs: None,
+                },
+            })
+            .expect("send queue detail event");
+        assert!(pump_external_queue_detail_events(&event_rx, &mut state));
+        assert_eq!(
+            state
+                .queue_details
+                .get(&request.path)
+                .map(|details| details.title.as_str()),
+            Some("song")
+        );
+        assert_eq!(
+            state
+                .queue_details
+                .get(&request.path)
+                .map(|details| details.cover_path.as_str()),
+            Some(cover.to_string_lossy().as_ref())
+        );
 
         state.queue.clear();
-        refresh_queue_details(&mut state);
+        assert!(sync_queue_details(&mut state, &request_tx));
         assert!(state.queue_details.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn refresh_queue_details_skips_library_tracks_in_queue() {
+    fn sync_queue_details_skips_library_tracks_in_queue() {
         let track = p("/library/song.flac");
+        let (request_tx, request_rx) = crossbeam_channel::unbounded();
         let mut state = BridgeState::default();
         state.library = Arc::new(LibrarySnapshot {
             tracks: vec![LibraryTrack {
@@ -3844,9 +4088,10 @@ mod tests {
         });
         state.queue = vec![track.clone()];
 
-        refresh_queue_details(&mut state);
+        assert!(!sync_queue_details(&mut state, &request_tx));
 
         assert!(!state.queue_details.contains_key(&track));
+        assert!(request_rx.try_recv().is_err());
     }
 
     #[test]
@@ -3876,30 +4121,113 @@ mod tests {
     }
 
     #[test]
-    fn pump_library_events_populates_queue_details_for_restored_external_tracks() {
+    fn pump_library_events_requests_queue_details_for_restored_external_tracks() {
         let root = test_dir("restored-external-queue-details");
         fs::create_dir_all(&root).expect("mkdir root");
         let track = root.join("song.flac");
-        let cover = root.join("cover.jpg");
         write_stub(&track, b"not-real-audio");
-        write_stub(&cover, b"not-real-jpg");
 
         let mut state = BridgeState::default();
         state.queue = vec![track.clone()];
 
         let (library_tx, library_rx) = crossbeam_channel::unbounded();
+        let (request_tx, request_rx) = crossbeam_channel::unbounded();
         library_tx
             .send(LibraryEvent::Snapshot(LibrarySnapshot::default()))
             .expect("send library snapshot");
 
-        assert!(pump_library_events(&library_rx, &mut state));
+        assert!(pump_library_events(&library_rx, &request_tx, &mut state));
+        let request = request_rx.try_recv().expect("external detail request");
+        assert_eq!(request.path, track);
+        assert!(state.queue_details.is_empty());
 
-        let details = state
-            .queue_details
-            .get(&track)
-            .expect("restored external track details inserted");
-        assert_eq!(details.title, "song");
-        assert_eq!(details.cover_path, cover.to_string_lossy());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_queue_details_invalidates_stale_external_metadata_when_file_changes() {
+        let root = test_dir("queue-details-stale");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let track = root.join("song.flac");
+        write_stub(&track, b"version-a");
+        let old_fingerprint = track_file_fingerprint(&track).expect("initial fingerprint");
+        write_stub(&track, b"version-b-with-new-size");
+        let (request_tx, request_rx) = crossbeam_channel::unbounded();
+
+        let mut state = BridgeState::default();
+        state.queue = vec![track.clone()];
+        state.queue_details.insert(
+            track.clone(),
+            IndexedTrack {
+                title: "Old".to_string(),
+                artist: String::new(),
+                album: String::new(),
+                cover_path: String::new(),
+                genre: String::new(),
+                year: None,
+                track_no: None,
+                duration_secs: None,
+            },
+        );
+        state
+            .queue_detail_fingerprints
+            .insert(track.clone(), old_fingerprint);
+
+        assert!(sync_queue_details(&mut state, &request_tx));
+        assert!(!state.queue_details.contains_key(&track));
+        let request = request_rx.try_recv().expect("replacement request");
+        assert_ne!(request.fingerprint, old_fingerprint);
+        assert_eq!(
+            state.pending_queue_detail_fingerprints.get(&track),
+            Some(&request.fingerprint)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_queue_detail_event_is_ignored_when_track_is_in_library() {
+        let root = test_dir("queue-details-library-owned");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let track = root.join("song.flac");
+        write_stub(&track, b"not-real-audio");
+        let fingerprint = track_file_fingerprint(&track).expect("track fingerprint");
+
+        let mut state = BridgeState::default();
+        state.queue = vec![track.clone()];
+        state.library = Arc::new(LibrarySnapshot {
+            tracks: vec![LibraryTrack {
+                path: track.clone(),
+                title: "Library Title".to_string(),
+                ..LibraryTrack::default()
+            }],
+            ..LibrarySnapshot::default()
+        });
+        state
+            .pending_queue_detail_fingerprints
+            .insert(track.clone(), fingerprint);
+
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        event_tx
+            .send(ExternalQueueDetailsEvent {
+                path: track.clone(),
+                fingerprint,
+                indexed: IndexedTrack {
+                    title: "External Title".to_string(),
+                    artist: String::new(),
+                    album: String::new(),
+                    cover_path: String::new(),
+                    genre: String::new(),
+                    year: None,
+                    track_no: None,
+                    duration_secs: None,
+                },
+            })
+            .expect("send queue detail event");
+
+        assert!(!pump_external_queue_detail_events(&event_rx, &mut state));
+        assert!(!state.queue_details.contains_key(&track));
+        assert!(!state.pending_queue_detail_fingerprints.contains_key(&track));
 
         let _ = fs::remove_dir_all(root);
     }

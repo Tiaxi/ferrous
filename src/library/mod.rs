@@ -61,6 +61,12 @@ pub struct LibrarySnapshot {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrackFileFingerprint {
+    pub(crate) mtime_ns: i64,
+    pub(crate) size_bytes: i64,
+}
+
 #[derive(Debug, Clone)]
 pub enum LibraryCommand {
     ScanRoot(PathBuf),
@@ -454,6 +460,21 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             size_bytes INTEGER NOT NULL,
             indexed_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS external_tracks (
+            path TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            album TEXT NOT NULL,
+            cover_path TEXT NOT NULL DEFAULT '',
+            genre TEXT NOT NULL DEFAULT '',
+            year INTEGER,
+            track_no INTEGER,
+            duration_secs REAL,
+            mtime_ns INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            indexed_at INTEGER NOT NULL
+        );
         ",
     )?;
 
@@ -481,10 +502,13 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r"
         CREATE INDEX IF NOT EXISTS idx_tracks_root_path ON tracks(root_path);
+        CREATE INDEX IF NOT EXISTS idx_tracks_root_path_path_nocase
+            ON tracks(root_path COLLATE NOCASE, path COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
         CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
         CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
         CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre);
+        CREATE INDEX IF NOT EXISTS idx_external_tracks_indexed_at ON external_tracks(indexed_at);
         CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
             title,
             artist,
@@ -522,6 +546,155 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         let _ = conn.execute("INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild')", []);
     }
 
+    Ok(())
+}
+
+pub(crate) fn track_file_fingerprint(path: &Path) -> Option<TrackFileFingerprint> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(TrackFileFingerprint {
+        mtime_ns: metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i64),
+        size_bytes: metadata.len() as i64,
+    })
+}
+
+pub(crate) fn load_external_track_cache(
+    path: &Path,
+    fingerprint: TrackFileFingerprint,
+) -> Option<IndexedTrack> {
+    let conn = open_library_db().ok()?;
+    init_schema(&conn).ok()?;
+    load_external_track_cache_from_conn(&conn, path, fingerprint)
+}
+
+pub(crate) fn load_external_track_caches(
+    requests: &[(PathBuf, TrackFileFingerprint)],
+) -> HashMap<PathBuf, IndexedTrack> {
+    let Ok(conn) = open_library_db() else {
+        return HashMap::new();
+    };
+    if init_schema(&conn).is_err() {
+        return HashMap::new();
+    }
+    load_external_track_caches_from_conn(&conn, requests)
+}
+
+fn load_external_track_cache_from_conn(
+    conn: &Connection,
+    path: &Path,
+    fingerprint: TrackFileFingerprint,
+) -> Option<IndexedTrack> {
+    conn.query_row(
+        r"
+        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs
+        FROM external_tracks
+        WHERE path = ?1
+          AND mtime_ns = ?2
+          AND size_bytes = ?3
+        ",
+        params![
+            path.to_string_lossy().to_string(),
+            fingerprint.mtime_ns,
+            fingerprint.size_bytes,
+        ],
+        |row| {
+            Ok(IndexedTrack {
+                title: row.get::<_, String>(0)?,
+                artist: row.get::<_, String>(1)?,
+                album: row.get::<_, String>(2)?,
+                cover_path: row.get::<_, String>(3)?,
+                genre: row.get::<_, String>(4)?,
+                year: row
+                    .get::<_, Option<i64>>(5)?
+                    .and_then(|v| i32::try_from(v).ok()),
+                track_no: row
+                    .get::<_, Option<i64>>(6)?
+                    .and_then(|v| u32::try_from(v).ok()),
+                duration_secs: row.get::<_, Option<f32>>(7)?,
+            })
+        },
+    )
+    .ok()
+}
+
+fn load_external_track_caches_from_conn(
+    conn: &Connection,
+    requests: &[(PathBuf, TrackFileFingerprint)],
+) -> HashMap<PathBuf, IndexedTrack> {
+    let mut loaded = HashMap::with_capacity(requests.len());
+    for (path, fingerprint) in requests {
+        if let Some(indexed) = load_external_track_cache_from_conn(conn, path, *fingerprint) {
+            loaded.insert(path.clone(), indexed);
+        }
+    }
+    loaded
+}
+
+pub(crate) fn store_external_track_cache(
+    path: &Path,
+    fingerprint: TrackFileFingerprint,
+    indexed: &IndexedTrack,
+) -> Result<(), String> {
+    let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
+    init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+    store_external_track_cache_in_conn(&conn, path, fingerprint, indexed)
+}
+
+fn store_external_track_cache_in_conn(
+    conn: &Connection,
+    path: &Path,
+    fingerprint: TrackFileFingerprint,
+    indexed: &IndexedTrack,
+) -> Result<(), String> {
+    conn.execute(
+        r"
+        INSERT INTO external_tracks(
+            path,
+            title,
+            artist,
+            album,
+            cover_path,
+            genre,
+            year,
+            track_no,
+            duration_secs,
+            mtime_ns,
+            size_bytes,
+            indexed_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(path) DO UPDATE SET
+            title = excluded.title,
+            artist = excluded.artist,
+            album = excluded.album,
+            cover_path = excluded.cover_path,
+            genre = excluded.genre,
+            year = excluded.year,
+            track_no = excluded.track_no,
+            duration_secs = excluded.duration_secs,
+            mtime_ns = excluded.mtime_ns,
+            size_bytes = excluded.size_bytes,
+            indexed_at = excluded.indexed_at
+        ",
+        params![
+            path.to_string_lossy().to_string(),
+            indexed.title.as_str(),
+            indexed.artist.as_str(),
+            indexed.album.as_str(),
+            indexed.cover_path.as_str(),
+            indexed.genre.as_str(),
+            indexed.year.map(i64::from),
+            indexed.track_no.map(i64::from),
+            indexed.duration_secs,
+            fingerprint.mtime_ns,
+            fingerprint.size_bytes,
+            unix_ts_i64(),
+        ],
+    )
+    .map_err(|e| format!("failed to store external track cache: {e}"))?;
     Ok(())
 }
 
@@ -1001,7 +1174,7 @@ pub(crate) fn is_supported_audio(path: &Path) -> bool {
     )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexedTrack {
     pub(crate) title: String,
     pub(crate) artist: String,
@@ -1159,6 +1332,44 @@ mod tests {
     }
 
     #[test]
+    fn external_track_cache_invalidates_when_file_fingerprint_changes() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&conn).expect("init schema");
+
+        let dir = test_dir("external-track-cache");
+        fs::create_dir_all(&dir).expect("create cache test dir");
+        let path = dir.join("song.flac");
+        write_stub(&path, b"version-a");
+
+        let fingerprint_a = track_file_fingerprint(&path).expect("fingerprint a");
+        let indexed_a = IndexedTrack {
+            title: "Song A".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            cover_path: String::new(),
+            genre: "Ambient".to_string(),
+            year: Some(2024),
+            track_no: Some(3),
+            duration_secs: Some(123.0),
+        };
+        store_external_track_cache_in_conn(&conn, &path, fingerprint_a, &indexed_a)
+            .expect("store external cache");
+
+        let loaded_a =
+            load_external_track_cache_from_conn(&conn, &path, fingerprint_a).expect("cache hit");
+        assert_eq!(loaded_a.title, "Song A");
+        assert_eq!(loaded_a.track_no, Some(3));
+
+        std::thread::sleep(Duration::from_millis(2));
+        write_stub(&path, b"version-b with different size");
+        let fingerprint_b = track_file_fingerprint(&path).expect("fingerprint b");
+        assert_ne!(fingerprint_a, fingerprint_b);
+        assert!(load_external_track_cache_from_conn(&conn, &path, fingerprint_b).is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn supported_audio_extensions_are_detected() {
         assert!(is_supported_audio(Path::new("a.mp3")));
         assert!(is_supported_audio(Path::new("a.flac")));
@@ -1239,6 +1450,113 @@ mod tests {
             has_root_path,
             "tracks.root_path should exist after migration"
         );
+    }
+
+    #[test]
+    fn external_track_cache_roundtrips_fresh_metadata() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let path = PathBuf::from("/outside/song.flac");
+        let fingerprint = TrackFileFingerprint {
+            mtime_ns: 42,
+            size_bytes: 1337,
+        };
+        let indexed = IndexedTrack {
+            title: "Outside Song".to_string(),
+            artist: "Outside Artist".to_string(),
+            album: "Outside Album".to_string(),
+            cover_path: "/outside/cover.jpg".to_string(),
+            genre: "Ambient".to_string(),
+            year: Some(2024),
+            track_no: Some(7),
+            duration_secs: Some(245.0),
+        };
+
+        store_external_track_cache_in_conn(&conn, &path, fingerprint, &indexed)
+            .expect("store external cache");
+        let loaded = load_external_track_cache_from_conn(&conn, &path, fingerprint)
+            .expect("load external cache");
+
+        assert_eq!(loaded, indexed);
+    }
+
+    #[test]
+    fn external_track_cache_rejects_stale_fingerprint() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let path = PathBuf::from("/outside/song.flac");
+        let indexed = IndexedTrack {
+            title: "Outside Song".to_string(),
+            artist: "Outside Artist".to_string(),
+            album: "Outside Album".to_string(),
+            cover_path: String::new(),
+            genre: String::new(),
+            year: None,
+            track_no: None,
+            duration_secs: Some(245.0),
+        };
+
+        store_external_track_cache_in_conn(
+            &conn,
+            &path,
+            TrackFileFingerprint {
+                mtime_ns: 42,
+                size_bytes: 1337,
+            },
+            &indexed,
+        )
+        .expect("store external cache");
+
+        let stale = load_external_track_cache_from_conn(
+            &conn,
+            &path,
+            TrackFileFingerprint {
+                mtime_ns: 99,
+                size_bytes: 1337,
+            },
+        );
+        assert!(stale.is_none());
+    }
+
+    #[test]
+    fn external_track_cache_batch_load_returns_only_matching_rows() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let path_a = PathBuf::from("/outside/a.flac");
+        let path_b = PathBuf::from("/outside/b.flac");
+        let fingerprint_a = TrackFileFingerprint {
+            mtime_ns: 10,
+            size_bytes: 100,
+        };
+        let fingerprint_b = TrackFileFingerprint {
+            mtime_ns: 20,
+            size_bytes: 200,
+        };
+        let indexed_a = IndexedTrack {
+            title: "Track A".to_string(),
+            artist: "Artist A".to_string(),
+            album: "Album A".to_string(),
+            cover_path: String::new(),
+            genre: String::new(),
+            year: None,
+            track_no: Some(1),
+            duration_secs: Some(111.0),
+        };
+
+        store_external_track_cache_in_conn(&conn, &path_a, fingerprint_a, &indexed_a)
+            .expect("store external cache");
+
+        let loaded = load_external_track_caches_from_conn(
+            &conn,
+            &[
+                (path_a.clone(), fingerprint_a),
+                (path_b.clone(), fingerprint_b),
+            ],
+        );
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.get(&path_a), Some(&indexed_a));
+        assert!(!loaded.contains_key(&path_b));
     }
 
     #[test]

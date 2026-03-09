@@ -1,5 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::ffi::c_uchar;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -64,6 +65,7 @@ struct AnalysisEmitState {
 struct QueueSectionCache {
     library_ptr: usize,
     queue_paths: Vec<PathBuf>,
+    queue_details_signature: u64,
     queue_section: QueueSectionData,
 }
 
@@ -257,19 +259,41 @@ impl FfiRuntime {
             return QueueSectionData::default();
         }
 
-        let library_ptr = std::sync::Arc::as_ptr(&snapshot.library) as usize;
-        if self.queue_section_cache.library_ptr == library_ptr
-            && self.queue_section_cache.queue_paths == snapshot.queue
-        {
+        if queue_section_cache_matches(&self.queue_section_cache, snapshot) {
             return self.queue_section_cache.queue_section.clone();
         }
 
         let queue_section = compute_queue_section_data(snapshot);
-        self.queue_section_cache.library_ptr = library_ptr;
+        self.queue_section_cache.library_ptr = std::sync::Arc::as_ptr(&snapshot.library) as usize;
         self.queue_section_cache.queue_paths = snapshot.queue.clone();
+        self.queue_section_cache.queue_details_signature = queue_details_signature(snapshot);
         self.queue_section_cache.queue_section = queue_section.clone();
         queue_section
     }
+}
+
+fn queue_section_cache_matches(cache: &QueueSectionCache, snapshot: &BridgeSnapshot) -> bool {
+    cache.library_ptr == std::sync::Arc::as_ptr(&snapshot.library) as usize
+        && cache.queue_paths == snapshot.queue
+        && cache.queue_details_signature == queue_details_signature(snapshot)
+}
+
+fn queue_details_signature(snapshot: &BridgeSnapshot) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for path in &snapshot.queue {
+        path.hash(&mut hasher);
+        if let Some(track) = snapshot.queue_details.get(path) {
+            track.title.hash(&mut hasher);
+            track.artist.hash(&mut hasher);
+            track.album.hash(&mut hasher);
+            track.cover_path.hash(&mut hasher);
+            track.genre.hash(&mut hasher);
+            track.year.hash(&mut hasher);
+            track.track_no.hash(&mut hasher);
+            track.duration_secs.map(f32::to_bits).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn merge_queue_snapshot(
@@ -1884,6 +1908,38 @@ mod tests {
         assert_eq!(queue_section.tracks[0].year, Some(2024));
         assert_eq!(queue_section.tracks[0].track_number, Some(7));
         assert_eq!(queue_section.tracks[0].length_seconds, Some(245.0));
+    }
+
+    #[test]
+    fn queue_section_cache_invalidates_when_external_queue_details_change() {
+        let mut snapshot = sample_snapshot();
+        snapshot.library = Arc::new(LibrarySnapshot::default());
+        snapshot.queue = vec![PathBuf::from("/outside/song.flac")];
+        let path = snapshot.queue[0].clone();
+
+        let mut cache = QueueSectionCache::default();
+        cache.library_ptr = Arc::as_ptr(&snapshot.library) as usize;
+        cache.queue_paths = snapshot.queue.clone();
+        cache.queue_details_signature = queue_details_signature(&snapshot);
+        cache.queue_section = compute_queue_section_data(&snapshot);
+
+        assert!(queue_section_cache_matches(&cache, &snapshot));
+
+        snapshot.queue_details.insert(
+            path,
+            crate::library::IndexedTrack {
+                title: "Outside Song".to_string(),
+                artist: "Outside Artist".to_string(),
+                album: "Outside Album".to_string(),
+                cover_path: "/outside/cover.jpg".to_string(),
+                genre: "Ambient".to_string(),
+                year: Some(2024),
+                track_no: Some(7),
+                duration_secs: Some(245.0),
+            },
+        );
+
+        assert!(!queue_section_cache_matches(&cache, &snapshot));
     }
 
     #[test]
