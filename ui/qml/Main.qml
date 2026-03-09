@@ -131,6 +131,7 @@ Kirigami.ApplicationWindow {
         && uiBridge.globalSearchModel.nextSelectableIndex)
         ? uiBridge.globalSearchModel
         : globalSearchModelFallback
+    readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
 
     function mixColor(colorA, colorB, amount) {
         const t = Math.max(0, Math.min(1, amount))
@@ -255,6 +256,8 @@ Kirigami.ApplicationWindow {
         property var waveformPeaksPacked: ""
         property bool spectrogramReset: false
         property real dbRange: 90
+        property int fftSize: 8192
+        property int spectrogramViewMode: 0
         property bool logScale: false
         property int repeatMode: 0
         property bool shuffleEnabled: false
@@ -308,6 +311,8 @@ Kirigami.ApplicationWindow {
         function previous() {}
         function seek(seconds) {}
         function setVolume(value) {}
+        function setFftSize(value) {}
+        function setSpectrogramViewMode(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
         function setRepeatMode(mode) {}
@@ -353,7 +358,7 @@ Kirigami.ApplicationWindow {
         function shutdown() {}
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
-        function takeSpectrogramRowsDeltaPacked() { return ({ rows: 0, bins: 0, data: "" }) }
+        function takeSpectrogramRowsDeltaPacked() { return ({ channels: [] }) }
     }
 
     function togglePlayPause() {
@@ -2429,6 +2434,10 @@ Kirigami.ApplicationWindow {
         albumArtViewer.open()
     }
 
+    function openSpectrogramViewer() {
+        spectrogramViewer.open()
+    }
+
     Action {
         id: openFilesAction
         text: "Open File(s)"
@@ -2523,7 +2532,7 @@ Kirigami.ApplicationWindow {
     Action {
         id: resetSpectrogramAction
         text: "Reset Spectrogram View"
-        onTriggered: spectrogramItem.reset()
+        onTriggered: spectrogramSurface.resetForCurrentMode()
     }
     Action {
         id: showFpsOverlayAction
@@ -2884,12 +2893,38 @@ Kirigami.ApplicationWindow {
                 }
 
                 GroupBox {
-                    title: "Visualization"
+                    title: "Spectrogram"
                     Layout.fillWidth: true
 
                     ColumnLayout {
                         anchors.fill: parent
                         spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Label { text: "View:" }
+                            ComboBox {
+                                Layout.preferredWidth: 180
+                                model: ["Downmix", "Per-channel"]
+                                currentIndex: Math.max(0, Math.min(1, uiBridge.spectrogramViewMode))
+                                onActivated: uiBridge.setSpectrogramViewMode(currentIndex)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Label { text: "FFT Window:" }
+                            ComboBox {
+                                Layout.preferredWidth: 180
+                                model: root.spectrogramFftChoices
+                                currentIndex: {
+                                    const index = root.spectrogramFftChoices.indexOf(uiBridge.fftSize)
+                                    return index >= 0 ? index : 0
+                                }
+                                onActivated: uiBridge.setFftSize(
+                                    root.spectrogramFftChoices[Math.max(0, currentIndex)])
+                            }
+                        }
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -5312,14 +5347,223 @@ Kirigami.ApplicationWindow {
                     color: "#0b0b0f"
                     border.color: Qt.rgba(0, 0, 0, 0.25)
 
+                    Item {
+                        id: spectrogramMainHost
+                        anchors.fill: parent
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        onDoubleClicked: function(mouse) {
+                            if (mouse.button === Qt.LeftButton) {
+                                root.openSpectrogramViewer()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Item {
+        id: spectrogramSurface
+        parent: spectrogramViewer.visible ? spectrogramFullscreenHost : spectrogramMainHost
+        visible: parent !== null
+        anchors.fill: parent
+        property var channelDescriptors: []
+
+        function placeholderDescriptors() {
+            return uiBridge.spectrogramViewMode === 1
+                ? [{ label: "M", showLabel: true }]
+                : [{ label: "", showLabel: false }]
+        }
+
+        function sameDescriptors(next) {
+            if (channelDescriptors.length !== next.length) {
+                return false
+            }
+            for (let i = 0; i < next.length; ++i) {
+                if (channelDescriptors[i].label !== next[i].label
+                        || channelDescriptors[i].showLabel !== next[i].showLabel) {
+                    return false
+                }
+            }
+            return true
+        }
+
+        function syncChannelDescriptors(channels) {
+            let next = []
+            if (channels && channels.length > 0) {
+                const showLabels = uiBridge.spectrogramViewMode === 1
+                for (let i = 0; i < channels.length; ++i) {
+                    const labelText = (channels[i].label || "").trim()
+                    next.push({
+                        label: labelText,
+                        showLabel: showLabels && labelText.length > 0
+                    })
+                }
+            }
+            if (next.length === 0) {
+                next = placeholderDescriptors()
+            }
+            if (!sameDescriptors(next)) {
+                channelDescriptors = next
+            }
+        }
+
+        function resetForCurrentMode() {
+            syncChannelDescriptors([])
+            for (let i = 0; i < spectrogramRepeater.count; ++i) {
+                const pane = spectrogramRepeater.itemAt(i)
+                if (pane && pane.spectrogramItem) {
+                    pane.spectrogramItem.reset()
+                }
+            }
+        }
+
+        function appendPackedDelta(channels) {
+            if (!channels || channels.length === 0) {
+                return
+            }
+            syncChannelDescriptors(channels)
+            for (let i = 0; i < channels.length; ++i) {
+                const pane = spectrogramRepeater.itemAt(i)
+                const channel = channels[i]
+                if (!pane || !pane.spectrogramItem || !channel) {
+                    continue
+                }
+                if ((channel.rows || 0) > 0 && (channel.bins || 0) > 0) {
+                    pane.spectrogramItem.appendPackedRows(channel.data, channel.rows, channel.bins)
+                }
+            }
+        }
+
+        Component.onCompleted: resetForCurrentMode()
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: spectrogramSurface.channelDescriptors.length > 1 ? 2 : 0
+
+            Repeater {
+                id: spectrogramRepeater
+                model: spectrogramSurface.channelDescriptors
+
+                delegate: Item {
+                    property alias spectrogramItem: spectrogramPaneItem
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.preferredHeight: 1
+                    Layout.minimumHeight: 0
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "#0b0b0f"
+                    }
+
                     SpectrogramItem {
-                        id: spectrogramItem
+                        id: spectrogramPaneItem
                         anchors.fill: parent
                         maxColumns: Math.max(640, Math.floor(width))
                         dbRange: uiBridge.dbRange
                         logScale: uiBridge.logScale
-                        showFpsOverlay: uiBridge.showFps
+                        showFpsOverlay: index === 0 ? uiBridge.showFps : false
                         sampleRateHz: uiBridge.sampleRateHz
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.margins: 8
+                        width: labelText.implicitWidth + 8
+                        height: labelText.implicitHeight + 2
+                        radius: 4
+                        color: Qt.rgba(0.0, 0.0, 0.0, 0.18)
+                        visible: modelData.showLabel
+
+                        Text {
+                            id: labelText
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: Qt.rgba(0.90, 0.93, 0.98, 0.74)
+                            font.pixelSize: 12
+                            font.weight: Font.Medium
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Popup {
+        id: spectrogramViewer
+        parent: Overlay.overlay
+        x: 0
+        y: 0
+        width: root.width
+        height: root.height
+        modal: true
+        focus: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape
+        enter: Transition {
+            NumberAnimation {
+                properties: "opacity,scale,x,y"
+                duration: root.uiPopupTransitionMs
+            }
+        }
+        exit: Transition {
+            NumberAnimation {
+                properties: "opacity,scale,x,y"
+                duration: root.uiPopupTransitionMs
+            }
+        }
+        background: Rectangle {
+            color: "#000000"
+            opacity: 0.87
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            onClicked: spectrogramViewer.close()
+        }
+
+        Rectangle {
+            z: 20
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: 12
+            width: 40
+            height: 40
+            radius: 8
+            color: Qt.rgba(0, 0, 0, 0.45)
+            border.color: Qt.rgba(1, 1, 1, 0.24)
+
+            ToolButton {
+                anchors.fill: parent
+                icon.name: "window-close"
+                onClicked: spectrogramViewer.close()
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 20
+            color: "#0b0b0f"
+            border.color: Qt.rgba(1, 1, 1, 0.12)
+
+            Item {
+                id: spectrogramFullscreenHost
+                anchors.fill: parent
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                onDoubleClicked: function(mouse) {
+                    if (mouse.button === Qt.LeftButton) {
+                        spectrogramViewer.close()
                     }
                 }
             }
@@ -5534,11 +5778,11 @@ Kirigami.ApplicationWindow {
         target: uiBridge
         function applyAnalysisDelta() {
             if (uiBridge.spectrogramReset && root.visualFeedsEnabled) {
-                spectrogramItem.reset()
+                spectrogramSurface.resetForCurrentMode()
             }
             const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
-            if (root.visualFeedsEnabled && delta.rows > 0 && delta.bins > 0) {
-                spectrogramItem.appendPackedRows(delta.data, delta.rows, delta.bins)
+            if (root.visualFeedsEnabled && delta.channels && delta.channels.length > 0) {
+                spectrogramSurface.appendPackedDelta(delta.channels)
             }
         }
         function onSnapshotChanged() {

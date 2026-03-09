@@ -1,5 +1,6 @@
 #include "SpectrogramItem.h"
 
+#include <QFontMetrics>
 #include <QMutexLocker>
 #include <QPainter>
 #include <QQuickWindow>
@@ -750,5 +751,8 @@ void SpectrogramItem::drawFpsOverlay(QPainter *painter) const {
     font.setPixelSize(10);
     painter->setFont(font);
     painter->setPen(QColor(190, 190, 200, 150));
-    painter->drawText(QPointF(8.0, 14.0), QStringLiteral("%1 fps").arg(m_fpsValue));
+    const QString text = QStringLiteral("%1 fps").arg(m_fpsValue);
+    const QFontMetrics metrics(font);
+    const int textWidth = metrics.horizontalAdvance(text);
+    painter->drawText(QPointF(width() - textWidth - 8.0, 14.0), text);
 }

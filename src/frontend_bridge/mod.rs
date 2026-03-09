@@ -10,7 +10,9 @@ use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TryS
 use serde_json::json;
 use walkdir::WalkDir;
 
-use crate::analysis::{AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot};
+use crate::analysis::{
+    AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramViewMode,
+};
 use crate::lastfm::{
     self, Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
     NowPlayingTrack as LastFmNowPlayingTrack, RuntimeState as LastFmRuntimeState,
@@ -137,6 +139,7 @@ pub enum BridgeSettingsCommand {
     SaveToDisk,
     SetVolume(f32),
     SetFftSize(usize),
+    SetSpectrogramViewMode(SpectrogramViewMode),
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
@@ -146,6 +149,37 @@ pub enum BridgeSettingsCommand {
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
+}
+
+impl SpectrogramViewMode {
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            1 => Self::PerChannel,
+            _ => Self::Downmix,
+        }
+    }
+
+    pub fn to_i32(self) -> i32 {
+        match self {
+            Self::Downmix => 0,
+            Self::PerChannel => 1,
+        }
+    }
+
+    fn parse_settings_value(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "downmix" | "single" | "mono" | "0" => Some(Self::Downmix),
+            "per_channel" | "per-channel" | "channels" | "1" => Some(Self::PerChannel),
+            _ => None,
+        }
+    }
+
+    fn settings_value(self) -> &'static str {
+        match self {
+            Self::Downmix => "downmix",
+            Self::PerChannel => "per_channel",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +244,7 @@ pub struct BridgeSnapshot {
 pub struct BridgeSettings {
     pub volume: f32,
     pub fft_size: usize,
+    pub spectrogram_view_mode: SpectrogramViewMode,
     pub db_range: f32,
     pub log_scale: bool,
     pub show_fps: bool,
@@ -227,6 +262,7 @@ impl Default for BridgeSettings {
         Self {
             volume: 1.0,
             fft_size: 8192,
+            spectrogram_view_mode: SpectrogramViewMode::Downmix,
             db_range: 90.0,
             log_scale: false,
             show_fps,
@@ -517,6 +553,9 @@ fn run_bridge_loop(
     state.playback.volume = state.settings.volume;
     playback.command(PlaybackCommand::SetVolume(state.settings.volume));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+    analysis.command(AnalysisCommand::SetSpectrogramViewMode(
+        state.settings.spectrogram_view_mode,
+    ));
     apply_session_restore(&mut state, &playback, load_session_snapshot().as_ref());
     state.rebuild_pre_built_tree();
     let mut lastfm_tracker = LastFmPlaybackTracker::default();
@@ -713,12 +752,17 @@ fn run_bridge_loop(
             #[allow(unused_variables)]
             let rss_kb = current_rss_kb();
             #[allow(unused_variables)]
-            let spectro_rows = state.analysis.spectrogram_rows.len();
+            let spectro_rows = state
+                .analysis
+                .spectrogram_channels
+                .first()
+                .map_or(0, |channel| channel.rows.len());
             #[allow(unused_variables)]
             let spectro_bins = state
                 .analysis
-                .spectrogram_rows
+                .spectrogram_channels
                 .first()
+                .and_then(|channel| channel.rows.first())
                 .map_or(0, std::vec::Vec::len);
             profile_eprintln!(
                 "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} spectro_rows={} spectro_bins={} sent_snap/s={} drop_snap/s={}",
@@ -1082,6 +1126,11 @@ fn handle_bridge_command(
                     context
                         .analysis
                         .command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+                    context
+                        .analysis
+                        .command(AnalysisCommand::SetSpectrogramViewMode(
+                            state.settings.spectrogram_view_mode,
+                        ));
                     context.lastfm.command(LastFmCommand::SetEnabled(
                         state.settings.lastfm_scrobbling_enabled,
                     ));
@@ -1105,6 +1154,13 @@ fn handle_bridge_command(
                     let fft = size.clamp(512, 8192).next_power_of_two();
                     state.settings.fft_size = fft;
                     context.analysis.command(AnalysisCommand::SetFftSize(fft));
+                    *context.settings_dirty = true;
+                }
+                BridgeSettingsCommand::SetSpectrogramViewMode(view_mode) => {
+                    state.settings.spectrogram_view_mode = view_mode;
+                    context
+                        .analysis
+                        .command(AnalysisCommand::SetSpectrogramViewMode(view_mode));
                     *context.settings_dirty = true;
                 }
                 BridgeSettingsCommand::SetDbRange(v) => {
@@ -2859,13 +2915,14 @@ fn pump_analysis_events(analysis_rx: &Receiver<AnalysisEvent>, state: &mut Bridg
         };
         match event {
             AnalysisEvent::Snapshot(snapshot) => {
-                if snapshot.spectrogram_seq == 0 && snapshot.spectrogram_rows.is_empty() {
-                    state.analysis.spectrogram_rows.clear();
-                } else if !snapshot.spectrogram_rows.is_empty() {
-                    state.analysis.spectrogram_rows = snapshot.spectrogram_rows;
+                if snapshot.spectrogram_seq == 0 && snapshot.spectrogram_channels.is_empty() {
+                    state.analysis.spectrogram_channels.clear();
+                } else if !snapshot.spectrogram_channels.is_empty() {
+                    state.analysis.spectrogram_channels = snapshot.spectrogram_channels;
                 }
                 state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
                 state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
+                state.analysis.spectrogram_view_mode = snapshot.spectrogram_view_mode;
                 state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
                 state.analysis.waveform_complete = snapshot.waveform_complete;
                 if !snapshot.waveform_peaks.is_empty() {
@@ -3287,6 +3344,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.fft_size = x.clamp(512, 8192).next_power_of_two();
                 }
             }
+            "spectrogram_view_mode" => {
+                if let Some(mode) = SpectrogramViewMode::parse_settings_value(value) {
+                    settings.spectrogram_view_mode = mode;
+                }
+            }
             "db_range" => {
                 if let Ok(x) = value.parse::<f32>() {
                     settings.db_range = x.clamp(50.0, 120.0);
@@ -3338,9 +3400,10 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
+        settings.spectrogram_view_mode.settings_value(),
         settings.db_range,
         i32::from(settings.log_scale),
         i32::from(settings.show_fps),
@@ -3522,6 +3585,7 @@ mod tests {
         let settings = BridgeSettings {
             volume: 0.42,
             fft_size: 2048,
+            spectrogram_view_mode: SpectrogramViewMode::PerChannel,
             db_range: 77.5,
             log_scale: true,
             show_fps: true,
@@ -3535,6 +3599,10 @@ mod tests {
         parse_settings_text(&mut parsed, &text);
         assert!((parsed.volume - 0.42).abs() < 0.0001);
         assert_eq!(parsed.fft_size, 2048);
+        assert_eq!(
+            parsed.spectrogram_view_mode,
+            SpectrogramViewMode::PerChannel
+        );
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.log_scale);
         assert!(parsed.show_fps);
@@ -3549,10 +3617,11 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=2.5\nfft_size=111\ndb_range=500\nlog_scale=0\nshow_fps=1\nsystem_media_controls_enabled=0\nlibrary_sort_mode=0\n",
+            "volume=2.5\nfft_size=111\nspectrogram_view_mode=bad\ndb_range=500\nlog_scale=0\nshow_fps=1\nsystem_media_controls_enabled=0\nlibrary_sort_mode=0\n",
         );
         assert_eq!(settings.volume, 1.0);
         assert_eq!(settings.fft_size, 512);
+        assert_eq!(settings.spectrogram_view_mode, SpectrogramViewMode::Downmix);
         assert_eq!(settings.db_range, 120.0);
         assert!(!settings.log_scale);
         assert!(settings.show_fps);
@@ -3567,9 +3636,13 @@ mod tests {
         let mut settings = BridgeSettings::default();
         parse_settings_text(
             &mut settings,
-            "volume=0.5\nfft_size=2048\ndb_range=80\nlog_scale=1\nshow_fps=0\nlibrary_sort_mode=1\n",
+            "volume=0.5\nfft_size=2048\nspectrogram_view_mode=per_channel\ndb_range=80\nlog_scale=1\nshow_fps=0\nlibrary_sort_mode=1\n",
         );
         assert!(settings.system_media_controls_enabled);
+        assert_eq!(
+            settings.spectrogram_view_mode,
+            SpectrogramViewMode::PerChannel
+        );
     }
 
     #[test]

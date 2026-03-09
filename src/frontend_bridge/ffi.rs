@@ -9,6 +9,7 @@ use super::{
     BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
     FrontendBridgeHandle, LibrarySortMode,
 };
+use crate::analysis::{SpectrogramChannelLabel, SpectrogramViewMode};
 use crate::playback::{PlaybackState, RepeatMode};
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
@@ -41,7 +42,13 @@ struct AnalysisDelta {
     waveform_coverage_millis: u32,
     waveform_complete: bool,
     waveform_peaks_u8: Vec<u8>,
-    spectrogram_rows_u8: Vec<Vec<u8>>,
+    spectrogram_channels_u8: Vec<EncodedSpectrogramChannel>,
+}
+
+#[derive(Default)]
+struct EncodedSpectrogramChannel {
+    label: SpectrogramChannelLabel,
+    rows_u8: Vec<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -693,54 +700,59 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
             BridgeCommand::Settings(BridgeSettingsCommand::SetFftSize(fft_size))
         }
         32 => {
+            let mode = SpectrogramViewMode::from_i32(reader.read_u8()? as i32);
             reader.expect_done()?;
-            BridgeCommand::RequestSnapshot
+            BridgeCommand::Settings(BridgeSettingsCommand::SetSpectrogramViewMode(mode))
         }
         33 => {
             reader.expect_done()?;
-            BridgeCommand::Shutdown
+            BridgeCommand::RequestSnapshot
         }
         34 => {
+            reader.expect_done()?;
+            BridgeCommand::Shutdown
+        }
+        35 => {
             let key = reader.read_u16_string()?;
             let expanded = reader.read_u8()? != 0;
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { key, expanded })
         }
-        35 => {
+        36 => {
             let seq = reader.read_u32()?;
             let query = reader.read_u16_string()?;
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::SetSearchQuery { seq, query })
         }
-        36 => {
+        37 => {
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::ReplaceAllTracks)
         }
-        37 => {
+        38 => {
             reader.expect_done()?;
             BridgeCommand::Library(BridgeLibraryCommand::AppendAllTracks)
         }
-        38 => {
+        39 => {
             let enabled = reader.read_u8()? != 0;
             reader.expect_done()?;
             BridgeCommand::Settings(BridgeSettingsCommand::SetSystemMediaControlsEnabled(
                 enabled,
             ))
         }
-        39 => {
+        40 => {
             let enabled = reader.read_u8()? != 0;
             reader.expect_done()?;
             BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmScrobblingEnabled(enabled))
         }
-        40 => {
+        41 => {
             reader.expect_done()?;
             BridgeCommand::Settings(BridgeSettingsCommand::BeginLastFmAuth)
         }
-        41 => {
+        42 => {
             reader.expect_done()?;
             BridgeCommand::Settings(BridgeSettingsCommand::CompleteLastFmAuth)
         }
-        42 => {
+        43 => {
             reader.expect_done()?;
             BridgeCommand::Settings(BridgeSettingsCommand::DisconnectLastFm)
         }
@@ -1151,6 +1163,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
     push_f32(&mut out, snapshot.settings.volume);
     push_u32(&mut out, snapshot.settings.fft_size as u32);
+    push_u8(
+        &mut out,
+        snapshot.settings.spectrogram_view_mode.to_i32() as u8,
+    );
     push_f32(&mut out, snapshot.settings.db_range);
     push_u8(&mut out, u8::from(snapshot.settings.log_scale));
     push_u8(&mut out, u8::from(snapshot.settings.show_fps));
@@ -1242,30 +1258,43 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
 
     let spectrogram_reset = s.analysis.spectrogram_seq < emit_state.last_spectrogram_seq
         || (s.analysis.spectrogram_seq == 0
-            && s.analysis.spectrogram_rows.is_empty()
+            && s.analysis.spectrogram_channels.is_empty()
             && emit_state.last_spectrogram_seq > 0);
     let spectrogram_seq = s.analysis.spectrogram_seq;
     let spectrogram_delta =
         spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq) as usize;
-    let spectrogram_rows_u8 = if spectrogram_delta > 0 && !s.analysis.spectrogram_rows.is_empty() {
-        let tail = spectrogram_delta.min(s.analysis.spectrogram_rows.len());
-        let start = s.analysis.spectrogram_rows.len().saturating_sub(tail);
-        s.analysis.spectrogram_rows[start..]
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|v| to_u8_spectrum(*v, s.settings.db_range))
-                    .collect::<Vec<u8>>()
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let spectrogram_channels_u8 =
+        if spectrogram_delta > 0 && !s.analysis.spectrogram_channels.is_empty() {
+            let frame_count = s
+                .analysis
+                .spectrogram_channels
+                .first()
+                .map_or(0, |channel| channel.rows.len());
+            let tail = spectrogram_delta.min(frame_count);
+            let start = frame_count.saturating_sub(tail);
+            s.analysis
+                .spectrogram_channels
+                .iter()
+                .map(|channel| EncodedSpectrogramChannel {
+                    label: channel.label,
+                    rows_u8: channel.rows[start..]
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|v| to_u8_spectrum(*v, s.settings.db_range))
+                                .collect::<Vec<u8>>()
+                        })
+                        .collect(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     emit_state.last_spectrogram_seq = spectrogram_seq;
     let has_payload = waveform_changed
         || waveform_meta_changed
         || spectrogram_reset
-        || !spectrogram_rows_u8.is_empty();
+        || !spectrogram_channels_u8.is_empty();
     if has_payload {
         emit_state.analysis_frame_seq = emit_state.analysis_frame_seq.wrapping_add(1);
     }
@@ -1278,7 +1307,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
         waveform_coverage_millis,
         waveform_complete: s.analysis.waveform_complete,
         waveform_peaks_u8,
-        spectrogram_rows_u8,
+        spectrogram_channels_u8,
     }
 }
 
@@ -1298,14 +1327,35 @@ fn to_u8_spectrum(v: f32, db_range: f32) -> u8 {
     ((xdb / range) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
+fn encode_channel_label(label: SpectrogramChannelLabel) -> u8 {
+    match label {
+        SpectrogramChannelLabel::Mono => 0,
+        SpectrogramChannelLabel::FrontLeft => 1,
+        SpectrogramChannelLabel::FrontRight => 2,
+        SpectrogramChannelLabel::FrontCenter => 3,
+        SpectrogramChannelLabel::Lfe => 4,
+        SpectrogramChannelLabel::SideLeft => 5,
+        SpectrogramChannelLabel::SideRight => 6,
+        SpectrogramChannelLabel::RearLeft => 7,
+        SpectrogramChannelLabel::RearRight => 8,
+        SpectrogramChannelLabel::RearCenter => 9,
+        SpectrogramChannelLabel::Unknown => 255,
+    }
+}
+
 fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     let waveform_len = delta.waveform_peaks_u8.len();
-    let row_count = delta.spectrogram_rows_u8.len();
-    let bin_count = delta
-        .spectrogram_rows_u8
+    let channel_count = delta.spectrogram_channels_u8.len();
+    let row_count = delta
+        .spectrogram_channels_u8
         .first()
+        .map_or(0, |channel| channel.rows_u8.len());
+    let bin_count = delta
+        .spectrogram_channels_u8
+        .first()
+        .and_then(|channel| channel.rows_u8.first())
         .map_or(0, std::vec::Vec::len);
-    let has_spectrogram = row_count > 0 && bin_count > 0;
+    let has_spectrogram = row_count > 0 && bin_count > 0 && channel_count > 0;
 
     let mut flags = 0u8;
     if delta.waveform_changed && waveform_len > 0 {
@@ -1328,8 +1378,15 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     let waveform_len_u16 = waveform_len.min(u16::MAX as usize) as u16;
     let row_count_u16 = row_count.min(u16::MAX as usize) as u16;
     let bin_count_u16 = bin_count.min(u16::MAX as usize) as u16;
-    let spectrogram_bytes = row_count_u16 as usize * bin_count_u16 as usize;
-    let payload_len = 20usize + waveform_len_u16 as usize + spectrogram_bytes;
+    let channel_count_u8 = channel_count.min(u8::MAX as usize) as u8;
+    let label_bytes = if has_spectrogram || delta.spectrogram_reset {
+        channel_count_u8 as usize
+    } else {
+        0
+    };
+    let spectrogram_bytes =
+        row_count_u16 as usize * channel_count_u8 as usize * bin_count_u16 as usize;
+    let payload_len = 21usize + waveform_len_u16 as usize + label_bytes + spectrogram_bytes;
 
     let mut out = Vec::with_capacity(4 + payload_len);
     out.extend_from_slice(&(payload_len as u32).to_le_bytes());
@@ -1341,17 +1398,29 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     out.extend_from_slice(&row_count_u16.to_le_bytes());
     out.extend_from_slice(&bin_count_u16.to_le_bytes());
     out.extend_from_slice(&delta.frame_seq.to_le_bytes());
+    out.push(channel_count_u8);
 
     if (flags & ANALYSIS_FLAG_WAVEFORM) != 0 {
         out.extend_from_slice(&delta.waveform_peaks_u8[..waveform_len_u16 as usize]);
     }
-    if (flags & ANALYSIS_FLAG_SPECTROGRAM) != 0 {
-        for row in delta
-            .spectrogram_rows_u8
+    if label_bytes > 0 {
+        for channel in delta
+            .spectrogram_channels_u8
             .iter()
-            .take(row_count_u16 as usize)
+            .take(channel_count_u8 as usize)
         {
-            out.extend_from_slice(&row[..bin_count_u16 as usize]);
+            out.push(encode_channel_label(channel.label));
+        }
+    }
+    if (flags & ANALYSIS_FLAG_SPECTROGRAM) != 0 {
+        for row_index in 0..row_count_u16 as usize {
+            for channel in delta
+                .spectrogram_channels_u8
+                .iter()
+                .take(channel_count_u8 as usize)
+            {
+                out.extend_from_slice(&channel.rows_u8[row_index][..bin_count_u16 as usize]);
+            }
         }
     }
 
@@ -1383,7 +1452,7 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::AnalysisSnapshot;
+    use crate::analysis::{AnalysisSnapshot, AnalysisSpectrogramChannel, SpectrogramChannelLabel};
     use crate::library::{LibrarySnapshot, LibraryTrack};
     use crate::playback::{PlaybackSnapshot, PlaybackState};
     use std::sync::Arc;
@@ -1406,9 +1475,13 @@ mod tests {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
                 waveform_coverage_seconds: 0.0,
                 waveform_complete: true,
-                spectrogram_rows: vec![vec![0.0, 1.0], vec![2.0, 3.0]],
+                spectrogram_channels: vec![AnalysisSpectrogramChannel {
+                    label: SpectrogramChannelLabel::Mono,
+                    rows: vec![vec![0.0, 1.0], vec![2.0, 3.0]],
+                }],
                 spectrogram_seq: 2,
                 sample_rate_hz: 48_000,
+                spectrogram_view_mode: SpectrogramViewMode::Downmix,
             },
             metadata: crate::metadata::TrackMetadata {
                 source_path: Some("/music/a.flac".to_string()),
@@ -1453,6 +1526,7 @@ mod tests {
             settings: super::super::BridgeSettings {
                 volume: 0.75,
                 fft_size: 2048,
+                spectrogram_view_mode: SpectrogramViewMode::Downmix,
                 db_range: 90.0,
                 log_scale: false,
                 show_fps: false,
@@ -1582,7 +1656,17 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let cmd = parse_binary_command(&encode_command(38, &[0]))
+        let cmd = parse_binary_command(&encode_command(32, &[1]))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Settings(BridgeSettingsCommand::SetSpectrogramViewMode(mode)) => {
+                assert_eq!(mode, SpectrogramViewMode::PerChannel);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cmd = parse_binary_command(&encode_command(39, &[0]))
             .expect("parse")
             .expect("command");
         match cmd {
@@ -1592,7 +1676,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let cmd = parse_binary_command(&encode_command(39, &[1]))
+        let cmd = parse_binary_command(&encode_command(40, &[1]))
             .expect("parse")
             .expect("command");
         match cmd {
@@ -1602,7 +1686,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let cmd = parse_binary_command(&encode_command(40, &[]))
+        let cmd = parse_binary_command(&encode_command(41, &[]))
             .expect("parse")
             .expect("command");
         assert!(matches!(
@@ -1610,7 +1694,7 @@ mod tests {
             BridgeCommand::Settings(BridgeSettingsCommand::BeginLastFmAuth)
         ));
 
-        let cmd = parse_binary_command(&encode_command(41, &[]))
+        let cmd = parse_binary_command(&encode_command(42, &[]))
             .expect("parse")
             .expect("command");
         assert!(matches!(
@@ -1618,7 +1702,7 @@ mod tests {
             BridgeCommand::Settings(BridgeSettingsCommand::CompleteLastFmAuth)
         ));
 
-        let cmd = parse_binary_command(&encode_command(42, &[]))
+        let cmd = parse_binary_command(&encode_command(43, &[]))
             .expect("parse")
             .expect("command");
         assert!(matches!(
@@ -1663,7 +1747,7 @@ mod tests {
         payload.extend_from_slice(key.as_bytes());
         payload.push(1);
 
-        let cmd = parse_binary_command(&encode_command(34, &payload))
+        let cmd = parse_binary_command(&encode_command(35, &payload))
             .expect("parse")
             .expect("command");
         match cmd {
@@ -1686,7 +1770,7 @@ mod tests {
         payload.extend_from_slice(&(query.len() as u16).to_le_bytes());
         payload.extend_from_slice(query.as_bytes());
 
-        let cmd = parse_binary_command(&encode_command(35, &payload))
+        let cmd = parse_binary_command(&encode_command(36, &payload))
             .expect("parse")
             .expect("command");
         match cmd {
@@ -1700,7 +1784,7 @@ mod tests {
 
     #[test]
     fn parse_binary_command_supports_all_library_track_commands() {
-        let cmd = parse_binary_command(&encode_command(36, &[]))
+        let cmd = parse_binary_command(&encode_command(37, &[]))
             .expect("parse")
             .expect("command");
         match cmd {
@@ -1708,7 +1792,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let cmd = parse_binary_command(&encode_command(37, &[]))
+        let cmd = parse_binary_command(&encode_command(38, &[]))
             .expect("parse")
             .expect("command");
         match cmd {
@@ -1926,7 +2010,7 @@ mod tests {
         let mut emit_state = AnalysisEmitState::default();
         let delta = compute_analysis_delta(&snapshot, &mut emit_state);
         assert!(delta.waveform_changed);
-        assert!(!delta.spectrogram_rows_u8.is_empty());
+        assert!(!delta.spectrogram_channels_u8.is_empty());
         let frame = encode_analysis_frame(&delta);
         assert!(!frame.is_empty());
         assert_eq!(frame[4], ANALYSIS_FRAME_MAGIC);
@@ -2015,7 +2099,7 @@ mod tests {
         assert_ne!(mask & SECTION_SETTINGS, 0);
         assert_eq!(mask & _SECTION_LIBRARY_TREE_RESERVED, 0);
 
-        assert!(ffi_send_binary(handle, &encode_command(33, &[])));
+        assert!(ffi_send_binary(handle, &encode_command(34, &[])));
         let stopped = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         assert!(stopped.is_some());
         unsafe { ferrous_ffi_bridge_destroy(handle) };

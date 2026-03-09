@@ -47,6 +47,7 @@ pub enum AnalysisCommand {
     },
     SetSampleRate(u32),
     SetFftSize(usize),
+    SetSpectrogramViewMode(SpectrogramViewMode),
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -56,14 +57,50 @@ pub enum AnalysisCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpectrogramViewMode {
+    #[default]
+    Downmix,
+    PerChannel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpectrogramChannelLabel {
+    #[default]
+    Mono,
+    FrontLeft,
+    FrontRight,
+    FrontCenter,
+    Lfe,
+    SideLeft,
+    SideRight,
+    RearLeft,
+    RearRight,
+    RearCenter,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisPcmChunk {
+    pub samples: Vec<f32>,
+    pub channel_labels: Vec<SpectrogramChannelLabel>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisSpectrogramChannel {
+    pub label: SpectrogramChannelLabel,
+    pub rows: Vec<Vec<f32>>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisSnapshot {
     pub waveform_peaks: Vec<f32>,
     pub waveform_coverage_seconds: f32,
     pub waveform_complete: bool,
-    pub spectrogram_rows: Vec<Vec<f32>>,
+    pub spectrogram_channels: Vec<AnalysisSpectrogramChannel>,
     pub spectrogram_seq: u64,
     pub sample_rate_hz: u32,
+    pub spectrogram_view_mode: SpectrogramViewMode,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +110,7 @@ pub enum AnalysisEvent {
 
 pub struct AnalysisEngine {
     tx: Sender<AnalysisCommand>,
-    pcm_tx: Sender<Vec<f32>>,
+    pcm_tx: Sender<AnalysisPcmChunk>,
 }
 
 const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
@@ -110,7 +147,7 @@ impl AnalysisEngine {
     pub fn new() -> (Self, Receiver<AnalysisEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<AnalysisCommand>();
         // Bounded PCM queue to prevent unbounded backlog under decode bursts.
-        let (pcm_tx, pcm_rx) = crossbeam_channel::bounded::<Vec<f32>>(12);
+        let (pcm_tx, pcm_rx) = crossbeam_channel::bounded::<AnalysisPcmChunk>(12);
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
 
         let waveform_tx = cmd_tx.clone();
@@ -155,14 +192,15 @@ impl AnalysisEngine {
             .spawn(move || {
             let mut snapshot = AnalysisSnapshot {
                 sample_rate_hz: 48_000,
+                spectrogram_view_mode: SpectrogramViewMode::Downmix,
                 ..AnalysisSnapshot::default()
             };
-            let mut pending_rows: Vec<Vec<f32>> = Vec::new();
+            let mut pending_channels: Vec<AnalysisSpectrogramChannel> = Vec::new();
             let mut waveform_dirty = false;
             let mut last_emit = std::time::Instant::now();
 
-            let mut stft = StftComputer::new(8192, 1024);
-            let mut decimator = SpectrogramDecimator::new(decimation_factor_for_hop(1024));
+            let mut spectrogram =
+                SpectrogramRuntime::new(8192, 1024, SpectrogramViewMode::Downmix, &[]);
             let mut active_track_token = 0u64;
             let mut active_track_path: Option<PathBuf> = None;
             let mut active_track_stamp: Option<WaveformSourceStamp> = None;
@@ -172,6 +210,7 @@ impl AnalysisEngine {
             let mut waveform_db_writes_since_prune = 0usize;
             let ticker = tick(Duration::from_millis(16));
             let mut pcm_fifo: VecDeque<f32> = VecDeque::with_capacity(48_000);
+            let mut pcm_labels = vec![SpectrogramChannelLabel::Mono];
             let mut last_tick_time = std::time::Instant::now();
             let mut sample_credit = 0.0f64;
             let profile_enabled =
@@ -210,18 +249,18 @@ impl AnalysisEngine {
                                 waveform_dirty = true;
                                 if reset_spectrogram {
                                     snapshot.spectrogram_seq = 0;
-                                    pending_rows.clear();
-                                    stft.reset_full();
-                                    decimator.reset();
+                                    pending_channels.clear();
+                                    spectrogram.reset();
                                     drain_pcm_queue(&pcm_rx);
                                     pcm_fifo.clear();
+                                    pcm_labels = vec![SpectrogramChannelLabel::Mono];
                                     last_tick_time = std::time::Instant::now();
                                     sample_credit = 0.0;
                                 }
                                 emit_snapshot(
                                     &event_tx,
                                     &snapshot,
-                                    &mut pending_rows,
+                                    &mut pending_channels,
                                     &mut waveform_dirty,
                                     &mut last_emit,
                                     true,
@@ -263,7 +302,7 @@ impl AnalysisEngine {
                                     emit_snapshot(
                                         &event_tx,
                                         &snapshot,
-                                        &mut pending_rows,
+                                        &mut pending_channels,
                                         &mut waveform_dirty,
                                         &mut last_emit,
                                         true,
@@ -281,7 +320,7 @@ impl AnalysisEngine {
                                     emit_snapshot(
                                         &event_tx,
                                         &snapshot,
-                                        &mut pending_rows,
+                                        &mut pending_channels,
                                         &mut waveform_dirty,
                                         &mut last_emit,
                                         true,
@@ -291,9 +330,8 @@ impl AnalysisEngine {
                             AnalysisCommand::SetFftSize(size) => {
                                 let fft = size.clamp(512, 8192).next_power_of_two();
                                 let hop = (fft / 8).max(64);
-                                stft = StftComputer::new(fft, hop);
-                                decimator = SpectrogramDecimator::new(decimation_factor_for_hop(hop));
-                                pending_rows.clear();
+                                spectrogram.set_fft_size(fft, hop);
+                                pending_channels.clear();
                                 snapshot.spectrogram_seq = 0;
                                 drain_pcm_queue(&pcm_rx);
                                 pcm_fifo.clear();
@@ -302,7 +340,25 @@ impl AnalysisEngine {
                                 emit_snapshot(
                                     &event_tx,
                                     &snapshot,
-                                    &mut pending_rows,
+                                    &mut pending_channels,
+                                    &mut waveform_dirty,
+                                    &mut last_emit,
+                                    true,
+                                );
+                            }
+                            AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
+                                snapshot.spectrogram_view_mode = view_mode;
+                                spectrogram.set_view_mode(view_mode);
+                                pending_channels.clear();
+                                snapshot.spectrogram_seq = 0;
+                                drain_pcm_queue(&pcm_rx);
+                                pcm_fifo.clear();
+                                sample_credit = 0.0;
+                                last_tick_time = std::time::Instant::now();
+                                emit_snapshot(
+                                    &event_tx,
+                                    &snapshot,
+                                    &mut pending_channels,
                                     &mut waveform_dirty,
                                     &mut last_emit,
                                     true,
@@ -366,7 +422,7 @@ impl AnalysisEngine {
                                         emit_snapshot(
                                             &event_tx,
                                             &snapshot,
-                                            &mut pending_rows,
+                                            &mut pending_channels,
                                             &mut waveform_dirty,
                                             &mut last_emit,
                                             true,
@@ -381,18 +437,37 @@ impl AnalysisEngine {
 
                         // Pull available PCM chunks into a sample FIFO first.
                         for _ in 0..64 {
-                            let Ok(samples) = pcm_rx.try_recv() else {
+                            let Ok(chunk) = pcm_rx.try_recv() else {
                                 break;
                             };
+                            if chunk.samples.is_empty() {
+                                continue;
+                            }
                             prof_pcm += 1;
-                            prof_in_samples += samples.len();
-                            pcm_fifo.extend(samples);
+                            prof_in_samples += chunk.samples.len();
+                            let chunk_labels = if chunk.channel_labels.is_empty() {
+                                vec![SpectrogramChannelLabel::Mono]
+                            } else {
+                                chunk.channel_labels.clone()
+                            };
+                            if chunk_labels != pcm_labels {
+                                pcm_labels = chunk_labels.clone();
+                                pcm_fifo.clear();
+                                pending_channels.clear();
+                                spectrogram.update_channel_labels(&chunk_labels);
+                                spectrogram.reset();
+                                snapshot.spectrogram_seq = 0;
+                            }
+                            pcm_fifo.extend(chunk.samples);
                         }
 
                         // Keep FIFO bounded to roughly 0.5s to avoid visual lead/lag buildup.
-                        let fifo_max = (snapshot.sample_rate_hz as usize / 2).max(4096);
-                        while pcm_fifo.len() > fifo_max {
-                            let _ = pcm_fifo.pop_front();
+                        let channel_count = pcm_labels.len().max(1);
+                        let fifo_max_frames = (snapshot.sample_rate_hz as usize / 2).max(4096);
+                        while (pcm_fifo.len() / channel_count) > fifo_max_frames {
+                            for _ in 0..channel_count {
+                                let _ = pcm_fifo.pop_front();
+                            }
                         }
 
                         // Feed STFT at real-time cadence from elapsed clock time to minimize drift.
@@ -406,49 +481,58 @@ impl AnalysisEngine {
 
                         // Keep visuals slightly behind output to compensate sink/device buffering.
                         let visual_delay_ms = BASE_VISUAL_DELAY_MS as usize;
-                        let effective_delay_samples =
+                        let effective_delay_frames =
                             (snapshot.sample_rate_hz as usize) * visual_delay_ms / 1000;
                         // Enforce configured visual delay by consuming only from samples older
                         // than the delay horizon.
-                        let available = pcm_fifo.len().saturating_sub(effective_delay_samples);
+                        let available_frames =
+                            (pcm_fifo.len() / channel_count).saturating_sub(effective_delay_frames);
 
                         // Closed-loop backlog control: steer FIFO depth toward configured delay
                         // to limit drift when producer/consumer pacing differs.
                         let backlog_error =
-                            pcm_fifo.len() as isize - effective_delay_samples as isize;
+                            (pcm_fifo.len() / channel_count) as isize - effective_delay_frames as isize;
                         let correction = (backlog_error / 8).clamp(-512, 512);
                         let adjusted_target =
                             (target_samples as isize + correction).clamp(0, 4096) as usize;
 
-                        let to_feed = adjusted_target.min(available);
-                        if to_feed > 0 {
-                            let mut feed = Vec::with_capacity(to_feed);
-                            for _ in 0..to_feed {
+                        let to_feed_frames = adjusted_target.min(available_frames);
+                        if to_feed_frames > 0 {
+                            let mut feed =
+                                Vec::with_capacity(to_feed_frames.saturating_mul(channel_count));
+                            for _ in 0..to_feed_frames.saturating_mul(channel_count) {
                                 if let Some(v) = pcm_fifo.pop_front() {
                                     feed.push(v);
                                 }
                             }
                             prof_out_samples += feed.len();
-                            stft.enqueue_samples(&feed, snapshot.sample_rate_hz);
+                            spectrogram.feed_chunk(
+                                &AnalysisPcmChunk {
+                                    samples: feed,
+                                    channel_labels: pcm_labels.clone(),
+                                },
+                                snapshot.sample_rate_hz,
+                            );
                         }
 
-                        let rows = stft.take_rows(8);
-                        prof_rows += rows.len();
-                        if rows.is_empty() {
+                        let channels = spectrogram.take_channels(8);
+                        let row_count = channels.first().map_or(0, |channel| channel.rows.len());
+                        prof_rows += row_count;
+                        if row_count == 0 {
                             ticks_without_row = ticks_without_row.saturating_add(1);
                         } else {
                             ticks_without_row = 0;
                         }
-                        for row in rows {
-                            if let Some(slow_row) = decimator.push(row) {
-                                pending_rows.push(slow_row);
-                                snapshot.spectrogram_seq = snapshot.spectrogram_seq.wrapping_add(1);
-                            }
+                        if row_count > 0 {
+                            snapshot.spectrogram_seq = snapshot
+                                .spectrogram_seq
+                                .wrapping_add(row_count as u64);
+                            merge_pending_channels(&mut pending_channels, channels);
                         }
                         emit_snapshot(
                             &event_tx,
                             &snapshot,
-                            &mut pending_rows,
+                            &mut pending_channels,
                             &mut waveform_dirty,
                             &mut last_emit,
                             false,
@@ -456,16 +540,20 @@ impl AnalysisEngine {
 
                         if profile_enabled && prof_last.elapsed() >= Duration::from_secs(1) {
                             profile_eprintln!(
-                                "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_samples={} fft={} hop={}",
+                                "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_frames={} fft={} hop={} channels={}",
                                 prof_ticks,
                                 prof_pcm,
                                 prof_in_samples,
                                 prof_out_samples,
                                 prof_rows,
-                                stft.pending_len(),
-                                pcm_fifo.len(),
-                                stft.fft_size(),
-                                stft.hop_size()
+                                spectrogram
+                                    .pipelines
+                                    .first()
+                                    .map_or(0, |pipeline| pipeline.stft.pending_len()),
+                                pcm_fifo.len() / channel_count,
+                                spectrogram.fft_size,
+                                spectrogram.hop_size,
+                                spectrogram.labels.len()
                             );
                             prof_last = std::time::Instant::now();
                             prof_pcm = 0;
@@ -490,7 +578,7 @@ impl AnalysisEngine {
         self.tx.clone()
     }
 
-    pub fn pcm_sender(&self) -> Sender<Vec<f32>> {
+    pub fn pcm_sender(&self) -> Sender<AnalysisPcmChunk> {
         self.pcm_tx.clone()
     }
 }
@@ -502,7 +590,7 @@ fn decimation_factor_for_hop(hop: usize) -> usize {
     (REFERENCE_HOP / hop).max(1)
 }
 
-fn drain_pcm_queue(pcm_rx: &Receiver<Vec<f32>>) {
+fn drain_pcm_queue(pcm_rx: &Receiver<AnalysisPcmChunk>) {
     while pcm_rx.try_recv().is_ok() {}
 }
 
@@ -727,7 +815,7 @@ fn insert_waveform_cache_entry(
 fn emit_snapshot(
     event_tx: &Sender<AnalysisEvent>,
     snapshot: &AnalysisSnapshot,
-    pending_rows: &mut Vec<Vec<f32>>,
+    pending_channels: &mut Vec<AnalysisSpectrogramChannel>,
     waveform_dirty: &mut bool,
     last_emit: &mut std::time::Instant,
     force: bool,
@@ -735,7 +823,7 @@ fn emit_snapshot(
     if !force && last_emit.elapsed() < std::time::Duration::from_millis(16) {
         return;
     }
-    if !*waveform_dirty && pending_rows.is_empty() && !force {
+    if !*waveform_dirty && pending_channels.is_empty() && !force {
         return;
     }
 
@@ -747,13 +835,246 @@ fn emit_snapshot(
         },
         waveform_coverage_seconds: snapshot.waveform_coverage_seconds,
         waveform_complete: snapshot.waveform_complete,
-        spectrogram_rows: std::mem::take(pending_rows),
+        spectrogram_channels: std::mem::take(pending_channels),
         spectrogram_seq: snapshot.spectrogram_seq,
         sample_rate_hz: snapshot.sample_rate_hz,
+        spectrogram_view_mode: snapshot.spectrogram_view_mode,
     };
     let _ = event_tx.send(AnalysisEvent::Snapshot(out));
     *waveform_dirty = false;
     *last_emit = std::time::Instant::now();
+}
+
+struct SpectrogramPipeline {
+    stft: StftComputer,
+    decimator: SpectrogramDecimator,
+}
+
+impl SpectrogramPipeline {
+    fn new(fft_size: usize, hop_size: usize) -> Self {
+        Self {
+            stft: StftComputer::new(fft_size, hop_size),
+            decimator: SpectrogramDecimator::new(decimation_factor_for_hop(hop_size)),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.stft.reset_full();
+        self.decimator.reset();
+    }
+}
+
+struct SpectrogramRuntime {
+    view_mode: SpectrogramViewMode,
+    labels: Vec<SpectrogramChannelLabel>,
+    pipelines: Vec<SpectrogramPipeline>,
+    fft_size: usize,
+    hop_size: usize,
+}
+
+impl SpectrogramRuntime {
+    fn new(
+        fft_size: usize,
+        hop_size: usize,
+        view_mode: SpectrogramViewMode,
+        labels: &[SpectrogramChannelLabel],
+    ) -> Self {
+        let normalized = Self::normalize_labels(view_mode, labels);
+        let pipeline_count = Self::pipeline_count_for(view_mode, normalized.len());
+        let pipelines = (0..pipeline_count)
+            .map(|_| SpectrogramPipeline::new(fft_size, hop_size))
+            .collect();
+        Self {
+            view_mode,
+            labels: normalized,
+            pipelines,
+            fft_size,
+            hop_size,
+        }
+    }
+
+    fn set_fft_size(&mut self, fft_size: usize, hop_size: usize) {
+        self.fft_size = fft_size;
+        self.hop_size = hop_size;
+        self.rebuild_pipelines();
+    }
+
+    fn set_view_mode(&mut self, view_mode: SpectrogramViewMode) {
+        if self.view_mode == view_mode {
+            return;
+        }
+        self.view_mode = view_mode;
+        self.labels = Self::normalize_labels(view_mode, &self.labels);
+        self.rebuild_pipelines();
+    }
+
+    fn update_channel_labels(&mut self, labels: &[SpectrogramChannelLabel]) {
+        let normalized = Self::normalize_labels(self.view_mode, labels);
+        if normalized == self.labels {
+            return;
+        }
+        self.labels = normalized;
+        self.rebuild_pipelines();
+    }
+
+    fn reset(&mut self) {
+        for pipeline in &mut self.pipelines {
+            pipeline.reset();
+        }
+    }
+
+    fn feed_chunk(&mut self, chunk: &AnalysisPcmChunk, sample_rate_hz: u32) {
+        if chunk.samples.is_empty() {
+            return;
+        }
+        let labels = Self::normalize_labels(self.view_mode, &chunk.channel_labels);
+        if labels != self.labels {
+            self.labels = labels;
+            self.rebuild_pipelines();
+        }
+
+        match self.view_mode {
+            SpectrogramViewMode::Downmix => {
+                let downmixed =
+                    downmix_interleaved_samples(&chunk.samples, chunk.channel_labels.len());
+                if let Some(pipeline) = self.pipelines.first_mut() {
+                    pipeline.stft.enqueue_samples(&downmixed, sample_rate_hz);
+                }
+            }
+            SpectrogramViewMode::PerChannel => {
+                let channels = self.labels.len().max(1);
+                if channels <= 1 {
+                    if let Some(pipeline) = self.pipelines.first_mut() {
+                        pipeline
+                            .stft
+                            .enqueue_samples(&chunk.samples, sample_rate_hz);
+                    }
+                    return;
+                }
+                let mut separated =
+                    vec![Vec::with_capacity(chunk.samples.len() / channels); channels];
+                for frame in chunk.samples.chunks_exact(channels) {
+                    for (index, sample) in frame.iter().copied().enumerate() {
+                        separated[index].push(sample);
+                    }
+                }
+                for (pipeline, samples) in self.pipelines.iter_mut().zip(separated.into_iter()) {
+                    pipeline.stft.enqueue_samples(&samples, sample_rate_hz);
+                }
+            }
+        }
+    }
+
+    fn take_channels(&mut self, max_rows: usize) -> Vec<AnalysisSpectrogramChannel> {
+        if self.pipelines.is_empty() {
+            return Vec::new();
+        }
+
+        let raw_rows: Vec<Vec<Vec<f32>>> = self
+            .pipelines
+            .iter_mut()
+            .map(|pipeline| pipeline.stft.take_rows(max_rows))
+            .collect();
+        let aligned_frames = raw_rows.iter().map(std::vec::Vec::len).min().unwrap_or(0);
+        if aligned_frames == 0 {
+            return Vec::new();
+        }
+
+        let mut output = self
+            .labels
+            .iter()
+            .copied()
+            .map(|label| AnalysisSpectrogramChannel {
+                label,
+                rows: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let mut iterators = raw_rows
+            .into_iter()
+            .map(std::iter::IntoIterator::into_iter)
+            .collect::<Vec<_>>();
+
+        for _ in 0..aligned_frames {
+            for (channel_index, iter) in iterators.iter_mut().enumerate() {
+                let Some(row) = iter.next() else {
+                    continue;
+                };
+                if let Some(slow_row) = self.pipelines[channel_index].decimator.push(row) {
+                    output[channel_index].rows.push(slow_row);
+                }
+            }
+        }
+
+        output.retain(|channel| !channel.rows.is_empty());
+        output
+    }
+
+    fn pipeline_count_for(view_mode: SpectrogramViewMode, label_count: usize) -> usize {
+        match view_mode {
+            SpectrogramViewMode::Downmix => 1,
+            SpectrogramViewMode::PerChannel => label_count.max(1),
+        }
+    }
+
+    fn normalize_labels(
+        view_mode: SpectrogramViewMode,
+        labels: &[SpectrogramChannelLabel],
+    ) -> Vec<SpectrogramChannelLabel> {
+        match view_mode {
+            SpectrogramViewMode::Downmix => vec![SpectrogramChannelLabel::Mono],
+            SpectrogramViewMode::PerChannel => {
+                if labels.is_empty() {
+                    vec![SpectrogramChannelLabel::Mono]
+                } else {
+                    labels.to_vec()
+                }
+            }
+        }
+    }
+
+    fn rebuild_pipelines(&mut self) {
+        let pipeline_count = Self::pipeline_count_for(self.view_mode, self.labels.len());
+        self.pipelines = (0..pipeline_count)
+            .map(|_| SpectrogramPipeline::new(self.fft_size, self.hop_size))
+            .collect();
+    }
+}
+
+fn downmix_interleaved_samples(samples: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(samples.len() / channels.max(1));
+    for frame in samples.chunks_exact(channels) {
+        let mut sum = 0.0f32;
+        for sample in frame {
+            sum += *sample;
+        }
+        out.push(sum / channels as f32);
+    }
+    out
+}
+
+fn merge_pending_channels(
+    pending: &mut Vec<AnalysisSpectrogramChannel>,
+    incoming: Vec<AnalysisSpectrogramChannel>,
+) {
+    if incoming.is_empty() {
+        return;
+    }
+    if pending.len() != incoming.len()
+        || pending
+            .iter()
+            .zip(incoming.iter())
+            .any(|(left, right)| left.label != right.label)
+    {
+        *pending = incoming;
+        return;
+    }
+    for (pending_channel, incoming_channel) in pending.iter_mut().zip(incoming.into_iter()) {
+        pending_channel.rows.extend(incoming_channel.rows);
+    }
 }
 
 struct StftComputer {
@@ -1513,18 +1834,19 @@ mod tests {
             waveform_peaks: vec![0.1, 0.2],
             waveform_coverage_seconds: 0.0,
             waveform_complete: true,
-            spectrogram_rows: Vec::new(),
+            spectrogram_channels: Vec::new(),
             spectrogram_seq: 0,
             sample_rate_hz: 48_000,
+            spectrogram_view_mode: SpectrogramViewMode::Downmix,
         };
-        let mut pending_rows = Vec::<Vec<f32>>::new();
+        let mut pending_channels = Vec::<AnalysisSpectrogramChannel>::new();
         let mut waveform_dirty = true;
         let mut last_emit = std::time::Instant::now() - Duration::from_secs(1);
 
         emit_snapshot(
             &tx,
             &snapshot,
-            &mut pending_rows,
+            &mut pending_channels,
             &mut waveform_dirty,
             &mut last_emit,
             true,

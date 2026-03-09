@@ -55,17 +55,18 @@ enum CommandId : quint16 {
     CmdSetShowFps = 29,
     CmdSetLibrarySortMode = 30,
     CmdSetFftSize = 31,
-    CmdRequestSnapshot = 32,
-    CmdShutdown = 33,
-    CmdSetNodeExpanded = 34,
-    CmdSetSearchQuery = 35,
-    CmdReplaceAllTracks = 36,
-    CmdAppendAllTracks = 37,
-    CmdSetSystemMediaControls = 38,
-    CmdSetLastFmScrobblingEnabled = 39,
-    CmdBeginLastFmAuth = 40,
-    CmdCompleteLastFmAuth = 41,
-    CmdDisconnectLastFm = 42,
+    CmdSetSpectrogramViewMode = 32,
+    CmdRequestSnapshot = 33,
+    CmdShutdown = 34,
+    CmdSetNodeExpanded = 35,
+    CmdSetSearchQuery = 36,
+    CmdReplaceAllTracks = 37,
+    CmdAppendAllTracks = 38,
+    CmdSetSystemMediaControls = 39,
+    CmdSetLastFmScrobblingEnabled = 40,
+    CmdBeginLastFmAuth = 41,
+    CmdCompleteLastFmAuth = 42,
+    CmdDisconnectLastFm = 43,
 };
 
 struct DecodedPlayback {
@@ -140,6 +141,7 @@ struct DecodedSettings {
     bool present{false};
     float volume{1.0f};
     int fftSize{8192};
+    int spectrogramViewMode{0};
     float dbRange{90.0f};
     bool logScale{false};
     bool showFps{false};

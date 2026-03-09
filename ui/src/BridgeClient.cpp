@@ -240,6 +240,33 @@ QString channelLayoutIconKey(int channels) {
     }
 }
 
+QString spectrogramChannelLabelText(quint8 code, int fallbackIndex) {
+    switch (code) {
+    case 0:
+        return QStringLiteral("M");
+    case 1:
+        return QStringLiteral("L");
+    case 2:
+        return QStringLiteral("R");
+    case 3:
+        return QStringLiteral("C");
+    case 4:
+        return QStringLiteral("LFE");
+    case 5:
+        return QStringLiteral("SL");
+    case 6:
+        return QStringLiteral("SR");
+    case 7:
+        return QStringLiteral("RL");
+    case 8:
+        return QStringLiteral("RR");
+    case 9:
+        return QStringLiteral("RC");
+    default:
+        return QStringLiteral("Ch%1").arg(std::max(1, fallbackIndex + 1));
+    }
+}
+
 QString formatLabelFromPath(const QString &path) {
     const QString ext = QFileInfo(path).suffix().trimmed().toLower();
     if (ext == QStringLiteral("m4a")
@@ -1073,6 +1100,14 @@ int BridgeClient::sampleRateHz() const {
     return m_sampleRateHz;
 }
 
+int BridgeClient::fftSize() const {
+    return m_fftSize;
+}
+
+int BridgeClient::spectrogramViewMode() const {
+    return m_spectrogramViewMode;
+}
+
 double BridgeClient::dbRange() const {
     return m_dbRange;
 }
@@ -1278,6 +1313,28 @@ void BridgeClient::setVolume(double value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(
         BinaryBridgeCodec::CmdSetVolume,
         std::clamp(value, 0.0, 1.0)));
+}
+
+void BridgeClient::setFftSize(int value) {
+    const int clamped = std::clamp(value, 512, 8192);
+    if (m_fftSize != clamped) {
+        m_fftSize = clamped;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
+        BinaryBridgeCodec::CmdSetFftSize,
+        static_cast<quint32>(clamped)));
+}
+
+void BridgeClient::setSpectrogramViewMode(int value) {
+    const int clamped = std::clamp(value, 0, 1);
+    if (m_spectrogramViewMode != clamped) {
+        m_spectrogramViewMode = clamped;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramViewMode,
+        static_cast<quint8>(clamped)));
 }
 
 void BridgeClient::setDbRange(double value) {
@@ -1759,11 +1816,20 @@ void BridgeClient::scanDefaultMusicRoot() {
 
 QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
     QVariantMap out;
-    out.insert(QStringLiteral("rows"), m_spectrogramPackedRows);
-    out.insert(QStringLiteral("bins"), m_spectrogramPackedBins);
-    out.insert(QStringLiteral("data"), m_spectrogramRowsPacked);
-    m_spectrogramRowsPacked.clear();
-    m_spectrogramPackedRows = 0;
+    QVariantList channels;
+    channels.reserve(m_spectrogramChannels.size());
+    for (auto &channel : m_spectrogramChannels) {
+        QVariantMap channelMap;
+        channelMap.insert(QStringLiteral("label"), channel.label);
+        channelMap.insert(QStringLiteral("rows"), channel.packedRowsCount);
+        channelMap.insert(QStringLiteral("bins"), channel.packedBins);
+        channelMap.insert(QStringLiteral("data"), channel.packedRows);
+        channels.push_back(channelMap);
+        channel.packedRows.clear();
+        channel.packedRowsCount = 0;
+    }
+    out.insert(QStringLiteral("channels"), channels);
+    m_spectrogramChannels.clear();
     return out;
 }
 
@@ -2154,7 +2220,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const auto *data = base + readOffset + sizeof(quint32);
         readOffset += totalBytes;
 
-        if (frameBytes < 20) {
+        if (frameBytes < 21) {
             continue;
         }
         if (data[0] != kAnalysisFrameMagic) {
@@ -2167,8 +2233,14 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const quint16 rowCount = qFromLittleEndian<quint16>(data + 12);
         const quint16 binCount = qFromLittleEndian<quint16>(data + 14);
         const quint32 frameSeq = qFromLittleEndian<quint32>(data + 16);
-        const qsizetype expected = 20 + static_cast<qsizetype>(waveformLen)
-            + static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
+        const quint8 channelCount = data[20];
+        const qsizetype labelBytes =
+            (((flags & kAnalysisFlagSpectrogram) != 0 || (flags & kAnalysisFlagReset) != 0)
+                ? static_cast<qsizetype>(channelCount)
+                : 0);
+        const qsizetype expected = 21 + static_cast<qsizetype>(waveformLen) + labelBytes
+            + static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(channelCount)
+                * static_cast<qsizetype>(binCount);
         if (static_cast<qsizetype>(frameBytes) < expected) {
             continue;
         }
@@ -2179,7 +2251,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         m_hasAnalysisFrameSeq = true;
         m_lastAnalysisFrameSeq = frameSeq;
 
-        const uchar *cursor = data + 20;
+        const uchar *cursor = data + 21;
 
         if (sampleRate > 0 && m_sampleRateHz != static_cast<int>(sampleRate)) {
             m_sampleRateHz = static_cast<int>(sampleRate);
@@ -2203,12 +2275,10 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
             changed = true;
         }
         if (spectrogramReset) {
-            if (m_spectrogramPackedRows > 0 || !m_spectrogramRowsPacked.isEmpty()) {
-                m_spectrogramRowsPacked.clear();
-                m_spectrogramPackedRows = 0;
+            if (!m_spectrogramChannels.isEmpty()) {
+                m_spectrogramChannels.clear();
                 changed = true;
             }
-            m_spectrogramPackedBins = 0;
         }
 
         if ((flags & kAnalysisFlagWaveform) != 0) {
@@ -2222,23 +2292,67 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
             cursor += waveformLen;
         }
 
-        if ((flags & kAnalysisFlagSpectrogram) != 0 && rowCount > 0 && binCount > 0) {
-            if (m_spectrogramPackedRows == 0) {
-                m_spectrogramPackedBins = binCount;
-            }
-            if (m_spectrogramPackedBins == static_cast<int>(binCount)) {
-                const qsizetype bytes = static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binCount);
-                m_spectrogramRowsPacked.append(reinterpret_cast<const char *>(cursor), bytes);
-                m_spectrogramPackedRows += rowCount;
-                constexpr int kMaxPendingSpectrogramRows = 512;
-                if (m_spectrogramPackedRows > kMaxPendingSpectrogramRows && m_spectrogramPackedBins > 0) {
-                    const int dropRows = m_spectrogramPackedRows - kMaxPendingSpectrogramRows;
-                    const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
-                        * static_cast<qsizetype>(m_spectrogramPackedBins);
-                    m_spectrogramRowsPacked.remove(0, dropBytes);
-                    m_spectrogramPackedRows = kMaxPendingSpectrogramRows;
+        QVector<QString> channelLabels;
+        channelLabels.reserve(channelCount);
+        for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
+            channelLabels.push_back(
+                spectrogramChannelLabelText(cursor[channelIndex], channelIndex));
+        }
+        cursor += labelBytes;
+
+        if ((flags & kAnalysisFlagSpectrogram) != 0
+            && rowCount > 0
+            && binCount > 0
+            && channelCount > 0) {
+            bool rebuildChannels = m_spectrogramChannels.size() != channelCount;
+            if (!rebuildChannels) {
+                for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
+                    const auto &channel = m_spectrogramChannels[channelIndex];
+                    if (channel.label != channelLabels[channelIndex]
+                        || (channel.packedBins > 0
+                            && channel.packedBins != static_cast<int>(binCount))) {
+                        rebuildChannels = true;
+                        break;
+                    }
                 }
-                if (m_spectrogramPackedRows > 0) {
+            }
+            if (rebuildChannels) {
+                m_spectrogramChannels.clear();
+                m_spectrogramChannels.reserve(channelCount);
+                for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
+                    SpectrogramChannelDelta channel;
+                    channel.label = channelLabels[channelIndex];
+                    channel.packedBins = static_cast<int>(binCount);
+                    m_spectrogramChannels.push_back(channel);
+                }
+                changed = true;
+            }
+
+            constexpr int kMaxPendingSpectrogramRows = 512;
+            const qsizetype rowBytes = static_cast<qsizetype>(binCount);
+            for (int rowIndex = 0; rowIndex < rowCount; ++rowIndex) {
+                for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
+                    auto &channel = m_spectrogramChannels[channelIndex];
+                    channel.packedRows.append(reinterpret_cast<const char *>(cursor), rowBytes);
+                    channel.packedRowsCount += 1;
+                    if (channel.packedRowsCount > kMaxPendingSpectrogramRows && channel.packedBins > 0) {
+                        const int dropRows = channel.packedRowsCount - kMaxPendingSpectrogramRows;
+                        const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
+                            * static_cast<qsizetype>(channel.packedBins);
+                        channel.packedRows.remove(0, dropBytes);
+                        channel.packedRowsCount = kMaxPendingSpectrogramRows;
+                    }
+                    cursor += rowBytes;
+                }
+            }
+            if (!m_spectrogramChannels.isEmpty()) {
+                const bool hasPendingRows = std::any_of(
+                    m_spectrogramChannels.cbegin(),
+                    m_spectrogramChannels.cend(),
+                    [](const SpectrogramChannelDelta &channel) {
+                        return channel.packedRowsCount > 0;
+                    });
+                if (hasPendingRows) {
                     changed = true;
                 }
             }
@@ -2820,6 +2934,21 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const double dbRange = snapshot.settings.present
         ? static_cast<double>(snapshot.settings.dbRange)
         : m_dbRange;
+    const int fftSize = snapshot.settings.present ? snapshot.settings.fftSize : m_fftSize;
+    if (m_fftSize != fftSize) {
+        m_fftSize = fftSize;
+        changed = true;
+    }
+
+    const int spectrogramViewMode = std::clamp(
+        snapshot.settings.present ? snapshot.settings.spectrogramViewMode : m_spectrogramViewMode,
+        0,
+        1);
+    if (m_spectrogramViewMode != spectrogramViewMode) {
+        m_spectrogramViewMode = spectrogramViewMode;
+        changed = true;
+    }
+
     if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
         m_dbRange = dbRange;
         changed = true;

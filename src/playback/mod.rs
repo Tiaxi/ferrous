@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::analysis::AnalysisCommand;
+use crate::analysis::{AnalysisCommand, AnalysisPcmChunk};
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -89,7 +89,7 @@ pub struct PlaybackEngine {
 impl PlaybackEngine {
     pub fn new(
         analysis_tx: Sender<AnalysisCommand>,
-        pcm_tx: Sender<Vec<f32>>,
+        pcm_tx: Sender<AnalysisPcmChunk>,
     ) -> (Self, Receiver<PlaybackEvent>) {
         let (tx, rx) = backend::spawn_engine(analysis_tx, pcm_tx);
         (Self { tx }, rx)
@@ -414,13 +414,13 @@ mod backend {
 
     use crossbeam_channel::{unbounded, Receiver, Sender};
 
-    use crate::analysis::AnalysisCommand;
+    use crate::analysis::{AnalysisCommand, AnalysisPcmChunk, SpectrogramChannelLabel};
 
     use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
 
     pub fn spawn_engine(
         analysis_tx: Sender<AnalysisCommand>,
-        pcm_tx: Sender<Vec<f32>>,
+        pcm_tx: Sender<AnalysisPcmChunk>,
     ) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
         let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
@@ -618,7 +618,10 @@ mod backend {
                                         phase -= 2.0 * PI;
                                     }
                                 }
-                                let _ = pcm_tx.try_send(chunk);
+                                let _ = pcm_tx.try_send(AnalysisPcmChunk {
+                                    samples: chunk,
+                                    channel_labels: vec![SpectrogramChannelLabel::Mono],
+                                });
                             }
 
                             if snapshot.state == PlaybackState::Playing
@@ -663,8 +666,9 @@ mod backend {
     use gst::prelude::*;
     use gstreamer as gst;
     use gstreamer_app as gst_app;
+    use gstreamer_audio as gst_audio;
 
-    use crate::analysis::AnalysisCommand;
+    use crate::analysis::{AnalysisCommand, AnalysisPcmChunk, SpectrogramChannelLabel};
     use crate::raw_audio::is_dts_file;
 
     use super::{
@@ -950,7 +954,7 @@ mod backend {
 
     pub fn spawn_engine(
         analysis_tx: Sender<AnalysisCommand>,
-        pcm_tx: Sender<Vec<f32>>,
+        pcm_tx: Sender<AnalysisPcmChunk>,
     ) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
         let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
@@ -970,7 +974,7 @@ mod backend {
         cmd_rx: Receiver<PlaybackCommand>,
         event_tx: Sender<PlaybackEvent>,
         analysis_tx: Sender<AnalysisCommand>,
-        pcm_tx: Sender<Vec<f32>>,
+        pcm_tx: Sender<AnalysisPcmChunk>,
     ) -> anyhow::Result<()> {
         gst::init().context("gst::init failed")?;
 
@@ -1489,28 +1493,110 @@ mod backend {
         }
     }
 
-    fn downmix_interleaved_f32_to_mono(bytes: &[u8], channels: usize) -> Vec<f32> {
-        if channels <= 1 {
-            let mut pcm = Vec::with_capacity(bytes.len() / 4);
-            for chunk in bytes.chunks_exact(4) {
-                pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-            }
-            return pcm;
-        }
-
-        let mut pcm = Vec::with_capacity(bytes.len() / (4 * channels.max(1)));
-        for frame in bytes.chunks_exact(4 * channels) {
-            let mut sum = 0.0f32;
-            let mut count = 0usize;
-            for sample in frame.chunks_exact(4) {
-                sum += f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
-                count += 1;
-            }
-            if count > 0 {
-                pcm.push(sum / count as f32);
-            }
+    fn decode_interleaved_f32(bytes: &[u8]) -> Vec<f32> {
+        let mut pcm = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         pcm
+    }
+
+    fn fallback_channel_labels(channels: usize) -> Vec<SpectrogramChannelLabel> {
+        match channels {
+            0 | 1 => vec![SpectrogramChannelLabel::Mono],
+            2 => vec![
+                SpectrogramChannelLabel::FrontLeft,
+                SpectrogramChannelLabel::FrontRight,
+            ],
+            3 => vec![
+                SpectrogramChannelLabel::FrontLeft,
+                SpectrogramChannelLabel::FrontRight,
+                SpectrogramChannelLabel::FrontCenter,
+            ],
+            4 => vec![
+                SpectrogramChannelLabel::FrontLeft,
+                SpectrogramChannelLabel::FrontRight,
+                SpectrogramChannelLabel::RearLeft,
+                SpectrogramChannelLabel::RearRight,
+            ],
+            5 => vec![
+                SpectrogramChannelLabel::FrontLeft,
+                SpectrogramChannelLabel::FrontRight,
+                SpectrogramChannelLabel::FrontCenter,
+                SpectrogramChannelLabel::SideLeft,
+                SpectrogramChannelLabel::SideRight,
+            ],
+            6 => vec![
+                SpectrogramChannelLabel::FrontLeft,
+                SpectrogramChannelLabel::FrontRight,
+                SpectrogramChannelLabel::FrontCenter,
+                SpectrogramChannelLabel::Lfe,
+                SpectrogramChannelLabel::SideLeft,
+                SpectrogramChannelLabel::SideRight,
+            ],
+            7 => vec![
+                SpectrogramChannelLabel::FrontLeft,
+                SpectrogramChannelLabel::FrontRight,
+                SpectrogramChannelLabel::FrontCenter,
+                SpectrogramChannelLabel::Lfe,
+                SpectrogramChannelLabel::RearCenter,
+                SpectrogramChannelLabel::SideLeft,
+                SpectrogramChannelLabel::SideRight,
+            ],
+            8 => vec![
+                SpectrogramChannelLabel::FrontLeft,
+                SpectrogramChannelLabel::FrontRight,
+                SpectrogramChannelLabel::FrontCenter,
+                SpectrogramChannelLabel::Lfe,
+                SpectrogramChannelLabel::RearLeft,
+                SpectrogramChannelLabel::RearRight,
+                SpectrogramChannelLabel::SideLeft,
+                SpectrogramChannelLabel::SideRight,
+            ],
+            count => vec![SpectrogramChannelLabel::Unknown; count],
+        }
+    }
+
+    fn map_channel_position(position: gst_audio::AudioChannelPosition) -> SpectrogramChannelLabel {
+        use gst_audio::AudioChannelPosition as Position;
+
+        match position {
+            Position::Mono => SpectrogramChannelLabel::Mono,
+            Position::FrontLeft => SpectrogramChannelLabel::FrontLeft,
+            Position::FrontRight => SpectrogramChannelLabel::FrontRight,
+            Position::FrontCenter => SpectrogramChannelLabel::FrontCenter,
+            Position::Lfe1 | Position::Lfe2 => SpectrogramChannelLabel::Lfe,
+            Position::SideLeft | Position::SurroundLeft => SpectrogramChannelLabel::SideLeft,
+            Position::SideRight | Position::SurroundRight => SpectrogramChannelLabel::SideRight,
+            Position::RearLeft => SpectrogramChannelLabel::RearLeft,
+            Position::RearRight => SpectrogramChannelLabel::RearRight,
+            Position::RearCenter => SpectrogramChannelLabel::RearCenter,
+            _ => SpectrogramChannelLabel::Unknown,
+        }
+    }
+
+    fn channel_labels_from_caps(caps: &gst::CapsRef) -> Vec<SpectrogramChannelLabel> {
+        if let Ok(info) = gst_audio::AudioInfo::from_caps(caps) {
+            if let Some(positions) = info.positions() {
+                let labels = positions
+                    .iter()
+                    .copied()
+                    .map(map_channel_position)
+                    .collect::<Vec<_>>();
+                if !labels.is_empty() {
+                    return labels;
+                }
+            }
+            return fallback_channel_labels(info.channels() as usize);
+        }
+        if let Some(structure) = caps.structure(0) {
+            if let Ok(channels) = structure.get::<i32>("channels") {
+                if channels > 0 {
+                    return fallback_channel_labels(channels as usize);
+                }
+            }
+        }
+        vec![SpectrogramChannelLabel::Mono]
     }
 
     #[cfg_attr(
@@ -1519,7 +1605,7 @@ mod backend {
     )]
     fn build_analysis_audio_sink(
         analysis_tx: Sender<AnalysisCommand>,
-        pcm_tx: Sender<Vec<f32>>,
+        pcm_tx: Sender<AnalysisPcmChunk>,
     ) -> anyhow::Result<gst::Bin> {
         let bin = gst::Bin::new();
 
@@ -1615,8 +1701,10 @@ mod backend {
                                 if let Ok(map) = buffer.map_readable() {
                                     let bytes = map.as_slice();
                                     if !bytes.is_empty() {
-                                        let mut channels = 1usize;
+                                        let mut channel_labels =
+                                            vec![SpectrogramChannelLabel::Mono];
                                         if let Some(caps) = sample.caps() {
+                                            channel_labels = channel_labels_from_caps(caps);
                                             if let Some(s) = caps.structure(0) {
                                                 if let Ok(rate) = s.get::<i32>("rate") {
                                                     if rate > 0 && last_rate_hz != rate as u32 {
@@ -1628,18 +1716,22 @@ mod backend {
                                                         );
                                                     }
                                                 }
-                                                if let Ok(value) = s.get::<i32>("channels") {
-                                                    if value > 0 {
-                                                        channels = value as usize;
-                                                    }
-                                                }
                                             }
                                         }
-                                        let pcm = downmix_interleaved_f32_to_mono(bytes, channels);
+                                        let pcm = decode_interleaved_f32(bytes);
                                         if !pcm.is_empty() {
                                             // Chunking balances analysis pacing against per-chunk allocation overhead.
-                                            for part in pcm.chunks(tap_chunk_samples) {
-                                                if pcm_tx.try_send(part.to_vec()).is_ok() {
+                                            let channels = channel_labels.len().max(1);
+                                            let chunk_width =
+                                                tap_chunk_samples.saturating_mul(channels);
+                                            for part in pcm.chunks(chunk_width.max(channels)) {
+                                                if pcm_tx
+                                                    .try_send(AnalysisPcmChunk {
+                                                        samples: part.to_vec(),
+                                                        channel_labels: channel_labels.clone(),
+                                                    })
+                                                    .is_ok()
+                                                {
                                                     prof_sent += 1;
                                                     prof_samples += part.len();
                                                 } else {
@@ -1818,7 +1910,7 @@ mod backend {
         }
 
         #[test]
-        fn analysis_downmix_averages_multichannel_frames() {
+        fn analysis_interleaved_pcm_decodes_f32_frames() {
             let bytes = [
                 1.0f32.to_le_bytes(),
                 0.0f32.to_le_bytes(),
@@ -1829,10 +1921,11 @@ mod backend {
             ]
             .concat();
 
-            let pcm = downmix_interleaved_f32_to_mono(&bytes, 3);
-            assert_eq!(pcm.len(), 2);
-            assert!((pcm[0] - 0.0).abs() < f32::EPSILON);
-            assert!((pcm[1] - 0.5).abs() < f32::EPSILON);
+            let pcm = decode_interleaved_f32(&bytes);
+            assert_eq!(pcm.len(), 6);
+            assert!((pcm[0] - 1.0).abs() < f32::EPSILON);
+            assert!((pcm[2] + 1.0).abs() < f32::EPSILON);
+            assert!((pcm[5] - 0.5).abs() < f32::EPSILON);
         }
 
         #[test]

@@ -99,6 +99,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool waveformComplete READ waveformComplete NOTIFY analysisChanged)
     Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY analysisChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
+    Q_PROPERTY(int fftSize READ fftSize NOTIFY snapshotChanged)
+    Q_PROPERTY(int spectrogramViewMode READ spectrogramViewMode NOTIFY snapshotChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
     Q_PROPERTY(int repeatMode READ repeatMode NOTIFY snapshotChanged)
@@ -174,6 +176,8 @@ public:
     bool waveformComplete() const;
     bool spectrogramReset() const;
     int sampleRateHz() const;
+    int fftSize() const;
+    int spectrogramViewMode() const;
     double dbRange() const;
     bool logScale() const;
     int repeatMode() const;
@@ -222,6 +226,8 @@ public:
     Q_INVOKABLE void previous();
     Q_INVOKABLE void seek(double seconds);
     Q_INVOKABLE void setVolume(double value);
+    Q_INVOKABLE void setFftSize(int value);
+    Q_INVOKABLE void setSpectrogramViewMode(int value);
     Q_INVOKABLE void setDbRange(double value);
     Q_INVOKABLE void setLogScale(bool value);
     Q_INVOKABLE void setRepeatMode(int mode);
@@ -285,6 +291,13 @@ private:
         QByteArray payload;
         qint64 ffiPoppedAtMs{0};
         qint64 ffiPopMs{0};
+    };
+
+    struct SpectrogramChannelDelta {
+        QString label;
+        QByteArray packedRows;
+        int packedRowsCount{0};
+        int packedBins{0};
     };
 
     struct SearchWorkerOutputFrame {
@@ -372,11 +385,11 @@ private:
     QByteArray m_waveformPeaksPacked;
     double m_waveformCoverageSeconds{0.0};
     bool m_waveformComplete{false};
-    QByteArray m_spectrogramRowsPacked;
-    int m_spectrogramPackedRows{0};
-    int m_spectrogramPackedBins{0};
+    QVector<SpectrogramChannelDelta> m_spectrogramChannels;
     bool m_spectrogramReset{false};
     int m_sampleRateHz{48000};
+    int m_fftSize{8192};
+    int m_spectrogramViewMode{0};
     double m_dbRange{90.0};
     bool m_logScale{false};
     int m_repeatMode{0};

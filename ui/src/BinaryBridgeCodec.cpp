@@ -349,6 +349,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
         return false;
     }
     Reader reader(payload);
+    quint8 spectrogramViewMode = 0;
     quint8 logScale = 0;
     quint8 showFps = 0;
     quint8 systemMediaControlsEnabled = 1;
@@ -356,6 +357,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     quint32 fftSize = 0;
     if (!reader.readF32(&out->volume)
         || !reader.readU32(&fftSize)
+        || !reader.readU8(&spectrogramViewMode)
         || !reader.readF32(&out->dbRange)
         || !reader.readU8(&logScale)
         || !reader.readU8(&showFps)
@@ -370,6 +372,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     }
     out->present = true;
     out->fftSize = static_cast<int>(fftSize);
+    out->spectrogramViewMode = static_cast<int>(spectrogramViewMode);
     out->logScale = logScale != 0;
     out->showFps = showFps != 0;
     out->librarySortMode = static_cast<int>(librarySortMode);
