@@ -86,9 +86,16 @@ pub struct LibraryScanProgress {
 pub struct LibrarySnapshot {
     pub roots: Vec<LibraryRoot>,
     pub tracks: Vec<LibraryTrack>,
+    pub search_revision: u64,
     pub scan_in_progress: bool,
     pub scan_progress: Option<LibraryScanProgress>,
     pub last_error: Option<String>,
+}
+
+impl LibrarySnapshot {
+    fn bump_search_revision(&mut self) {
+        self.search_revision = self.search_revision.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,10 +142,15 @@ impl LibraryService {
                             return;
                         }
                         load_snapshot(&conn, &mut snapshot);
+                        snapshot.bump_search_revision();
                         emit_snapshot(&event_tx, &snapshot);
 
                         while let Ok(cmd) = cmd_rx.recv() {
                             snapshot.last_error = None;
+                            let reload_search_data_on_success = matches!(
+                                &cmd,
+                                LibraryCommand::RenameRoot { .. } | LibraryCommand::RemoveRoot(_)
+                            );
                             let result = match cmd {
                                 LibraryCommand::ScanRoot(root) => {
                                     handle_add_root(&conn, &root, "", &mut snapshot, &event_tx)
@@ -160,11 +172,14 @@ impl LibraryService {
                                 }
                             };
 
-                            if let Err(err) = result {
-                                snapshot.last_error = Some(err);
+                            if let Err(err) = &result {
+                                snapshot.last_error = Some(err.clone());
                             }
 
                             load_snapshot(&conn, &mut snapshot);
+                            if result.is_ok() && reload_search_data_on_success {
+                                snapshot.bump_search_revision();
+                            }
                             snapshot.scan_in_progress = false;
                             snapshot.scan_progress = None;
                             emit_snapshot(&event_tx, &snapshot);
@@ -401,6 +416,7 @@ fn handle_add_root(
     insert_root(conn, &root, name)?;
     // Reflect the newly-added root in UI state immediately, before scan completion.
     snapshot.roots = load_roots(conn);
+    snapshot.bump_search_revision();
     run_scans(conn, &[root], snapshot, event_tx)
 }
 
@@ -518,6 +534,7 @@ fn run_scans(
             snapshot
                 .tracks
                 .retain(|track| !stale_set.contains(track.path.to_string_lossy().as_ref()));
+            snapshot.bump_search_revision();
         }
 
         snapshot.scan_in_progress = true;
@@ -546,6 +563,7 @@ fn apply_pending_upserts_for_root(
     if updates.is_empty() {
         return;
     }
+    snapshot.bump_search_revision();
     for (task, indexed) in updates.drain(..) {
         let as_snapshot_track = LibraryTrack {
             path: task.path.clone(),
