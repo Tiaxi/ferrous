@@ -136,6 +136,10 @@ fn load_metadata_for_path(path: &Path) -> TrackMetadata {
     };
     apply_lofty_metadata(path, &mut metadata);
     apply_raw_surround_tags(path, &mut metadata);
+    if metadata.cover_art_path.is_none() {
+        metadata.cover_art_path =
+            find_folder_cover_path(path).map(|cover_path| cover_path.to_string_lossy().to_string());
+    }
     if metadata.format_label.is_empty() {
         metadata.format_label =
             format_label_from_extension(path.extension().and_then(|value| value.to_str()));
@@ -179,12 +183,10 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
     metadata.year = tag.date().map(|value| i32::from(value.year));
 
     if let Some(pic) = tag.pictures().first() {
-        if let Ok(img) = image::load_from_memory(pic.data()) {
-            let rgba = img.to_rgba8();
-            let width = u32_to_usize(rgba.width());
-            let height = u32_to_usize(rgba.height());
-            let raw = rgba.into_raw();
-            metadata.cover_art_path = cache_embedded_cover_png(path, width, height, &raw);
+        if let Some((cover_path, width, height, raw)) =
+            cached_embedded_cover_details(path, pic.data())
+        {
+            metadata.cover_art_path = Some(cover_path);
             metadata.cover_art_rgba = Some((width, height, raw));
         }
     }
@@ -637,8 +639,10 @@ mod tests {
     }
 }
 
-fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
-    let dir = track_path.parent()?;
+fn folder_cover_candidates(track_path: &Path) -> Vec<PathBuf> {
+    let Some(dir) = track_path.parent() else {
+        return Vec::new();
+    };
     let mut candidates = vec![
         "cover.jpg",
         "cover.jpeg",
@@ -671,6 +675,18 @@ fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
         }
     }
 
+    candidates
+}
+
+fn find_folder_cover_path(track_path: &Path) -> Option<PathBuf> {
+    folder_cover_candidates(track_path)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
+    let candidates = folder_cover_candidates(track_path);
+
     for p in candidates {
         if !p.is_file() {
             continue;
@@ -696,6 +712,27 @@ fn cover_cache_dir() -> Option<PathBuf> {
     Some(cache_base.join("ferrous").join("embedded_covers"))
 }
 
+pub(crate) fn cached_embedded_cover_path(track_path: &Path) -> Option<String> {
+    let tagged = lofty::read_from_path(track_path).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let picture = tag.pictures().first()?;
+    let (cover_path, _, _, _) = cached_embedded_cover_details(track_path, picture.data())?;
+    Some(cover_path)
+}
+
+fn cached_embedded_cover_details(
+    track_path: &Path,
+    encoded_bytes: &[u8],
+) -> Option<(String, usize, usize, Vec<u8>)> {
+    let img = image::load_from_memory(encoded_bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let width = u32_to_usize(rgba.width());
+    let height = u32_to_usize(rgba.height());
+    let raw = rgba.into_raw();
+    let cover_path = cache_embedded_cover_png(track_path, width, height, &raw)?;
+    Some((cover_path, width, height, raw))
+}
+
 fn cache_embedded_cover_png(
     track_path: &Path,
     width: usize,
@@ -712,16 +749,14 @@ fn cache_embedded_cover_png(
     let key = hasher.finish();
     let out_path = cache_dir.join(format!("{key:016x}.png"));
 
-    if !out_path.is_file() {
-        let width = u32::try_from(width).ok()?;
-        let height = u32::try_from(height).ok()?;
-        let dims_match = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
-        if dims_match
-            .save_with_format(&out_path, image::ImageFormat::Png)
-            .is_err()
-        {
-            return None;
-        }
+    let width = u32::try_from(width).ok()?;
+    let height = u32::try_from(height).ok()?;
+    let dims_match = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    if dims_match
+        .save_with_format(&out_path, image::ImageFormat::Png)
+        .is_err()
+    {
+        return None;
     }
 
     Some(out_path.to_string_lossy().to_string())

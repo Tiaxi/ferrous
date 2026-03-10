@@ -160,11 +160,11 @@ void WaveformItem::paint(QPainter *painter) {
         if (elapsed >= 1.0) {
             std::fprintf(
                 stderr,
-                "[ui-waveform] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f peaks=%d\n",
+                "[ui-waveform] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f peaks=%lld\n",
                 static_cast<unsigned long long>(m_profilePaints),
                 m_profilePaintMs,
                 m_profilePaints > 0 ? (m_profilePaintMs / static_cast<double>(m_profilePaints)) : 0.0,
-                peaksDataLocal.size());
+                static_cast<long long>(peaksDataLocal.size()));
             m_profileLast = paint_end;
             m_profilePaints = 0;
             m_profilePaintMs = 0.0;

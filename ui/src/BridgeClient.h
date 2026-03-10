@@ -4,9 +4,11 @@
 #include <QObject>
 #include <QByteArray>
 #include <QHash>
+#include <QNetworkAccessManager>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QSet>
 #include <QVariant>
 #include <QVariantMap>
 #include <QVariantList>
@@ -14,6 +16,7 @@
 
 #include <condition_variable>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -22,6 +25,8 @@
 #include "GlobalSearchResultsModel.h"
 
 struct FerrousFfiBridge;
+class QNetworkReply;
+class QTemporaryDir;
 
 struct QueueRowData {
     QString title;
@@ -140,6 +145,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int globalSearchTrackCount READ globalSearchTrackCount NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(quint32 globalSearchSeq READ globalSearchSeq NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QObject* globalSearchModel READ globalSearchModel CONSTANT)
+    Q_PROPERTY(QVariantList itunesArtworkResults READ itunesArtworkResults NOTIFY itunesArtworkChanged)
+    Q_PROPERTY(bool itunesArtworkLoading READ itunesArtworkLoading NOTIFY itunesArtworkChanged)
+    Q_PROPERTY(QString itunesArtworkStatusText READ itunesArtworkStatusText NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
@@ -219,6 +227,9 @@ public:
     int globalSearchTrackCount() const;
     quint32 globalSearchSeq() const;
     QObject *globalSearchModel() const;
+    QVariantList itunesArtworkResults() const;
+    bool itunesArtworkLoading() const;
+    QString itunesArtworkStatusText() const;
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
     bool connected() const;
@@ -272,6 +283,11 @@ public:
     Q_INVOKABLE void setLibraryNodeExpanded(const QString &key, bool expanded);
     Q_INVOKABLE void setLibrarySortMode(int mode);
     Q_INVOKABLE void setGlobalSearchQuery(const QString &query);
+    Q_INVOKABLE void searchCurrentTrackArtworkSuggestions();
+    Q_INVOKABLE void clearItunesArtworkSuggestions();
+    Q_INVOKABLE QVariantMap itunesArtworkResultAt(int index) const;
+    Q_INVOKABLE void prepareItunesArtworkSuggestion(int index);
+    Q_INVOKABLE void applyItunesArtworkSuggestion(int index);
     Q_INVOKABLE void openInFileBrowser(const QString &path);
     Q_INVOKABLE void openContainingFolder(const QString &path);
     Q_INVOKABLE QVariantMap imageFileDetails(const QString &path) const;
@@ -288,6 +304,7 @@ signals:
     void analysisChanged();
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
+    void itunesArtworkChanged();
     void diagnosticsChanged();
     void connectedChanged();
     void bridgeError(const QString &message);
@@ -326,6 +343,16 @@ private:
         quint64 coalescedOutputDrops{0};
     };
 
+    struct ItunesArtworkCandidate {
+        QString albumTitle;
+        QString artistName;
+        QString collectionUrl;
+        QString previewUrl;
+        QStringList assetUrls;
+        int rankGroup{0};
+        int apiOrder{0};
+    };
+
     bool startInProcessBridge();
     void startSearchApplyWorker();
     void stopSearchApplyWorker();
@@ -342,6 +369,15 @@ private:
     void coverLookupWorkerLoop();
     void applyTrackCoverLookupResult(const QString &trackPath, const QString &coverUrl);
     void cacheTrackCoverForPath(const QString &trackPath, const QString &coverUrl);
+    QString coverUrlForPath(const QString &path) const;
+    void bumpCoverRefreshNonce(const QString &path);
+    void cancelItunesArtworkRequests();
+    void startItunesArtworkAssetDownload(
+        int candidateIndex,
+        int assetUrlIndex = 0);
+    void resetItunesArtworkTempDir();
+    bool ensureItunesArtworkTempDir();
+    void updateItunesArtworkResult(int index, const QVariantMap &row);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
@@ -449,12 +485,22 @@ private:
     quint32 m_nextGlobalSearchSeq{1};
     quint32 m_latestGlobalSearchSeqSent{0};
     QHash<quint32, qint64> m_globalSearchSentAtMs;
+    QHash<QString, quint64> m_coverRefreshNonceByPath;
+    quint64 m_nextCoverRefreshNonce{1};
     int m_globalSearchDebounceMs{90};
     int m_globalSearchShortDebounceMs{160};
     int m_globalSearchShortDebounceChars{1};
     bool m_publishLegacySearchLists{false};
     QString m_pendingGlobalSearchQuery;
     QString m_lastGlobalSearchQuerySent;
+    QVector<ItunesArtworkCandidate> m_itunesArtworkCandidates;
+    QVariantList m_itunesArtworkResults;
+    bool m_itunesArtworkLoading{false};
+    QString m_itunesArtworkStatusText;
+    quint64 m_itunesArtworkGeneration{0};
+    QNetworkAccessManager m_itunesArtworkNetwork;
+    QSet<QNetworkReply *> m_itunesArtworkReplies;
+    std::unique_ptr<QTemporaryDir> m_itunesArtworkTempDir;
     QString m_diagnosticsText;
     QString m_diagnosticsLogPath;
     QStringList m_diagnosticsLines;
@@ -491,6 +537,7 @@ private:
     bool m_coverLookupStop{false};
     std::optional<QString> m_coverLookupPendingPath;
     QString m_coverLookupInFlightPath;
+    QString m_pendingAppliedArtworkTrackPath;
     quint64 m_searchFramesReceived{0};
     quint64 m_searchFramesApplied{0};
     quint64 m_searchFramesDroppedStale{0};

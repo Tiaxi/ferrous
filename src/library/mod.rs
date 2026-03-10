@@ -10,6 +10,7 @@ use lofty::prelude::Accessor;
 use rusqlite::{params, Connection};
 use walkdir::WalkDir;
 
+use crate::metadata::cached_embedded_cover_path;
 use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, read_appended_apev2_text_metadata,
 };
@@ -1489,6 +1490,9 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
     }
 
     out.cover_path = find_cover_path_for_track(path);
+    if out.cover_path.is_empty() {
+        out.cover_path = cached_embedded_cover_path(path).unwrap_or_default();
+    }
     out
 }
 
@@ -1547,6 +1551,47 @@ fn unix_ts_i64() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64_to_i64(duration.as_secs()))
         .unwrap_or(0)
+}
+
+pub(crate) fn refresh_cover_paths_for_tracks(paths: &[PathBuf]) -> Result<(), String> {
+    let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
+    init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+    let now = unix_ts_i64();
+
+    for path in paths {
+        let indexed = read_track_info(path);
+        conn.execute(
+            r"
+            UPDATE tracks
+            SET cover_path = ?2,
+                cover_checked = 1,
+                indexed_at = ?3
+            WHERE path = ?1
+            ",
+            params![
+                path.to_string_lossy().to_string(),
+                indexed.cover_path.as_str(),
+                now,
+            ],
+        )
+        .map_err(|e| format!("failed to refresh track cover path: {e}"))?;
+
+        let exists_in_external = conn
+            .query_row(
+                "SELECT 1 FROM external_tracks WHERE path = ?1 LIMIT 1",
+                params![path.to_string_lossy().to_string()],
+                |_row| Ok(()),
+            )
+            .is_ok();
+        if exists_in_external {
+            let Some(fingerprint) = track_file_fingerprint(path) else {
+                continue;
+            };
+            store_external_track_cache_in_conn(&conn, path, fingerprint, &indexed)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

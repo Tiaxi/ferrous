@@ -19,6 +19,7 @@ NUKE_DB=0
 NUKE_SESSION=0
 NUKE_THUMBNAILS=0
 ENABLE_COREDUMP=0
+ENABLE_PROFILE_LOGS=0
 APP_ARGS=()
 
 reset_stale_cmake_cache() {
@@ -110,6 +111,7 @@ Options:
   --no-configure    Skip cmake configure step
   --no-build        Skip cmake build step
   --no-run          Only configure/build; do not launch UI
+  --profile-logs    Build with FERROUS_ENABLE_PROFILE_LOGS=ON and export FERROUS_PROFILE_UI=1 on launch
   --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
   --nuke-session    Delete saved playlist/session (${XDG_CONFIG_HOME:-\$HOME/.config}/ferrous/session.json)
   --nuke-thumbnails Delete Ferrous library thumbnail cache (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
@@ -137,6 +139,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-run)
             DO_RUN=0
+            ;;
+        --profile-logs)
+            ENABLE_PROFILE_LOGS=1
             ;;
         --nuke-db)
             NUKE_DB=1
@@ -189,7 +194,16 @@ fi
 
 if [[ ${DO_CONFIGURE} -eq 1 ]]; then
     reset_stale_cmake_cache
-    cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+    CMAKE_ARGS=(
+        -S "${UI_DIR}"
+        -B "${BUILD_DIR}"
+        -G "${GENERATOR}"
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+    )
+    if [[ ${ENABLE_PROFILE_LOGS} -eq 1 ]]; then
+        CMAKE_ARGS+=(-DFERROUS_ENABLE_PROFILE_LOGS=ON)
+    fi
+    cmake "${CMAKE_ARGS[@]}"
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then
@@ -197,6 +211,10 @@ if [[ ${DO_BUILD} -eq 1 ]]; then
 fi
 
 if [[ ${DO_RUN} -eq 1 ]]; then
+    if [[ ${ENABLE_PROFILE_LOGS} -eq 1 ]]; then
+        export FERROUS_PROFILE_UI="${FERROUS_PROFILE_UI:-1}"
+        echo "UI profiling logs enabled (FERROUS_PROFILE_UI=${FERROUS_PROFILE_UI})."
+    fi
     if [[ ${ENABLE_COREDUMP} -eq 1 ]]; then
         ulimit -c unlimited || true
         echo "Core dumps enabled (ulimit -c unlimited)."

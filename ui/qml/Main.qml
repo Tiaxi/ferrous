@@ -60,8 +60,16 @@ Kirigami.ApplicationWindow {
     property bool albumArtInitialViewPending: false
     property bool albumArtViewerOpen: false
     property bool albumArtInfoVisible: false
-    property var albumArtFileInfo: ({})
-    property string albumArtInfoSource: ""
+    property var albumArtViewerFileInfo: ({})
+    property string albumArtViewerInfoSource: ""
+    property string albumArtViewerSource: ""
+    property bool albumArtViewerShowsCurrentTrack: true
+    readonly property int albumArtViewerDecodeWidth: Math.max(
+        1024,
+        Math.ceil(Math.max(root.width, albumArtFullscreenWindow.width, albumArtViewer.width)))
+    readonly property int albumArtViewerDecodeHeight: Math.max(
+        1024,
+        Math.ceil(Math.max(root.height, albumArtFullscreenWindow.height, albumArtViewer.height)))
     property bool spectrogramViewerOpen: false
     property string pendingFolderDialogContext: ""
     property string pendingFileDialogContext: ""
@@ -307,6 +315,9 @@ Kirigami.ApplicationWindow {
         property int globalSearchTrackCount: 0
         property int globalSearchSeq: 0
         property var globalSearchModel: null
+        property var itunesArtworkResults: []
+        property bool itunesArtworkLoading: false
+        property string itunesArtworkStatusText: ""
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property bool connected: false
@@ -314,6 +325,7 @@ Kirigami.ApplicationWindow {
         signal analysisChanged()
         signal libraryTreeFrameReceived(int version, var treeBytes)
         signal globalSearchResultsChanged()
+        signal itunesArtworkChanged()
         signal diagnosticsChanged()
         signal bridgeError(string message)
         function play() {}
@@ -364,6 +376,11 @@ Kirigami.ApplicationWindow {
         function setLibraryNodeExpanded(key, expanded) {}
         function setLibrarySortMode(mode) {}
         function setGlobalSearchQuery(query) {}
+        function searchCurrentTrackArtworkSuggestions() {}
+        function clearItunesArtworkSuggestions() {}
+        function itunesArtworkResultAt(index) { return ({}) }
+        function prepareItunesArtworkSuggestion(index) {}
+        function applyItunesArtworkSuggestion(index) {}
         function openInFileBrowser(path) {}
         function openContainingFolder(path) {}
         function imageFileDetails(path) { return ({}) }
@@ -2341,6 +2358,20 @@ Kirigami.ApplicationWindow {
         return value
     }
 
+    function pathFromAnyUrl(urlValue) {
+        const localPath = root.urlToLocalPath(urlValue)
+        const queryIndex = localPath.indexOf("?")
+        const fragmentIndex = localPath.indexOf("#")
+        let endIndex = localPath.length
+        if (queryIndex >= 0) {
+            endIndex = Math.min(endIndex, queryIndex)
+        }
+        if (fragmentIndex >= 0) {
+            endIndex = Math.min(endIndex, fragmentIndex)
+        }
+        return endIndex < localPath.length ? localPath.substring(0, endIndex) : localPath
+    }
+
     function folderDialogPath(dialogObj) {
         if (!dialogObj) {
             return ""
@@ -2504,15 +2535,14 @@ Kirigami.ApplicationWindow {
     }
 
     function refreshAlbumArtFileInfo() {
-        const coverPath = uiBridge.currentTrackCoverPath || ""
-        albumArtInfoSource = coverPath
-        albumArtFileInfo = coverPath.length > 0
-            ? (uiBridge.imageFileDetails(coverPath) || ({}))
+        const infoSource = root.albumArtViewerInfoSource || ""
+        albumArtViewerFileInfo = infoSource.length > 0
+            ? (uiBridge.imageFileDetails(infoSource) || ({}))
             : ({})
     }
 
     function albumArtInfoOverlayText() {
-        const info = root.albumArtFileInfo || ({})
+        const info = root.albumArtViewerFileInfo || ({})
         const lines = []
 
         if ((info.fileName || "").length > 0) {
@@ -2574,13 +2604,64 @@ Kirigami.ApplicationWindow {
         if (!uiBridge.currentTrackCoverPath || uiBridge.currentTrackCoverPath.length === 0) {
             return
         }
+        albumArtViewerSource = uiBridge.currentTrackCoverPath || ""
+        albumArtViewerInfoSource = root.pathFromAnyUrl(albumArtViewerSource)
+        albumArtViewerShowsCurrentTrack = true
         albumArtZoom = 1.0
         albumArtPanX = 0.0
         albumArtPanY = 0.0
         albumArtInfoVisible = false
         albumArtInitialViewPending = true
+        albumArtViewerFileInfo = ({})
+        albumArtViewerOpen = true
+    }
+
+    function openAlbumArtViewerForSuggestion(rowMap) {
+        const previewSource = (rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || ""
+        if (previewSource.length === 0) {
+            return
+        }
+        albumArtViewerSource = previewSource
+        albumArtViewerInfoSource = (rowMap && (rowMap.normalizedPath || "")) || root.pathFromAnyUrl(previewSource)
+        albumArtViewerShowsCurrentTrack = false
+        albumArtZoom = 1.0
+        albumArtPanX = 0.0
+        albumArtPanY = 0.0
+        albumArtInfoVisible = true
+        albumArtInitialViewPending = true
         refreshAlbumArtFileInfo()
         albumArtViewerOpen = true
+    }
+
+    function toggleAlbumArtInfoVisible() {
+        if (!root.albumArtViewerOpen) {
+            return
+        }
+        if (!root.albumArtInfoVisible) {
+            refreshAlbumArtFileInfo()
+        }
+        root.albumArtInfoVisible = !root.albumArtInfoVisible
+    }
+
+    function currentTrackItunesArtworkDisabledReason() {
+        if ((uiBridge.currentTrackPath || "").trim().length === 0) {
+            return "No active track."
+        }
+        if ((uiBridge.currentTrackAlbum || "").trim().length === 0) {
+            return "Album metadata is missing."
+        }
+        if ((uiBridge.currentTrackArtist || "").trim().length === 0) {
+            return "Artist metadata is missing."
+        }
+        return ""
+    }
+
+    function openItunesArtworkDialog() {
+        itunesArtworkDialog.parent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
+            ? albumArtWindowHost
+            : Overlay.overlay
+        uiBridge.searchCurrentTrackArtworkSuggestions()
+        itunesArtworkDialog.open()
     }
 
     function openSpectrogramViewer() {
@@ -2643,6 +2724,12 @@ Kirigami.ApplicationWindow {
         text: "Queue All Library Tracks"
         enabled: root.canPlayAllLibraryTracks()
         onTriggered: root.appendAllLibraryTracks()
+    }
+    Action {
+        id: replaceFromItunesAction
+        text: "Replace From iTunes..."
+        enabled: root.currentTrackItunesArtworkDisabledReason().length === 0
+        onTriggered: root.openItunesArtworkDialog()
     }
     Action {
         id: preferencesAction
@@ -4649,12 +4736,27 @@ Kirigami.ApplicationWindow {
 
                         MouseArea {
                             anchors.fill: parent
-                            enabled: uiBridge.currentTrackCoverPath.length > 0
-                            acceptedButtons: Qt.LeftButton
+                            enabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onPressed: function(mouse) {
+                                if (mouse.button === Qt.RightButton) {
+                                    nowPlayingAlbumArtMenu.popup()
+                                }
+                            }
                             onDoubleClicked: function(mouse) {
                                 if (mouse.button === Qt.LeftButton) {
                                     root.openAlbumArtViewer()
                                 }
+                            }
+                        }
+
+                        Menu {
+                            id: nowPlayingAlbumArtMenu
+                            MenuItem { action: replaceFromItunesAction }
+                            MenuItem {
+                                enabled: false
+                                visible: !replaceFromItunesAction.enabled
+                                text: root.currentTrackItunesArtworkDisabledReason()
                             }
                         }
                     }
@@ -6186,6 +6288,382 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: itunesArtworkDialog
+        parent: Overlay.overlay
+        modal: true
+        focus: true
+        z: 100
+        property int pendingPreviewIndex: -1
+        property int pendingApplyIndex: -1
+        property string currentArtworkSource: ""
+        property var currentArtworkInfo: ({})
+        readonly property real hostWidth: (parent && parent.width > 0) ? parent.width : root.width
+        readonly property real hostHeight: (parent && parent.height > 0) ? parent.height : root.height
+        width: Math.min(Math.max(320, hostWidth - 48), 920)
+        height: Math.min(Math.max(320, hostHeight - 48), 680)
+        x: (hostWidth - width) / 2
+        y: (hostHeight - height) / 2
+        title: "Replace From iTunes"
+        standardButtons: Dialog.Close
+        function clearPendingActionState() {
+            pendingPreviewIndex = -1
+            pendingApplyIndex = -1
+        }
+        function refreshCurrentArtworkInfo() {
+            currentArtworkSource = uiBridge.currentTrackCoverPath || ""
+            const infoSource = root.pathFromAnyUrl(currentArtworkSource)
+            currentArtworkInfo = infoSource.length > 0
+                ? (uiBridge.imageFileDetails(infoSource) || ({}))
+                : ({})
+        }
+        function suggestionRowAt(index) {
+            return uiBridge.itunesArtworkResultAt(index) || ({})
+        }
+        function suggestionRowReady(row) {
+            return ((row && (row.normalizedPath || "")) || "").length > 0
+        }
+        function requestSuggestionPreview(index) {
+            const row = suggestionRowAt(index)
+            if (suggestionRowReady(row)) {
+                pendingPreviewIndex = -1
+                pendingApplyIndex = -1
+                root.openAlbumArtViewerForSuggestion(row)
+                return
+            }
+            pendingApplyIndex = -1
+            pendingPreviewIndex = index
+            uiBridge.prepareItunesArtworkSuggestion(index)
+        }
+        function requestSuggestionApply(index) {
+            const row = suggestionRowAt(index)
+            if (suggestionRowReady(row)) {
+                pendingPreviewIndex = -1
+                pendingApplyIndex = -1
+                uiBridge.applyItunesArtworkSuggestion(index)
+                itunesArtworkDialog.close()
+                return
+            }
+            pendingPreviewIndex = -1
+            pendingApplyIndex = index
+            uiBridge.prepareItunesArtworkSuggestion(index)
+        }
+        function processPendingSuggestionAction() {
+            if (!visible) {
+                return
+            }
+            if (pendingApplyIndex >= 0) {
+                const applyRow = suggestionRowAt(pendingApplyIndex)
+                if (suggestionRowReady(applyRow)) {
+                    const resolvedIndex = pendingApplyIndex
+                    clearPendingActionState()
+                    uiBridge.applyItunesArtworkSuggestion(resolvedIndex)
+                    itunesArtworkDialog.close()
+                    return
+                }
+                if ((((applyRow && (applyRow.assetError || "")) || "").length > 0)
+                        && !((applyRow && (applyRow.assetLoading || false)) || false)) {
+                    pendingApplyIndex = -1
+                }
+            }
+            if (pendingPreviewIndex >= 0) {
+                const previewRow = suggestionRowAt(pendingPreviewIndex)
+                if (suggestionRowReady(previewRow)) {
+                    clearPendingActionState()
+                    root.openAlbumArtViewerForSuggestion(previewRow)
+                    return
+                }
+                if ((((previewRow && (previewRow.assetError || "")) || "").length > 0)
+                        && !((previewRow && (previewRow.assetLoading || false)) || false)) {
+                    pendingPreviewIndex = -1
+                }
+            }
+        }
+        onOpened: {
+            clearPendingActionState()
+            refreshCurrentArtworkInfo()
+        }
+        onClosed: {
+            clearPendingActionState()
+            uiBridge.clearItunesArtworkSuggestions()
+            itunesArtworkDialog.parent = Overlay.overlay
+        }
+
+        Connections {
+            target: uiBridge
+            function onItunesArtworkChanged() {
+                itunesArtworkDialog.processPendingSuggestionAction()
+            }
+            function onSnapshotChanged() {
+                if (itunesArtworkDialog.visible) {
+                    itunesArtworkDialog.refreshCurrentArtworkInfo()
+                }
+            }
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+
+                BusyIndicator {
+                    running: uiBridge.itunesArtworkLoading
+                    visible: running
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: uiBridge.itunesArtworkStatusText || ""
+                    color: root.uiTextColor
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: implicitHeight
+                implicitHeight: currentArtworkSummaryRow.implicitHeight + 20
+                radius: 12
+                color: root.uiPaneColor
+                border.color: root.uiBorderColor
+                clip: true
+
+                RowLayout {
+                    id: currentArtworkSummaryRow
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 12
+
+                    Item {
+                        Layout.preferredWidth: 92
+                        Layout.preferredHeight: 92
+                        clip: true
+
+                        Image {
+                            id: currentArtworkImage
+                            anchors.fill: parent
+                            fillMode: Image.PreserveAspectFit
+                            source: itunesArtworkDialog.currentArtworkSource
+                            smooth: true
+                            asynchronous: true
+                            cache: true
+                            visible: (itunesArtworkDialog.currentArtworkSource || "").length > 0
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 10
+                            color: root.uiSurfaceAltColor
+                            border.color: root.uiBorderColor
+                            visible: !currentArtworkImage.visible
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "No art"
+                                color: root.uiMutedTextColor
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Current album art"
+                            color: root.uiTextColor
+                            font.pixelSize: 16
+                            font.weight: Font.DemiBold
+                            elide: Text.ElideRight
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: [
+                                (itunesArtworkDialog.currentArtworkInfo.resolutionText || ""),
+                                (itunesArtworkDialog.currentArtworkInfo.fileType || ""),
+                                (itunesArtworkDialog.currentArtworkInfo.fileSizeText || "")
+                            ].filter(Boolean).join("  |  ")
+                            color: root.uiMutedTextColor
+                            wrapMode: Text.Wrap
+                            visible: text.length > 0
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: (itunesArtworkDialog.currentArtworkInfo.mimeType || "").length > 0
+                            text: "MIME: " + (itunesArtworkDialog.currentArtworkInfo.mimeType || "")
+                            color: root.uiMutedTextColor
+                            elide: Text.ElideRight
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: (itunesArtworkDialog.currentArtworkSource || "").length === 0
+                            text: "No current album art is available for this track."
+                            color: root.uiMutedTextColor
+                            wrapMode: Text.Wrap
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: (itunesArtworkDialog.currentArtworkSource || "").length > 0
+                                && Object.keys(itunesArtworkDialog.currentArtworkInfo || {}).length === 0
+                            text: "Current artwork metadata is not available."
+                            color: root.uiMutedTextColor
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                }
+            }
+
+            ListView {
+                id: itunesArtworkResultsView
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 10
+                boundsBehavior: Flickable.StopAtBounds
+                rightMargin: itunesArtworkScrollBar.visible ? (itunesArtworkScrollBar.width + 10) : 0
+                model: uiBridge.itunesArtworkResults
+                visible: count > 0
+
+                ScrollBar.vertical: ScrollBar {
+                    id: itunesArtworkScrollBar
+                    policy: ScrollBar.AsNeeded
+                }
+
+                delegate: Rectangle {
+                    required property int index
+                    required property var modelData
+                    x: ListView.view.leftMargin
+                    width: Math.max(0, ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin)
+                    implicitHeight: 136
+                    radius: 12
+                    color: root.uiPaneColor
+                    border.color: root.uiBorderColor
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 12
+
+                        Image {
+                            Layout.preferredWidth: 92
+                            Layout.preferredHeight: 92
+                            fillMode: Image.PreserveAspectFit
+                            source: (modelData && (modelData.previewSource || "")) || ""
+                            smooth: true
+                            asynchronous: true
+                            cache: true
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: (modelData && (modelData.albumTitle || "")) || ""
+                                color: root.uiTextColor
+                                font.pixelSize: 16
+                                font.weight: Font.DemiBold
+                                elide: Text.ElideRight
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: (modelData && (modelData.artistName || "")) || ""
+                                color: root.uiMutedTextColor
+                                elide: Text.ElideRight
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: [
+                                    (modelData && (modelData.resolutionText || "")) || "",
+                                    (modelData && (modelData.fileType || "")) || "",
+                                    (modelData && (modelData.fileSizeText || "")) || ""
+                                ].filter(Boolean).join("  |  ")
+                                color: root.uiMutedTextColor
+                                wrapMode: Text.Wrap
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                visible: ((modelData && (modelData.mimeType || "")) || "").length > 0
+                                text: "MIME: " + (((modelData && (modelData.mimeType || "")) || ""))
+                                color: root.uiMutedTextColor
+                                elide: Text.ElideRight
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: ((modelData && (modelData.assetLoading || false)) || false)
+                                spacing: 8
+
+                                BusyIndicator {
+                                    Layout.preferredWidth: 18
+                                    Layout.preferredHeight: 18
+                                    running: true
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "Loading high-resolution artwork..."
+                                    color: root.uiMutedTextColor
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                visible: ((modelData && (modelData.assetError || "")) || "").length > 0
+                                text: (modelData && (modelData.assetError || "")) || ""
+                                color: Kirigami.Theme.negativeTextColor
+                                wrapMode: Text.Wrap
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                visible: !((modelData && (modelData.assetLoading || false)) || false)
+                                    && ((modelData && (modelData.detailStatusText || "")) || "").length > 0
+                                text: (modelData && (modelData.detailStatusText || "")) || ""
+                                color: root.uiMutedTextColor
+                                wrapMode: Text.Wrap
+                            }
+                        }
+
+                        ColumnLayout {
+                            spacing: 8
+
+                            Button {
+                                text: ((modelData && (modelData.assetLoading || false)) || false)
+                                    && itunesArtworkDialog.pendingPreviewIndex === index
+                                    ? "Loading..."
+                                    : "Preview"
+                                enabled: !((modelData && (modelData.assetLoading || false)) || false)
+                                onClicked: itunesArtworkDialog.requestSuggestionPreview(index)
+                            }
+
+                            Button {
+                                text: ((modelData && (modelData.assetLoading || false)) || false)
+                                    && itunesArtworkDialog.pendingApplyIndex === index
+                                    ? "Loading..."
+                                    : "Apply"
+                                enabled: !((modelData && (modelData.assetLoading || false)) || false)
+                                onClicked: itunesArtworkDialog.requestSuggestionApply(index)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Popup {
         id: albumArtViewer
         parent: Overlay.overlay
@@ -6208,6 +6686,12 @@ Kirigami.ApplicationWindow {
                 properties: "opacity,scale,x,y"
                 duration: root.uiPopupTransitionMs
             }
+        }
+        Shortcut {
+            sequence: "I"
+            context: Qt.WindowShortcut
+            enabled: albumArtViewer.visible
+            onActivated: root.toggleAlbumArtInfoVisible()
         }
         onOpened: root.applyAlbumArtInitialView()
         onClosed: {
@@ -6280,6 +6764,13 @@ Kirigami.ApplicationWindow {
             sequence: "Escape"
             context: Qt.WindowShortcut
             onActivated: root.closeAlbumArtViewer()
+        }
+
+        Shortcut {
+            sequence: "I"
+            context: Qt.WindowShortcut
+            enabled: albumArtFullscreenWindow.visibility === Window.FullScreen
+            onActivated: root.toggleAlbumArtInfoVisible()
         }
 
         MouseArea {
@@ -6359,12 +6850,14 @@ Kirigami.ApplicationWindow {
                 Image {
                     id: albumArtImageFull
                     anchors.fill: parent
-                    source: uiBridge.currentTrackCoverPath
+                    source: root.albumArtViewerSource
                     fillMode: Image.PreserveAspectFit
                     smooth: true
                     asynchronous: true
                     cache: true
-                    retainWhileLoading: true
+                    retainWhileLoading: false
+                    sourceSize.width: root.albumArtViewerDecodeWidth
+                    sourceSize.height: root.albumArtViewerDecodeHeight
                     onStatusChanged: root.applyAlbumArtInitialView()
                 }
             }
@@ -6372,13 +6865,17 @@ Kirigami.ApplicationWindow {
             MouseArea {
                 id: albumArtPanArea
                 anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
                 hoverEnabled: true
                 preventStealing: true
                 property real lastX: 0
                 property real lastY: 0
                 cursorShape: root.albumArtZoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
                 onPressed: function(mouse) {
+                    if (mouse.button === Qt.RightButton) {
+                        albumArtViewerContextMenu.popup()
+                        return
+                    }
                     if (!root.isPointOnAlbumArtImage(albumArtPanArea, mouse.x, mouse.y)) {
                         root.closeAlbumArtViewer()
                         return
@@ -6431,6 +6928,16 @@ Kirigami.ApplicationWindow {
                     wheel.accepted = true
                 }
             }
+
+            Menu {
+                id: albumArtViewerContextMenu
+                MenuItem { action: replaceFromItunesAction }
+                MenuItem {
+                    enabled: false
+                    visible: !replaceFromItunesAction.enabled
+                    text: root.currentTrackItunesArtworkDisabledReason()
+                }
+            }
         }
 
         Column {
@@ -6457,7 +6964,7 @@ Kirigami.ApplicationWindow {
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
-                    onClicked: root.albumArtInfoVisible = !root.albumArtInfoVisible
+                    onClicked: root.toggleAlbumArtInfoVisible()
                 }
             }
 
@@ -6497,6 +7004,19 @@ Kirigami.ApplicationWindow {
         visible: false
     }
 
+    Image {
+        id: albumArtViewerPreloadImage
+        visible: false
+        asynchronous: true
+        cache: true
+        retainWhileLoading: true
+        source: !root.albumArtViewerOpen || root.albumArtViewerShowsCurrentTrack
+            ? (uiBridge.currentTrackCoverPath || "")
+            : ""
+        sourceSize.width: root.albumArtViewerDecodeWidth
+        sourceSize.height: root.albumArtViewerDecodeHeight
+    }
+
     onClosing: function(close) { uiBridge.shutdown() }
 
     Connections {
@@ -6513,8 +7033,24 @@ Kirigami.ApplicationWindow {
         function onSnapshotChanged() {
             root.syncMutedVolumeState()
             if (root.albumArtViewerOpen
-                    && root.albumArtInfoSource !== (uiBridge.currentTrackCoverPath || "")) {
-                root.refreshAlbumArtFileInfo()
+                    && root.albumArtViewerShowsCurrentTrack
+                    && root.albumArtViewerSource !== (uiBridge.currentTrackCoverPath || "")) {
+                root.albumArtViewerSource = uiBridge.currentTrackCoverPath || ""
+                root.albumArtViewerInfoSource = root.pathFromAnyUrl(root.albumArtViewerSource)
+                if (root.albumArtInfoVisible) {
+                    root.refreshAlbumArtFileInfo()
+                } else {
+                    root.albumArtViewerFileInfo = ({})
+                }
+            } else if (root.albumArtViewerOpen
+                    && root.albumArtViewerInfoSource
+                        !== root.pathFromAnyUrl(root.albumArtViewerSource || "")) {
+                root.albumArtViewerInfoSource = root.pathFromAnyUrl(root.albumArtViewerSource || "")
+                if (root.albumArtInfoVisible) {
+                    root.refreshAlbumArtFileInfo()
+                } else {
+                    root.albumArtViewerFileInfo = ({})
+                }
             }
             const incomingPosition = uiBridge.positionSeconds
             const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath

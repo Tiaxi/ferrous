@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod artwork;
 pub mod frontend_bridge;
 pub mod lastfm;
 pub mod library;

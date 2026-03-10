@@ -15,14 +15,23 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QBuffer>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
 #include <QImageReader>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLocale>
 #include <QMetaObject>
 #include <QMimeDatabase>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QProcess>
 #include <QSet>
+#include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QThread>
 #include <QTextStream>
 #include <QUrl>
@@ -133,7 +142,161 @@ QString searchCoverUrlFast(const QString &path) {
     if (path.startsWith(QStringLiteral("file://"))) {
         return path;
     }
-    return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded);
+
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+        return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded);
+    }
+
+    const QString canonicalPath = info.canonicalFilePath().isEmpty()
+        ? info.absoluteFilePath()
+        : info.canonicalFilePath();
+    QUrl coverUrl = QUrl::fromLocalFile(canonicalPath);
+    coverUrl.setFragment(
+        QStringLiteral("v=%1").arg(info.lastModified().toMSecsSinceEpoch()));
+    return coverUrl.toString(QUrl::FullyEncoded);
+}
+
+QString normalizedItunesMatchKey(const QString &value) {
+    return value.simplified().toCaseFolded();
+}
+
+int itunesMatchRankGroup(
+    const QString &candidateAlbum,
+    const QString &candidateArtist,
+    const QString &wantedAlbum,
+    const QString &wantedArtist)
+{
+    const QString album = normalizedItunesMatchKey(candidateAlbum);
+    const QString artist = normalizedItunesMatchKey(candidateArtist);
+    const QString wantedAlbumKey = normalizedItunesMatchKey(wantedAlbum);
+    const QString wantedArtistKey = normalizedItunesMatchKey(wantedArtist);
+
+    const bool albumExact = !album.isEmpty() && album == wantedAlbumKey;
+    const bool artistExact = !artist.isEmpty() && artist == wantedArtistKey;
+    const bool albumPartial = !wantedAlbumKey.isEmpty() && album.contains(wantedAlbumKey);
+    const bool artistPartial = !wantedArtistKey.isEmpty() && artist.contains(wantedArtistKey);
+
+    if (albumExact && artistExact) {
+        return 0;
+    }
+    if (albumExact) {
+        return 1;
+    }
+    if (artistExact) {
+        return 2;
+    }
+    if (albumPartial || artistPartial) {
+        return 3;
+    }
+    return 4;
+}
+
+QString replaceUrlTerminalExtension(const QString &urlString, const QString &extension) {
+    const QString trimmedExtension = extension.trimmed().toLower();
+    if (trimmedExtension.isEmpty()) {
+        return {};
+    }
+
+    QUrl url(urlString);
+    QString path = url.path();
+    const int lastSlash = path.lastIndexOf(QLatin1Char('/'));
+    if (lastSlash < 0) {
+        return {};
+    }
+    const int lastDot = path.lastIndexOf(QLatin1Char('.'));
+    if (lastDot <= lastSlash) {
+        return {};
+    }
+
+    path = path.left(lastDot + 1) + trimmedExtension;
+    url.setPath(path);
+    return url.toString(QUrl::FullyEncoded);
+}
+
+QString sourceArtworkExtension(const QUrl &url) {
+    const QString path = url.path();
+    const int lastSlash = path.lastIndexOf(QLatin1Char('/'));
+    if (lastSlash <= 0) {
+        return {};
+    }
+    const int previousSlash = path.lastIndexOf(QLatin1Char('/'), lastSlash - 1);
+    const QString sourceSegment = path.mid(previousSlash + 1, lastSlash - previousSlash - 1);
+    const QString suffix = QFileInfo(sourceSegment).suffix().trimmed().toLower();
+    if (suffix == QStringLiteral("jpeg")) {
+        return QStringLiteral("jpg");
+    }
+    if (suffix == QStringLiteral("tiff")) {
+        return QStringLiteral("tif");
+    }
+    return suffix;
+}
+
+QStringList deriveItunesArtworkUrls(const QString &artworkUrl100) {
+    QString highRes = artworkUrl100.trimmed();
+    if (highRes.isEmpty()) {
+        return {};
+    }
+    highRes.replace(QStringLiteral("100x100bb"), QStringLiteral("100000x100000-999"));
+
+    QStringList urls;
+    auto appendUnique = [&urls](const QString &candidate) {
+        const QString trimmed = candidate.trimmed();
+        if (!trimmed.isEmpty() && !urls.contains(trimmed)) {
+            urls.push_back(trimmed);
+        }
+    };
+
+    const QUrl highResUrl(highRes);
+    const QString path = highResUrl.path();
+    const QString sourceExt = sourceArtworkExtension(highResUrl);
+    const QString terminalExt = QFileInfo(path).suffix().trimmed().toLower();
+    const QString thumbMarker = QStringLiteral("/image/thumb/");
+    const int thumbPos = path.indexOf(thumbMarker);
+
+    if (thumbPos >= 0) {
+        const QString afterThumb = path.mid(thumbPos + thumbMarker.size());
+        const int lastSlash = afterThumb.lastIndexOf(QLatin1Char('/'));
+        if (lastSlash > 0) {
+            appendUnique(QStringLiteral("https://a5.mzstatic.com/us/r1000/0/") + afterThumb.left(lastSlash));
+        }
+    }
+
+    appendUnique(highRes);
+
+    if (!sourceExt.isEmpty() && sourceExt != terminalExt) {
+        appendUnique(replaceUrlTerminalExtension(highRes, sourceExt));
+    }
+
+    const QString highResFallback =
+        QStringLiteral("https://is5-ssl.mzstatic.com") + path;
+    if (!sourceExt.isEmpty() && sourceExt != terminalExt) {
+        appendUnique(replaceUrlTerminalExtension(highResFallback, sourceExt));
+    }
+    appendUnique(highResFallback);
+
+    return urls;
+}
+
+QString deriveItunesPreviewUrl(const QString &artworkUrl100) {
+    QString previewUrl = artworkUrl100.trimmed();
+    if (previewUrl.isEmpty()) {
+        return {};
+    }
+
+    previewUrl.replace(QStringLiteral("100x100bb"), QStringLiteral("600x600bb"));
+    return previewUrl;
+}
+
+QString imageFormatExtension(const QByteArray &format) {
+    const QByteArray lower = format.trimmed().toLower();
+    if (lower == "jpeg") {
+        return QStringLiteral("jpg");
+    }
+    if (lower == "tiff") {
+        return QStringLiteral("tif");
+    }
+    return QString::fromLatin1(lower);
 }
 
 int readEnvMillis(const char *key, int fallback) {
@@ -483,6 +646,8 @@ BridgeClient::~BridgeClient() {
     m_analysisNotifyTimer.stop();
     m_globalSearchDebounceTimer.stop();
     m_searchApplyDispatchTimer.stop();
+    cancelItunesArtworkRequests();
+    resetItunesArtworkTempDir();
     shutdownBridgeGracefully();
     stopCoverLookupWorker();
     stopSearchApplyWorker();
@@ -648,6 +813,265 @@ void BridgeClient::cacheTrackCoverForPath(const QString &trackPath, const QStrin
         m_trackCoverByDirectory.clear();
         m_trackCoverByDirectory.insert(dirPath, coverUrl);
     }
+}
+
+QString BridgeClient::coverUrlForPath(const QString &path) const {
+    const QString baseUrl = searchCoverUrlFast(path);
+    const QString localPath = normalizeLocalPathArg(path);
+    if (localPath.isEmpty()) {
+        return baseUrl;
+    }
+
+    const QFileInfo info(localPath);
+    const QString canonicalPath = info.canonicalFilePath().isEmpty()
+        ? info.absoluteFilePath()
+        : info.canonicalFilePath();
+    if (canonicalPath.isEmpty()) {
+        return baseUrl;
+    }
+
+    const auto nonceIt = m_coverRefreshNonceByPath.constFind(canonicalPath);
+    if (nonceIt == m_coverRefreshNonceByPath.constEnd()) {
+        return baseUrl;
+    }
+
+    QUrl url(baseUrl);
+    if (!url.isValid()) {
+        url = QUrl::fromLocalFile(canonicalPath);
+    }
+    QString fragment = url.fragment(QUrl::FullyDecoded);
+    const int refreshPos = fragment.indexOf(QStringLiteral("&r="));
+    if (refreshPos >= 0) {
+        fragment = fragment.left(refreshPos);
+    } else if (fragment.startsWith(QStringLiteral("r="))) {
+        fragment.clear();
+    }
+    if (!fragment.isEmpty()) {
+        fragment += QStringLiteral("&");
+    }
+    fragment += QStringLiteral("r=%1").arg(nonceIt.value());
+    url.setFragment(fragment);
+    return url.toString(QUrl::FullyEncoded);
+}
+
+void BridgeClient::bumpCoverRefreshNonce(const QString &path) {
+    const QString localPath = normalizeLocalPathArg(path);
+    if (localPath.isEmpty()) {
+        return;
+    }
+
+    const QFileInfo info(localPath);
+    const QString canonicalPath = info.canonicalFilePath().isEmpty()
+        ? info.absoluteFilePath()
+        : info.canonicalFilePath();
+    if (canonicalPath.isEmpty()) {
+        return;
+    }
+
+    m_coverRefreshNonceByPath.insert(canonicalPath, m_nextCoverRefreshNonce++);
+    if (m_coverRefreshNonceByPath.size() > 4096) {
+        m_coverRefreshNonceByPath.clear();
+        m_coverRefreshNonceByPath.insert(canonicalPath, m_nextCoverRefreshNonce++);
+    }
+}
+
+void BridgeClient::cancelItunesArtworkRequests() {
+    const auto replies = m_itunesArtworkReplies.values();
+    m_itunesArtworkReplies.clear();
+    for (QNetworkReply *reply : replies) {
+        if (!reply) {
+            continue;
+        }
+        reply->abort();
+        reply->deleteLater();
+    }
+}
+
+void BridgeClient::startItunesArtworkAssetDownload(
+    int candidateIndex,
+    int assetUrlIndex)
+{
+    if (candidateIndex < 0 || candidateIndex >= m_itunesArtworkCandidates.size()) {
+        return;
+    }
+    const QStringList assetUrls = m_itunesArtworkCandidates[candidateIndex].assetUrls;
+    const QString trimmedUrl = (assetUrlIndex >= 0 && assetUrlIndex < assetUrls.size())
+        ? assetUrls[assetUrlIndex].trimmed()
+        : QString();
+    QVariantMap row = itunesArtworkResultAt(candidateIndex);
+    if (row.isEmpty()) {
+        return;
+    }
+    if (trimmedUrl.isEmpty()) {
+        row.insert(QStringLiteral("assetLoading"), false);
+        row.insert(QStringLiteral("assetReady"), false);
+        row.insert(
+            QStringLiteral("assetError"),
+            QStringLiteral("No high-resolution artwork URL was available."));
+        row.insert(
+            QStringLiteral("detailStatusText"),
+            QStringLiteral("High-resolution artwork could not be loaded."));
+        updateItunesArtworkResult(candidateIndex, row);
+        return;
+    }
+
+    const quint64 generation = m_itunesArtworkGeneration;
+    QNetworkRequest request{QUrl(trimmedUrl)};
+    request.setTransferTimeout(30000);
+    auto *reply = m_itunesArtworkNetwork.get(request);
+    m_itunesArtworkReplies.insert(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, generation, candidateIndex, assetUrlIndex]() {
+        m_itunesArtworkReplies.remove(reply);
+        const bool stale = generation != m_itunesArtworkGeneration;
+        const auto error = reply->error();
+        const QString errorText = reply->errorString();
+        const QByteArray payload = reply->readAll();
+        reply->deleteLater();
+        if (stale) {
+            return;
+        }
+
+        QVariantMap row = itunesArtworkResultAt(candidateIndex);
+        if (row.isEmpty()) {
+            return;
+        }
+
+        const bool usedFallback = assetUrlIndex > 0;
+        auto failCandidate = [this, candidateIndex, assetUrlIndex, row](const QString &message) mutable {
+            if (candidateIndex >= 0 && candidateIndex < m_itunesArtworkCandidates.size()) {
+                const QStringList assetUrls = m_itunesArtworkCandidates[candidateIndex].assetUrls;
+                if (assetUrlIndex + 1 < assetUrls.size()) {
+                    startItunesArtworkAssetDownload(candidateIndex, assetUrlIndex + 1);
+                    return;
+                }
+            }
+            row.insert(QStringLiteral("assetLoading"), false);
+            row.insert(QStringLiteral("assetReady"), false);
+            row.insert(QStringLiteral("assetError"), message);
+            row.insert(
+                QStringLiteral("detailStatusText"),
+                QStringLiteral("High-resolution artwork could not be loaded."));
+            updateItunesArtworkResult(candidateIndex, row);
+        };
+
+        if (error != QNetworkReply::NoError || payload.isEmpty()) {
+            failCandidate(
+                errorText.trimmed().isEmpty()
+                    ? QStringLiteral("Failed to load high-resolution artwork.")
+                    : QStringLiteral("Failed to load high-resolution artwork: %1").arg(errorText));
+            return;
+        }
+        if (!ensureItunesArtworkTempDir()) {
+            failCandidate(QStringLiteral("Failed to prepare temporary artwork cache."));
+            return;
+        }
+
+        QBuffer buffer;
+        buffer.setData(payload);
+        buffer.open(QIODevice::ReadOnly);
+        QImageReader reader(&buffer);
+        reader.setAutoTransform(true);
+        const QByteArray format = reader.format().trimmed().toLower();
+        const QString sourceExtension = imageFormatExtension(format);
+        if (sourceExtension != QStringLiteral("png")
+            && sourceExtension != QStringLiteral("jpg")
+            && sourceExtension != QStringLiteral("tif")) {
+            failCandidate(QStringLiteral("Unsupported artwork format returned by iTunes."));
+            return;
+        }
+
+        const QImage image = reader.read();
+        if (image.isNull()) {
+            failCandidate(QStringLiteral("Failed to decode downloaded artwork."));
+            return;
+        }
+
+        const QString baseName = QStringLiteral("candidate-%1-%2")
+            .arg(generation)
+            .arg(candidateIndex, 3, 10, QChar('0'));
+        const QString originalPath = m_itunesArtworkTempDir->filePath(
+            baseName + QStringLiteral("-orig.") + sourceExtension);
+        QFile originalFile(originalPath);
+        if (!originalFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
+            || originalFile.write(payload) != payload.size()) {
+            failCandidate(QStringLiteral("Failed to cache downloaded artwork."));
+            return;
+        }
+        originalFile.close();
+
+        const int side = std::min(image.width(), image.height());
+        const int x = std::max(0, (image.width() - side) / 2);
+        const int y = std::max(0, (image.height() - side) / 2);
+        const QImage normalized = image.width() == image.height()
+            ? image
+            : image.copy(x, y, side, side);
+        const QString normalizedExtension = sourceExtension == QStringLiteral("png")
+            ? QStringLiteral("png")
+            : QStringLiteral("jpg");
+        const QString normalizedPath = m_itunesArtworkTempDir->filePath(
+            baseName + QStringLiteral("-normalized.") + normalizedExtension);
+        const bool saved = normalizedExtension == QStringLiteral("jpg")
+            ? normalized.save(normalizedPath, "JPG", 95)
+            : normalized.save(normalizedPath, "PNG");
+        if (!saved) {
+            failCandidate(QStringLiteral("Failed to normalize downloaded artwork."));
+            return;
+        }
+
+        row.insert(QStringLiteral("previewSource"), searchCoverUrlFast(normalizedPath));
+        row.insert(QStringLiteral("normalizedPath"), normalizedPath);
+        row.insert(QStringLiteral("normalizedUrl"), searchCoverUrlFast(normalizedPath));
+        row.insert(QStringLiteral("downloadPath"), originalPath);
+        row.insert(QStringLiteral("usedFallback"), usedFallback);
+        row.insert(QStringLiteral("assetReady"), true);
+        row.insert(QStringLiteral("assetLoading"), false);
+        row.insert(QStringLiteral("assetError"), QString());
+        row.insert(
+            QStringLiteral("detailStatusText"),
+            usedFallback
+                ? QStringLiteral("Loaded the high-resolution fallback artwork.")
+                : QString());
+
+        const QVariantMap info = imageFileDetails(originalPath);
+        for (auto it = info.constBegin(); it != info.constEnd(); ++it) {
+            row.insert(it.key(), it.value());
+        }
+        updateItunesArtworkResult(candidateIndex, row);
+    });
+}
+
+void BridgeClient::updateItunesArtworkResult(int index, const QVariantMap &row) {
+    if (index < 0 || index >= m_itunesArtworkResults.size()) {
+        return;
+    }
+    m_itunesArtworkResults[index] = row;
+    emit itunesArtworkChanged();
+}
+
+void BridgeClient::resetItunesArtworkTempDir() {
+    m_itunesArtworkTempDir.reset();
+}
+
+bool BridgeClient::ensureItunesArtworkTempDir() {
+    if (m_itunesArtworkTempDir && m_itunesArtworkTempDir->isValid()) {
+        return true;
+    }
+
+    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (baseDir.trimmed().isEmpty()) {
+        baseDir = QDir::tempPath();
+    }
+    QDir().mkpath(baseDir);
+
+    auto dir = std::make_unique<QTemporaryDir>(
+        QDir(baseDir).filePath(QStringLiteral("itunes-artwork-XXXXXX")));
+    if (!dir->isValid()) {
+        return false;
+    }
+    dir->setAutoRemove(true);
+    m_itunesArtworkTempDir = std::move(dir);
+    return true;
 }
 
 void BridgeClient::enqueueSearchFrame(quint32 seq, QByteArray payload, qint64 ffiPopMs) {
@@ -1308,6 +1732,18 @@ QObject *BridgeClient::globalSearchModel() const {
     return const_cast<GlobalSearchResultsModel *>(&m_globalSearchModel);
 }
 
+QVariantList BridgeClient::itunesArtworkResults() const {
+    return m_itunesArtworkResults;
+}
+
+bool BridgeClient::itunesArtworkLoading() const {
+    return m_itunesArtworkLoading;
+}
+
+QString BridgeClient::itunesArtworkStatusText() const {
+    return m_itunesArtworkStatusText;
+}
+
 QString BridgeClient::diagnosticsText() const {
     return m_diagnosticsText;
 }
@@ -1706,10 +2142,7 @@ QString BridgeClient::libraryThumbnailSource(const QString &path) const {
     }
 
     QUrl coverUrl = QUrl::fromLocalFile(canonicalPath);
-    QUrlQuery query(coverUrl);
-    query.removeAllQueryItems(QStringLiteral("v"));
-    query.addQueryItem(QStringLiteral("v"), QString::number(mtimeMs));
-    coverUrl.setQuery(query);
+    coverUrl.setFragment(QStringLiteral("v=%1").arg(mtimeMs));
 
     const QString result = coverUrl.toString(QUrl::FullyEncoded);
     m_libraryThumbnailSourceCache.insert(cacheKey, result);
@@ -1857,6 +2290,209 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
     }
 
     m_globalSearchDebounceTimer.start();
+}
+
+void BridgeClient::searchCurrentTrackArtworkSuggestions() {
+    const QString album = m_currentTrackAlbum.trimmed();
+    const QString artist = m_currentTrackArtist.trimmed();
+
+    cancelItunesArtworkRequests();
+    m_itunesArtworkGeneration++;
+    m_itunesArtworkCandidates.clear();
+    m_itunesArtworkResults.clear();
+
+    if (album.isEmpty() || artist.isEmpty()) {
+        m_itunesArtworkLoading = false;
+        m_itunesArtworkStatusText = QStringLiteral("Album and artist metadata are required.");
+        emit itunesArtworkChanged();
+        return;
+    }
+
+    m_itunesArtworkLoading = true;
+    m_itunesArtworkStatusText = QStringLiteral("Searching iTunes...");
+    emit itunesArtworkChanged();
+
+    QUrl url(QStringLiteral("https://itunes.apple.com/search"));
+    QUrlQuery query(url);
+    query.addQueryItem(QStringLiteral("term"), artist + QStringLiteral(" ") + album);
+    query.addQueryItem(QStringLiteral("country"), QStringLiteral("fi"));
+    query.addQueryItem(QStringLiteral("media"), QStringLiteral("music"));
+    query.addQueryItem(QStringLiteral("entity"), QStringLiteral("album"));
+    query.addQueryItem(QStringLiteral("limit"), QStringLiteral("25"));
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setTransferTimeout(30000);
+    auto *reply = m_itunesArtworkNetwork.get(request);
+    m_itunesArtworkReplies.insert(reply);
+    const quint64 generation = m_itunesArtworkGeneration;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, generation, album, artist]() {
+        m_itunesArtworkReplies.remove(reply);
+        const bool stale = generation != m_itunesArtworkGeneration;
+        const auto error = reply->error();
+        const QByteArray payload = reply->readAll();
+        reply->deleteLater();
+        if (stale) {
+            return;
+        }
+        if (error != QNetworkReply::NoError) {
+            m_itunesArtworkLoading = false;
+            m_itunesArtworkStatusText =
+                QStringLiteral("iTunes search failed: %1").arg(reply->errorString());
+            emit itunesArtworkChanged();
+            return;
+        }
+
+        const auto doc = QJsonDocument::fromJson(payload);
+        const auto results = doc.object().value(QStringLiteral("results")).toArray();
+
+        QVector<ItunesArtworkCandidate> candidates;
+        candidates.reserve(results.size());
+        int apiOrder = 0;
+        for (const QJsonValue &value : results) {
+            const QJsonObject obj = value.toObject();
+            const QString artworkUrl100 = obj.value(QStringLiteral("artworkUrl100")).toString();
+            if (artworkUrl100.trimmed().isEmpty()) {
+                ++apiOrder;
+                continue;
+            }
+            const QStringList assetUrls = deriveItunesArtworkUrls(artworkUrl100);
+            if (assetUrls.isEmpty()) {
+                ++apiOrder;
+                continue;
+            }
+
+            ItunesArtworkCandidate candidate;
+            candidate.albumTitle = obj.value(QStringLiteral("collectionName")).toString().trimmed();
+            candidate.artistName = obj.value(QStringLiteral("artistName")).toString().trimmed();
+            candidate.collectionUrl = obj.value(QStringLiteral("collectionViewUrl")).toString().trimmed();
+            candidate.previewUrl = deriveItunesPreviewUrl(artworkUrl100);
+            candidate.assetUrls = assetUrls;
+            candidate.rankGroup = itunesMatchRankGroup(
+                candidate.albumTitle,
+                candidate.artistName,
+                album,
+                artist);
+            candidate.apiOrder = apiOrder++;
+            candidates.push_back(std::move(candidate));
+        }
+
+        std::stable_sort(
+            candidates.begin(),
+            candidates.end(),
+            [](const ItunesArtworkCandidate &lhs, const ItunesArtworkCandidate &rhs) {
+                if (lhs.rankGroup != rhs.rankGroup) {
+                    return lhs.rankGroup < rhs.rankGroup;
+                }
+                return lhs.apiOrder < rhs.apiOrder;
+        });
+
+        m_itunesArtworkCandidates = candidates;
+        m_itunesArtworkResults.clear();
+        if (candidates.isEmpty()) {
+            m_itunesArtworkLoading = false;
+            m_itunesArtworkStatusText = QStringLiteral("No iTunes artwork suggestions found.");
+            emit itunesArtworkChanged();
+            return;
+        }
+
+        QVariantList rows;
+        rows.reserve(candidates.size());
+        for (int i = 0; i < candidates.size(); ++i) {
+            const auto &candidate = candidates[i];
+            QVariantMap row;
+            row.insert(QStringLiteral("albumTitle"), candidate.albumTitle);
+            row.insert(QStringLiteral("artistName"), candidate.artistName);
+            row.insert(QStringLiteral("collectionUrl"), candidate.collectionUrl);
+            row.insert(QStringLiteral("previewSource"), candidate.previewUrl);
+            row.insert(QStringLiteral("normalizedPath"), QString());
+            row.insert(QStringLiteral("normalizedUrl"), QString());
+            row.insert(QStringLiteral("downloadPath"), QString());
+            row.insert(QStringLiteral("sortIndex"), i);
+            row.insert(QStringLiteral("usedFallback"), false);
+            row.insert(QStringLiteral("assetReady"), false);
+            row.insert(QStringLiteral("assetLoading"), false);
+            row.insert(QStringLiteral("assetError"), QString());
+            row.insert(
+                QStringLiteral("detailStatusText"),
+                QStringLiteral("High-resolution file info loads on preview or apply."));
+            rows.push_back(row);
+        }
+
+        m_itunesArtworkResults = rows;
+        m_itunesArtworkLoading = false;
+        m_itunesArtworkStatusText =
+            QStringLiteral("Found %1 suggestion(s). High-resolution artwork loads on preview/apply.")
+                .arg(rows.size());
+        emit itunesArtworkChanged();
+    });
+}
+
+void BridgeClient::clearItunesArtworkSuggestions() {
+    cancelItunesArtworkRequests();
+    m_itunesArtworkGeneration++;
+    m_itunesArtworkCandidates.clear();
+    m_itunesArtworkResults.clear();
+    m_itunesArtworkLoading = false;
+    m_itunesArtworkStatusText.clear();
+    emit itunesArtworkChanged();
+}
+
+QVariantMap BridgeClient::itunesArtworkResultAt(int index) const {
+    if (index < 0 || index >= m_itunesArtworkResults.size()) {
+        return {};
+    }
+    return m_itunesArtworkResults[index].toMap();
+}
+
+void BridgeClient::prepareItunesArtworkSuggestion(int index) {
+    if (index < 0 || index >= m_itunesArtworkCandidates.size()) {
+        return;
+    }
+
+    QVariantMap row = itunesArtworkResultAt(index);
+    if (row.isEmpty()) {
+        return;
+    }
+    if (row.value(QStringLiteral("assetReady")).toBool()
+        || row.value(QStringLiteral("assetLoading")).toBool()) {
+        return;
+    }
+
+    row.insert(QStringLiteral("assetLoading"), true);
+    row.insert(QStringLiteral("assetError"), QString());
+    row.insert(QStringLiteral("detailStatusText"), QStringLiteral("Loading high-resolution artwork..."));
+    updateItunesArtworkResult(index, row);
+    startItunesArtworkAssetDownload(index);
+}
+
+void BridgeClient::applyItunesArtworkSuggestion(int index) {
+    if (index < 0 || index >= m_itunesArtworkResults.size()) {
+        return;
+    }
+    const QVariantMap row = m_itunesArtworkResults[index].toMap();
+    const QString normalizedPath = normalizeLocalPathArg(
+        row.value(QStringLiteral("normalizedPath")).toString());
+    const QString trackPath = normalizeLocalPathArg(m_currentTrackPath);
+    if (normalizedPath.isEmpty() || trackPath.isEmpty()) {
+        if (trackPath.isEmpty()) {
+            return;
+        }
+        prepareItunesArtworkSuggestion(index);
+        return;
+    }
+
+    m_trackCoverByPath.remove(trackPath);
+    const QString dirPath = trackDirectoryPath(trackPath);
+    if (!dirPath.isEmpty()) {
+        m_trackCoverByDirectory.remove(dirPath);
+    }
+    m_pendingAppliedArtworkTrackPath = trackPath;
+
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringPair(
+        BinaryBridgeCodec::CmdApplyAlbumArt,
+        trackPath,
+        normalizedPath));
 }
 
 void BridgeClient::openInFileBrowser(const QString &path) {
@@ -2748,12 +3384,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : 0;
     QString metadataCoverUrl;
     if (!metadataCoverPath.trimmed().isEmpty() && metadataSourcePath == currentPath) {
-        const QUrl maybeUrl(metadataCoverPath);
-        if (maybeUrl.isValid() && maybeUrl.isLocalFile()) {
-            metadataCoverUrl = maybeUrl.toString();
-        } else {
-            metadataCoverUrl = QUrl::fromLocalFile(metadataCoverPath).toString();
+        if (!m_pendingAppliedArtworkTrackPath.isEmpty()
+            && m_pendingAppliedArtworkTrackPath == currentPath) {
+            bumpCoverRefreshNonce(metadataCoverPath);
+            m_pendingAppliedArtworkTrackPath.clear();
         }
+        metadataCoverUrl = coverUrlForPath(metadataCoverPath);
     }
 
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
@@ -3044,7 +3680,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     QString currentCover = metadataCoverUrl;
-    bool waitingForCoverLookup = false;
     if (currentCover.isEmpty() && !queueTrackCover.isEmpty()) {
         currentCover = queueTrackCover;
     }
@@ -3062,16 +3697,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 cacheTrackCoverForPath(currentPath, currentCover);
             } else {
                 requestTrackCoverLookup(currentPath);
-                waitingForCoverLookup = true;
             }
         }
-    }
-    if (waitingForCoverLookup
-        && currentPathChanged
-        && currentCover.isEmpty()
-        && !m_currentTrackCoverPath.isEmpty()) {
-        // Avoid flashing an empty placeholder while the next track cover is still loading.
-        currentCover = m_currentTrackCoverPath;
     }
     if (!currentPath.isEmpty() && !currentCover.isEmpty()) {
         cacheTrackCoverForPath(currentPath, currentCover);

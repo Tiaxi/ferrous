@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 use crate::analysis::{
     AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramViewMode,
 };
+use crate::artwork::apply_artwork_to_track;
 use crate::lastfm::{
     self, Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
     NowPlayingTrack as LastFmNowPlayingTrack, RuntimeState as LastFmRuntimeState,
@@ -20,9 +21,9 @@ use crate::lastfm::{
 };
 use crate::library::{
     is_supported_audio, load_external_track_cache, load_external_track_caches, read_track_info,
-    search_tracks_fts, store_external_track_cache, track_file_fingerprint, IndexedTrack,
-    LibraryCommand, LibraryEvent, LibraryRoot, LibrarySearchTrack, LibraryService, LibrarySnapshot,
-    LibraryTrack, TrackFileFingerprint,
+    refresh_cover_paths_for_tracks, search_tracks_fts, store_external_track_cache,
+    track_file_fingerprint, IndexedTrack, LibraryCommand, LibraryEvent, LibraryRoot,
+    LibrarySearchTrack, LibraryService, LibrarySnapshot, LibraryTrack, TrackFileFingerprint,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -114,8 +115,14 @@ pub enum BridgeQueueCommand {
 #[derive(Debug, Clone)]
 pub enum BridgeLibraryCommand {
     ScanRoot(PathBuf),
-    AddRoot { path: PathBuf, name: String },
-    RenameRoot { path: PathBuf, name: String },
+    AddRoot {
+        path: PathBuf,
+        name: String,
+    },
+    RenameRoot {
+        path: PathBuf,
+        name: String,
+    },
     RemoveRoot(PathBuf),
     RescanRoot(PathBuf),
     RescanAll,
@@ -123,14 +130,34 @@ pub enum BridgeLibraryCommand {
     PlayTrack(PathBuf),
     ReplaceWithAlbum(Vec<PathBuf>),
     AppendAlbum(Vec<PathBuf>),
-    ReplaceAlbumByKey { artist: String, album: String },
-    AppendAlbumByKey { artist: String, album: String },
-    ReplaceArtistByKey { artist: String },
-    AppendArtistByKey { artist: String },
+    ReplaceAlbumByKey {
+        artist: String,
+        album: String,
+    },
+    AppendAlbumByKey {
+        artist: String,
+        album: String,
+    },
+    ReplaceArtistByKey {
+        artist: String,
+    },
+    AppendArtistByKey {
+        artist: String,
+    },
     ReplaceAllTracks,
     AppendAllTracks,
-    SetNodeExpanded { key: String, expanded: bool },
-    SetSearchQuery { seq: u32, query: String },
+    ApplyAlbumArt {
+        track_path: PathBuf,
+        artwork_path: PathBuf,
+    },
+    SetNodeExpanded {
+        key: String,
+        expanded: bool,
+    },
+    SetSearchQuery {
+        seq: u32,
+        query: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -400,6 +427,19 @@ struct ExternalQueueDetailsEvent {
     indexed: IndexedTrack,
 }
 
+#[derive(Debug, Clone)]
+struct ApplyAlbumArtRequest {
+    track_path: PathBuf,
+    artwork_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct ApplyAlbumArtEvent {
+    track_path: PathBuf,
+    indexed_by_path: HashMap<PathBuf, IndexedTrack>,
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct AlbumInventoryAcc {
     main_track_count: u32,
@@ -621,6 +661,8 @@ struct BridgeLoopRuntime {
     search_results_rx: Receiver<BridgeSearchResultsFrame>,
     external_queue_details_tx: Sender<ExternalQueueDetailsRequest>,
     external_queue_details_event_rx: Receiver<ExternalQueueDetailsEvent>,
+    apply_album_art_tx: Sender<ApplyAlbumArtRequest>,
+    apply_album_art_rx: Receiver<ApplyAlbumArtEvent>,
     lastfm: LastFmHandle,
     lastfm_rx: Receiver<LastFmEvent>,
     state: BridgeState,
@@ -644,6 +686,7 @@ struct BridgeLoopRuntime {
     tree_emit_min_track_delta: usize,
     last_tree_emit_at: Option<Instant>,
     last_tree_emit_track_count: usize,
+    deferred_tree_rebuild_at: Option<Instant>,
 }
 
 struct BridgeLoopFlags {
@@ -676,11 +719,16 @@ impl BridgeLoopRuntime {
             unbounded::<ExternalQueueDetailsRequest>();
         let (external_queue_details_event_tx, external_queue_details_event_rx) =
             unbounded::<ExternalQueueDetailsEvent>();
+        let (apply_album_art_tx, apply_album_art_rx) = unbounded::<ApplyAlbumArtRequest>();
+        let (apply_album_art_event_tx, apply_album_art_event_rx) =
+            unbounded::<ApplyAlbumArtEvent>();
         spawn_bridge_support_threads(
             search_query_rx,
             search_results_tx,
             external_queue_details_rx,
             external_queue_details_event_tx,
+            apply_album_art_rx,
+            apply_album_art_event_tx,
         );
 
         let mut state = BridgeState::default();
@@ -720,6 +768,8 @@ impl BridgeLoopRuntime {
             search_results_rx,
             external_queue_details_tx,
             external_queue_details_event_rx,
+            apply_album_art_tx,
+            apply_album_art_rx: apply_album_art_event_rx,
             lastfm,
             lastfm_rx,
             state,
@@ -758,6 +808,7 @@ impl BridgeLoopRuntime {
             tree_emit_min_track_delta: scan_tree_emit_min_track_delta(),
             last_tree_emit_at: None,
             last_tree_emit_track_count: 0,
+            deferred_tree_rebuild_at: None,
         }
     }
 
@@ -791,6 +842,7 @@ impl BridgeLoopRuntime {
     fn handle_command(&mut self, cmd: BridgeCommand, event_tx: &Sender<BridgeEvent>) {
         let rebuild_tree =
             command_requires_tree_rebuild(&cmd, self.state.settings.library_sort_mode);
+        let deferred_tree_rebuild = command_tree_rebuild_delay(&cmd);
         let refresh_queue_snapshot = command_requires_queue_snapshot(&cmd);
         let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
         let mut command_context = BridgeCommandContext {
@@ -800,6 +852,7 @@ impl BridgeLoopRuntime {
             lastfm: &self.lastfm,
             search_query_tx: &self.search_query_tx,
             external_queue_details_tx: &self.external_queue_details_tx,
+            apply_album_art_tx: &self.apply_album_art_tx,
             event_tx,
             running: &mut self.flags.running,
             settings_dirty: &mut self.flags.settings_dirty,
@@ -808,6 +861,10 @@ impl BridgeLoopRuntime {
         if rebuild_tree {
             self.state.rebuild_pre_built_tree();
             self.snapshot_plan.include_tree_in_next_snapshot = true;
+        } else if changed {
+            if let Some(delay) = deferred_tree_rebuild {
+                self.deferred_tree_rebuild_at = Some(Instant::now() + delay);
+            }
         }
         if changed {
             self.flags.snapshot_dirty = true;
@@ -841,6 +898,7 @@ impl BridgeLoopRuntime {
         if changed {
             self.flags.snapshot_dirty = true;
         }
+        self.maybe_rebuild_tree_after_deferred_update();
         if self.flags.snapshot_dirty && self.last_snapshot_emit.elapsed() >= self.snapshot_interval
         {
             self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
@@ -850,7 +908,7 @@ impl BridgeLoopRuntime {
             flush_pending_search_results_event(event_tx, &mut self.state.pending_search_results);
     }
 
-    fn pump_bridge_events(&mut self, _event_tx: &Sender<BridgeEvent>) -> bool {
+    fn pump_bridge_events(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
         let playback_changed = pump_playback_events(
             &self.playback_rx,
             &self.analysis,
@@ -862,6 +920,12 @@ impl BridgeLoopRuntime {
         let library_changed = pump_library_events(
             &self.library_rx,
             &self.external_queue_details_tx,
+            &mut self.state,
+        );
+        let apply_album_art_changed = pump_apply_album_art_events(
+            &self.apply_album_art_rx,
+            &self.metadata,
+            event_tx,
             &mut self.state,
         );
         let external_queue_details_changed = pump_external_queue_detail_events(
@@ -876,6 +940,9 @@ impl BridgeLoopRuntime {
         let _ = pump_search_results(&self.search_results_rx, &mut self.state);
         tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
         self.revalidate_queue_details();
+        if apply_album_art_changed {
+            self.deferred_tree_rebuild_at = Some(Instant::now() + Duration::from_millis(150));
+        }
         self.handle_library_refresh(library_changed);
         if external_queue_details_changed {
             self.snapshot_plan.include_queue_in_next_snapshot = true;
@@ -884,6 +951,7 @@ impl BridgeLoopRuntime {
             || analysis_changed
             || metadata_changed
             || library_changed
+            || apply_album_art_changed
             || external_queue_details_changed
             || lastfm_changed
     }
@@ -903,6 +971,7 @@ impl BridgeLoopRuntime {
         if !library_changed {
             return;
         }
+        self.deferred_tree_rebuild_at = None;
         self.snapshot_plan.include_queue_in_next_snapshot = true;
         let now = Instant::now();
         let track_delta = self
@@ -921,6 +990,19 @@ impl BridgeLoopRuntime {
             self.state.rebuild_pre_built_tree();
             self.snapshot_plan.include_tree_in_next_snapshot = true;
         }
+    }
+
+    fn maybe_rebuild_tree_after_deferred_update(&mut self) {
+        let Some(deadline) = self.deferred_tree_rebuild_at else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        self.deferred_tree_rebuild_at = None;
+        self.state.rebuild_pre_built_tree();
+        self.snapshot_plan.include_tree_in_next_snapshot = true;
+        self.flags.snapshot_dirty = true;
     }
 
     fn emit_snapshot(&mut self, event_tx: &Sender<BridgeEvent>, include_queue: bool) {
@@ -1015,6 +1097,8 @@ fn spawn_bridge_support_threads(
     search_results_tx: Sender<BridgeSearchResultsFrame>,
     external_queue_details_rx: Receiver<ExternalQueueDetailsRequest>,
     external_queue_details_event_tx: Sender<ExternalQueueDetailsEvent>,
+    apply_album_art_rx: Receiver<ApplyAlbumArtRequest>,
+    apply_album_art_event_tx: Sender<ApplyAlbumArtEvent>,
 ) {
     let _ = std::thread::Builder::new()
         .name("ferrous-bridge-search".to_string())
@@ -1027,6 +1111,9 @@ fn spawn_bridge_support_threads(
                 &external_queue_details_event_tx,
             );
         });
+    let _ = std::thread::Builder::new()
+        .name("ferrous-apply-artwork".to_string())
+        .spawn(move || run_apply_album_art_worker(&apply_album_art_rx, &apply_album_art_event_tx));
 }
 
 fn spawn_lastfm_service(settings: &BridgeSettings) -> (LastFmHandle, Receiver<LastFmEvent>) {
@@ -1281,6 +1368,15 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
     }
 }
 
+fn command_tree_rebuild_delay(cmd: &BridgeCommand) -> Option<Duration> {
+    match cmd {
+        BridgeCommand::Library(BridgeLibraryCommand::ApplyAlbumArt { .. }) => {
+            Some(Duration::from_millis(350))
+        }
+        _ => None,
+    }
+}
+
 fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
     match cmd {
         BridgeCommand::Queue(queue_cmd) => !matches!(queue_cmd, BridgeQueueCommand::Select(_)),
@@ -1324,9 +1420,19 @@ struct BridgeCommandContext<'a> {
     lastfm: &'a LastFmHandle,
     search_query_tx: &'a Sender<SearchWorkerQuery>,
     external_queue_details_tx: &'a Sender<ExternalQueueDetailsRequest>,
+    apply_album_art_tx: &'a Sender<ApplyAlbumArtRequest>,
     event_tx: &'a Sender<BridgeEvent>,
     running: &'a mut bool,
     settings_dirty: &'a mut bool,
+}
+
+struct LibraryCommandRuntime<'a> {
+    playback: &'a PlaybackEngine,
+    library: &'a LibraryService,
+    external_queue_details_tx: &'a Sender<ExternalQueueDetailsRequest>,
+    apply_album_art_tx: &'a Sender<ApplyAlbumArtRequest>,
+    search_query_tx: &'a Sender<SearchWorkerQuery>,
+    event_tx: &'a Sender<BridgeEvent>,
 }
 
 fn handle_playback_bridge_command(
@@ -1494,11 +1600,14 @@ fn handle_bridge_command(
         BridgeCommand::Library(cmd) => handle_library_command(
             cmd,
             state,
-            context.playback,
-            context.library,
-            context.external_queue_details_tx,
-            context.search_query_tx,
-            context.event_tx,
+            &LibraryCommandRuntime {
+                playback: context.playback,
+                library: context.library,
+                external_queue_details_tx: context.external_queue_details_tx,
+                apply_album_art_tx: context.apply_album_art_tx,
+                search_query_tx: context.search_query_tx,
+                event_tx: context.event_tx,
+            },
         ),
         BridgeCommand::Analysis(cmd) => match cmd {
             BridgeAnalysisCommand::SetFftSize(size) => {
@@ -2457,62 +2566,114 @@ fn handle_library_root_command(
     }
 }
 
-fn handle_library_command(
+fn handle_library_view_command(
     cmd: BridgeLibraryCommand,
     state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    library: &LibraryService,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    search_query_tx: &Sender<SearchWorkerQuery>,
-    event_tx: &Sender<BridgeEvent>,
-) -> bool {
-    if let Some(outcome) = handle_library_root_command(&cmd, library) {
-        return outcome;
-    }
+    runtime: &LibraryCommandRuntime<'_>,
+) -> Option<bool> {
     match cmd {
-        BridgeLibraryCommand::AddTrack(path) => handle_import_library_command(
+        BridgeLibraryCommand::ApplyAlbumArt {
+            track_path,
+            artwork_path,
+        } => {
+            if runtime
+                .apply_album_art_tx
+                .send(ApplyAlbumArtRequest {
+                    track_path,
+                    artwork_path,
+                })
+                .is_err()
+            {
+                let _ = try_send_event(
+                    runtime.event_tx,
+                    BridgeEvent::Error("failed to queue album art apply request".to_string()),
+                );
+            }
+            Some(false)
+        }
+        BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
+            let normalized = key.trim();
+            if normalized.is_empty() {
+                return Some(false);
+            }
+            Some(if expanded {
+                state.expanded_keys.insert(normalized.to_string())
+            } else {
+                state.expanded_keys.remove(normalized)
+            })
+        }
+        BridgeLibraryCommand::SetSearchQuery { seq, query } => {
+            let _ = runtime.search_query_tx.send(SearchWorkerQuery {
+                seq,
+                query: query.trim().to_string(),
+                library: Arc::clone(&state.library),
+            });
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+fn handle_library_collection_command(
+    cmd: BridgeLibraryCommand,
+    state: &mut BridgeState,
+    runtime: &LibraryCommandRuntime<'_>,
+) -> Option<bool> {
+    match cmd {
+        BridgeLibraryCommand::AddTrack(path) => Some(handle_import_library_command(
             state,
-            playback,
-            external_queue_details_tx,
-            event_tx,
+            runtime.playback,
+            runtime.external_queue_details_tx,
+            runtime.event_tx,
             "append",
             vec![path],
             false,
-        ),
-        BridgeLibraryCommand::PlayTrack(path) => handle_import_library_command(
+        )),
+        BridgeLibraryCommand::PlayTrack(path) => Some(handle_import_library_command(
             state,
-            playback,
-            external_queue_details_tx,
-            event_tx,
+            runtime.playback,
+            runtime.external_queue_details_tx,
+            runtime.event_tx,
             "open",
             vec![path],
             true,
-        ),
-        BridgeLibraryCommand::ReplaceWithAlbum(paths) => handle_import_library_command(
+        )),
+        BridgeLibraryCommand::ReplaceWithAlbum(paths) => Some(handle_import_library_command(
             state,
-            playback,
-            external_queue_details_tx,
-            event_tx,
+            runtime.playback,
+            runtime.external_queue_details_tx,
+            runtime.event_tx,
             "open",
             paths,
             true,
-        ),
-        BridgeLibraryCommand::AppendAlbum(paths) => handle_import_library_command(
+        )),
+        BridgeLibraryCommand::AppendAlbum(paths) => Some(handle_import_library_command(
             state,
-            playback,
-            external_queue_details_tx,
-            event_tx,
+            runtime.playback,
+            runtime.external_queue_details_tx,
+            runtime.event_tx,
             "append",
             paths,
             false,
-        ),
+        )),
         BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => {
             let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
-            replace_queue_paths(state, playback, external_queue_details_tx, paths, true)
+            Some(replace_queue_paths(
+                state,
+                runtime.playback,
+                runtime.external_queue_details_tx,
+                paths,
+                true,
+            ))
         }
         BridgeLibraryCommand::AppendAlbumByKey { artist, album } => {
             let paths = collect_album_paths_for_queue(&state.library, &artist, &album);
-            append_queue_paths(state, playback, external_queue_details_tx, paths)
+            Some(append_queue_paths(
+                state,
+                runtime.playback,
+                runtime.external_queue_details_tx,
+                paths,
+            ))
         }
         BridgeLibraryCommand::ReplaceArtistByKey { artist } => {
             let paths = collect_artist_paths_for_queue(
@@ -2520,7 +2681,13 @@ fn handle_library_command(
                 &artist,
                 state.settings.library_sort_mode,
             );
-            replace_queue_paths(state, playback, external_queue_details_tx, paths, true)
+            Some(replace_queue_paths(
+                state,
+                runtime.playback,
+                runtime.external_queue_details_tx,
+                paths,
+                true,
+            ))
         }
         BridgeLibraryCommand::AppendArtistByKey { artist } => {
             let paths = collect_artist_paths_for_queue(
@@ -2528,42 +2695,119 @@ fn handle_library_command(
                 &artist,
                 state.settings.library_sort_mode,
             );
-            append_queue_paths(state, playback, external_queue_details_tx, paths)
+            Some(append_queue_paths(
+                state,
+                runtime.playback,
+                runtime.external_queue_details_tx,
+                paths,
+            ))
         }
-        BridgeLibraryCommand::ReplaceAllTracks => replace_queue_paths(
+        BridgeLibraryCommand::ReplaceAllTracks => Some(replace_queue_paths(
             state,
-            playback,
-            external_queue_details_tx,
+            runtime.playback,
+            runtime.external_queue_details_tx,
             library_track_paths(&state.library),
             true,
-        ),
-        BridgeLibraryCommand::AppendAllTracks => append_queue_paths(
+        )),
+        BridgeLibraryCommand::AppendAllTracks => Some(append_queue_paths(
             state,
-            playback,
-            external_queue_details_tx,
+            runtime.playback,
+            runtime.external_queue_details_tx,
             library_track_paths(&state.library),
-        ),
-        BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
-            let normalized = key.trim();
-            if normalized.is_empty() {
-                return false;
-            }
-            if expanded {
-                state.expanded_keys.insert(normalized.to_string())
-            } else {
-                state.expanded_keys.remove(normalized)
-            }
-        }
-        BridgeLibraryCommand::SetSearchQuery { seq, query } => {
-            let _ = search_query_tx.send(SearchWorkerQuery {
-                seq,
-                query: query.trim().to_string(),
-                library: Arc::clone(&state.library),
-            });
-            false
-        }
-        _ => false,
+        )),
+        _ => None,
     }
+}
+
+fn pump_apply_album_art_events(
+    apply_album_art_rx: &Receiver<ApplyAlbumArtEvent>,
+    metadata: &MetadataService,
+    event_tx: &Sender<BridgeEvent>,
+    state: &mut BridgeState,
+) -> bool {
+    let mut changed = false;
+
+    while let Ok(event) = apply_album_art_rx.try_recv() {
+        if let Some(error) = event.error.as_ref() {
+            let _ = try_send_event(event_tx, BridgeEvent::Error(error.clone()));
+            if event.indexed_by_path.is_empty() {
+                continue;
+            }
+        }
+
+        update_library_cover_paths(state, &event.indexed_by_path);
+        update_queue_cover_paths(state, &event.indexed_by_path);
+
+        if let Some(current_path) = state.playback.current.as_ref() {
+            if let Some(indexed) = event.indexed_by_path.get(current_path) {
+                let next_cover_path =
+                    (!indexed.cover_path.is_empty()).then(|| indexed.cover_path.clone());
+                if state.metadata.cover_art_path != next_cover_path {
+                    state.metadata.cover_art_path = next_cover_path;
+                }
+            }
+        }
+
+        metadata.request(event.track_path);
+        changed = true;
+    }
+
+    changed
+}
+
+fn update_library_cover_paths(
+    state: &mut BridgeState,
+    indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
+) {
+    let mut next_library = (*state.library).clone();
+    let mut changed = false;
+    for track in &mut next_library.tracks {
+        let Some(indexed) = indexed_by_path.get(&track.path) else {
+            continue;
+        };
+        if track.cover_path == indexed.cover_path {
+            continue;
+        }
+        track.cover_path = indexed.cover_path.clone();
+        changed = true;
+    }
+    if changed {
+        next_library.search_revision = next_library.search_revision.saturating_add(1);
+        state.library = Arc::new(next_library);
+    }
+}
+
+fn update_queue_cover_paths(
+    state: &mut BridgeState,
+    indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
+) {
+    for (path, indexed) in indexed_by_path {
+        let Some(existing) = state.queue_details.get_mut(path) else {
+            continue;
+        };
+        if existing.cover_path != indexed.cover_path {
+            existing.cover_path.clone_from(&indexed.cover_path);
+        }
+        if let Some(fingerprint) = track_file_fingerprint(path) {
+            state
+                .queue_detail_fingerprints
+                .insert(path.clone(), fingerprint);
+        }
+    }
+}
+
+fn handle_library_command(
+    cmd: BridgeLibraryCommand,
+    state: &mut BridgeState,
+    runtime: &LibraryCommandRuntime<'_>,
+) -> bool {
+    if let Some(outcome) = handle_library_root_command(&cmd, runtime.library) {
+        return outcome;
+    }
+    if let Some(outcome) = handle_library_view_command(cmd.clone(), state, runtime) {
+        return outcome;
+    }
+    handle_library_collection_command(cmd, state, runtime).unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -3859,6 +4103,43 @@ fn run_external_queue_detail_worker(
             fingerprint: request.fingerprint,
             indexed,
         });
+    }
+}
+
+fn run_apply_album_art_worker(
+    req_rx: &Receiver<ApplyAlbumArtRequest>,
+    event_tx: &Sender<ApplyAlbumArtEvent>,
+) {
+    while let Ok(request) = req_rx.recv() {
+        let event = match apply_artwork_to_track(&request.track_path, &request.artwork_path) {
+            Ok(outcome) => {
+                let mut affected_paths = outcome.affected_track_paths;
+                affected_paths.sort();
+                affected_paths.dedup();
+
+                let refresh_error = refresh_cover_paths_for_tracks(&affected_paths).err();
+                let indexed_by_path = affected_paths
+                    .into_iter()
+                    .map(|path| {
+                        let indexed = read_track_info(&path);
+                        (path, indexed)
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                ApplyAlbumArtEvent {
+                    track_path: request.track_path,
+                    indexed_by_path,
+                    error: refresh_error
+                        .map(|error| format!("failed to refresh cover paths: {error}")),
+                }
+            }
+            Err(error) => ApplyAlbumArtEvent {
+                track_path: request.track_path,
+                indexed_by_path: HashMap::new(),
+                error: Some(format!("failed to apply album art: {error}")),
+            },
+        };
+        let _ = event_tx.send(event);
     }
 }
 

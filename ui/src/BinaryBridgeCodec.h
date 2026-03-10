@@ -69,6 +69,7 @@ enum CommandId : quint16 {
     CmdDisconnectLastFm = 43,
     CmdSetViewerFullscreenMode = 44,
     CmdRenameRoot = 45,
+    CmdApplyAlbumArt = 46,
 };
 
 struct DecodedPlayback {
