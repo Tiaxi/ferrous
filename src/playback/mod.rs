@@ -1788,6 +1788,38 @@ mod backend {
             .map_err(|_| anyhow!("missing output sink element"))
     }
 
+    fn build_raw_audio_caps() -> gst::Caps {
+        gst::Caps::builder("audio/x-raw").build()
+    }
+
+    fn build_analysis_audio_caps() -> gst::Caps {
+        gst::Caps::builder("audio/x-raw")
+            .field("format", "F32LE")
+            .field("layout", "interleaved")
+            // Keep analysis workload constant across source formats/codecs.
+            .field("rate", 44_100i32)
+            .build()
+    }
+
+    fn build_capsfilter(caps: &gst::Caps) -> anyhow::Result<gst::Element> {
+        let capsfilter = gst::ElementFactory::make("capsfilter")
+            .build()
+            .map_err(|_| anyhow!("missing capsfilter element"))?;
+        capsfilter.set_property("caps", caps);
+        Ok(capsfilter)
+    }
+
+    fn build_analysis_queue() -> anyhow::Result<gst::Element> {
+        let queue = gst::ElementFactory::make("queue")
+            .build()
+            .map_err(|_| anyhow!("missing queue element"))?;
+        queue.set_property_from_str("leaky", "downstream");
+        queue.set_property("max-size-buffers", 128u32);
+        queue.set_property("max-size-bytes", 0u32);
+        queue.set_property("max-size-time", 0u64);
+        Ok(queue)
+    }
+
     fn link_tee_branch(
         tee: &gst::Element,
         branch_sink: &gst::Element,
@@ -1814,6 +1846,10 @@ mod backend {
         pcm_tx: Sender<AnalysisPcmChunk>,
     ) -> anyhow::Result<gst::Bin> {
         let bin = gst::Bin::new();
+        let raw_audio_caps = build_raw_audio_caps();
+        let analysis_caps = build_analysis_audio_caps();
+
+        let input_capsfilter = build_capsfilter(&raw_audio_caps)?;
 
         let tee = gst::ElementFactory::make("tee")
             .build()
@@ -1828,32 +1864,17 @@ mod backend {
         let resample_out = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|_| anyhow!("missing audioresample element"))?;
+        let output_capsfilter = build_capsfilter(&raw_audio_caps)?;
         let sink_out = build_output_sink()?;
 
-        let queue_tap = gst::ElementFactory::make("queue")
-            .build()
-            .map_err(|_| anyhow!("missing queue element"))?;
-        queue_tap.set_property_from_str("leaky", "downstream");
-        queue_tap.set_property("max-size-buffers", 128u32);
-        queue_tap.set_property("max-size-bytes", 0u32);
-        queue_tap.set_property("max-size-time", 0u64);
+        let queue_tap = build_analysis_queue()?;
         let conv = gst::ElementFactory::make("audioconvert")
             .build()
             .map_err(|_| anyhow!("missing audioconvert element"))?;
         let resample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|_| anyhow!("missing audioresample element"))?;
-        let capsfilter = gst::ElementFactory::make("capsfilter")
-            .build()
-            .map_err(|_| anyhow!("missing capsfilter element"))?;
-
-        let caps = gst::Caps::builder("audio/x-raw")
-            .field("format", "F32LE")
-            .field("layout", "interleaved")
-            // Keep analysis workload constant across source formats/codecs.
-            .field("rate", 44_100i32)
-            .build();
-        capsfilter.set_property("caps", &caps);
+        let capsfilter = build_capsfilter(&analysis_caps)?;
 
         // Keep tap synced by default to avoid analysis racing ahead of
         // audible playback; explicit env override is still available for
@@ -1864,7 +1885,7 @@ mod backend {
             != Some(0);
 
         let appsink = gst_app::AppSink::builder()
-            .caps(&caps)
+            .caps(&analysis_caps)
             .drop(true)
             .max_buffers(8)
             .sync(analysis_sync)
@@ -1883,10 +1904,12 @@ mod backend {
         );
 
         bin.add_many([
+            &input_capsfilter,
             &tee,
             &queue_out,
             &conv_out,
             &resample_out,
+            &output_capsfilter,
             &sink_out,
             &queue_tap,
             &conv,
@@ -1896,8 +1919,16 @@ mod backend {
         ])
         .context("failed to add elements to analysis audio bin")?;
 
-        gst::Element::link_many([&queue_out, &conv_out, &resample_out, &sink_out])
-            .context("failed to link output branch")?;
+        gst::Element::link_many([&input_capsfilter, &tee])
+            .context("failed to link audio sink ingress")?;
+        gst::Element::link_many([
+            &queue_out,
+            &conv_out,
+            &resample_out,
+            &output_capsfilter,
+            &sink_out,
+        ])
+        .context("failed to link output branch")?;
         gst::Element::link_many([
             &queue_tap,
             &conv,
@@ -1910,10 +1941,10 @@ mod backend {
         link_tee_branch(&tee, &queue_out, "output queue")?;
         link_tee_branch(&tee, &queue_tap, "analysis queue")?;
 
-        let tee_sink_pad = tee
+        let ingress_sink_pad = input_capsfilter
             .static_pad("sink")
-            .ok_or_else(|| anyhow!("missing tee sink pad"))?;
-        let ghost = gst::GhostPad::with_target(&tee_sink_pad)
+            .ok_or_else(|| anyhow!("missing input capsfilter sink pad"))?;
+        let ghost = gst::GhostPad::with_target(&ingress_sink_pad)
             .map_err(|_| anyhow!("failed creating ghost pad"))?;
         ghost
             .set_active(true)
