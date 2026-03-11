@@ -57,6 +57,19 @@ constexpr int kMaxDiagnosticsLines = 2000;
 constexpr int kItunesArtworkSearchRequestLimit = 50;
 constexpr int kItunesArtworkResultDisplayLimit = 40;
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+bool shouldEmitUiProfileLog(qint64 nowMs, qint64 *lastMs, qint64 minIntervalMs = 250) {
+    if (lastMs == nullptr) {
+        return true;
+    }
+    if (*lastMs != 0 && (nowMs - *lastMs) < minIntervalMs) {
+        return false;
+    }
+    *lastMs = nowMs;
+    return true;
+}
+#endif
+
 bool isNewerSeq(quint32 seq, quint32 last) {
     return static_cast<qint32>(seq - last) > 0;
 }
@@ -581,6 +594,10 @@ QVariant QueueRowsModel::trackNumberAt(int index) const {
 
 BridgeClient::BridgeClient(QObject *parent)
     : QObject(parent) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    m_profileUiEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
+        || qEnvironmentVariableIsSet("FERROUS_PROFILE");
+#endif
     m_fileBrowserName = detectFileBrowserName();
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
     reloadDiagnosticsFromDisk();
@@ -1348,10 +1365,15 @@ void BridgeClient::pollInProcessBridge() {
     if (m_ffiBridge == nullptr) {
         return;
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QElapsedTimer pollTimer;
+    pollTimer.start();
+#endif
     ferrous_ffi_bridge_poll(m_ffiBridge, 64);
 
     bool anySnapshotChanged = false;
     int processedAnalysisFrames = 0;
+    qsizetype processedAnalysisBytes = 0;
     constexpr int kMaxAnalysisFramesPerPass = 8;
     while (processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
         std::size_t len = 0;
@@ -1363,6 +1385,7 @@ void BridgeClient::pollInProcessBridge() {
         const QByteArray chunk(
             reinterpret_cast<const char *>(framePtr),
             static_cast<qsizetype>(len));
+        processedAnalysisBytes += chunk.size();
         ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
         processAnalysisBytes(chunk);
     }
@@ -1438,6 +1461,28 @@ void BridgeClient::pollInProcessBridge() {
     if (anySnapshotChanged) {
         scheduleSnapshotChanged();
     }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        const double pollMs = static_cast<double>(pollTimer.nsecsElapsed()) / 1'000'000.0;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool saturated = processedAnalysisFrames >= kMaxAnalysisFramesPerPass;
+        if ((pollMs >= 6.0 || saturated)
+            && shouldEmitUiProfileLog(nowMs, &m_lastBridgePollProfileLogMs, 200)) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("ui-prof"),
+                QStringLiteral(
+                    "bridge_poll ms=%1 analysis_frames=%2 analysis_kb=%3 tree_frames=%4 search_frames=%5 events=%6 saturated=%7")
+                    .arg(pollMs, 0, 'f', 2)
+                    .arg(processedAnalysisFrames)
+                    .arg(static_cast<double>(processedAnalysisBytes) / 1024.0, 0, 'f', 1)
+                    .arg(processedTreeFrames)
+                    .arg(processedSearchFrames)
+                    .arg(processedEvents)
+                    .arg(saturated ? 1 : 0));
+        }
+    }
+#endif
 }
 
 QString BridgeClient::playbackState() const {
@@ -2763,9 +2808,15 @@ void BridgeClient::scanDefaultMusicRoot() {
 }
 
 QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QElapsedTimer deltaTimer;
+    deltaTimer.start();
+#endif
     QVariantMap out;
     QVariantList channels;
     channels.reserve(m_spectrogramChannels.size());
+    int totalRows = 0;
+    qsizetype totalBytes = 0;
     for (auto &channel : m_spectrogramChannels) {
         QVariantMap channelMap;
         channelMap.insert(QStringLiteral("label"), channel.label);
@@ -2773,11 +2824,29 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
         channelMap.insert(QStringLiteral("bins"), channel.packedBins);
         channelMap.insert(QStringLiteral("data"), channel.packedRows);
         channels.push_back(channelMap);
+        totalRows += channel.packedRowsCount;
+        totalBytes += channel.packedRows.size();
         channel.packedRows.clear();
         channel.packedRowsCount = 0;
     }
     out.insert(QStringLiteral("channels"), channels);
     m_spectrogramChannels.clear();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        const double deltaMs = static_cast<double>(deltaTimer.nsecsElapsed()) / 1'000'000.0;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if ((deltaMs >= 2.0 || totalRows >= 48)
+            && shouldEmitUiProfileLog(nowMs, &m_lastSpectrogramDeltaProfileLogMs, 200)) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("ui-prof"),
+                QStringLiteral("spectrogram_delta ms=%1 channels=%2 rows=%3 kb=%4")
+                    .arg(deltaMs, 0, 'f', 2)
+                    .arg(channels.size())
+                    .arg(totalRows)
+                    .arg(static_cast<double>(totalBytes) / 1024.0, 0, 'f', 1));
+        }
+    }
+#endif
     return out;
 }
 
@@ -3144,12 +3213,20 @@ void BridgeClient::flushGlobalSearchQuery() {
 }
 
 void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QElapsedTimer analysisTimer;
+    analysisTimer.start();
+#endif
     if (chunk.isEmpty()) {
         return;
     }
     m_analysisBuffer += chunk;
 
     bool changed = false;
+    int parsedFrames = 0;
+    int totalRows = 0;
+    int totalChannels = 0;
+    int maxBins = 0;
     qsizetype readOffset = m_analysisBufferReadOffset;
     const qsizetype totalSize = m_analysisBuffer.size();
     const auto *base = reinterpret_cast<const uchar *>(m_analysisBuffer.constData());
@@ -3194,6 +3271,10 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         if (static_cast<qsizetype>(frameBytes) < expected) {
             continue;
         }
+        parsedFrames++;
+        totalRows += static_cast<int>(rowCount);
+        totalChannels = std::max(totalChannels, static_cast<int>(channelCount));
+        maxBins = std::max(maxBins, static_cast<int>(binCount));
         if (m_hasAnalysisFrameSeq && !isNewerSeq(frameSeq, m_lastAnalysisFrameSeq)) {
             m_analysisDroppedFrames++;
             continue;
@@ -3329,6 +3410,33 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
     } else {
         m_analysisBufferReadOffset = readOffset;
     }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        int pendingRows = 0;
+        for (const auto &channel : m_spectrogramChannels) {
+            pendingRows = std::max(pendingRows, channel.packedRowsCount);
+        }
+        const double analysisMs = static_cast<double>(analysisTimer.nsecsElapsed()) / 1'000'000.0;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if ((analysisMs >= 3.0 || pendingRows >= 96 || parsedFrames > 1)
+            && shouldEmitUiProfileLog(nowMs, &m_lastAnalysisProfileLogMs, 200)) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("ui-prof"),
+                QStringLiteral(
+                    "analysis_decode ms=%1 chunk_kb=%2 parsed_frames=%3 rows=%4 channels=%5 bins=%6 pending_rows=%7 changed=%8 dropped=%9")
+                    .arg(analysisMs, 0, 'f', 2)
+                    .arg(static_cast<double>(chunk.size()) / 1024.0, 0, 'f', 1)
+                    .arg(parsedFrames)
+                    .arg(totalRows)
+                    .arg(totalChannels)
+                    .arg(maxBins)
+                    .arg(pendingRows)
+                    .arg(changed ? 1 : 0)
+                    .arg(static_cast<qulonglong>(m_analysisDroppedFrames)));
+        }
+    }
+#endif
 }
 
 void BridgeClient::scheduleSnapshotChanged() {

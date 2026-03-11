@@ -543,6 +543,10 @@ private:
     quint64 m_searchFramesApplied{0};
     quint64 m_searchFramesDroppedStale{0};
     quint64 m_searchFramesDecodeErrors{0};
+    bool m_profileUiEnabled{false};
+    qint64 m_lastBridgePollProfileLogMs{0};
+    qint64 m_lastAnalysisProfileLogMs{0};
+    qint64 m_lastSpectrogramDeltaProfileLogMs{0};
     QByteArray m_analysisBuffer;
     qsizetype m_analysisBufferReadOffset{0};
     bool m_hasAnalysisFrameSeq{false};

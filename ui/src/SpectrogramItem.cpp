@@ -47,6 +47,25 @@ quint8 spectrogramGetValue(const std::vector<quint8> &row, int start, int end) {
     }
     return value;
 }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+bool shouldLogProfileSpike(
+    std::chrono::steady_clock::time_point *lastLog,
+    std::chrono::steady_clock::time_point now,
+    double minIntervalSeconds = 0.20) {
+    if (lastLog == nullptr) {
+        return true;
+    }
+    if (lastLog->time_since_epoch().count() != 0) {
+        const double elapsed = std::chrono::duration<double>(now - *lastLog).count();
+        if (elapsed < minIntervalSeconds) {
+            return false;
+        }
+    }
+    *lastLog = now;
+    return true;
+}
+#endif
 } // namespace
 
 SpectrogramItem::SpectrogramItem(QQuickItem *parent)
@@ -217,6 +236,9 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
 }
 
 void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    const auto appendStart = std::chrono::steady_clock::now();
+#endif
     QMutexLocker lock(&m_stateMutex);
     if (packedRows.isEmpty() || rowCount <= 0 || binsPerRow <= 0) {
         return;
@@ -255,6 +277,24 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileEnabled) {
+        const auto now = std::chrono::steady_clock::now();
+        const double appendMs = std::chrono::duration<double, std::milli>(now - appendStart).count();
+        const int backlog = static_cast<int>(m_pendingColumns.size());
+        if ((appendMs >= 2.0 || backlog >= 96)
+            && shouldLogProfileSpike(&m_profileLastAppendSpike, now)) {
+            std::fprintf(
+                stderr,
+                "[ui-spectrogram] append rows=%d bins=%d copy_ms=%.3f backlog=%d cols=%zu\n",
+                appended,
+                binsPerRow,
+                appendMs,
+                backlog,
+                static_cast<size_t>(m_columns.size()));
+        }
+    }
+#endif
     update();
 }
 
@@ -308,8 +348,20 @@ void SpectrogramItem::paint(QPainter *painter) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
         const auto paint_end = std::chrono::steady_clock::now();
+        const double paintMs = std::chrono::duration<double, std::milli>(paint_end - paint_start).count();
         m_profilePaints += 1;
-        m_profilePaintMs += std::chrono::duration<double, std::milli>(paint_end - paint_start).count();
+        m_profilePaintMs += paintMs;
+        if (paintMs >= 4.0 && shouldLogProfileSpike(&m_profileLastPaintSpike, paint_end)) {
+            std::fprintf(
+                stderr,
+                "[ui-spectrogram] paint_spike ms=%.3f pending=%zu cols=%zu bins=%d size=%dx%d\n",
+                paintMs,
+                static_cast<size_t>(m_pendingColumns.size()),
+                static_cast<size_t>(m_columns.size()),
+                m_binsPerColumn,
+                w,
+                h);
+        }
         const double elapsed = std::chrono::duration<double>(paint_end - m_profileLast).count();
         if (elapsed >= 1.0) {
             std::fprintf(
@@ -702,8 +754,8 @@ void SpectrogramItem::handleWindowAfterAnimating() {
 
     bool advanced = false;
     bool pending = false;
-    QMutexLocker lock(&m_stateMutex);
     double elapsed = 0.0;
+    QMutexLocker lock(&m_stateMutex);
     if (m_animationTickInitialized) {
         elapsed = std::chrono::duration<double>(now - m_lastAnimationTick).count();
     }
@@ -718,6 +770,20 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     }
     advanced = advanceAnimationLocked(elapsed);
     pending = !m_pendingColumns.empty();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileEnabled
+        && elapsed >= 0.025
+        && shouldLogProfileSpike(&m_profileLastFrameGapSpike, now)) {
+        std::fprintf(
+            stderr,
+            "[ui-spectrogram] frame_gap ms=%.3f pending=%zu phase=%.3f fps=%d advanced=%d\n",
+            elapsed * 1000.0,
+            static_cast<size_t>(m_pendingColumns.size()),
+            m_pendingPhase,
+            m_fpsValue,
+            advanced ? 1 : 0);
+    }
+#endif
     lock.unlock();
     if (changed || advanced || pending) {
         update();
