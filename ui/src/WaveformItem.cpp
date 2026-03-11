@@ -2,21 +2,42 @@
 
 #include <QMutexLocker>
 #include <QPainter>
+#include <QQuickWindow>
+#include <QSGRendererInterface>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 
+namespace {
+bool shouldUseFboTarget(QQuickWindow *window) {
+    if (qEnvironmentVariableIsSet("FERROUS_UI_PAINT_IMAGE")) {
+        return false;
+    }
+    if (qEnvironmentVariableIsSet("FERROUS_UI_PAINT_FBO")) {
+        return true;
+    }
+    if (window == nullptr || window->rendererInterface() == nullptr) {
+        return false;
+    }
+    return window->rendererInterface()->graphicsApi() == QSGRendererInterface::OpenGL;
+}
+} // namespace
+
 WaveformItem::WaveformItem(QQuickItem *parent)
     : QQuickPaintedItem(parent) {
     setAntialiasing(false);
     setOpaquePainting(true);
-    // Keep Image render path by default; allow FBO only via explicit opt-in.
-    const bool useFboTarget = qEnvironmentVariableIsSet("FERROUS_UI_PAINT_FBO");
-    if (useFboTarget) {
+    if (shouldUseFboTarget(window())) {
         setRenderTarget(QQuickPaintedItem::FramebufferObject);
     }
+    connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow *window) {
+        setRenderTarget(
+            shouldUseFboTarget(window)
+                ? QQuickPaintedItem::FramebufferObject
+                : QQuickPaintedItem::Image);
+    });
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
