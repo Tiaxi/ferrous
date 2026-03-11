@@ -962,6 +962,7 @@ mod backend {
         target_volume: f32,
         applied_volume: f32,
         startup_gain_ramp: bool,
+        buffering_active: bool,
         seek_hold: Option<(Instant, Duration)>,
     }
 
@@ -1000,6 +1001,7 @@ mod backend {
                 target_volume: 1.0,
                 applied_volume: 1.0,
                 startup_gain_ramp: false,
+                buffering_active: false,
                 seek_hold: None,
             }
         }
@@ -1043,6 +1045,7 @@ mod backend {
                 &mut self.startup_gain_ramp,
                 force_play,
             );
+            self.buffering_active = false;
             self.emit_track_changed(path, queue_index, kind);
             self.emit_snapshot();
         }
@@ -1051,6 +1054,7 @@ mod backend {
             soft_mute(&self.playbin, &mut self.applied_volume);
             let _ = self.playbin.set_state(gst::State::Ready);
             self.startup_gain_ramp = false;
+            self.buffering_active = false;
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
@@ -1216,6 +1220,7 @@ mod backend {
                     .set_property("volume", f64::from(self.applied_volume));
                 self.startup_gain_ramp = true;
             }
+            self.buffering_active = false;
             if self.playbin.set_state(gst::State::Playing).is_ok() {
                 self.snapshot.state = PlaybackState::Playing;
                 if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
@@ -1226,6 +1231,7 @@ mod backend {
         }
 
         fn pause(&mut self) {
+            self.buffering_active = false;
             if self.playbin.set_state(gst::State::Paused).is_ok() {
                 self.snapshot.state = PlaybackState::Paused;
                 self.emit_snapshot();
@@ -1236,6 +1242,7 @@ mod backend {
             soft_mute(&self.playbin, &mut self.applied_volume);
             if self.playbin.set_state(gst::State::Ready).is_ok() {
                 self.startup_gain_ramp = false;
+                self.buffering_active = false;
                 self.seek_hold = None;
                 self.snapshot.state = PlaybackState::Stopped;
                 self.snapshot.position = Duration::ZERO;
@@ -1248,16 +1255,7 @@ mod backend {
         fn seek(&mut self, pos: Duration) {
             let nanos = u64::try_from(pos.as_nanos().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
             let target = gst::ClockTime::from_nseconds(nanos);
-            let seek_flags = if self
-                .snapshot
-                .current
-                .as_ref()
-                .is_some_and(|path| is_dts_file(path))
-            {
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
-            } else {
-                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
-            };
+            let seek_flags = seek_flags_for_path(self.snapshot.current.as_deref());
             let _ = self.playbin.seek_simple(seek_flags, target);
             self.snapshot.position = pos.min(self.snapshot.duration);
             self.seek_hold = Some((
@@ -1383,7 +1381,22 @@ mod backend {
 
         fn handle_bus_message(&mut self, msg: &gst::Message) {
             match msg.view() {
+                gst::MessageView::Buffering(buffering) => {
+                    let percent = buffering.percent();
+                    if percent < 100 {
+                        if self.snapshot.state == PlaybackState::Playing && !self.buffering_active {
+                            let _ = self.playbin.set_state(gst::State::Paused);
+                            self.buffering_active = true;
+                        }
+                    } else if self.buffering_active {
+                        self.buffering_active = false;
+                        if self.snapshot.state == PlaybackState::Playing {
+                            let _ = self.playbin.set_state(gst::State::Playing);
+                        }
+                    }
+                }
                 gst::MessageView::Eos(..) => {
+                    self.buffering_active = false;
                     self.snapshot.state = PlaybackState::Stopped;
                     self.snapshot.position = Duration::ZERO;
                     self.emit_snapshot();
@@ -1395,6 +1408,7 @@ mod backend {
                         err.error(),
                         err.debug()
                     );
+                    self.buffering_active = false;
                     self.snapshot.state = PlaybackState::Stopped;
                     self.emit_snapshot();
                 }
@@ -1466,16 +1480,22 @@ mod backend {
         };
         let Some(tuned_flags) = flags_class
             .builder_with_value(flags.clone())
-            .and_then(|builder| {
-                builder
-                    .unset_by_nick("download")
-                    .unset_by_nick("buffering")
-                    .build()
-            })
+            .and_then(|builder| builder.unset_by_nick("download").build())
         else {
             return;
         };
         playbin.set_property_from_value("flags", &tuned_flags);
+    }
+
+    fn seek_flags_for_path(path: Option<&Path>) -> gst::SeekFlags {
+        if path.is_some_and(is_dts_file) {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+        } else {
+            // Accurate seeks can force parsers/demuxers to scan large files.
+            // Default playback should prefer responsiveness, especially on slow
+            // network-backed filesystems.
+            gst::SeekFlags::FLUSH
+        }
     }
 
     fn maybe_emit_natural_handoff(
@@ -2084,6 +2104,22 @@ mod backend {
             assert!((pcm[0] - 1.0).abs() < f32::EPSILON);
             assert!((pcm[2] + 1.0).abs() < f32::EPSILON);
             assert!((pcm[5] - 0.5).abs() < f32::EPSILON);
+        }
+
+        #[test]
+        fn flac_seek_prefers_fast_non_accurate_mode() {
+            let flags = seek_flags_for_path(Some(Path::new("/tmp/test.flac")));
+            assert!(flags.contains(gst::SeekFlags::FLUSH));
+            assert!(!flags.contains(gst::SeekFlags::ACCURATE));
+            assert!(!flags.contains(gst::SeekFlags::KEY_UNIT));
+        }
+
+        #[test]
+        fn dts_seek_stays_key_unit_based() {
+            let flags = seek_flags_for_path(Some(Path::new("/tmp/test.dts")));
+            assert!(flags.contains(gst::SeekFlags::FLUSH));
+            assert!(flags.contains(gst::SeekFlags::KEY_UNIT));
+            assert!(!flags.contains(gst::SeekFlags::ACCURATE));
         }
 
         #[test]
