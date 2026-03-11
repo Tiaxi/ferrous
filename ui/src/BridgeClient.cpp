@@ -595,15 +595,6 @@ BridgeClient::BridgeClient(QObject *parent)
         }
     });
 
-    m_analysisNotifyTimer.setSingleShot(true);
-    m_analysisNotifyTimer.setInterval(readEnvMillis("FERROUS_UI_ANALYSIS_NOTIFY_MS", 16));
-    connect(&m_analysisNotifyTimer, &QTimer::timeout, this, [this]() {
-        if (m_analysisChangedPending) {
-            m_analysisChangedPending = false;
-            emit analysisChanged();
-        }
-    });
-
     m_globalSearchDebounceTimer.setSingleShot(true);
     m_globalSearchDebounceMs = readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 90);
     m_globalSearchShortDebounceMs = readEnvMillis(
@@ -645,7 +636,6 @@ BridgeClient::BridgeClient(QObject *parent)
 
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
-    m_analysisNotifyTimer.stop();
     m_globalSearchDebounceTimer.stop();
     m_searchApplyDispatchTimer.stop();
     cancelItunesArtworkRequests();
@@ -3349,10 +3339,20 @@ void BridgeClient::scheduleSnapshotChanged() {
 }
 
 void BridgeClient::scheduleAnalysisChanged() {
-    m_analysisChangedPending = true;
-    if (!m_analysisNotifyTimer.isActive()) {
-        m_analysisNotifyTimer.start();
+    if (m_analysisChangedPending) {
+        return;
     }
+    m_analysisChangedPending = true;
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            if (!m_analysisChangedPending) {
+                return;
+            }
+            m_analysisChangedPending = false;
+            emit analysisChanged();
+        },
+        Qt::QueuedConnection);
 }
 
 void BridgeClient::shutdownBridgeGracefully() {

@@ -520,7 +520,6 @@ private:
     int m_pendingQueueSelection{-1};
     qint64 m_pendingQueueSelectionUntilMs{0};
     QTimer m_snapshotNotifyTimer;
-    QTimer m_analysisNotifyTimer;
     QTimer m_globalSearchDebounceTimer;
     QTimer m_searchApplyDispatchTimer;
     int m_searchApplyDispatchMs{12};
