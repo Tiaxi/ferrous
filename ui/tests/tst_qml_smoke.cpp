@@ -1,3 +1,4 @@
+#include <QApplication>
 #include <QFileInfo>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -254,6 +255,7 @@ class QmlSmokeTest : public QObject {
 
 private slots:
     void loadsMainQmlWithFallbackBridge();
+    void tagEditorLibrarySupportGateMatchesSupportedRows();
     void libraryTreeStartsCollapsedByDefault();
     void rootRowsStartExpandedByDefault();
     void artistExpansionPopulatesInBatches();
@@ -274,6 +276,48 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     const QUrl url = QUrl::fromLocalFile(qmlPath);
     engine.load(url);
     QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+}
+
+void QmlSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+
+    const QUrl url = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml"));
+    engine.load(url);
+    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    QObject *root = engine.rootObjects().constFirst();
+    QVERIFY(root != nullptr);
+
+    QVariant supported;
+    QVariant unsupported;
+    const QVariant supportedRow = QVariant::fromValue(QVariantMap{
+        {QStringLiteral("rowType"), QStringLiteral("album")},
+        {QStringLiteral("selectionKey"), QStringLiteral("album|/music|Artist|Album")},
+    });
+    const QVariant unsupportedRow = QVariant::fromValue(QVariantMap{
+        {QStringLiteral("rowType"), QStringLiteral("artist")},
+        {QStringLiteral("selectionKey"), QStringLiteral("artist|/music|Artist")},
+    });
+    const bool supportedInvoked = QMetaObject::invokeMethod(
+        root,
+        "canOpenTagEditorForLibrary",
+        Q_RETURN_ARG(QVariant, supported),
+        Q_ARG(QVariant, supportedRow));
+    const bool unsupportedInvoked = QMetaObject::invokeMethod(
+        root,
+        "canOpenTagEditorForLibrary",
+        Q_RETURN_ARG(QVariant, unsupported),
+        Q_ARG(QVariant, unsupportedRow));
+
+    QVERIFY(supportedInvoked);
+    QVERIFY(unsupportedInvoked);
+    QCOMPARE(supported.toBool(), true);
+    QCOMPARE(unsupported.toBool(), false);
 }
 
 void QmlSmokeTest::libraryTreeStartsCollapsedByDefault() {
@@ -322,6 +366,13 @@ void QmlSmokeTest::lazyArtistRowRequestsBackendExpansion() {
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
 }
 
-QTEST_MAIN(QmlSmokeTest)
+int main(int argc, char **argv) {
+    qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
+    qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
+
+    QApplication app(argc, argv);
+    QmlSmokeTest test;
+    return QTest::qExec(&test, argc, argv);
+}
 
 #include "tst_qml_smoke.moc"

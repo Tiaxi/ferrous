@@ -8,3 +8,4 @@
 - [Search Apply Hitch Plan](./SEARCH_APPLY_HITCH_PLAN.md)
 - [Search Model Refinement Plan](./SEARCH_MODEL_REFINEMENT_PLAN.md)
 - [Search Hitch Diagnostics Analysis](./SEARCH_HITCH_DIAGNOSTICS_ANALYSIS.md)
+- [Unified Tag Editor Plan](./TAG_EDITOR_PLAN.md)

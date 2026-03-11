@@ -25,6 +25,7 @@
 #include "LibraryTreeModel.h"
 #include "MprisController.h"
 #include "SpectrogramItem.h"
+#include "TagEditorController.h"
 #include "WaveformItem.h"
 
 namespace {
@@ -251,11 +252,13 @@ int main(int argc, char *argv[]) {
     });
     MprisController mpris(&bridge);
     LibraryTreeModel libraryModel;
+    TagEditorController tagEditor(&bridge);
     QQmlApplicationEngine engine;
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &tagEditor);
 
     QObject::connect(
         &engine,

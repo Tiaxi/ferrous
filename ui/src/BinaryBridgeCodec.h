@@ -70,6 +70,7 @@ enum CommandId : quint16 {
     CmdSetViewerFullscreenMode = 44,
     CmdRenameRoot = 45,
     CmdApplyAlbumArt = 46,
+    CmdRefreshEditedPaths = 47,
 };
 
 struct DecodedPlayback {

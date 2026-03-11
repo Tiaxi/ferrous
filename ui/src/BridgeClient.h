@@ -290,6 +290,7 @@ public:
     Q_INVOKABLE void applyItunesArtworkSuggestion(int index);
     Q_INVOKABLE void openInFileBrowser(const QString &path);
     Q_INVOKABLE void openContainingFolder(const QString &path);
+    Q_INVOKABLE void refreshEditedPaths(const QStringList &paths);
     Q_INVOKABLE QVariantMap imageFileDetails(const QString &path) const;
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
@@ -298,6 +299,7 @@ public:
     Q_INVOKABLE void shutdown();
     Q_INVOKABLE void clearDiagnostics();
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
+    QByteArray renameEditedFiles(const QByteArray &payload);
 
 signals:
     void snapshotChanged();

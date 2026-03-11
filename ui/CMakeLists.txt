@@ -64,6 +64,8 @@ qt_add_executable(ferrous
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
+    src/TagEditorController.cpp
+    src/TagEditorTableModel.cpp
     src/SpectrogramItem.cpp
     src/WindowActivation.cpp
     src/WaveformItem.cpp
@@ -139,11 +141,18 @@ if(BUILD_TESTING)
 
     qt_add_executable(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp
+        src/BinaryBridgeCodec.cpp
+        src/BridgeClient.cpp
+        src/DiagnosticsLog.cpp
+        src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
+        src/TagEditorController.cpp
+        src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
         src/WaveformItem.cpp
     )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
+    add_dependencies(ferrous_qml_smoke_tests ferrous_rust_bridge)
     target_compile_definitions(ferrous_qml_smoke_tests PRIVATE
         FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
@@ -154,8 +163,15 @@ if(BUILD_TESTING)
         Qt6::Quick
         Qt6::QuickControls2
         Qt6::Concurrent
+        Qt6::Network
+        Qt6::Widgets
         Qt6::Test
         KF6::Kirigami
+        "${FERROUS_RUST_STATIC_LIB}"
+        PkgConfig::FERROUS_GSTREAMER
+        dl
+        m
+        pthread
     )
     ferrous_enable_strict_warnings(ferrous_qml_smoke_tests)
     if(FERROUS_ENABLE_PROFILE_LOGS)

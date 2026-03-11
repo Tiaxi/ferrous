@@ -1,5 +1,6 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::Path;
 
 #[cfg(feature = "gst")]
@@ -17,9 +18,14 @@ pub(crate) struct RawAudioTagMetadata {
     pub(crate) title: Option<String>,
     pub(crate) artist: Option<String>,
     pub(crate) album: Option<String>,
+    pub(crate) album_artist: Option<String>,
     pub(crate) genre: Option<String>,
     pub(crate) year: Option<i32>,
     pub(crate) track_no: Option<u32>,
+    pub(crate) track_total: Option<u32>,
+    pub(crate) disc_no: Option<u32>,
+    pub(crate) disc_total: Option<u32>,
+    pub(crate) comment: Option<String>,
 }
 
 impl RawAudioTagMetadata {
@@ -27,9 +33,14 @@ impl RawAudioTagMetadata {
         self.title.is_none()
             && self.artist.is_none()
             && self.album.is_none()
+            && self.album_artist.is_none()
             && self.genre.is_none()
             && self.year.is_none()
             && self.track_no.is_none()
+            && self.track_total.is_none()
+            && self.disc_no.is_none()
+            && self.disc_total.is_none()
+            && self.comment.is_none()
     }
 }
 
@@ -299,12 +310,22 @@ fn apply_ape_text_item(metadata: &mut RawAudioTagMetadata, key: &str, value: &st
         metadata.artist = Some(value.to_string());
     } else if key.eq_ignore_ascii_case("album") {
         metadata.album = Some(value.to_string());
+    } else if key.eq_ignore_ascii_case("album artist") || key.eq_ignore_ascii_case("albumartist") {
+        metadata.album_artist = Some(value.to_string());
     } else if key.eq_ignore_ascii_case("genre") {
         metadata.genre = Some(value.to_string());
     } else if key.eq_ignore_ascii_case("year") {
         metadata.year = parse_ape_year(value);
     } else if key.eq_ignore_ascii_case("track") {
-        metadata.track_no = parse_ape_track_number(value);
+        let (track_no, track_total) = parse_ape_number_pair(value);
+        metadata.track_no = track_no;
+        metadata.track_total = track_total;
+    } else if key.eq_ignore_ascii_case("disc") {
+        let (disc_no, disc_total) = parse_ape_number_pair(value);
+        metadata.disc_no = disc_no;
+        metadata.disc_total = disc_total;
+    } else if key.eq_ignore_ascii_case("comment") {
+        metadata.comment = Some(value.to_string());
     }
 }
 
@@ -319,10 +340,155 @@ fn parse_ape_year(value: &str) -> Option<i32> {
     (digits.len() == 4).then(|| digits.parse().ok()).flatten()
 }
 
+#[cfg(test)]
 fn parse_ape_track_number(value: &str) -> Option<u32> {
+    parse_ape_number_pair(value).0
+}
+
+fn parse_ape_number_pair(value: &str) -> (Option<u32>, Option<u32>) {
     let trimmed = value.trim();
-    let number = trimmed.split('/').next()?.trim();
-    number.parse().ok()
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+
+    let mut parts = trimmed.splitn(2, '/');
+    let number = parts.next().and_then(parse_optional_u32);
+    let total = parts.next().and_then(parse_optional_u32);
+    (number, total)
+}
+
+fn parse_optional_u32(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty())
+        .then(|| trimmed.parse().ok())
+        .flatten()
+}
+
+fn format_ape_number_pair(number: Option<u32>, total: Option<u32>) -> Option<String> {
+    match (number, total) {
+        (None, None) => None,
+        (Some(number), None) => Some(number.to_string()),
+        (None, Some(total)) => Some(format!("/{total}")),
+        (Some(number), Some(total)) => Some(format!("{number}/{total}")),
+    }
+}
+
+pub(crate) fn write_appended_apev2_text_metadata(
+    path: &Path,
+    metadata: &RawAudioTagMetadata,
+) -> Result<(), String> {
+    if !is_raw_surround_file(path) {
+        return Err(format!(
+            "APEv2 write is only supported for AC3/DTS files: {}",
+            path.to_string_lossy()
+        ));
+    }
+
+    let mut bytes = fs::read(path)
+        .map_err(|err| format!("failed to read raw surround file for tag write: {err}"))?;
+    if let Some(range) = locate_appended_apev2_range(&bytes) {
+        bytes.truncate(range.start);
+    }
+    if !metadata.is_empty() {
+        bytes.extend_from_slice(&build_apev2_tag(metadata));
+    }
+    fs::write(path, bytes)
+        .map_err(|err| format!("failed to write raw surround file with updated tags: {err}"))
+}
+
+fn locate_appended_apev2_range(bytes: &[u8]) -> Option<Range<usize>> {
+    let footer = read_apev2_footer_from_bytes(bytes)?;
+    let footer_start = bytes.len().checked_sub(APE_TAG_HEADER_BYTES)?;
+    let footer_only_start = bytes
+        .len()
+        .checked_sub(usize::try_from(footer.tag_size).ok()?)?;
+    let header_start = footer_only_start.checked_sub(APE_TAG_HEADER_BYTES)?;
+    let start = if bytes
+        .get(header_start..header_start + APE_PREAMBLE.len())
+        .is_some_and(|value| value == APE_PREAMBLE)
+    {
+        header_start
+    } else {
+        footer_only_start
+    };
+    (start <= footer_start).then_some(start..bytes.len())
+}
+
+fn read_apev2_footer_from_bytes(bytes: &[u8]) -> Option<Apev2Footer> {
+    let footer = bytes.get(bytes.len().checked_sub(APE_TAG_HEADER_BYTES)?..)?;
+    if footer.get(..APE_PREAMBLE.len())? != APE_PREAMBLE {
+        return None;
+    }
+
+    let version = u32::from_le_bytes(footer.get(8..12)?.try_into().ok()?);
+    if version != 1000 && version != 2000 {
+        return None;
+    }
+
+    let tag_size = u32::from_le_bytes(footer.get(12..16)?.try_into().ok()?);
+    let item_count = u32::from_le_bytes(footer.get(16..20)?.try_into().ok()?);
+    if tag_size < u32::try_from(APE_TAG_HEADER_BYTES).ok()?
+        || usize::try_from(tag_size).ok()? > bytes.len()
+    {
+        return None;
+    }
+
+    Some(Apev2Footer {
+        item_count,
+        tag_size,
+    })
+}
+
+fn build_apev2_tag(metadata: &RawAudioTagMetadata) -> Vec<u8> {
+    let mut items = Vec::<(&str, String)>::new();
+    if let Some(title) = metadata.title.as_ref() {
+        items.push(("Title", title.clone()));
+    }
+    if let Some(artist) = metadata.artist.as_ref() {
+        items.push(("Artist", artist.clone()));
+    }
+    if let Some(album) = metadata.album.as_ref() {
+        items.push(("Album", album.clone()));
+    }
+    if let Some(album_artist) = metadata.album_artist.as_ref() {
+        items.push(("Album Artist", album_artist.clone()));
+    }
+    if let Some(genre) = metadata.genre.as_ref() {
+        items.push(("Genre", genre.clone()));
+    }
+    if let Some(year) = metadata.year {
+        items.push(("Year", year.to_string()));
+    }
+    if let Some(track) = format_ape_number_pair(metadata.track_no, metadata.track_total) {
+        items.push(("Track", track));
+    }
+    if let Some(disc) = format_ape_number_pair(metadata.disc_no, metadata.disc_total) {
+        items.push(("Disc", disc));
+    }
+    if let Some(comment) = metadata.comment.as_ref() {
+        items.push(("Comment", comment.clone()));
+    }
+
+    let mut item_bytes = Vec::new();
+    let item_count = items.len();
+    for (key, value) in items {
+        item_bytes.extend_from_slice(&u32::try_from(value.len()).unwrap_or(u32::MAX).to_le_bytes());
+        item_bytes.extend_from_slice(&0u32.to_le_bytes());
+        item_bytes.extend_from_slice(key.as_bytes());
+        item_bytes.push(0);
+        item_bytes.extend_from_slice(value.as_bytes());
+    }
+
+    let size_field = u32::try_from(item_bytes.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(u32::try_from(APE_TAG_HEADER_BYTES).unwrap_or(u32::MAX));
+    let mut out = item_bytes;
+    out.extend_from_slice(&build_ape_block(
+        size_field,
+        u32::try_from(item_count).unwrap_or(u32::MAX),
+        0x80,
+    ));
+    out
 }
 
 #[cfg(feature = "gst")]
@@ -362,14 +528,14 @@ fn build_test_apev2_tag(items: &[(&str, &str)], header: bool) -> Vec<u8> {
         );
     let mut out = Vec::new();
     if header {
-        out.extend_from_slice(&build_test_ape_block(
+        out.extend_from_slice(&build_ape_block(
             size_field,
             u32::try_from(items.len()).expect("test item count fits into u32"),
             0xA0,
         ));
     }
     out.extend_from_slice(&item_bytes);
-    out.extend_from_slice(&build_test_ape_block(
+    out.extend_from_slice(&build_ape_block(
         size_field,
         u32::try_from(items.len()).expect("test item count fits into u32"),
         0x80,
@@ -377,8 +543,7 @@ fn build_test_apev2_tag(items: &[(&str, &str)], header: bool) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
-fn build_test_ape_block(size_field: u32, item_count: u32, flag_byte: u8) -> [u8; 32] {
+fn build_ape_block(size_field: u32, item_count: u32, flag_byte: u8) -> [u8; 32] {
     let mut block = [0u8; 32];
     block[..8].copy_from_slice(APE_PREAMBLE);
     block[8..12].copy_from_slice(&2000u32.to_le_bytes());
@@ -391,8 +556,9 @@ fn build_test_ape_block(size_field: u32, item_count: u32, flag_byte: u8) -> [u8;
 #[cfg(test)]
 mod tests {
     use super::{
-        build_test_apev2_tag, parse_ape_track_number, parse_ape_year, raw_surround_format_label,
-        read_appended_apev2_text_metadata, write_test_apev2_file,
+        build_test_apev2_tag, parse_ape_number_pair, parse_ape_track_number, parse_ape_year,
+        raw_surround_format_label, read_appended_apev2_text_metadata,
+        write_appended_apev2_text_metadata, write_test_apev2_file, RawAudioTagMetadata,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -417,6 +583,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_ape_number_pair_supports_missing_number() {
+        assert_eq!(parse_ape_number_pair("/8"), (None, Some(8)));
+        assert_eq!(parse_ape_number_pair("03/08"), (Some(3), Some(8)));
+    }
+
+    #[test]
     fn parse_ape_year_uses_leading_digits() {
         assert_eq!(parse_ape_year("2001"), Some(2001));
         assert_eq!(parse_ape_year("2010-06-03"), Some(2010));
@@ -432,9 +604,12 @@ mod tests {
                 ("Title", "The Leper Affinity"),
                 ("Artist", "Opeth"),
                 ("Album", "Blackwater Park"),
+                ("Album Artist", "Opeth"),
                 ("Genre", "Progressive death metal"),
                 ("Year", "2001"),
                 ("Track", "01/8"),
+                ("Disc", "02/3"),
+                ("Comment", "Classic"),
             ],
             true,
         );
@@ -443,9 +618,14 @@ mod tests {
         assert_eq!(metadata.title.as_deref(), Some("The Leper Affinity"));
         assert_eq!(metadata.artist.as_deref(), Some("Opeth"));
         assert_eq!(metadata.album.as_deref(), Some("Blackwater Park"));
+        assert_eq!(metadata.album_artist.as_deref(), Some("Opeth"));
         assert_eq!(metadata.genre.as_deref(), Some("Progressive death metal"));
         assert_eq!(metadata.year, Some(2001));
         assert_eq!(metadata.track_no, Some(1));
+        assert_eq!(metadata.track_total, Some(8));
+        assert_eq!(metadata.disc_no, Some(2));
+        assert_eq!(metadata.disc_total, Some(3));
+        assert_eq!(metadata.comment.as_deref(), Some("Classic"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -479,5 +659,46 @@ mod tests {
     fn raw_surround_format_labels_match_extensions() {
         assert_eq!(raw_surround_format_label(Path::new("a.ac3")), "AC3");
         assert_eq!(raw_surround_format_label(Path::new("a.dts")), "DTS");
+    }
+
+    #[test]
+    fn write_apev2_text_metadata_replaces_existing_appended_block() {
+        let path = test_path("rewrite", "ac3");
+        write_test_apev2_file(&path, &[("Title", "Old"), ("Track", "01/9")], true);
+
+        write_appended_apev2_text_metadata(
+            &path,
+            &RawAudioTagMetadata {
+                title: Some("New".to_string()),
+                artist: Some("Artist".to_string()),
+                album_artist: Some("Album Artist".to_string()),
+                track_no: Some(3),
+                track_total: Some(8),
+                disc_no: Some(2),
+                disc_total: Some(4),
+                comment: Some("Updated".to_string()),
+                ..RawAudioTagMetadata::default()
+            },
+        )
+        .expect("rewrite tags");
+
+        let metadata = read_appended_apev2_text_metadata(&path).expect("metadata");
+        assert_eq!(metadata.title.as_deref(), Some("New"));
+        assert_eq!(metadata.artist.as_deref(), Some("Artist"));
+        assert_eq!(metadata.album_artist.as_deref(), Some("Album Artist"));
+        assert_eq!(metadata.track_no, Some(3));
+        assert_eq!(metadata.track_total, Some(8));
+        assert_eq!(metadata.disc_no, Some(2));
+        assert_eq!(metadata.disc_total, Some(4));
+        assert_eq!(metadata.comment.as_deref(), Some("Updated"));
+
+        let bytes = std::fs::read(&path).expect("read rewritten file");
+        let ape_count = bytes
+            .windows(super::APE_PREAMBLE.len())
+            .filter(|window| *window == super::APE_PREAMBLE)
+            .count();
+        assert_eq!(ape_count, 1);
+
+        let _ = std::fs::remove_file(path);
     }
 }

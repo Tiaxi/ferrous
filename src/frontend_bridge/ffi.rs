@@ -13,6 +13,7 @@ use super::{
 use crate::analysis::{SpectrogramChannelLabel, SpectrogramViewMode};
 use crate::library::{IndexedTrack, LibraryTrack};
 use crate::playback::{PlaybackState, RepeatMode};
+use crate::tag_editor;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
@@ -578,6 +579,162 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_search_results(ptr: *mut c_ucha
     drop(Vec::from_raw_parts(ptr, len, len));
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `paths_ptr` must point to `paths_len` readable bytes for the duration of this call.
+pub unsafe extern "C" fn ferrous_ffi_bridge_refresh_edited_paths(
+    handle: *mut FerrousFfiBridge,
+    paths_ptr: *const c_uchar,
+    paths_len: usize,
+) -> bool {
+    if handle.is_null() || paths_ptr.is_null() || paths_len == 0 {
+        return false;
+    }
+    let Ok(paths) = tag_editor::parse_paths_blob(std::slice::from_raw_parts(paths_ptr, paths_len))
+    else {
+        return false;
+    };
+    let bridge = &*handle;
+    let Ok(runtime) = bridge.runtime.lock() else {
+        return false;
+    };
+    runtime.bridge.command(BridgeCommand::Library(
+        BridgeLibraryCommand::RefreshEditedPaths(paths),
+    ));
+    true
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `paths_ptr` must point to `paths_len` readable bytes for the duration of this call.
+/// If `len_out` is non-null it must be writable for one `usize`.
+pub unsafe extern "C" fn ferrous_ffi_tag_editor_load(
+    paths_ptr: *const c_uchar,
+    paths_len: usize,
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
+    if paths_ptr.is_null() || paths_len == 0 {
+        return std::ptr::null_mut();
+    }
+    let Ok(paths) = tag_editor::parse_paths_blob(std::slice::from_raw_parts(paths_ptr, paths_len))
+    else {
+        return std::ptr::null_mut();
+    };
+    let response = tag_editor::load_rows_for_paths(&paths);
+    let Ok(bytes) = tag_editor::serialize_load_response(&response) else {
+        return std::ptr::null_mut();
+    };
+    into_raw_buffer(bytes, len_out)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `save_ptr` must point to `save_len` readable bytes for the duration of this call.
+/// If `len_out` is non-null it must be writable for one `usize`.
+pub unsafe extern "C" fn ferrous_ffi_tag_editor_save(
+    save_ptr: *const c_uchar,
+    save_len: usize,
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
+    if save_ptr.is_null() || save_len == 0 {
+        return std::ptr::null_mut();
+    }
+    let Ok(request) =
+        tag_editor::parse_save_request(std::slice::from_raw_parts(save_ptr, save_len))
+    else {
+        return std::ptr::null_mut();
+    };
+    let response = tag_editor::save_rows(request);
+    let Ok(bytes) = tag_editor::serialize_save_response(&response) else {
+        return std::ptr::null_mut();
+    };
+    into_raw_buffer(bytes, len_out)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `rename_ptr` must point to `rename_len` readable bytes for the duration of this call.
+/// If `len_out` is non-null it must be writable for one `usize`.
+pub unsafe extern "C" fn ferrous_ffi_bridge_rename_edited_files(
+    handle: *mut FerrousFfiBridge,
+    rename_ptr: *const c_uchar,
+    rename_len: usize,
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
+    if handle.is_null() || rename_ptr.is_null() || rename_len == 0 {
+        return std::ptr::null_mut();
+    }
+    let Ok(request) =
+        tag_editor::parse_rename_request(std::slice::from_raw_parts(rename_ptr, rename_len))
+    else {
+        return std::ptr::null_mut();
+    };
+    let response = tag_editor::rename_rows(request);
+    let rename_pairs = response
+        .results
+        .iter()
+        .filter_map(|result| {
+            if !result.ok {
+                return None;
+            }
+            let new_path = result.new_path.as_deref()?;
+            Some((PathBuf::from(&result.path), PathBuf::from(new_path)))
+        })
+        .filter(|(old_path, new_path)| old_path != new_path)
+        .collect::<Vec<_>>();
+    if !rename_pairs.is_empty() {
+        let bridge = &*handle;
+        if let Ok(runtime) = bridge.runtime.lock() {
+            runtime.bridge.command(BridgeCommand::Library(
+                BridgeLibraryCommand::RefreshRenamedPaths(rename_pairs),
+            ));
+        }
+    }
+    let Ok(bytes) = tag_editor::serialize_rename_response(&response) else {
+        return std::ptr::null_mut();
+    };
+    into_raw_buffer(bytes, len_out)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer previously returned by one of the tag editor helpers.
+pub unsafe extern "C" fn ferrous_ffi_tag_editor_free_buffer(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    drop(Vec::from_raw_parts(ptr, len, len));
+}
+
+fn into_raw_buffer(bytes: Vec<u8>, len_out: *mut usize) -> *mut c_uchar {
+    let mut boxed = bytes.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    let len = boxed.len();
+    std::mem::forget(boxed);
+    if !len_out.is_null() {
+        unsafe {
+            *len_out = len;
+        }
+    }
+    ptr
+}
+
 fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String> {
     if payload.len() < 4 {
         return Err("binary command payload too short".to_string());
@@ -707,6 +864,7 @@ fn parse_library_collection_command(
             track_path: PathBuf::from(reader.read_u16_string()?),
             artwork_path: PathBuf::from(reader.read_u16_string()?),
         },
+        47 => BridgeLibraryCommand::RefreshEditedPaths(read_path_vec(reader)?),
         _ => return Ok(None),
     };
     reader.expect_done()?;

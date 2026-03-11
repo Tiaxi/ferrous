@@ -27,4 +27,22 @@ std::uint8_t *ferrous_ffi_bridge_pop_search_results(
     std::size_t *len_out,
     std::uint32_t *seq_out);
 void ferrous_ffi_bridge_free_search_results(std::uint8_t *ptr, std::size_t len);
+bool ferrous_ffi_bridge_refresh_edited_paths(
+    FerrousFfiBridge *handle,
+    const std::uint8_t *paths_ptr,
+    std::size_t paths_len);
+std::uint8_t *ferrous_ffi_bridge_rename_edited_files(
+    FerrousFfiBridge *handle,
+    const std::uint8_t *rename_ptr,
+    std::size_t rename_len,
+    std::size_t *len_out);
+std::uint8_t *ferrous_ffi_tag_editor_load(
+    const std::uint8_t *paths_ptr,
+    std::size_t paths_len,
+    std::size_t *len_out);
+std::uint8_t *ferrous_ffi_tag_editor_save(
+    const std::uint8_t *save_ptr,
+    std::size_t save_len,
+    std::size_t *len_out);
+void ferrous_ffi_tag_editor_free_buffer(std::uint8_t *ptr, std::size_t len);
 }

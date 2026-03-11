@@ -1929,10 +1929,6 @@ void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;
     }
-    if (m_selectedQueueIndex != index) {
-        m_selectedQueueIndex = index;
-        emit snapshotChanged();
-    }
     m_pendingQueueSelection = index;
     m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
@@ -2662,6 +2658,41 @@ void BridgeClient::openContainingFolder(const QString &path) {
         emit bridgeError(QStringLiteral("failed to open containing folder in %1: %2")
                              .arg(m_fileBrowserName, path));
     }
+}
+
+void BridgeClient::refreshEditedPaths(const QStringList &paths) {
+    QStringList sanitized;
+    sanitized.reserve(paths.size());
+    for (const QString &path : paths) {
+        const QString normalized = normalizeLocalPathArg(path);
+        if (!normalized.isEmpty()) {
+            sanitized.push_back(normalized);
+        }
+    }
+    if (sanitized.isEmpty()) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
+        BinaryBridgeCodec::CmdRefreshEditedPaths,
+        sanitized));
+}
+
+QByteArray BridgeClient::renameEditedFiles(const QByteArray &payload) {
+    if (m_ffiBridge == nullptr || payload.isEmpty()) {
+        return {};
+    }
+    std::size_t len = 0;
+    std::uint8_t *raw = ferrous_ffi_bridge_rename_edited_files(
+        m_ffiBridge,
+        reinterpret_cast<const std::uint8_t *>(payload.constData()),
+        static_cast<std::size_t>(payload.size()),
+        &len);
+    QByteArray response;
+    if (raw != nullptr && len > 0) {
+        response = QByteArray(reinterpret_cast<const char *>(raw), static_cast<int>(len));
+        ferrous_ffi_tag_editor_free_buffer(raw, len);
+    }
+    return response;
 }
 
 QVariantMap BridgeClient::imageFileDetails(const QString &path) const {
