@@ -236,6 +236,11 @@ fn apply_technical_details(
         return;
     }
 
+    if !needs_stream_details_probe(metadata) {
+        metadata.current_bitrate_kbps = metadata.current_bitrate_kbps.or(metadata.bitrate_kbps);
+        return;
+    }
+
     if let Some(details) = probe_stream_details(path) {
         if !details.format_label.is_empty() {
             metadata.format_label = details.format_label;
@@ -248,6 +253,14 @@ fn apply_technical_details(
         metadata.bitrate_timeline_kbps = details.bitrate_timeline_kbps;
         let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
     }
+}
+
+fn needs_stream_details_probe(metadata: &TrackMetadata) -> bool {
+    metadata.sample_rate_hz.is_none()
+        || metadata.channels.is_none()
+        || metadata.bitrate_kbps.is_none()
+        || metadata.current_bitrate_kbps.is_none()
+        || metadata.format_label.is_empty()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -530,7 +543,8 @@ fn codec_label(codec: CodecType) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bytes_to_kbps, format_label_from_extension, MetadataEvent, MetadataService, TrackMetadata,
+        bytes_to_kbps, format_label_from_extension, needs_stream_details_probe, MetadataEvent,
+        MetadataService, TrackMetadata,
     };
     use crate::raw_audio::write_test_apev2_file;
     use std::path::PathBuf;
@@ -574,6 +588,32 @@ mod tests {
     #[test]
     fn kbps_rounding_matches_expected_values() {
         assert_eq!(bytes_to_kbps(113_125.0), 905);
+    }
+
+    #[test]
+    fn skips_stream_probe_when_basic_technical_details_are_already_known() {
+        let metadata = TrackMetadata {
+            sample_rate_hz: Some(96_000),
+            bitrate_kbps: Some(4_608),
+            channels: Some(6),
+            current_bitrate_kbps: Some(4_608),
+            format_label: "FLAC".to_string(),
+            ..TrackMetadata::default()
+        };
+
+        assert!(!needs_stream_details_probe(&metadata));
+    }
+
+    #[test]
+    fn probes_stream_when_core_technical_details_are_missing() {
+        let metadata = TrackMetadata {
+            sample_rate_hz: Some(44_100),
+            channels: Some(2),
+            format_label: "MP3".to_string(),
+            ..TrackMetadata::default()
+        };
+
+        assert!(needs_stream_details_probe(&metadata));
     }
 
     #[test]

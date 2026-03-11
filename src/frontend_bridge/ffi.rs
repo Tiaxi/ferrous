@@ -1623,6 +1623,7 @@ mod tests {
                 duration: Duration::from_secs(180),
                 current: Some(PathBuf::from("/music/a.flac")),
                 current_queue_index: Some(0),
+                current_bitrate_kbps: Some(905),
                 volume: 0.75,
                 repeat_mode: RepeatMode::Off,
                 shuffle_enabled: false,

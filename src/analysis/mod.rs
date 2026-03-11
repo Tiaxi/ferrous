@@ -1451,6 +1451,22 @@ fn ensure_sample_buffer(
         .expect("sample buffer is initialized above")
 }
 
+fn waveform_sample_rate_divisor(sample_rate_hz: u64) -> u64 {
+    const TARGET_48KHZ: u64 = 48_000;
+    const TARGET_44K1HZ: u64 = 44_100;
+
+    if sample_rate_hz <= TARGET_48KHZ {
+        return 1;
+    }
+    if sample_rate_hz.is_multiple_of(TARGET_48KHZ) {
+        return sample_rate_hz / TARGET_48KHZ;
+    }
+    if sample_rate_hz.is_multiple_of(TARGET_44K1HZ) {
+        return sample_rate_hz / TARGET_44K1HZ;
+    }
+    1
+}
+
 fn decode_waveform_peaks_stream<F, C>(
     path: &Path,
     max_points: usize,
@@ -1524,7 +1540,10 @@ where
 
         let spec = *decoded_audio.spec();
         let channels = spec.channels.count().max(1);
-        let sample_stride = if channels >= 2 { 8usize } else { 4usize };
+        let base_sample_stride = if channels >= 2 { 8usize } else { 4usize };
+        let sample_rate_divisor =
+            usize::try_from(waveform_sample_rate_divisor(sample_rate_hz)).unwrap_or(1);
+        let sample_stride = base_sample_stride.saturating_mul(sample_rate_divisor);
         let decoded_capacity = decoded_audio.capacity();
         let buf = ensure_sample_buffer(&mut sample_buf, decoded_capacity, spec);
         buf.copy_interleaved_ref(decoded_audio);
@@ -2056,6 +2075,25 @@ mod tests {
         match evt {
             AnalysisEvent::Snapshot(s) => assert_eq!(s.waveform_peaks, vec![0.1, 0.2]),
         }
+    }
+
+    #[test]
+    fn waveform_sample_rate_divisor_targets_common_high_rate_multiples() {
+        assert_eq!(waveform_sample_rate_divisor(44_100), 1);
+        assert_eq!(waveform_sample_rate_divisor(48_000), 1);
+        assert_eq!(waveform_sample_rate_divisor(88_200), 2);
+        assert_eq!(waveform_sample_rate_divisor(96_000), 2);
+        assert_eq!(waveform_sample_rate_divisor(176_400), 4);
+        assert_eq!(waveform_sample_rate_divisor(192_000), 4);
+        assert_eq!(waveform_sample_rate_divisor(384_000), 8);
+    }
+
+    #[test]
+    fn waveform_sample_rate_divisor_leaves_non_matching_rates_untouched() {
+        assert_eq!(waveform_sample_rate_divisor(32_000), 1);
+        assert_eq!(waveform_sample_rate_divisor(44_000), 1);
+        assert_eq!(waveform_sample_rate_divisor(50_000), 1);
+        assert_eq!(waveform_sample_rate_divisor(64_000), 1);
     }
 
     #[cfg(feature = "gst")]

@@ -31,6 +31,7 @@ pub struct NormalizedArtwork {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyArtworkOutcome {
     pub affected_track_paths: Vec<PathBuf>,
+    pub cover_path_override: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,15 +118,17 @@ pub fn apply_artwork_to_track(
     let normalized = normalize_artwork_file(artwork_path)?;
     match classify_artwork_source(track_path) {
         ArtworkSource::Sidecar(sidecar_path) => {
-            write_sidecar_replacement(&sidecar_path, &normalized)?;
+            let cover_path = write_sidecar_replacement(&sidecar_path, &normalized)?;
             Ok(ApplyArtworkOutcome {
                 affected_track_paths: sibling_supported_audio_files(track_path)?,
+                cover_path_override: Some(cover_path),
             })
         }
         ArtworkSource::Embedded => {
             let affected = rewrite_embedded_artwork(track_path, &normalized)?;
             Ok(ApplyArtworkOutcome {
                 affected_track_paths: affected,
+                cover_path_override: None,
             })
         }
     }
@@ -174,7 +177,7 @@ fn classify_artwork_source(track_path: &Path) -> ArtworkSource {
 fn write_sidecar_replacement(
     current_sidecar_path: &Path,
     artwork: &NormalizedArtwork,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let target_path = if current_sidecar_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -194,7 +197,7 @@ fn write_sidecar_replacement(
             )
         })?;
     }
-    Ok(())
+    Ok(target_path)
 }
 
 fn rewrite_embedded_artwork(

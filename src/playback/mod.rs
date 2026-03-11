@@ -40,6 +40,7 @@ pub struct PlaybackSnapshot {
     pub duration: Duration,
     pub current: Option<PathBuf>,
     pub current_queue_index: Option<usize>,
+    pub current_bitrate_kbps: Option<u32>,
     pub volume: f32,
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
@@ -1052,6 +1053,7 @@ mod backend {
             self.startup_gain_ramp = false;
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
+            self.snapshot.current_bitrate_kbps = None;
             self.snapshot.state = PlaybackState::Stopped;
             self.snapshot.position = Duration::ZERO;
             self.snapshot.duration = Duration::ZERO;
@@ -1238,6 +1240,7 @@ mod backend {
                 self.snapshot.state = PlaybackState::Stopped;
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
+                self.snapshot.current_bitrate_kbps = None;
                 self.emit_snapshot();
             }
         }
@@ -1411,6 +1414,7 @@ mod backend {
         let playbin = gst::ElementFactory::make("playbin")
             .build()
             .map_err(|_| anyhow!("failed to create playbin"))?;
+        configure_playbin_buffering(&playbin);
 
         let analysis_sink = build_analysis_audio_sink(analysis_tx, pcm_tx)?;
         playbin.set_property("audio-sink", &analysis_sink);
@@ -1453,6 +1457,25 @@ mod backend {
 
         let _ = runtime.playbin.set_state(gst::State::Null);
         Ok(())
+    }
+
+    fn configure_playbin_buffering(playbin: &gst::Element) {
+        let flags = playbin.property_value("flags");
+        let Some(flags_class) = gst::glib::FlagsClass::with_type(flags.type_()) else {
+            return;
+        };
+        let Some(tuned_flags) = flags_class
+            .builder_with_value(flags.clone())
+            .and_then(|builder| {
+                builder
+                    .unset_by_nick("download")
+                    .unset_by_nick("buffering")
+                    .build()
+            })
+        else {
+            return;
+        };
+        playbin.set_property_from_value("flags", &tuned_flags);
     }
 
     fn maybe_emit_natural_handoff(
@@ -1513,6 +1536,7 @@ mod backend {
         snapshot.current = Some(path.to_path_buf());
         snapshot.position = Duration::ZERO;
         snapshot.duration = Duration::ZERO;
+        snapshot.current_bitrate_kbps = None;
     }
 
     fn soft_mute(playbin: &gst::Element, applied_volume: &mut f32) {

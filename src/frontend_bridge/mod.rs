@@ -21,9 +21,10 @@ use crate::lastfm::{
 };
 use crate::library::{
     is_supported_audio, load_external_track_cache, load_external_track_caches, read_track_info,
-    refresh_cover_paths_for_tracks, search_tracks_fts, store_external_track_cache,
-    track_file_fingerprint, IndexedTrack, LibraryCommand, LibraryEvent, LibraryRoot,
-    LibrarySearchTrack, LibraryService, LibrarySnapshot, LibraryTrack, TrackFileFingerprint,
+    refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
+    search_tracks_fts, store_external_track_cache, track_file_fingerprint, IndexedTrack,
+    LibraryCommand, LibraryEvent, LibraryRoot, LibrarySearchTrack, LibraryService, LibrarySnapshot,
+    LibraryTrack, TrackFileFingerprint,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -4117,14 +4118,41 @@ fn run_apply_album_art_worker(
                 affected_paths.sort();
                 affected_paths.dedup();
 
-                let refresh_error = refresh_cover_paths_for_tracks(&affected_paths).err();
-                let indexed_by_path = affected_paths
-                    .into_iter()
-                    .map(|path| {
-                        let indexed = read_track_info(&path);
-                        (path, indexed)
-                    })
-                    .collect::<HashMap<_, _>>();
+                let (refresh_error, indexed_by_path) = if let Some(cover_path) =
+                    outcome.cover_path_override
+                {
+                    let refresh_error =
+                        refresh_cover_paths_for_tracks_with_override(&affected_paths, &cover_path)
+                            .err();
+                    let cover_path_string = cover_path.to_string_lossy().to_string();
+                    let indexed_by_path = affected_paths
+                        .into_iter()
+                        .map(|path| {
+                            let indexed = IndexedTrack {
+                                title: String::new(),
+                                artist: String::new(),
+                                album: String::new(),
+                                cover_path: cover_path_string.clone(),
+                                genre: String::new(),
+                                year: None,
+                                track_no: None,
+                                duration_secs: None,
+                            };
+                            (path, indexed)
+                        })
+                        .collect::<HashMap<_, _>>();
+                    (refresh_error, indexed_by_path)
+                } else {
+                    let refresh_error = refresh_cover_paths_for_tracks(&affected_paths).err();
+                    let indexed_by_path = affected_paths
+                        .into_iter()
+                        .map(|path| {
+                            let indexed = read_track_info(&path);
+                            (path, indexed)
+                        })
+                        .collect::<HashMap<_, _>>();
+                    (refresh_error, indexed_by_path)
+                };
 
                 ApplyAlbumArtEvent {
                     track_path: request.track_path,

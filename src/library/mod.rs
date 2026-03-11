@@ -1594,6 +1594,48 @@ pub(crate) fn refresh_cover_paths_for_tracks(paths: &[PathBuf]) -> Result<(), St
     Ok(())
 }
 
+pub(crate) fn refresh_cover_paths_for_tracks_with_override(
+    paths: &[PathBuf],
+    cover_path: &Path,
+) -> Result<(), String> {
+    let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
+    init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+    let now = unix_ts_i64();
+    let cover_path_string = cover_path.to_string_lossy().to_string();
+
+    for path in paths {
+        let path_string = path.to_string_lossy().to_string();
+        conn.execute(
+            r"
+            UPDATE tracks
+            SET cover_path = ?2,
+                cover_checked = 1,
+                indexed_at = ?3
+            WHERE path = ?1
+            ",
+            params![path_string, cover_path_string.as_str(), now],
+        )
+        .map_err(|e| format!("failed to refresh track cover path: {e}"))?;
+
+        conn.execute(
+            r"
+            UPDATE external_tracks
+            SET cover_path = ?2,
+                indexed_at = ?3
+            WHERE path = ?1
+            ",
+            params![
+                path.to_string_lossy().to_string(),
+                cover_path_string.as_str(),
+                now
+            ],
+        )
+        .map_err(|e| format!("failed to refresh external track cover path: {e}"))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

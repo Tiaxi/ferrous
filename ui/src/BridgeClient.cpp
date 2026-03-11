@@ -54,6 +54,8 @@ constexpr quint8 kAnalysisFlagSpectrogram = 0x04;
 constexpr quint8 kAnalysisFlagWaveformComplete = 0x08;
 constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
 constexpr int kMaxDiagnosticsLines = 2000;
+constexpr int kItunesArtworkSearchRequestLimit = 50;
+constexpr int kItunesArtworkResultDisplayLimit = 40;
 
 bool isNewerSeq(quint32 seq, quint32 last) {
     return static_cast<qint32>(seq - last) > 0;
@@ -2415,6 +2417,9 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 }
                 return lhs.apiOrder < rhs.apiOrder;
         });
+        if (aggregation->candidates.size() > kItunesArtworkResultDisplayLimit) {
+            aggregation->candidates.resize(kItunesArtworkResultDisplayLimit);
+        }
 
         m_itunesArtworkCandidates = aggregation->candidates;
         m_itunesArtworkResults.clear();
@@ -2472,7 +2477,9 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
         query.addQueryItem(QStringLiteral("id"), QString::number(artistId));
         query.addQueryItem(QStringLiteral("country"), QStringLiteral("fi"));
         query.addQueryItem(QStringLiteral("entity"), QStringLiteral("album"));
-        query.addQueryItem(QStringLiteral("limit"), QStringLiteral("200"));
+        query.addQueryItem(
+            QStringLiteral("limit"),
+            QString::number(kItunesArtworkSearchRequestLimit));
         url.setQuery(query);
 
         QNetworkRequest request(url);
@@ -2512,7 +2519,9 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
         query.addQueryItem(QStringLiteral("term"), searchTerm);
         query.addQueryItem(QStringLiteral("country"), QStringLiteral("fi"));
         query.addQueryItem(QStringLiteral("entity"), QStringLiteral("album"));
-        query.addQueryItem(QStringLiteral("limit"), QStringLiteral("200"));
+        query.addQueryItem(
+            QStringLiteral("limit"),
+            QString::number(kItunesArtworkSearchRequestLimit));
         url.setQuery(query);
 
         QNetworkRequest request(url);
