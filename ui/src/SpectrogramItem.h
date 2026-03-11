@@ -97,6 +97,8 @@ private:
     bool m_scrollPrimed{false};
     bool m_rowRateInitialized{false};
     double m_estimatedRowsPerSecond{0.0};
+    int m_rowRateWindowRows{0};
+    std::chrono::steady_clock::time_point m_rowRateWindowStart{};
     std::chrono::steady_clock::time_point m_lastRowAppendTime{};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};

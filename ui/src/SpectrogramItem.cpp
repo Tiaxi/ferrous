@@ -190,6 +190,8 @@ void SpectrogramItem::reset() {
     m_scrollPrimed = false;
     m_rowRateInitialized = false;
     m_estimatedRowsPerSecond = 0.0;
+    m_rowRateWindowRows = 0;
+    m_rowRateWindowStart = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
     m_binsPerColumn = 0;
     invalidateMapping();
@@ -682,14 +684,13 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
 }
 
 double SpectrogramItem::targetRowsPerSecondLocked() const {
-    // Keep this aligned with the backend decimator/reference hop: the UI receives
-    // one visual spectrogram column per ~1024 input samples regardless of FFT size.
+    if (m_rowRateInitialized && std::isfinite(m_estimatedRowsPerSecond)) {
+        return std::clamp(m_estimatedRowsPerSecond, 1.0, 400.0);
+    }
+    // Fallback until we have enough observed arrival data to pace the scroll.
     if (m_sampleRateHz > 0) {
         const double stableRate = static_cast<double>(m_sampleRateHz) / kReferenceHopSamples;
         return std::clamp(stableRate, 1.0, 400.0);
-    }
-    if (m_rowRateInitialized && std::isfinite(m_estimatedRowsPerSecond)) {
-        return std::clamp(m_estimatedRowsPerSecond, 1.0, 400.0);
     }
     return 0.0;
 }
@@ -699,20 +700,29 @@ void SpectrogramItem::noteIncomingRowsLocked(int rowCount) {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
-    if (m_rowRateInitialized) {
-        const double elapsed = std::chrono::duration<double>(now - m_lastRowAppendTime).count();
-        if (elapsed > 0.0005) {
-            const double instantRate = std::clamp(
-                static_cast<double>(rowCount) / elapsed,
-                1.0,
-                1200.0);
-            constexpr double alpha = 0.20;
-            m_estimatedRowsPerSecond = (alpha * instantRate) + ((1.0 - alpha) * m_estimatedRowsPerSecond);
+    if (m_rowRateWindowStart.time_since_epoch().count() == 0) {
+        m_rowRateWindowStart = now;
+        m_rowRateWindowRows = 0;
+    }
+    m_rowRateWindowRows += rowCount;
+    const double windowElapsed =
+        std::chrono::duration<double>(now - m_rowRateWindowStart).count();
+    if (windowElapsed >= 0.35) {
+        const double instantRate = std::clamp(
+            static_cast<double>(m_rowRateWindowRows) / windowElapsed,
+            1.0,
+            400.0);
+        if (m_rowRateInitialized) {
+            constexpr double alpha = 0.18;
+            m_estimatedRowsPerSecond =
+                (alpha * instantRate) + ((1.0 - alpha) * m_estimatedRowsPerSecond);
+        } else {
+            m_estimatedRowsPerSecond = instantRate;
+            m_rowRateInitialized = true;
+            m_pendingPhase = std::max(0.0, m_pendingPhase);
         }
-    } else {
-        m_estimatedRowsPerSecond = std::clamp(static_cast<double>(rowCount) * 60.0, 30.0, 400.0);
-        m_rowRateInitialized = true;
-        m_pendingPhase = std::max(0.0, m_pendingPhase);
+        m_rowRateWindowStart = now;
+        m_rowRateWindowRows = 0;
     }
     m_lastRowAppendTime = now;
 }
