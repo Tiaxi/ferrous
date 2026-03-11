@@ -867,8 +867,23 @@ void BridgeClient::cacheTrackCoverForPath(const QString &trackPath, const QStrin
 }
 
 QString BridgeClient::coverUrlForPath(const QString &path) const {
-    const QString baseUrl = searchCoverUrlFast(path);
     const QString localPath = normalizeLocalPathArg(path);
+    QString baseUrl;
+    if (!localPath.isEmpty()) {
+        const auto urlIt = m_coverUrlCacheByPath.constFind(localPath);
+        if (urlIt != m_coverUrlCacheByPath.constEnd()) {
+            baseUrl = urlIt.value();
+        } else {
+            baseUrl = searchCoverUrlFast(localPath);
+            m_coverUrlCacheByPath.insert(localPath, baseUrl);
+            if (m_coverUrlCacheByPath.size() > 4096) {
+                m_coverUrlCacheByPath.clear();
+                m_coverUrlCacheByPath.insert(localPath, baseUrl);
+            }
+        }
+    } else {
+        baseUrl = searchCoverUrlFast(path);
+    }
     if (localPath.isEmpty()) {
         return baseUrl;
     }
@@ -876,10 +891,23 @@ QString BridgeClient::coverUrlForPath(const QString &path) const {
         return baseUrl;
     }
 
-    const QFileInfo info(localPath);
-    const QString canonicalPath = info.canonicalFilePath().isEmpty()
-        ? info.absoluteFilePath()
-        : info.canonicalFilePath();
+    QString canonicalPath;
+    const auto canonicalIt = m_coverCanonicalPathCacheByPath.constFind(localPath);
+    if (canonicalIt != m_coverCanonicalPathCacheByPath.constEnd()) {
+        canonicalPath = canonicalIt.value();
+    } else {
+        const QFileInfo info(localPath);
+        canonicalPath = info.canonicalFilePath().isEmpty()
+            ? info.absoluteFilePath()
+            : info.canonicalFilePath();
+        if (!canonicalPath.isEmpty()) {
+            m_coverCanonicalPathCacheByPath.insert(localPath, canonicalPath);
+            if (m_coverCanonicalPathCacheByPath.size() > 4096) {
+                m_coverCanonicalPathCacheByPath.clear();
+                m_coverCanonicalPathCacheByPath.insert(localPath, canonicalPath);
+            }
+        }
+    }
     if (canonicalPath.isEmpty()) {
         return baseUrl;
     }
@@ -913,6 +941,9 @@ void BridgeClient::bumpCoverRefreshNonce(const QString &path) {
     if (localPath.isEmpty()) {
         return;
     }
+
+    m_coverUrlCacheByPath.remove(localPath);
+    m_coverCanonicalPathCacheByPath.remove(localPath);
 
     const QFileInfo info(localPath);
     const QString canonicalPath = info.canonicalFilePath().isEmpty()

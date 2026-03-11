@@ -463,6 +463,8 @@ private:
     QList<QStringList> m_libraryAlbumTrackPaths;
     QHash<QString, QString> m_trackCoverByPath;
     QHash<QString, QString> m_trackCoverByDirectory;
+    mutable QHash<QString, QString> m_coverUrlCacheByPath;
+    mutable QHash<QString, QString> m_coverCanonicalPathCacheByPath;
     mutable QHash<QString, QString> m_libraryThumbnailSourceCache;
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
