@@ -15,6 +15,7 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr int kMaxPendingColumns = 512;
+constexpr int kPendingStartupLeadColumns = 12;
 constexpr int kPendingLeadColumns = 3;
 constexpr int kPendingBacklogTarget = 48;
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
@@ -233,8 +234,10 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         return;
     }
     noteIncomingRowsLocked(rowsAdded);
+    const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
     if (!m_scrollPrimed
-        && static_cast<int>(m_pendingColumns.size()) > kPendingLeadColumns) {
+        && m_rowRateInitialized
+        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -280,8 +283,10 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
         return;
     }
     noteIncomingRowsLocked(appended);
+    const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
     if (!m_scrollPrimed
-        && static_cast<int>(m_pendingColumns.size()) > kPendingLeadColumns) {
+        && m_rowRateInitialized
+        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -634,6 +639,17 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         dt = 1.0 / std::max(30.0, fallbackFps);
     }
 
+    const double prevPhase = m_pendingPhase;
+    const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
+    if (!m_scrollPrimed) {
+        if (!m_rowRateInitialized || static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
+            m_pendingPhase = 0.0;
+            return std::abs(m_pendingPhase - prevPhase) > 0.0001;
+        }
+        consumePendingColumnsLocked(1);
+        m_scrollPrimed = !m_columns.empty();
+    }
+
     const double rowsPerSecond = targetRowsPerSecondLocked();
     if (!std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
         if (m_pendingPhase > 0.0) {
@@ -641,16 +657,6 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
             return true;
         }
         return false;
-    }
-
-    const double prevPhase = m_pendingPhase;
-    if (!m_scrollPrimed) {
-        if (static_cast<int>(m_pendingColumns.size()) <= kPendingLeadColumns) {
-            m_pendingPhase = 0.0;
-            return std::abs(m_pendingPhase - prevPhase) > 0.0001;
-        }
-        consumePendingColumnsLocked(1);
-        m_scrollPrimed = !m_columns.empty();
     }
     m_pendingPhase += rowsPerSecond * dt;
     const int backlog = static_cast<int>(m_pendingColumns.size());
