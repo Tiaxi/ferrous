@@ -3678,7 +3678,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             row.title = track.title.trimmed().isEmpty() ? track.path : track.title;
             row.artist = track.artist;
             row.album = track.album;
-            row.coverPath = searchCoverUrlFast(track.coverPath);
+            row.coverPath = track.coverPath;
             row.genre = track.genre;
             row.lengthText = track.lengthSeconds >= 0.0f
                 ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
@@ -3689,9 +3689,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 
             paths.push_back(track.path);
             rows.push_back(row);
-            if (!track.path.trimmed().isEmpty() && !row.coverPath.isEmpty()) {
-                cacheTrackCoverForPath(track.path, row.coverPath);
-            }
         }
         if (m_queueRowsModel.setRows(std::move(rows))) {
             changed = true;
@@ -3768,7 +3765,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackArtist = track.artist;
             nextTrackAlbum = track.album;
             nextTrackGenre = track.genre;
-            queueTrackCover = searchCoverUrlFast(track.coverPath);
+            queueTrackCover = coverUrlForPath(track.coverPath);
             if (track.year != std::numeric_limits<int>::min()) {
                 nextTrackYear = track.year;
             }
@@ -3777,7 +3774,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackArtist = row->artist;
             nextTrackAlbum = row->album;
             nextTrackGenre = row->genre;
-            queueTrackCover = row->coverPath;
+            queueTrackCover = coverUrlForPath(row->coverPath);
             if (row->year != std::numeric_limits<int>::min()) {
                 nextTrackYear = row->year;
             }

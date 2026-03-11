@@ -1151,10 +1151,14 @@ fn restore_initial_bridge_state(
         state.settings.integrations.lastfm_scrobbling_enabled,
     ));
     apply_session_restore(state, playback, load_session_snapshot().as_ref());
-    if !state.queue.is_empty() {
+    if should_sync_queue_details_on_initial_restore(state) {
         let _ = sync_queue_details(state, external_queue_details_tx);
     }
     state.rebuild_pre_built_tree();
+}
+
+fn should_sync_queue_details_on_initial_restore(state: &BridgeState) -> bool {
+    !state.queue.is_empty() && !state.library.tracks.is_empty()
 }
 
 #[cfg_attr(
@@ -1387,7 +1391,10 @@ fn command_tree_rebuild_delay(cmd: &BridgeCommand) -> Option<Duration> {
 
 fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
     match cmd {
-        BridgeCommand::Queue(queue_cmd) => !matches!(queue_cmd, BridgeQueueCommand::Select(_)),
+        BridgeCommand::Queue(queue_cmd) => !matches!(
+            queue_cmd,
+            BridgeQueueCommand::Select(_) | BridgeQueueCommand::PlayAt(_)
+        ),
         BridgeCommand::Library(library_cmd) => matches!(
             library_cmd,
             BridgeLibraryCommand::AddTrack(_)
@@ -4595,6 +4602,19 @@ fn pump_external_queue_detail_events(
 }
 
 fn config_base_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        static TEST_CONFIG_BASE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let path = TEST_CONFIG_BASE.get_or_init(|| {
+            let mut base = std::env::temp_dir();
+            base.push(format!("ferrous-test-config-{}", std::process::id()));
+            let _ = fs::create_dir_all(&base);
+            base
+        });
+        return Some(path.clone());
+    }
+
+    #[cfg(not(test))]
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| {
@@ -5405,6 +5425,22 @@ mod tests {
     }
 
     #[test]
+    fn initial_restore_skips_queue_detail_sync_until_library_is_loaded() {
+        let mut state = BridgeState::default();
+        state.queue = vec![p("/music/a.flac")];
+        assert!(!should_sync_queue_details_on_initial_restore(&state));
+
+        state.library = Arc::new(LibrarySnapshot {
+            tracks: vec![LibraryTrack {
+                path: p("/music/a.flac"),
+                ..LibraryTrack::default()
+            }],
+            ..LibrarySnapshot::default()
+        });
+        assert!(should_sync_queue_details_on_initial_restore(&state));
+    }
+
+    #[test]
     fn pump_library_events_requests_queue_details_for_restored_external_tracks() {
         let root = test_dir("restored-external-queue-details");
         fs::create_dir_all(&root).expect("mkdir root");
@@ -5995,11 +6031,11 @@ mod tests {
     }
 
     #[test]
-    fn queue_select_command_does_not_require_queue_snapshot() {
+    fn selection_only_queue_commands_do_not_require_queue_snapshot() {
         assert!(!command_requires_queue_snapshot(&BridgeCommand::Queue(
             BridgeQueueCommand::Select(Some(0)),
         )));
-        assert!(command_requires_queue_snapshot(&BridgeCommand::Queue(
+        assert!(!command_requires_queue_snapshot(&BridgeCommand::Queue(
             BridgeQueueCommand::PlayAt(0),
         )));
     }

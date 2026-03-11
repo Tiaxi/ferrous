@@ -2727,6 +2727,10 @@ Kirigami.ApplicationWindow {
             refreshAlbumArtFileInfo()
         }
         root.albumArtInfoVisible = !root.albumArtInfoVisible
+        if (root.useWholeScreenViewerMode
+                && albumArtFullscreenWindow.visibility === Window.FullScreen) {
+            albumArtFullscreenFocusSink.forceActiveFocus()
+        }
     }
 
     function currentTrackItunesArtworkDisabledReason() {
@@ -6326,6 +6330,7 @@ Kirigami.ApplicationWindow {
         onVisibilityChanged: function() {
             if (spectrogramFullscreenWindow.visibility === Window.FullScreen) {
                 requestActivate()
+                spectrogramFullscreenFocusSink.forceActiveFocus()
             }
         }
         onClosing: function(close) {
@@ -6334,15 +6339,22 @@ Kirigami.ApplicationWindow {
             }
         }
 
-        Shortcut {
-            sequence: "Escape"
-            context: Qt.WindowShortcut
-            onActivated: root.closeSpectrogramViewer()
+        FocusScope {
+            id: spectrogramFullscreenFocusSink
+            anchors.fill: parent
+            focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                    event.accepted = true
+                    root.closeSpectrogramViewer()
+                }
+            }
         }
 
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton
+            onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
             onClicked: root.closeSpectrogramViewer()
         }
 
@@ -6376,6 +6388,7 @@ Kirigami.ApplicationWindow {
             MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
+                onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
                 onDoubleClicked: function(mouse) {
                     if (mouse.button === Qt.LeftButton) {
                         root.closeSpectrogramViewer()
@@ -6848,6 +6861,7 @@ Kirigami.ApplicationWindow {
         onVisibilityChanged: function() {
             if (albumArtFullscreenWindow.visibility === Window.FullScreen) {
                 requestActivate()
+                albumArtFullscreenFocusSink.forceActiveFocus()
                 root.applyAlbumArtInitialView()
             }
         }
@@ -6857,10 +6871,16 @@ Kirigami.ApplicationWindow {
             }
         }
 
-        Shortcut {
-            sequence: "Escape"
-            context: Qt.WindowShortcut
-            onActivated: root.closeAlbumArtViewer()
+        FocusScope {
+            id: albumArtFullscreenFocusSink
+            anchors.fill: parent
+            focus: albumArtFullscreenWindow.visibility === Window.FullScreen
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                    event.accepted = true
+                    root.closeAlbumArtViewer()
+                }
+            }
         }
 
         Shortcut {
@@ -6873,6 +6893,7 @@ Kirigami.ApplicationWindow {
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton
+            onPressed: albumArtFullscreenFocusSink.forceActiveFocus()
             onClicked: root.closeAlbumArtViewer()
         }
 
@@ -7088,7 +7109,9 @@ Kirigami.ApplicationWindow {
                     acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
                     hoverEnabled: true
                     preventStealing: true
+                    onPressed: albumArtFullscreenFocusSink.forceActiveFocus()
                     onWheel: function(wheel) {
+                        albumArtFullscreenFocusSink.forceActiveFocus()
                         wheel.accepted = true
                     }
                 }

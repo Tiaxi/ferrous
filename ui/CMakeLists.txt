@@ -202,4 +202,49 @@ if(BUILD_TESTING)
     set_tests_properties(ferrous_app_instance_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+
+    qt_add_executable(ferrous_bridge_client_tests
+        tests/tst_bridge_client.cpp
+        src/BinaryBridgeCodec.cpp
+        src/BridgeClient.cpp
+        src/DiagnosticsLog.cpp
+        src/GlobalSearchResultsModel.cpp
+        src/LibraryTreeModel.cpp
+        src/TagEditorController.cpp
+        src/TagEditorTableModel.cpp
+        src/SpectrogramItem.cpp
+        src/WaveformItem.cpp
+    )
+    target_include_directories(ferrous_bridge_client_tests PRIVATE src)
+    add_dependencies(ferrous_bridge_client_tests ferrous_rust_bridge)
+    target_link_libraries(ferrous_bridge_client_tests PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+        Qt6::Concurrent
+        Qt6::Network
+        Qt6::Widgets
+        Qt6::Test
+        KF6::Kirigami
+        "${FERROUS_RUST_STATIC_LIB}"
+        PkgConfig::FERROUS_GSTREAMER
+        dl
+        m
+        pthread
+    )
+    ferrous_enable_strict_warnings(ferrous_bridge_client_tests)
+    if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_compile_definitions(ferrous_bridge_client_tests PRIVATE
+            FERROUS_ENABLE_PROFILE_LOGS=1
+        )
+    endif()
+    set_target_properties(ferrous_bridge_client_tests PROPERTIES
+        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
+    )
+    add_test(NAME ferrous_bridge_client_tests COMMAND ferrous_bridge_client_tests)
+    set_tests_properties(ferrous_bridge_client_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
 endif()
