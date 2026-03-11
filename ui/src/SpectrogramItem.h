@@ -3,7 +3,7 @@
 #include <QImage>
 #include <QMetaObject>
 #include <QMutex>
-#include <QQuickPaintedItem>
+#include <QQuickItem>
 #include <QByteArray>
 #include <QVariantList>
 
@@ -13,8 +13,9 @@
 #include <vector>
 
 class QQuickWindow;
+class QSGNode;
 
-class SpectrogramItem : public QQuickPaintedItem {
+class SpectrogramItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY dbRangeChanged)
     Q_PROPERTY(bool logScale READ logScale WRITE setLogScale NOTIFY logScaleChanged)
@@ -44,8 +45,6 @@ public:
     Q_INVOKABLE void appendRows(const QVariantList &rows);
     Q_INVOKABLE void appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow);
 
-    void paint(QPainter *painter) override;
-
 signals:
     void dbRangeChanged();
     void logScaleChanged();
@@ -55,6 +54,7 @@ signals:
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
 
 private:
     static constexpr int kGradientTableSize = 2048;
@@ -69,12 +69,12 @@ private:
     bool consumePendingColumnsLocked(int requested);
     bool advanceAnimationLocked(double elapsedSeconds);
     double targetRowsPerSecondLocked() const;
+    void updateOverlayImageLocked();
     void noteIncomingRowsLocked(int rowCount);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
     void updateFpsEstimateLocked();
-    void drawFpsOverlay(QPainter *painter) const;
 
     double m_dbRange{90.0};
     bool m_logScale{false};
@@ -89,6 +89,9 @@ private:
 
     QImage m_canvas;
     bool m_canvasDirty{true};
+    bool m_textureDirty{true};
+    QImage m_overlayImage;
+    bool m_overlayDirty{true};
     int m_canvasWriteX{0};
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
