@@ -57,8 +57,8 @@ constexpr int kMaxDiagnosticsLines = 2000;
 constexpr int kItunesArtworkSearchRequestLimit = 50;
 constexpr int kItunesArtworkResultDisplayLimit = 40;
 
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 bool shouldEmitUiProfileLog(qint64 nowMs, qint64 *lastMs, qint64 minIntervalMs = 250) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (lastMs == nullptr) {
         return true;
     }
@@ -67,8 +67,13 @@ bool shouldEmitUiProfileLog(qint64 nowMs, qint64 *lastMs, qint64 minIntervalMs =
     }
     *lastMs = nowMs;
     return true;
-}
+#else
+    (void)nowMs;
+    (void)lastMs;
+    (void)minIntervalMs;
+    return false;
 #endif
+}
 
 bool isNewerSeq(quint32 seq, quint32 last) {
     return static_cast<qint32>(seq - last) > 0;
@@ -646,6 +651,42 @@ BridgeClient::BridgeClient(QObject *parent)
     m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
+    if (m_profileUiEnabled) {
+        const int uiStallWatchdogIntervalMs =
+            std::max(4, readEnvMillis("FERROUS_UI_STALL_WATCHDOG_MS", 8));
+        const int uiStallThresholdMs =
+            std::max(12, readEnvMillis("FERROUS_UI_STALL_THRESHOLD_MS", 20));
+        m_uiStallWatchdogTimer.setTimerType(Qt::PreciseTimer);
+        m_uiStallWatchdogTimer.setInterval(uiStallWatchdogIntervalMs);
+        m_uiStallWatchdogElapsed.start();
+        m_uiStallWatchdogLastTickMs = m_uiStallWatchdogElapsed.elapsed();
+        connect(&m_uiStallWatchdogTimer, &QTimer::timeout, this, [this, uiStallThresholdMs, uiStallWatchdogIntervalMs]() {
+            if (!m_uiStallWatchdogElapsed.isValid()) {
+                m_uiStallWatchdogElapsed.start();
+                m_uiStallWatchdogLastTickMs = m_uiStallWatchdogElapsed.elapsed();
+                return;
+            }
+
+            const qint64 elapsedMs = m_uiStallWatchdogElapsed.elapsed();
+            const qint64 gapMs = elapsedMs - m_uiStallWatchdogLastTickMs;
+            m_uiStallWatchdogLastTickMs = elapsedMs;
+
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            if (gapMs >= uiStallThresholdMs
+                && shouldEmitUiProfileLog(nowMs, &m_lastUiStallProfileLogMs, 25)) {
+                FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                    QStringLiteral("ui-prof"),
+                    QStringLiteral(
+                        "event_loop_stall ms=%1 timer_ms=%2 connected=%3 snapshot_pending=%4")
+                        .arg(gapMs)
+                        .arg(uiStallWatchdogIntervalMs)
+                        .arg(m_connected ? 1 : 0)
+                        .arg(m_snapshotChangedPending ? 1 : 0));
+            }
+        });
+        m_uiStallWatchdogTimer.start();
+    }
+
     startSearchApplyWorker();
     startCoverLookupWorker();
     startInProcessBridge();
@@ -653,6 +694,7 @@ BridgeClient::BridgeClient(QObject *parent)
 
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
+    m_uiStallWatchdogTimer.stop();
     m_globalSearchDebounceTimer.stop();
     m_searchApplyDispatchTimer.stop();
     cancelItunesArtworkRequests();
@@ -3692,6 +3734,28 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         return false;
     }
 
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool profileSnapshot = m_profileUiEnabled;
+    QElapsedTimer snapshotProfileTimer;
+    qint64 snapshotProfileMarkNs = 0;
+    double snapshotPlaybackMs = 0.0;
+    double snapshotQueueMs = 0.0;
+    double snapshotTrackMs = 0.0;
+    double snapshotSettingsMs = 0.0;
+    double snapshotLastFmMs = 0.0;
+    double snapshotLibraryMs = 0.0;
+    if (profileSnapshot) {
+        snapshotProfileTimer.start();
+    }
+    const auto finishSnapshotSection = [&](double &slot) {
+        if (!profileSnapshot) {
+            return;
+        }
+        const qint64 nowNs = snapshotProfileTimer.nsecsElapsed();
+        slot += static_cast<double>(nowNs - snapshotProfileMarkNs) / 1000000.0;
+        snapshotProfileMarkNs = nowNs;
+    };
+
     const QString nextState = playbackStateText(snapshot.playback.state, m_playbackState);
     const bool isStopped = nextState == QStringLiteral("Stopped");
     const double pos = snapshot.playback.present ? snapshot.playback.positionSeconds : m_positionSeconds;
@@ -3733,7 +3797,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         metadataCoverUrl = coverUrlForPath(metadataCoverPath);
     }
 
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     bool changed = false;
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
 
@@ -3820,6 +3883,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             m_pendingQueueSelectionUntilMs = 0;
         }
     }
+    finishSnapshotSection(snapshotPlaybackMs);
 
     if (snapshot.queue.present) {
         QString nextQueueDurationText = formatSeconds(snapshot.queue.totalDurationSeconds);
@@ -3878,6 +3942,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_selectedQueueIndex = selected;
         changed = true;
     }
+    finishSnapshotSection(snapshotQueueMs);
 
     const bool currentPathChanged = m_currentTrackPath != currentPath;
     if (currentPathChanged) {
@@ -4045,6 +4110,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_currentTrackCoverPath = currentCover;
         changed = true;
     }
+    finishSnapshotSection(snapshotTrackMs);
 
     const double dbRange = snapshot.settings.present
         ? static_cast<double>(snapshot.settings.dbRange)
@@ -4108,6 +4174,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_librarySortMode = settingsSortMode;
         changed = true;
     }
+    finishSnapshotSection(snapshotSettingsMs);
 
     const bool lastFmEnabled = snapshot.lastfm.present ? snapshot.lastfm.enabled : m_lastFmScrobblingEnabled;
     if (m_lastFmScrobblingEnabled != lastFmEnabled) {
@@ -4164,6 +4231,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_lastFmAuthUrl.trimmed().isEmpty()) {
         m_lastOpenedExternalUrl.clear();
     }
+    finishSnapshotSection(snapshotLastFmMs);
 
     const bool scanInProgress = snapshot.library.present ? snapshot.library.scanInProgress : m_libraryScanInProgress;
     if (m_libraryScanInProgress != scanInProgress) {
@@ -4278,6 +4346,38 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!qFuzzyCompare(m_libraryScanEtaSeconds + 2.0, etaSeconds + 2.0)) {
         m_libraryScanEtaSeconds = etaSeconds;
         changed = true;
+    }
+
+    finishSnapshotSection(snapshotLibraryMs);
+    if (profileSnapshot) {
+        const double snapshotTotalMs =
+            static_cast<double>(snapshotProfileTimer.nsecsElapsed()) / 1000000.0;
+        const double snapshotMaxSectionMs =
+            std::max({snapshotPlaybackMs,
+                      snapshotQueueMs,
+                      snapshotTrackMs,
+                      snapshotSettingsMs,
+                      snapshotLastFmMs,
+                      snapshotLibraryMs});
+        if ((snapshotTotalMs >= 4.0 || snapshotMaxSectionMs >= 2.0)
+            && shouldEmitUiProfileLog(nowMs, &m_lastSnapshotApplyProfileLogMs, 50)) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("ui-prof"),
+                QStringLiteral(
+                    "snapshot_apply ms=%1 playback_ms=%2 queue_ms=%3 track_ms=%4 "
+                    "settings_ms=%5 lastfm_ms=%6 library_ms=%7 queue_tracks=%8 "
+                    "root_entries=%9 changed=%10")
+                    .arg(snapshotTotalMs, 0, 'f', 2)
+                    .arg(snapshotPlaybackMs, 0, 'f', 2)
+                    .arg(snapshotQueueMs, 0, 'f', 2)
+                    .arg(snapshotTrackMs, 0, 'f', 2)
+                    .arg(snapshotSettingsMs, 0, 'f', 2)
+                    .arg(snapshotLastFmMs, 0, 'f', 2)
+                    .arg(snapshotLibraryMs, 0, 'f', 2)
+                    .arg(snapshot.queue.present ? snapshot.queue.tracks.size() : m_queuePaths.size())
+                    .arg(snapshot.library.present ? snapshot.library.rootEntries.size() : m_libraryRootEntries.size())
+                    .arg(changed ? 1 : 0));
+        }
     }
 
     return changed;

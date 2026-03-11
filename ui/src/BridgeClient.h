@@ -3,6 +3,7 @@
 #include <QAbstractListModel>
 #include <QObject>
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QNetworkAccessManager>
 #include <QString>
@@ -547,6 +548,11 @@ private:
     qint64 m_lastBridgePollProfileLogMs{0};
     qint64 m_lastAnalysisProfileLogMs{0};
     qint64 m_lastSpectrogramDeltaProfileLogMs{0};
+    qint64 m_lastSnapshotApplyProfileLogMs{0};
+    qint64 m_lastUiStallProfileLogMs{0};
+    QTimer m_uiStallWatchdogTimer;
+    QElapsedTimer m_uiStallWatchdogElapsed;
+    qint64 m_uiStallWatchdogLastTickMs{0};
     QByteArray m_analysisBuffer;
     qsizetype m_analysisBufferReadOffset{0};
     bool m_hasAnalysisFrameSeq{false};
