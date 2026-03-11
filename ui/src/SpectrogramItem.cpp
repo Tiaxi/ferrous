@@ -13,6 +13,7 @@
 
 namespace {
 constexpr double kMinFreqHz = 25.0;
+constexpr double kReferenceHopSamples = 1024.0;
 constexpr int kMaxPendingColumns = 512;
 constexpr int kPendingBacklogTarget = 48;
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
@@ -573,15 +574,14 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         dt = 1.0 / std::max(30.0, fallbackFps);
     }
 
-    double rowsPerSecond = m_estimatedRowsPerSecond;
-    if (!m_rowRateInitialized || !std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
+    const double rowsPerSecond = targetRowsPerSecondLocked();
+    if (!std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
         if (m_pendingPhase > 0.0) {
             m_pendingPhase = 0.0;
             return true;
         }
         return false;
     }
-    rowsPerSecond = std::clamp(rowsPerSecond, 30.0, 400.0);
 
     const double prevPhase = m_pendingPhase;
     m_pendingPhase += rowsPerSecond * dt;
@@ -612,6 +612,19 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
 
     const bool phaseChanged = std::abs(m_pendingPhase - prevPhase) > 0.0001;
     return consumed || phaseChanged;
+}
+
+double SpectrogramItem::targetRowsPerSecondLocked() const {
+    // Keep this aligned with the backend decimator/reference hop: the UI receives
+    // one visual spectrogram column per ~1024 input samples regardless of FFT size.
+    if (m_sampleRateHz > 0) {
+        const double stableRate = static_cast<double>(m_sampleRateHz) / kReferenceHopSamples;
+        return std::clamp(stableRate, 1.0, 400.0);
+    }
+    if (m_rowRateInitialized && std::isfinite(m_estimatedRowsPerSecond)) {
+        return std::clamp(m_estimatedRowsPerSecond, 1.0, 400.0);
+    }
+    return 0.0;
 }
 
 void SpectrogramItem::noteIncomingRowsLocked(int rowCount) {

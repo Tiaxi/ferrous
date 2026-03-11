@@ -68,6 +68,7 @@ private:
     void drawColumnAt(int x, const std::vector<quint8> &col);
     bool consumePendingColumnsLocked(int requested);
     bool advanceAnimationLocked(double elapsedSeconds);
+    double targetRowsPerSecondLocked() const;
     void noteIncomingRowsLocked(int rowCount);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
