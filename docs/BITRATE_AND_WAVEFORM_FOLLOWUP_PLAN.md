@@ -283,66 +283,12 @@ Recommended scope if cache is implemented:
 
 ### Waveform
 
-### Reassessment After Inspecting Current Implementation
+Recommended near-term direction:
 
-The current implementation makes one important tradeoff explicit:
+- keep the current `44.1/48 kHz` divisor-based sampling reduction
+- if more improvement is needed later, move next to block-peak decimation rather than lowering target rate immediately
 
-- on waveform-cache miss, Ferrous immediately launches a dedicated full-file waveform decode job on track change
-- that job opens the file separately and walks packets until EOF
-- the current sample-stride reduction happens after decode, so it reduces PCM-side work but does not materially reduce network-share read volume
+Recommended fallback if still too slow:
 
-That means the current near-term recommendation in this document is too narrow for the specific pain point of large surround FLACs on network shares. The main bottleneck is the extra first-play read pass, not just the per-sample waveform math.
-
-### Recommended Direction
-
-Recommended default behavior:
-
-- stop doing eager full-file linear waveform generation on cache miss during track change
-- build a fast whole-track preview waveform by sparsely probing the file at seek intervals
-- keep the persistent waveform cache, and optionally refine the preview later if a full-quality offline build is still desired
-
-Why this is the best mitigation:
-
-- it keeps the core product promise: a mostly complete full-track waveform is available early enough to guide seeking
-- it avoids the current worst case of reading the entire file sequentially on first play
-- on FLAC specifically, Ferrous's Symphonia stack already parses `SEEKTABLE` metadata and exposes coarse seek support, which makes sparse sampling a much better fit than a full linear pass
-- the amount of decoded audio can be bounded to a tiny window per probe instead of the entire track
-
-Tradeoff:
-
-- the first-pass waveform is approximate rather than exact
-- some formats or files without good seek indexes may need fallback behavior
-- sparse seeks trade bandwidth for latency, so probe count needs to stay intentionally low
-
-### Recommended Implementation Order
-
-1. Replace the current cache-miss full scan with a sparse preview builder.
-   - If a cached waveform exists, use it immediately.
-   - If not, build a low-resolution whole-track preview instead of a full-file decode.
-
-2. Implement seek-sampled probing for seek-friendly formats first.
-   - For FLAC, use Symphonia seeks against target timestamps spread across the track.
-   - Decode only a short window around each target point and collapse it to one bin or a small number of bins.
-   - Aggregate peaks across all channels, not just the first channel.
-
-3. Persist the preview waveform as its own cache product.
-   - Treat it as good enough for seek guidance.
-   - Optionally tag cache rows by quality level if Ferrous later adds a refined builder.
-
-4. Keep refinement optional and off the hot path.
-   - If a more exact waveform is still wanted, run that only when playback is idle, on local files, or behind an explicit setting.
-   - Do not make exact refinement a requirement for first-play usability.
-
-5. Use playback-derived accumulation only as a secondary refinement path.
-   - Playback PCM can still help fill or validate cache quality later.
-   - It should not be the only uncached-path strategy if immediate seek guidance is required.
-
-### Secondary Speedups If An Offline Builder Remains
-
-If Ferrous keeps a separate waveform builder for non-default/background use, the next improvements should focus on fidelity-per-cost rather than assuming they solve the network problem:
-
-- replace first-sample skipping with block-peak decimation
-- collapse channels by max absolute amplitude instead of sampling only the first channel
-- optionally test lower fixed analysis targets such as `24 kHz` / `22.05 kHz`
-
-These changes can make the builder faster and more representative, especially for multichannel material, but they do not remove the fundamental extra-read cost on network shares.
+- test `24 kHz / 22.05 kHz` targets behind an option or controlled experiment
+- compare first-build speed against visible waveform quality before making it default
