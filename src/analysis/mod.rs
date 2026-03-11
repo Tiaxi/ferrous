@@ -118,7 +118,6 @@ const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
 const SPARSE_WAVEFORM_PREVIEW_MAX_POINTS: usize = 256;
-const SPARSE_WAVEFORM_PREVIEW_MAX_PROBES: usize = 64;
 const SPARSE_WAVEFORM_PREVIEW_WINDOW_MS: u64 = 200;
 const SPARSE_WAVEFORM_PREVIEW_MAX_PACKETS_PER_PROBE: usize = 4;
 const BASE_VISUAL_DELAY_MS: i32 = 0;
@@ -1529,7 +1528,6 @@ struct SparseWaveformPreviewPlan {
     track_id: u32,
     estimated_frames: u64,
     point_count: usize,
-    probe_count: usize,
     window_frames: u64,
 }
 
@@ -1548,41 +1546,13 @@ fn sparse_waveform_preview_plan(
     if point_count == 0 {
         return None;
     }
-    let probe_count = point_count.clamp(1, SPARSE_WAVEFORM_PREVIEW_MAX_PROBES);
 
     Some(SparseWaveformPreviewPlan {
         track_id: 0,
         estimated_frames,
         point_count,
-        probe_count,
         window_frames: sparse_waveform_preview_window_frames(sample_rate_hz),
     })
-}
-
-fn interpolate_waveform_peaks(peaks: &[f32], target_points: usize) -> Vec<f32> {
-    if target_points == 0 || peaks.is_empty() {
-        return Vec::new();
-    }
-    if peaks.len() >= target_points || peaks.len() == 1 {
-        return peaks.to_vec();
-    }
-
-    let last_index = peaks.len().saturating_sub(1);
-    let output_last = target_points.saturating_sub(1).max(1);
-    let mut out = Vec::with_capacity(target_points);
-
-    for i in 0..target_points {
-        let scaled = i.saturating_mul(last_index);
-        let left = scaled / output_last;
-        let right = (left + 1).min(last_index);
-        let remainder = scaled % output_last;
-        let weight = small_usize_to_f32(remainder) / small_usize_to_f32(output_last);
-        let left_peak = peaks[left];
-        let right_peak = peaks[right];
-        out.push((left_peak + ((right_peak - left_peak) * weight)).clamp(0.0, 1.0));
-    }
-
-    out
 }
 
 fn decode_sparse_waveform_probe<C>(
@@ -1657,15 +1627,15 @@ fn decode_waveform_peaks_sparse_preview<C>(
 where
     C: FnMut() -> bool,
 {
-    let mut probe_peaks = Vec::with_capacity(plan.probe_count);
+    let mut peaks = Vec::with_capacity(plan.point_count);
 
-    for index in 0..plan.probe_count {
+    for index in 0..plan.point_count {
         if is_cancelled() {
             return Ok(None);
         }
 
         let target_ts =
-            sparse_waveform_preview_probe_ts(index, plan.probe_count, plan.estimated_frames);
+            sparse_waveform_preview_probe_ts(index, plan.point_count, plan.estimated_frames);
         format.seek(
             SeekMode::Coarse,
             SeekTo::TimeStamp {
@@ -1683,15 +1653,12 @@ where
             sample_buf,
             &mut is_cancelled,
         ) {
-            Some(peak) => probe_peaks.push(peak),
+            Some(peak) => peaks.push(peak),
             None => return Ok(None),
         }
     }
 
-    Ok(Some(interpolate_waveform_peaks(
-        &probe_peaks,
-        plan.point_count,
-    )))
+    Ok(Some(peaks))
 }
 
 fn open_waveform_source(
@@ -2440,30 +2407,6 @@ mod tests {
             Some(estimated_frames.saturating_sub(1))
         );
         assert!(probes.windows(2).all(|pair| pair[0] <= pair[1]));
-    }
-
-    #[test]
-    fn sparse_waveform_preview_plan_caps_probe_count_below_output_points() {
-        let mut codec_params = CodecParameters::default();
-        codec_params.sample_rate = Some(48_000);
-        codec_params.n_frames = Some(48_000 * 600);
-
-        let plan = sparse_waveform_preview_plan(Path::new("/music/test.flac"), &codec_params, 1024)
-            .expect("preview plan");
-
-        assert_eq!(plan.point_count, 256);
-        assert_eq!(plan.probe_count, 64);
-    }
-
-    #[test]
-    fn interpolate_waveform_peaks_fills_between_sparse_probes() {
-        let peaks = interpolate_waveform_peaks(&[0.0, 1.0], 5);
-
-        assert_eq!(peaks.len(), 5);
-        assert_eq!(peaks.first().copied(), Some(0.0));
-        assert_eq!(peaks.last().copied(), Some(1.0));
-        assert!(peaks[1] > 0.0);
-        assert!(peaks[3] < 1.0);
     }
 
     #[test]
