@@ -94,6 +94,7 @@ private:
     std::deque<std::vector<quint8>> m_columns;
     std::deque<std::vector<quint8>> m_pendingColumns;
     double m_pendingPhase{0.0};
+    bool m_scrollPrimed{false};
     bool m_rowRateInitialized{false};
     double m_estimatedRowsPerSecond{0.0};
     std::chrono::steady_clock::time_point m_lastRowAppendTime{};
