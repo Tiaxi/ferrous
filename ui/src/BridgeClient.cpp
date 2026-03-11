@@ -1368,8 +1368,21 @@ void BridgeClient::pollInProcessBridge() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     QElapsedTimer pollTimer;
     pollTimer.start();
+    double ffiPollMs = 0.0;
+    double analysisProcessMs = 0.0;
+    double treeProcessMs = 0.0;
+    double searchQueueMs = 0.0;
+    double eventDecodeMs = 0.0;
+    double eventApplyMs = 0.0;
+#endif
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QElapsedTimer ffiPollTimer;
+    ffiPollTimer.start();
 #endif
     ferrous_ffi_bridge_poll(m_ffiBridge, 64);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    ffiPollMs = static_cast<double>(ffiPollTimer.nsecsElapsed()) / 1'000'000.0;
+#endif
 
     bool anySnapshotChanged = false;
     int processedAnalysisFrames = 0;
@@ -1387,7 +1400,14 @@ void BridgeClient::pollInProcessBridge() {
             static_cast<qsizetype>(len));
         processedAnalysisBytes += chunk.size();
         ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        QElapsedTimer analysisProcessTimer;
+        analysisProcessTimer.start();
+#endif
         processAnalysisBytes(chunk);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        analysisProcessMs += static_cast<double>(analysisProcessTimer.nsecsElapsed()) / 1'000'000.0;
+#endif
     }
 
     int processedTreeFrames = 0;
@@ -1407,7 +1427,14 @@ void BridgeClient::pollInProcessBridge() {
         const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
             ? std::numeric_limits<int>::max()
             : static_cast<int>(version);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        QElapsedTimer treeProcessTimer;
+        treeProcessTimer.start();
+#endif
         applyLibraryTreeFrame(versionInt, treeBytes);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        treeProcessMs += static_cast<double>(treeProcessTimer.nsecsElapsed()) / 1'000'000.0;
+#endif
     }
 
     int processedSearchFrames = 0;
@@ -1429,7 +1456,14 @@ void BridgeClient::pollInProcessBridge() {
             reinterpret_cast<const char *>(searchPtr),
             static_cast<qsizetype>(len));
         ferrous_ffi_bridge_free_search_results(searchPtr, len);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        QElapsedTimer searchQueueTimer;
+        searchQueueTimer.start();
+#endif
         enqueueSearchFrame(seq, payload, popTimer.elapsed());
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        searchQueueMs += static_cast<double>(searchQueueTimer.nsecsElapsed()) / 1'000'000.0;
+#endif
     }
 
     int processedEvents = 0;
@@ -1448,6 +1482,10 @@ void BridgeClient::pollInProcessBridge() {
 
         BinaryBridgeCodec::DecodedSnapshot decoded;
         QString decodeError;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        QElapsedTimer eventDecodeTimer;
+        eventDecodeTimer.start();
+#endif
         if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
             logDiagnostic(
                 QStringLiteral("bridge"),
@@ -1455,7 +1493,15 @@ void BridgeClient::pollInProcessBridge() {
             emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
             continue;
         }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        eventDecodeMs += static_cast<double>(eventDecodeTimer.nsecsElapsed()) / 1'000'000.0;
+        QElapsedTimer eventApplyTimer;
+        eventApplyTimer.start();
+#endif
         anySnapshotChanged |= processBinarySnapshot(decoded);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        eventApplyMs += static_cast<double>(eventApplyTimer.nsecsElapsed()) / 1'000'000.0;
+#endif
     }
 
     if (anySnapshotChanged) {
@@ -1472,12 +1518,18 @@ void BridgeClient::pollInProcessBridge() {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("ui-prof"),
                 QStringLiteral(
-                    "bridge_poll ms=%1 analysis_frames=%2 analysis_kb=%3 tree_frames=%4 search_frames=%5 events=%6 saturated=%7")
+                    "bridge_poll ms=%1 ffi_poll=%2 analysis_ms=%3 analysis_frames=%4 analysis_kb=%5 tree_ms=%6 tree_frames=%7 search_ms=%8 search_frames=%9 event_decode_ms=%10 event_apply_ms=%11 events=%12 saturated=%13")
                     .arg(pollMs, 0, 'f', 2)
+                    .arg(ffiPollMs, 0, 'f', 2)
+                    .arg(analysisProcessMs, 0, 'f', 2)
                     .arg(processedAnalysisFrames)
                     .arg(static_cast<double>(processedAnalysisBytes) / 1024.0, 0, 'f', 1)
+                    .arg(treeProcessMs, 0, 'f', 2)
                     .arg(processedTreeFrames)
+                    .arg(searchQueueMs, 0, 'f', 2)
                     .arg(processedSearchFrames)
+                    .arg(eventDecodeMs, 0, 'f', 2)
+                    .arg(eventApplyMs, 0, 'f', 2)
                     .arg(processedEvents)
                     .arg(saturated ? 1 : 0));
         }
