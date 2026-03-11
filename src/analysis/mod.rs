@@ -12,9 +12,9 @@ use crossbeam_channel::{select, tick, unbounded, Receiver, Sender};
 use realfft::{num_complex::Complex32, RealFftPlanner, RealToComplex};
 use rusqlite::{params, Connection};
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -117,6 +117,9 @@ const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
+const SPARSE_WAVEFORM_PREVIEW_MAX_POINTS: usize = 256;
+const SPARSE_WAVEFORM_PREVIEW_WINDOW_MS: u64 = 200;
+const SPARSE_WAVEFORM_PREVIEW_MAX_PACKETS_PER_PROBE: usize = 4;
 const BASE_VISUAL_DELAY_MS: i32 = 0;
 const REFERENCE_HOP: usize = 1024;
 
@@ -1467,24 +1470,200 @@ fn waveform_sample_rate_divisor(sample_rate_hz: u64) -> u64 {
     1
 }
 
-fn decode_waveform_peaks_stream<F, C>(
-    path: &Path,
-    max_points: usize,
-    mut on_update: F,
-    mut is_cancelled: C,
-) -> anyhow::Result<()>
-where
-    F: FnMut(Vec<f32>, f32, bool) -> bool,
-    C: FnMut() -> bool,
-{
-    #[cfg(feature = "gst")]
-    if is_raw_surround_file(path) {
-        return decode_waveform_peaks_stream_gst(path, max_points, on_update, is_cancelled);
+fn should_use_sparse_waveform_preview(path: &Path, codec_params: &CodecParameters) -> bool {
+    if codec_params.sample_rate.is_none() || codec_params.n_frames.is_none() {
+        return false;
     }
 
-    if is_cancelled() {
-        return Ok(());
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("flac"))
+}
+
+fn sparse_waveform_preview_point_count(max_points: usize, estimated_frames: u64) -> usize {
+    if max_points == 0 || estimated_frames == 0 {
+        return 0;
     }
+
+    max_points
+        .min(SPARSE_WAVEFORM_PREVIEW_MAX_POINTS)
+        .min(usize::try_from(estimated_frames).unwrap_or(usize::MAX))
+        .max(1)
+}
+
+fn sparse_waveform_preview_probe_ts(
+    index: usize,
+    point_count: usize,
+    estimated_frames: u64,
+) -> u64 {
+    if point_count <= 1 || estimated_frames <= 1 {
+        return 0;
+    }
+
+    let numerator = u128::from(usize_to_u64(index))
+        .saturating_mul(u128::from(estimated_frames.saturating_sub(1)));
+    let denominator = u128::from(usize_to_u64(point_count.saturating_sub(1)).max(1));
+    u64::try_from(numerator / denominator).unwrap_or(estimated_frames.saturating_sub(1))
+}
+
+fn sparse_waveform_preview_window_frames(sample_rate_hz: u64) -> u64 {
+    sample_rate_hz
+        .saturating_mul(SPARSE_WAVEFORM_PREVIEW_WINDOW_MS)
+        .div_ceil(1000)
+        .max(1)
+}
+
+fn peak_abs_all_channels(samples: &[f32]) -> f32 {
+    let mut peak = 0.0f32;
+    for &sample in samples {
+        let amp = sample.abs();
+        if amp > peak {
+            peak = amp;
+        }
+    }
+    peak.clamp(0.0, 1.0)
+}
+
+struct SparseWaveformPreviewPlan {
+    track_id: u32,
+    estimated_frames: u64,
+    point_count: usize,
+    window_frames: u64,
+}
+
+fn sparse_waveform_preview_plan(
+    path: &Path,
+    codec_params: &CodecParameters,
+    max_points: usize,
+) -> Option<SparseWaveformPreviewPlan> {
+    if !should_use_sparse_waveform_preview(path, codec_params) {
+        return None;
+    }
+
+    let sample_rate_hz = u64::from(codec_params.sample_rate?);
+    let estimated_frames = codec_params.n_frames?;
+    let point_count = sparse_waveform_preview_point_count(max_points, estimated_frames);
+    if point_count == 0 {
+        return None;
+    }
+
+    Some(SparseWaveformPreviewPlan {
+        track_id: 0,
+        estimated_frames,
+        point_count,
+        window_frames: sparse_waveform_preview_window_frames(sample_rate_hz),
+    })
+}
+
+fn decode_sparse_waveform_probe<C>(
+    format: &mut Box<dyn FormatReader>,
+    audio_decoder: &mut Box<dyn Decoder>,
+    track_id: u32,
+    window_frames: u64,
+    sample_buf: &mut Option<SampleBuffer<f32>>,
+    mut is_cancelled: C,
+) -> Option<f32>
+where
+    C: FnMut() -> bool,
+{
+    let mut decoded_frames = 0u64;
+    let mut packets = 0usize;
+    let mut peak = 0.0f32;
+
+    while decoded_frames < window_frames && packets < SPARSE_WAVEFORM_PREVIEW_MAX_PACKETS_PER_PROBE
+    {
+        if is_cancelled() {
+            return None;
+        }
+
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+            Err(SymphoniaError::ResetRequired) => {
+                audio_decoder.reset();
+                continue;
+            }
+            Err(_) => break,
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+        packets += 1;
+
+        let decoded_audio = match audio_decoder.decode(&packet) {
+            Ok(decoded_audio) => decoded_audio,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::ResetRequired) => {
+                audio_decoder.reset();
+                continue;
+            }
+            Err(_) => break,
+        };
+
+        let spec = *decoded_audio.spec();
+        let channels = spec.channels.count().max(1);
+        let decoded_capacity = decoded_audio.capacity();
+        let buf = ensure_sample_buffer(sample_buf, decoded_capacity, spec);
+        buf.copy_interleaved_ref(decoded_audio);
+
+        let samples = buf.samples();
+        peak = peak.max(peak_abs_all_channels(samples));
+        decoded_frames =
+            decoded_frames.saturating_add(usize_to_u64(samples.len() / channels.max(1)));
+    }
+
+    Some(peak.clamp(0.0, 1.0))
+}
+
+fn decode_waveform_peaks_sparse_preview<C>(
+    format: &mut Box<dyn FormatReader>,
+    plan: &SparseWaveformPreviewPlan,
+    audio_decoder: &mut Box<dyn Decoder>,
+    sample_buf: &mut Option<SampleBuffer<f32>>,
+    mut is_cancelled: C,
+) -> anyhow::Result<Option<Vec<f32>>>
+where
+    C: FnMut() -> bool,
+{
+    let mut peaks = Vec::with_capacity(plan.point_count);
+
+    for index in 0..plan.point_count {
+        if is_cancelled() {
+            return Ok(None);
+        }
+
+        let target_ts =
+            sparse_waveform_preview_probe_ts(index, plan.point_count, plan.estimated_frames);
+        format.seek(
+            SeekMode::Coarse,
+            SeekTo::TimeStamp {
+                ts: target_ts,
+                track_id: plan.track_id,
+            },
+        )?;
+        audio_decoder.reset();
+
+        match decode_sparse_waveform_probe(
+            format,
+            audio_decoder,
+            plan.track_id,
+            plan.window_frames,
+            sample_buf,
+            &mut is_cancelled,
+        ) {
+            Some(peak) => peaks.push(peak),
+            None => return Ok(None),
+        }
+    }
+
+    Ok(Some(peaks))
+}
+
+fn open_waveform_source(
+    path: &Path,
+) -> anyhow::Result<(Box<dyn FormatReader>, CodecParameters, u32)> {
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -1493,7 +1672,7 @@ where
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
 
-    let mut format = symphonia::default::get_probe()
+    let format = symphonia::default::get_probe()
         .format(
             &hint,
             mss,
@@ -1505,20 +1684,46 @@ where
     let track = format
         .default_track()
         .ok_or_else(|| anyhow::anyhow!("no default track"))?;
+    let codec_params = track.codec_params.clone();
     let track_id = track.id;
 
-    let mut audio_decoder =
-        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-    let sample_rate_hz = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
-    let estimated_frames = track.codec_params.n_frames.unwrap_or(sample_rate_hz * 240);
+    Ok((format, codec_params, track_id))
+}
 
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+struct FullWaveformDecodeContext<'a> {
+    format: &'a mut Box<dyn FormatReader>,
+    audio_decoder: &'a mut Box<dyn Decoder>,
+    sample_buf: &'a mut Option<SampleBuffer<f32>>,
+    track_id: u32,
+    estimated_frames: u64,
+    sample_rate_hz: u64,
+    max_points: usize,
+}
+
+fn decode_waveform_peaks_full_scan<F, C>(
+    ctx: FullWaveformDecodeContext<'_>,
+    mut on_update: F,
+    mut is_cancelled: C,
+) where
+    F: FnMut(Vec<f32>, f32, bool) -> bool,
+    C: FnMut() -> bool,
+{
+    let FullWaveformDecodeContext {
+        format,
+        audio_decoder,
+        sample_buf,
+        track_id,
+        estimated_frames,
+        sample_rate_hz,
+        max_points,
+    } = ctx;
+
     let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate_hz);
-
     let mut packet_counter = 0usize;
+
     loop {
         if is_cancelled() {
-            return Ok(());
+            return;
         }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
@@ -1545,21 +1750,22 @@ where
             usize::try_from(waveform_sample_rate_divisor(sample_rate_hz)).unwrap_or(1);
         let sample_stride = base_sample_stride.saturating_mul(sample_rate_divisor);
         let decoded_capacity = decoded_audio.capacity();
-        let buf = ensure_sample_buffer(&mut sample_buf, decoded_capacity, spec);
+        let buf = ensure_sample_buffer(sample_buf, decoded_capacity, spec);
         buf.copy_interleaved_ref(decoded_audio);
 
         let samples = buf.samples();
         let frame_width = channels.saturating_mul(sample_stride).max(1);
         for base in (0..samples.len()).step_by(frame_width) {
             if base.is_multiple_of(4096) && is_cancelled() {
-                return Ok(());
+                return;
             }
-            if !waveform.push_sample(samples[base].abs(), sample_stride, &mut on_update) {
-                return Ok(());
+            let end = (base + frame_width).min(samples.len());
+            let block_peak = peak_abs_all_channels(&samples[base..end]);
+            if !waveform.push_sample(block_peak, sample_stride, &mut on_update) {
+                return;
             }
         }
 
-        // Keep this worker from starving UI/render threads on heavy FLAC decode.
         if packet_counter.is_multiple_of(64) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -1568,6 +1774,67 @@ where
     if !is_cancelled() {
         let _ = on_update(waveform.finish(), 0.0, true);
     }
+}
+
+fn decode_waveform_peaks_stream<F, C>(
+    path: &Path,
+    max_points: usize,
+    mut on_update: F,
+    mut is_cancelled: C,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<f32>, f32, bool) -> bool,
+    C: FnMut() -> bool,
+{
+    #[cfg(feature = "gst")]
+    if is_raw_surround_file(path) {
+        return decode_waveform_peaks_stream_gst(path, max_points, on_update, is_cancelled);
+    }
+
+    if is_cancelled() {
+        return Ok(());
+    }
+    let (mut format, codec_params, track_id) = open_waveform_source(path)?;
+
+    let mut audio_decoder =
+        symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
+    let sample_rate_hz = u64::from(codec_params.sample_rate.unwrap_or(48_000));
+    let estimated_frames = codec_params.n_frames.unwrap_or(sample_rate_hz * 240);
+
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+    if let Some(plan) = sparse_waveform_preview_plan(path, &codec_params, max_points) {
+        if let Some(peaks) = decode_waveform_peaks_sparse_preview(
+            &mut format,
+            &SparseWaveformPreviewPlan { track_id, ..plan },
+            &mut audio_decoder,
+            &mut sample_buf,
+            &mut is_cancelled,
+        )? {
+            if !is_cancelled() {
+                let _ = on_update(
+                    peaks,
+                    seconds_from_frames(estimated_frames, sample_rate_hz),
+                    true,
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    decode_waveform_peaks_full_scan(
+        FullWaveformDecodeContext {
+            format: &mut format,
+            audio_decoder: &mut audio_decoder,
+            sample_buf: &mut sample_buf,
+            track_id,
+            estimated_frames,
+            sample_rate_hz,
+            max_points,
+        },
+        on_update,
+        is_cancelled,
+    );
     Ok(())
 }
 
@@ -2094,6 +2361,59 @@ mod tests {
         assert_eq!(waveform_sample_rate_divisor(44_000), 1);
         assert_eq!(waveform_sample_rate_divisor(50_000), 1);
         assert_eq!(waveform_sample_rate_divisor(64_000), 1);
+    }
+
+    #[test]
+    fn sparse_waveform_preview_targets_flac_with_known_duration() {
+        let mut codec_params = CodecParameters::default();
+        codec_params.sample_rate = Some(96_000);
+        codec_params.n_frames = Some(96_000 * 180);
+
+        assert!(should_use_sparse_waveform_preview(
+            Path::new("/music/test.FLAC"),
+            &codec_params
+        ));
+        assert!(!should_use_sparse_waveform_preview(
+            Path::new("/music/test.mp3"),
+            &codec_params
+        ));
+
+        codec_params.n_frames = None;
+        assert!(!should_use_sparse_waveform_preview(
+            Path::new("/music/test.flac"),
+            &codec_params
+        ));
+    }
+
+    #[test]
+    fn sparse_waveform_preview_point_count_caps_preview_work() {
+        assert_eq!(sparse_waveform_preview_point_count(1024, 10_000), 256);
+        assert_eq!(sparse_waveform_preview_point_count(64, 10_000), 64);
+        assert_eq!(sparse_waveform_preview_point_count(1024, 12), 12);
+        assert_eq!(sparse_waveform_preview_point_count(0, 10_000), 0);
+    }
+
+    #[test]
+    fn sparse_waveform_preview_probe_timestamps_span_track() {
+        let estimated_frames = 48_000 * 120;
+        let point_count = 5;
+        let probes: Vec<u64> = (0..point_count)
+            .map(|index| sparse_waveform_preview_probe_ts(index, point_count, estimated_frames))
+            .collect();
+
+        assert_eq!(probes.first().copied(), Some(0));
+        assert_eq!(
+            probes.last().copied(),
+            Some(estimated_frames.saturating_sub(1))
+        );
+        assert!(probes.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn peak_abs_all_channels_uses_loudest_surround_channel() {
+        let samples = vec![0.10, -0.30, 0.25, -0.90, 0.40, -0.20];
+
+        assert_eq!(peak_abs_all_channels(&samples), 0.90);
     }
 
     #[cfg(feature = "gst")]
