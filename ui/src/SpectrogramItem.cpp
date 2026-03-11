@@ -3,7 +3,6 @@
 #include <QFontMetrics>
 #include <QMutexLocker>
 #include <QPainter>
-#include <QSGRendererInterface>
 #include <QQuickWindow>
 #include <QString>
 
@@ -67,26 +66,15 @@ bool shouldLogProfileSpike(
     return true;
 }
 #endif
-
-bool shouldUseFboTarget(QQuickWindow *window) {
-    if (qEnvironmentVariableIsSet("FERROUS_UI_PAINT_IMAGE")) {
-        return false;
-    }
-    if (qEnvironmentVariableIsSet("FERROUS_UI_PAINT_FBO")) {
-        return true;
-    }
-    if (window == nullptr || window->rendererInterface() == nullptr) {
-        return false;
-    }
-    return window->rendererInterface()->graphicsApi() == QSGRendererInterface::OpenGL;
-}
 } // namespace
 
 SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     : QQuickPaintedItem(parent) {
     setAntialiasing(false);
     setOpaquePainting(true);
-    if (shouldUseFboTarget(window())) {
+    // Keep stable Image render path by default; allow FBO only via explicit opt-in.
+    const bool useFboTarget = qEnvironmentVariableIsSet("FERROUS_UI_PAINT_FBO");
+    if (useFboTarget) {
         setRenderTarget(QQuickPaintedItem::FramebufferObject);
     }
     m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
@@ -738,10 +726,6 @@ std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) con
 }
 
 void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
-    setRenderTarget(
-        shouldUseFboTarget(window)
-            ? QQuickPaintedItem::FramebufferObject
-            : QQuickPaintedItem::Image);
     if (m_animationTickConnection) {
         disconnect(m_animationTickConnection);
         m_animationTickConnection = QMetaObject::Connection{};
