@@ -2312,55 +2312,82 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
     m_itunesArtworkStatusText = QStringLiteral("Searching iTunes...");
     emit itunesArtworkChanged();
 
-    QUrl url(QStringLiteral("https://itunes.apple.com/search"));
-    QUrlQuery query(url);
-    query.addQueryItem(QStringLiteral("term"), artist + QStringLiteral(" ") + album);
-    query.addQueryItem(QStringLiteral("country"), QStringLiteral("fi"));
-    query.addQueryItem(QStringLiteral("media"), QStringLiteral("music"));
-    query.addQueryItem(QStringLiteral("entity"), QStringLiteral("album"));
-    query.addQueryItem(QStringLiteral("limit"), QStringLiteral("25"));
-    url.setQuery(query);
-
-    QNetworkRequest request(url);
-    request.setTransferTimeout(30000);
-    auto *reply = m_itunesArtworkNetwork.get(request);
-    m_itunesArtworkReplies.insert(reply);
     const quint64 generation = m_itunesArtworkGeneration;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, generation, album, artist]() {
-        m_itunesArtworkReplies.remove(reply);
-        const bool stale = generation != m_itunesArtworkGeneration;
-        const auto error = reply->error();
-        const QByteArray payload = reply->readAll();
-        reply->deleteLater();
-        if (stale) {
-            return;
-        }
-        if (error != QNetworkReply::NoError) {
-            m_itunesArtworkLoading = false;
-            m_itunesArtworkStatusText =
-                QStringLiteral("iTunes search failed: %1").arg(reply->errorString());
-            emit itunesArtworkChanged();
-            return;
-        }
-
-        const auto doc = QJsonDocument::fromJson(payload);
-        const auto results = doc.object().value(QStringLiteral("results")).toArray();
-
+    struct SearchAggregation {
         QVector<ItunesArtworkCandidate> candidates;
-        candidates.reserve(results.size());
-        int apiOrder = 0;
+        QSet<QString> dedupKeys;
+        QSet<qint64> artistLookupIds;
+        int nextApiOrder{0};
+        int pendingRequests{0};
+        int successfulRequests{0};
+        QString firstError;
+    };
+
+    QStringList searchTerms;
+    QSet<QString> seenSearchTerms;
+    const QStringList rawTerms{
+        artist + QStringLiteral(" ") + album,
+        album,
+        artist,
+    };
+    for (const QString &rawTerm : rawTerms) {
+        const QString term = rawTerm.simplified();
+        const QString termKey = normalizedItunesMatchKey(term);
+        if (term.isEmpty() || seenSearchTerms.contains(termKey)) {
+            continue;
+        }
+        seenSearchTerms.insert(termKey);
+        searchTerms.push_back(term);
+    }
+
+    auto aggregation = std::make_shared<SearchAggregation>();
+    aggregation->pendingRequests = searchTerms.size();
+
+    auto albumPreviewStrings = [](const QJsonArray &results) {
+        QStringList rawPreview;
+        const int rawLimit = std::min(15, static_cast<int>(results.size()));
+        rawPreview.reserve(rawLimit);
+        for (int i = 0; i < rawLimit; ++i) {
+            const QJsonObject previewObj = results[i].toObject();
+            rawPreview.push_back(
+                QStringLiteral("[%1] %2 | %3")
+                    .arg(i)
+                    .arg(previewObj.value(QStringLiteral("collectionName")).toString().trimmed(),
+                         previewObj.value(QStringLiteral("artistName")).toString().trimmed()));
+        }
+        return rawPreview;
+    };
+
+    auto addAlbumResults = [aggregation, album, artist](const QJsonArray &results) {
         for (const QJsonValue &value : results) {
             const QJsonObject obj = value.toObject();
             const QString artworkUrl100 = obj.value(QStringLiteral("artworkUrl100")).toString();
             if (artworkUrl100.trimmed().isEmpty()) {
-                ++apiOrder;
                 continue;
             }
             const QStringList assetUrls = deriveItunesArtworkUrls(artworkUrl100);
             if (assetUrls.isEmpty()) {
-                ++apiOrder;
                 continue;
             }
+
+            const qint64 collectionId = static_cast<qint64>(
+                obj.value(QStringLiteral("collectionId")).toDouble(-1));
+            QString dedupKey;
+            if (collectionId > 0) {
+                dedupKey = QStringLiteral("id:%1").arg(collectionId);
+            } else {
+                dedupKey = obj.value(QStringLiteral("collectionViewUrl")).toString().trimmed();
+                if (dedupKey.isEmpty()) {
+                    dedupKey = QStringLiteral("%1|%2|%3")
+                        .arg(obj.value(QStringLiteral("collectionName")).toString().trimmed(),
+                             obj.value(QStringLiteral("artistName")).toString().trimmed(),
+                             artworkUrl100.trimmed());
+                }
+            }
+            if (aggregation->dedupKeys.contains(dedupKey)) {
+                continue;
+            }
+            aggregation->dedupKeys.insert(dedupKey);
 
             ItunesArtworkCandidate candidate;
             candidate.albumTitle = obj.value(QStringLiteral("collectionName")).toString().trimmed();
@@ -2373,13 +2400,15 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 candidate.artistName,
                 album,
                 artist);
-            candidate.apiOrder = apiOrder++;
-            candidates.push_back(std::move(candidate));
+            candidate.apiOrder = aggregation->nextApiOrder++;
+            aggregation->candidates.push_back(std::move(candidate));
         }
+    };
 
+    auto finalizeSearch = [this, aggregation]() {
         std::stable_sort(
-            candidates.begin(),
-            candidates.end(),
+            aggregation->candidates.begin(),
+            aggregation->candidates.end(),
             [](const ItunesArtworkCandidate &lhs, const ItunesArtworkCandidate &rhs) {
                 if (lhs.rankGroup != rhs.rankGroup) {
                     return lhs.rankGroup < rhs.rankGroup;
@@ -2387,19 +2416,23 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 return lhs.apiOrder < rhs.apiOrder;
         });
 
-        m_itunesArtworkCandidates = candidates;
+        m_itunesArtworkCandidates = aggregation->candidates;
         m_itunesArtworkResults.clear();
-        if (candidates.isEmpty()) {
+        if (aggregation->candidates.isEmpty()) {
             m_itunesArtworkLoading = false;
-            m_itunesArtworkStatusText = QStringLiteral("No iTunes artwork suggestions found.");
+            if (aggregation->successfulRequests <= 0 && !aggregation->firstError.isEmpty()) {
+                m_itunesArtworkStatusText = aggregation->firstError;
+            } else {
+                m_itunesArtworkStatusText = QStringLiteral("No iTunes artwork suggestions found.");
+            }
             emit itunesArtworkChanged();
             return;
         }
 
         QVariantList rows;
-        rows.reserve(candidates.size());
-        for (int i = 0; i < candidates.size(); ++i) {
-            const auto &candidate = candidates[i];
+        rows.reserve(aggregation->candidates.size());
+        for (int i = 0; i < aggregation->candidates.size(); ++i) {
+            const auto &candidate = aggregation->candidates[i];
             QVariantMap row;
             row.insert(QStringLiteral("albumTitle"), candidate.albumTitle);
             row.insert(QStringLiteral("artistName"), candidate.artistName);
@@ -2425,7 +2458,112 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             QStringLiteral("Found %1 suggestion(s). High-resolution artwork loads on preview/apply.")
                 .arg(rows.size());
         emit itunesArtworkChanged();
-    });
+    };
+
+    auto dispatchArtistLookup = [this, generation, album, artist, aggregation, finalizeSearch, albumPreviewStrings, addAlbumResults](qint64 artistId) {
+        if (artistId <= 0 || aggregation->artistLookupIds.contains(artistId)) {
+            return;
+        }
+        aggregation->artistLookupIds.insert(artistId);
+        aggregation->pendingRequests += 1;
+
+        QUrl url(QStringLiteral("https://itunes.apple.com/lookup"));
+        QUrlQuery query(url);
+        query.addQueryItem(QStringLiteral("id"), QString::number(artistId));
+        query.addQueryItem(QStringLiteral("country"), QStringLiteral("fi"));
+        query.addQueryItem(QStringLiteral("entity"), QStringLiteral("album"));
+        query.addQueryItem(QStringLiteral("limit"), QStringLiteral("200"));
+        url.setQuery(query);
+
+        QNetworkRequest request(url);
+        request.setTransferTimeout(30000);
+        auto *reply = m_itunesArtworkNetwork.get(request);
+        m_itunesArtworkReplies.insert(reply);
+
+        connect(reply, &QNetworkReply::finished, this, [this, reply, generation, aggregation, finalizeSearch, artistId, albumPreviewStrings, addAlbumResults]() {
+            m_itunesArtworkReplies.remove(reply);
+            const bool stale = generation != m_itunesArtworkGeneration;
+            const auto error = reply->error();
+            const QString errorText = reply->errorString();
+            const QByteArray payload = reply->readAll();
+            reply->deleteLater();
+            if (stale) {
+                return;
+            }
+
+            aggregation->pendingRequests = std::max(0, aggregation->pendingRequests - 1);
+            if (error != QNetworkReply::NoError) {
+            } else {
+                aggregation->successfulRequests += 1;
+                const auto doc = QJsonDocument::fromJson(payload);
+                const auto results = doc.object().value(QStringLiteral("results")).toArray();
+                addAlbumResults(results);
+            }
+
+            if (aggregation->pendingRequests == 0) {
+                finalizeSearch();
+            }
+        });
+    };
+
+    for (const QString &searchTerm : searchTerms) {
+        QUrl url(QStringLiteral("https://itunes.apple.com/search"));
+        QUrlQuery query(url);
+        query.addQueryItem(QStringLiteral("term"), searchTerm);
+        query.addQueryItem(QStringLiteral("country"), QStringLiteral("fi"));
+        query.addQueryItem(QStringLiteral("entity"), QStringLiteral("album"));
+        query.addQueryItem(QStringLiteral("limit"), QStringLiteral("200"));
+        url.setQuery(query);
+
+        QNetworkRequest request(url);
+        request.setTransferTimeout(30000);
+        auto *reply = m_itunesArtworkNetwork.get(request);
+        m_itunesArtworkReplies.insert(reply);
+
+        connect(reply, &QNetworkReply::finished, this, [this, reply, generation, album, artist, aggregation, finalizeSearch, searchTerm, albumPreviewStrings, addAlbumResults, dispatchArtistLookup]() {
+            m_itunesArtworkReplies.remove(reply);
+            const bool stale = generation != m_itunesArtworkGeneration;
+            const auto error = reply->error();
+            const QString errorText = reply->errorString();
+            const QByteArray payload = reply->readAll();
+            reply->deleteLater();
+            if (stale) {
+                return;
+            }
+
+            aggregation->pendingRequests = std::max(0, aggregation->pendingRequests - 1);
+            if (error != QNetworkReply::NoError) {
+                if (aggregation->firstError.isEmpty()) {
+                    aggregation->firstError =
+                        QStringLiteral("iTunes search failed: %1").arg(errorText);
+                }
+            } else {
+                aggregation->successfulRequests += 1;
+                const auto doc = QJsonDocument::fromJson(payload);
+                const auto results = doc.object().value(QStringLiteral("results")).toArray();
+                addAlbumResults(results);
+
+                if (normalizedItunesMatchKey(searchTerm) == normalizedItunesMatchKey(artist)) {
+                    for (const QJsonValue &value : results) {
+                        const QJsonObject obj = value.toObject();
+                        const QString resultArtist = obj.value(QStringLiteral("artistName")).toString().trimmed();
+                        if (normalizedItunesMatchKey(resultArtist) != normalizedItunesMatchKey(artist)) {
+                            continue;
+                        }
+                        const qint64 artistId = static_cast<qint64>(
+                            obj.value(QStringLiteral("artistId")).toDouble(-1));
+                        if (artistId > 0) {
+                            dispatchArtistLookup(artistId);
+                        }
+                    }
+                }
+            }
+
+            if (aggregation->pendingRequests == 0) {
+                finalizeSearch();
+            }
+        });
+    }
 }
 
 void BridgeClient::clearItunesArtworkSuggestions() {
