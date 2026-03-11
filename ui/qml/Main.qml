@@ -324,6 +324,7 @@ Kirigami.ApplicationWindow {
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property bool connected: false
+        signal playbackChanged()
         signal snapshotChanged()
         signal analysisChanged()
         signal libraryTreeFrameReceived(int version, var treeBytes)
@@ -7172,6 +7173,19 @@ Kirigami.ApplicationWindow {
                     root.albumArtViewerFileInfo = ({})
                 }
             }
+            if (uiBridge.queueVersion !== root.lastSeenQueueVersion) {
+                root.lastSeenQueueVersion = uiBridge.queueVersion
+                root.resetQueueSelectionForUpdatedQueue()
+                root.applyPendingPlaylistViewportRestore()
+                root.syncQueueSelectionToCurrentQueue()
+                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
+            }
+            if (uiBridge.selectedQueueIndex !== root.lastSyncedBridgeSelectedQueueIndex) {
+                root.syncQueueSelectionToCurrentQueue()
+                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
+            }
+        }
+        function onPlaybackChanged() {
             const incomingPosition = uiBridge.positionSeconds
             const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath
             const nowMs = Date.now()
@@ -7205,17 +7219,6 @@ Kirigami.ApplicationWindow {
                 root.positionSmoothingAnchorSeconds = incomingPosition
                 root.positionSmoothingLastMs = nowMs
                 root.positionSmoothingTrackPath = uiBridge.currentTrackPath
-            }
-            if (uiBridge.queueVersion !== root.lastSeenQueueVersion) {
-                root.lastSeenQueueVersion = uiBridge.queueVersion
-                root.resetQueueSelectionForUpdatedQueue()
-                root.applyPendingPlaylistViewportRestore()
-                root.syncQueueSelectionToCurrentQueue()
-                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
-            }
-            if (uiBridge.selectedQueueIndex !== root.lastSyncedBridgeSelectedQueueIndex) {
-                root.syncQueueSelectionToCurrentQueue()
-                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
             }
         }
         function onLibraryTreeFrameReceived(version, treeBytes) {

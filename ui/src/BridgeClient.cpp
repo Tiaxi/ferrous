@@ -1429,7 +1429,8 @@ void BridgeClient::pollInProcessBridge() {
     ffiPollMs = static_cast<double>(ffiPollTimer.nsecsElapsed()) / 1'000'000.0;
 #endif
 
-    bool anySnapshotChanged = false;
+    m_pollPlaybackChanged = false;
+    m_pollSnapshotChanged = false;
     int processedAnalysisFrames = 0;
     qsizetype processedAnalysisBytes = 0;
     constexpr int kMaxAnalysisFramesPerPass = 8;
@@ -1543,13 +1544,16 @@ void BridgeClient::pollInProcessBridge() {
         QElapsedTimer eventApplyTimer;
         eventApplyTimer.start();
 #endif
-        anySnapshotChanged |= processBinarySnapshot(decoded);
+        processBinarySnapshot(decoded);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         eventApplyMs += static_cast<double>(eventApplyTimer.nsecsElapsed()) / 1'000'000.0;
 #endif
     }
 
-    if (anySnapshotChanged) {
+    if (m_pollPlaybackChanged) {
+        schedulePlaybackChanged();
+    }
+    if (m_pollSnapshotChanged) {
         scheduleSnapshotChanged();
     }
 
@@ -3543,6 +3547,23 @@ void BridgeClient::scheduleSnapshotChanged() {
     }
 }
 
+void BridgeClient::schedulePlaybackChanged() {
+    if (m_playbackChangedPending) {
+        return;
+    }
+    m_playbackChangedPending = true;
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            if (!m_playbackChangedPending) {
+                return;
+            }
+            m_playbackChangedPending = false;
+            emit playbackChanged();
+        },
+        Qt::QueuedConnection);
+}
+
 void BridgeClient::scheduleAnalysisChanged() {
     if (m_analysisChangedPending) {
         return;
@@ -3798,6 +3819,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     bool changed = false;
+    bool playbackSignalChanged = false;
+    bool snapshotSignalChanged = false;
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
 
     if (snapshot.queue.present && !m_loggedStartupQueuePresent) {
@@ -3824,6 +3847,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_playbackState != nextState) {
         m_playbackState = nextState;
         changed = true;
+        playbackSignalChanged = true;
     }
 
     bool applyIncomingPosition = true;
@@ -3841,10 +3865,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (m_positionText != posText) {
             m_positionText = posText;
             changed = true;
+            playbackSignalChanged = true;
         }
         if (std::abs(m_positionSeconds - pos) >= 0.03) {
             m_positionSeconds = pos;
             changed = true;
+            playbackSignalChanged = true;
         }
     }
 
@@ -3852,19 +3878,23 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_durationText != durText) {
         m_durationText = durText;
         changed = true;
+        playbackSignalChanged = true;
     }
     if (!qFuzzyCompare(m_durationSeconds + 1.0, dur + 1.0)) {
         m_durationSeconds = dur;
         changed = true;
+        playbackSignalChanged = true;
     }
 
     if (m_repeatMode != repeatMode) {
         m_repeatMode = repeatMode;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_shuffleEnabled != shuffleEnabled) {
         m_shuffleEnabled = shuffleEnabled;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const double settingsVolume = snapshot.settings.present
@@ -3873,11 +3903,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (std::abs(m_volume - settingsVolume) > 0.0005) {
         m_volume = settingsVolume;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     if (m_queueLength != qlen) {
         m_queueLength = qlen;
         changed = true;
+        snapshotSignalChanged = true;
         if (m_pendingQueueSelection >= qlen) {
             m_pendingQueueSelection = -1;
             m_pendingQueueSelectionUntilMs = 0;
@@ -3894,6 +3926,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (m_queueDurationText != nextQueueDurationText) {
             m_queueDurationText = nextQueueDurationText;
             changed = true;
+            snapshotSignalChanged = true;
         }
 
         QVector<QueueRowData> rows;
@@ -3919,6 +3952,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
         if (m_queueRowsModel.setRows(std::move(rows))) {
             changed = true;
+            snapshotSignalChanged = true;
         }
         if (m_queuePaths != paths) {
             m_queuePaths = paths;
@@ -3926,6 +3960,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 ? (m_queueVersion + 1)
                 : 1;
             changed = true;
+            snapshotSignalChanged = true;
         }
     }
 
@@ -3936,11 +3971,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             if (m_selectedQueueIndex != selected) {
                 m_selectedQueueIndex = selected;
                 changed = true;
+                snapshotSignalChanged = true;
             }
         }
     } else if (m_selectedQueueIndex != selected) {
         m_selectedQueueIndex = selected;
         changed = true;
+        snapshotSignalChanged = true;
     }
     finishSnapshotSection(snapshotQueueMs);
 
@@ -3948,6 +3985,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (currentPathChanged) {
         m_currentTrackPath = currentPath;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
@@ -3956,6 +3994,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_playingQueueIndex != playing) {
         m_playingQueueIndex = playing;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     QString nextTrackTitle = m_currentTrackTitle;
@@ -4044,42 +4083,52 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_currentTrackTitle != nextTrackTitle) {
         m_currentTrackTitle = nextTrackTitle;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackArtist != nextTrackArtist) {
         m_currentTrackArtist = nextTrackArtist;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackAlbum != nextTrackAlbum) {
         m_currentTrackAlbum = nextTrackAlbum;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackGenre != nextTrackGenre) {
         m_currentTrackGenre = nextTrackGenre;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackYear != nextTrackYear) {
         m_currentTrackYear = nextTrackYear;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackFormatLabel != nextTrackFormatLabel) {
         m_currentTrackFormatLabel = nextTrackFormatLabel;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackChannels != nextTrackChannels) {
         m_currentTrackChannels = nextTrackChannels;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackSampleRateHz != nextTrackSampleRateHz) {
         m_currentTrackSampleRateHz = nextTrackSampleRateHz;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackBitDepth != nextTrackBitDepth) {
         m_currentTrackBitDepth = nextTrackBitDepth;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_currentTrackCurrentBitrateKbps != nextTrackCurrentBitrateKbps) {
         m_currentTrackCurrentBitrateKbps = nextTrackCurrentBitrateKbps;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     QString currentCover = metadataCoverUrl;
@@ -4109,6 +4158,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;
         changed = true;
+        snapshotSignalChanged = true;
     }
     finishSnapshotSection(snapshotTrackMs);
 
@@ -4119,6 +4169,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_fftSize != fftSize) {
         m_fftSize = fftSize;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int spectrogramViewMode = std::clamp(
@@ -4128,6 +4179,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_spectrogramViewMode != spectrogramViewMode) {
         m_spectrogramViewMode = spectrogramViewMode;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int viewerFullscreenMode = std::clamp(
@@ -4139,23 +4191,27 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_viewerFullscreenMode != viewerFullscreenMode) {
         m_viewerFullscreenMode = viewerFullscreenMode;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     if (!qFuzzyCompare(m_dbRange + 1.0, dbRange + 1.0)) {
         m_dbRange = dbRange;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const bool logScale = snapshot.settings.present ? snapshot.settings.logScale : m_logScale;
     if (m_logScale != logScale) {
         m_logScale = logScale;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
     if (m_showFps != showFps) {
         m_showFps = showFps;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const bool systemMediaControlsEnabled = snapshot.settings.present
@@ -4164,6 +4220,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_systemMediaControlsEnabled != systemMediaControlsEnabled) {
         m_systemMediaControlsEnabled = systemMediaControlsEnabled;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int settingsSortMode = std::clamp(
@@ -4173,6 +4230,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_librarySortMode != settingsSortMode) {
         m_librarySortMode = settingsSortMode;
         changed = true;
+        snapshotSignalChanged = true;
     }
     finishSnapshotSection(snapshotSettingsMs);
 
@@ -4180,6 +4238,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_lastFmScrobblingEnabled != lastFmEnabled) {
         m_lastFmScrobblingEnabled = lastFmEnabled;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const bool lastFmBuildConfigured = snapshot.lastfm.present
@@ -4188,12 +4247,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_lastFmBuildConfigured != lastFmBuildConfigured) {
         m_lastFmBuildConfigured = lastFmBuildConfigured;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int lastFmAuthState = snapshot.lastfm.present ? snapshot.lastfm.authState : m_lastFmAuthState;
     if (m_lastFmAuthState != lastFmAuthState) {
         m_lastFmAuthState = lastFmAuthState;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int lastFmPendingScrobbleCount = snapshot.lastfm.present
@@ -4202,24 +4263,28 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_lastFmPendingScrobbleCount != lastFmPendingScrobbleCount) {
         m_lastFmPendingScrobbleCount = lastFmPendingScrobbleCount;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const QString lastFmUsername = snapshot.lastfm.present ? snapshot.lastfm.username : m_lastFmUsername;
     if (m_lastFmUsername != lastFmUsername) {
         m_lastFmUsername = lastFmUsername;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const QString lastFmStatusText = snapshot.lastfm.present ? snapshot.lastfm.statusText : m_lastFmStatusText;
     if (m_lastFmStatusText != lastFmStatusText) {
         m_lastFmStatusText = lastFmStatusText;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const QString lastFmAuthUrl = snapshot.lastfm.present ? snapshot.lastfm.authUrl : m_lastFmAuthUrl;
     if (m_lastFmAuthUrl != lastFmAuthUrl) {
         m_lastFmAuthUrl = lastFmAuthUrl;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (!m_lastFmAuthUrl.trimmed().isEmpty() && m_lastOpenedExternalUrl != m_lastFmAuthUrl) {
         const QUrl authUrl(m_lastFmAuthUrl);
@@ -4237,36 +4302,42 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_libraryScanInProgress != scanInProgress) {
         m_libraryScanInProgress = scanInProgress;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int roots = snapshot.library.present ? snapshot.library.rootCount : m_libraryRootCount;
     if (m_libraryRootCount != roots) {
         m_libraryRootCount = roots;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int tracks = snapshot.library.present ? snapshot.library.trackCount : m_libraryTrackCount;
     if (m_libraryTrackCount != tracks) {
         m_libraryTrackCount = tracks;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int artists = snapshot.library.present ? snapshot.library.artistCount : m_libraryArtistCount;
     if (m_libraryArtistCount != artists) {
         m_libraryArtistCount = artists;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int albums = snapshot.library.present ? snapshot.library.albumCount : m_libraryAlbumCount;
     if (m_libraryAlbumCount != albums) {
         m_libraryAlbumCount = albums;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const QStringList rootPaths = snapshot.library.present ? snapshot.library.rootPaths : m_libraryRoots;
     if (m_libraryRoots != rootPaths) {
         m_libraryRoots = rootPaths;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     QVariantList rootEntries = m_libraryRootEntries;
@@ -4288,6 +4359,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_libraryRootEntries != rootEntries) {
         m_libraryRootEntries = rootEntries;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const QString libraryLastError = snapshot.library.present ? snapshot.library.lastError : m_libraryLastError;
@@ -4296,6 +4368,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (!m_libraryLastError.trimmed().isEmpty()) {
             emit bridgeError(QStringLiteral("library: %1").arg(m_libraryLastError));
         }
+        snapshotSignalChanged = true;
     }
 
     if (!m_pendingAddRootPath.isEmpty()) {
@@ -4314,6 +4387,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_librarySortMode != librarySortMode) {
         m_librarySortMode = librarySortMode;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     const int rootsCompleted = snapshot.library.present ? std::max(0, snapshot.library.rootsCompleted) : m_libraryScanRootsCompleted;
@@ -4326,29 +4400,41 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_libraryScanRootsCompleted != rootsCompleted) {
         m_libraryScanRootsCompleted = rootsCompleted;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_libraryScanRootsTotal != rootsTotal) {
         m_libraryScanRootsTotal = rootsTotal;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_libraryScanDiscovered != discovered) {
         m_libraryScanDiscovered = discovered;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (m_libraryScanProcessed != processed) {
         m_libraryScanProcessed = processed;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (!qFuzzyCompare(m_libraryScanFilesPerSecond + 1.0, filesPerSecond + 1.0)) {
         m_libraryScanFilesPerSecond = filesPerSecond;
         changed = true;
+        snapshotSignalChanged = true;
     }
     if (!qFuzzyCompare(m_libraryScanEtaSeconds + 2.0, etaSeconds + 2.0)) {
         m_libraryScanEtaSeconds = etaSeconds;
         changed = true;
+        snapshotSignalChanged = true;
     }
 
     finishSnapshotSection(snapshotLibraryMs);
+    if (playbackSignalChanged) {
+        m_pollPlaybackChanged = true;
+    }
+    if (snapshotSignalChanged) {
+        m_pollSnapshotChanged = true;
+    }
     if (profileSnapshot) {
         const double snapshotTotalMs =
             static_cast<double>(snapshotProfileTimer.nsecsElapsed()) / 1000000.0;

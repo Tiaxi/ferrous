@@ -75,11 +75,11 @@ private:
 
 class BridgeClient : public QObject {
     Q_OBJECT
-    Q_PROPERTY(QString playbackState READ playbackState NOTIFY snapshotChanged)
-    Q_PROPERTY(QString positionText READ positionText NOTIFY snapshotChanged)
-    Q_PROPERTY(QString durationText READ durationText NOTIFY snapshotChanged)
-    Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY snapshotChanged)
-    Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY snapshotChanged)
+    Q_PROPERTY(QString playbackState READ playbackState NOTIFY playbackChanged)
+    Q_PROPERTY(QString positionText READ positionText NOTIFY playbackChanged)
+    Q_PROPERTY(QString durationText READ durationText NOTIFY playbackChanged)
+    Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY playbackChanged)
+    Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY playbackChanged)
     Q_PROPERTY(double volume READ volume NOTIFY snapshotChanged)
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(int queueVersion READ queueVersion NOTIFY snapshotChanged)
@@ -303,6 +303,7 @@ public:
     QByteArray renameEditedFiles(const QByteArray &payload);
 
 signals:
+    void playbackChanged();
     void snapshotChanged();
     void analysisChanged();
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
@@ -391,6 +392,7 @@ private:
     void appendDiagnosticLine(const QString &line);
     void rebuildDiagnosticsText();
     static QString resolveDiagnosticsLogPath();
+    void schedulePlaybackChanged();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
     void shutdownBridgeGracefully();
@@ -513,8 +515,11 @@ private:
     bool m_connected{false};
     bool m_loggedStartupQueueMissing{false};
     bool m_loggedStartupQueuePresent{false};
+    bool m_playbackChangedPending{false};
     bool m_snapshotChangedPending{false};
     bool m_analysisChangedPending{false};
+    bool m_pollPlaybackChanged{false};
+    bool m_pollSnapshotChanged{false};
     bool m_pendingSeek{false};
     double m_pendingSeekTargetSeconds{0.0};
     qint64 m_pendingSeekUntilMs{0};
