@@ -830,6 +830,9 @@ QString BridgeClient::coverUrlForPath(const QString &path) const {
     if (localPath.isEmpty()) {
         return baseUrl;
     }
+    if (m_coverRefreshNonceByPath.isEmpty()) {
+        return baseUrl;
+    }
 
     const QFileInfo info(localPath);
     const QString canonicalPath = info.canonicalFilePath().isEmpty()
