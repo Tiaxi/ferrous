@@ -15,9 +15,10 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr int kMaxPendingColumns = 512;
-constexpr int kPendingStartupLeadColumns = 12;
-constexpr int kPendingLeadColumns = 3;
+constexpr int kPendingStartupLeadColumns = 4;
+constexpr int kPendingLeadColumns = 2;
 constexpr int kPendingBacklogTarget = 48;
+constexpr double kRowRateWarmupSeconds = 0.18;
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
     {{65535, 65535, 65535}},
     {{65535, 65535, 65535}},
@@ -713,7 +714,7 @@ void SpectrogramItem::noteIncomingRowsLocked(int rowCount) {
     m_rowRateWindowRows += rowCount;
     const double windowElapsed =
         std::chrono::duration<double>(now - m_rowRateWindowStart).count();
-    if (windowElapsed >= 0.35) {
+    if (windowElapsed >= kRowRateWarmupSeconds) {
         const double instantRate = std::clamp(
             static_cast<double>(m_rowRateWindowRows) / windowElapsed,
             1.0,
