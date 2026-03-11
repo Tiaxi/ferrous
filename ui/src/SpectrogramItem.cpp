@@ -674,9 +674,9 @@ std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) con
 }
 
 void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
-    if (m_frameSwapConnection) {
-        disconnect(m_frameSwapConnection);
-        m_frameSwapConnection = QMetaObject::Connection{};
+    if (m_animationTickConnection) {
+        disconnect(m_animationTickConnection);
+        m_animationTickConnection = QMetaObject::Connection{};
     }
     QMutexLocker lock(&m_stateMutex);
     m_fpsInitialized = false;
@@ -689,15 +689,14 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     if (window == nullptr) {
         return;
     }
-    m_frameSwapConnection = connect(
+    m_animationTickConnection = connect(
         window,
-        &QQuickWindow::frameSwapped,
+        &QQuickWindow::afterAnimating,
         this,
-        &SpectrogramItem::handleWindowFrameSwapped,
-        Qt::QueuedConnection);
+        &SpectrogramItem::handleWindowAfterAnimating);
 }
 
-void SpectrogramItem::handleWindowFrameSwapped() {
+void SpectrogramItem::handleWindowAfterAnimating() {
     using Clock = std::chrono::steady_clock;
     const auto now = Clock::now();
 

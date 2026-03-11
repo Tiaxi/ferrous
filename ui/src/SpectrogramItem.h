@@ -72,7 +72,7 @@ private:
     void noteIncomingRowsLocked(int rowCount);
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
-    void handleWindowFrameSwapped();
+    void handleWindowAfterAnimating();
     void updateFpsEstimateLocked();
     void drawFpsOverlay(QPainter *painter) const;
 
@@ -110,6 +110,6 @@ private:
     std::chrono::steady_clock::time_point m_profileLast{};
     quint64 m_profilePaints{0};
     double m_profilePaintMs{0.0};
-    QMetaObject::Connection m_frameSwapConnection;
+    QMetaObject::Connection m_animationTickConnection;
     mutable QMutex m_stateMutex;
 };
