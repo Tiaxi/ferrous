@@ -8,7 +8,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::{select, tick, unbounded, Receiver, Sender};
+use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use realfft::{num_complex::Complex32, RealFftPlanner, RealToComplex};
 use rusqlite::{params, Connection};
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
@@ -154,8 +154,6 @@ struct AnalysisRuntimeState {
     waveform_db_writes_since_prune: usize,
     pcm_fifo: VecDeque<f32>,
     pcm_labels: Vec<SpectrogramChannelLabel>,
-    last_tick_time: std::time::Instant,
-    elapsed_credit_ns: u128,
     profile_enabled: bool,
     prof_last: std::time::Instant,
     prof_pcm: usize,
@@ -232,8 +230,6 @@ impl AnalysisRuntimeState {
             waveform_db_writes_since_prune: 0,
             pcm_fifo: VecDeque::with_capacity(48_000),
             pcm_labels: vec![SpectrogramChannelLabel::Mono],
-            last_tick_time: std::time::Instant::now(),
-            elapsed_credit_ns: 0,
             profile_enabled: cfg!(feature = "profiling-logs")
                 && std::env::var_os("FERROUS_PROFILE").is_some(),
             prof_last: std::time::Instant::now(),
@@ -426,21 +422,21 @@ impl AnalysisRuntimeState {
         drain_pcm_queue(pcm_rx);
         self.pcm_fifo.clear();
         self.pcm_labels = vec![SpectrogramChannelLabel::Mono];
-        self.last_tick_time = std::time::Instant::now();
-        self.elapsed_credit_ns = 0;
     }
 
-    fn handle_tick(
+    fn handle_pcm_ready(
         &mut self,
+        first_chunk: AnalysisPcmChunk,
         pcm_rx: &Receiver<AnalysisPcmChunk>,
         event_tx: &Sender<AnalysisEvent>,
     ) {
         self.prof_ticks += 1;
+        self.push_pcm_chunk(first_chunk);
         self.pull_pcm_chunks(pcm_rx);
 
         let channel_count = self.pcm_labels.len().max(1);
         self.trim_pcm_fifo(channel_count);
-        let to_feed_frames = self.frames_to_feed(channel_count);
+        let to_feed_frames = self.frames_available_to_feed(channel_count);
         self.feed_spectrogram(channel_count, to_feed_frames);
         self.collect_spectrogram_rows();
         self.emit_snapshot(event_tx, false);
@@ -452,26 +448,30 @@ impl AnalysisRuntimeState {
             let Ok(chunk) = pcm_rx.try_recv() else {
                 break;
             };
-            if chunk.samples.is_empty() {
-                continue;
-            }
-            self.prof_pcm += 1;
-            self.prof_in_samples += chunk.samples.len();
-            let chunk_labels = if chunk.channel_labels.is_empty() {
-                vec![SpectrogramChannelLabel::Mono]
-            } else {
-                chunk.channel_labels.clone()
-            };
-            if chunk_labels != self.pcm_labels {
-                self.pcm_labels.clone_from(&chunk_labels);
-                self.pcm_fifo.clear();
-                self.pending_channels.clear();
-                self.spectrogram.update_channel_labels(&chunk_labels);
-                self.spectrogram.reset();
-                self.snapshot.spectrogram_seq = 0;
-            }
-            self.pcm_fifo.extend(chunk.samples);
+            self.push_pcm_chunk(chunk);
         }
+    }
+
+    fn push_pcm_chunk(&mut self, chunk: AnalysisPcmChunk) {
+        if chunk.samples.is_empty() {
+            return;
+        }
+        self.prof_pcm += 1;
+        self.prof_in_samples += chunk.samples.len();
+        let chunk_labels = if chunk.channel_labels.is_empty() {
+            vec![SpectrogramChannelLabel::Mono]
+        } else {
+            chunk.channel_labels.clone()
+        };
+        if chunk_labels != self.pcm_labels {
+            self.pcm_labels.clone_from(&chunk_labels);
+            self.pcm_fifo.clear();
+            self.pending_channels.clear();
+            self.spectrogram.update_channel_labels(&chunk_labels);
+            self.spectrogram.reset();
+            self.snapshot.spectrogram_seq = 0;
+        }
+        self.pcm_fifo.extend(chunk.samples);
     }
 
     fn trim_pcm_fifo(&mut self, channel_count: usize) {
@@ -483,34 +483,11 @@ impl AnalysisRuntimeState {
         }
     }
 
-    fn frames_to_feed(&mut self, channel_count: usize) -> usize {
-        let now = std::time::Instant::now();
-        self.elapsed_credit_ns = self
-            .elapsed_credit_ns
-            .saturating_add(now.duration_since(self.last_tick_time).as_nanos());
-        self.last_tick_time = now;
-
-        let sample_rate = u128::from(self.snapshot.sample_rate_hz);
-        let accrued_samples_u128 =
-            (self.elapsed_credit_ns.saturating_mul(sample_rate)) / 1_000_000_000;
-        let accrued_samples = usize::try_from(accrued_samples_u128).unwrap_or(usize::MAX);
-        let consumed_ns = (u128::from(usize_to_u64(accrued_samples)) * 1_000_000_000) / sample_rate;
-        self.elapsed_credit_ns = self.elapsed_credit_ns.saturating_sub(consumed_ns);
-        let target_samples = accrued_samples.clamp(256, 2048);
-
+    fn frames_available_to_feed(&self, channel_count: usize) -> usize {
         let visual_delay_ms = u32_to_usize(BASE_VISUAL_DELAY_MS.unsigned_abs());
         let effective_delay_frames =
             u32_to_usize(self.snapshot.sample_rate_hz).saturating_mul(visual_delay_ms) / 1000;
-        let available_frames =
-            (self.pcm_fifo.len() / channel_count).saturating_sub(effective_delay_frames);
-
-        let backlog_error = usize_to_i64(self.pcm_fifo.len() / channel_count)
-            - usize_to_i64(effective_delay_frames);
-        let correction = (backlog_error / 8).clamp(-512, 512);
-        let adjusted_target = (usize_to_i64(target_samples) + correction).clamp(0, 4096);
-        let adjusted_target = usize::try_from(adjusted_target).unwrap_or(4096);
-
-        adjusted_target.min(available_frames)
+        (self.pcm_fifo.len() / channel_count).saturating_sub(effective_delay_frames)
     }
 
     fn feed_spectrogram(&mut self, channel_count: usize, to_feed_frames: usize) {
@@ -553,7 +530,7 @@ impl AnalysisRuntimeState {
         }
 
         profile_eprintln!(
-            "[analysis] ticks/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_frames={} fft={} hop={} channels={}",
+            "[analysis] wakes/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_frames={} fft={} hop={} channels={}",
             self.prof_ticks,
             self.prof_pcm,
             self.prof_in_samples,
@@ -633,7 +610,6 @@ fn spawn_analysis_worker(
     let _ = std::thread::Builder::new()
         .name("ferrous-analysis".to_string())
         .spawn(move || {
-            let ticker = tick(Duration::from_millis(16));
             let mut state = AnalysisRuntimeState::new();
             loop {
                 select! {
@@ -647,7 +623,10 @@ fn spawn_analysis_worker(
                             waveform_decode_active_token.as_ref(),
                         );
                     }
-                    recv(ticker) -> _ => state.handle_tick(&pcm_rx, &event_tx),
+                    recv(pcm_rx) -> msg => {
+                        let Ok(chunk) = msg else { break; };
+                        state.handle_pcm_ready(chunk, &pcm_rx, &event_tx);
+                    }
                 }
             }
         });
