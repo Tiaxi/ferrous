@@ -56,6 +56,7 @@ Kirigami.ApplicationWindow {
     property real positionSmoothingLastMs: 0
     property string positionSmoothingTrackPath: ""
     property string stoppedSpectrogramTrackPath: ""
+    property string lastSpectrogramPlaybackState: ""
     property real albumArtZoom: 1.0
     property real albumArtPanX: 0.0
     property real albumArtPanY: 0.0
@@ -7260,12 +7261,20 @@ Kirigami.ApplicationWindow {
             }
         }
         function onPlaybackChanged() {
+            const playbackState = uiBridge.playbackState || ""
+            if (playbackState === "Playing"
+                    && root.lastSpectrogramPlaybackState === "Stopped"
+                    && root.stoppedSpectrogramTrackPath.length > 0
+                    && root.stoppedSpectrogramTrackPath !== (uiBridge.currentTrackPath || "")) {
+                spectrogramSurface.resetForCurrentMode(true)
+                root.stoppedSpectrogramTrackPath = uiBridge.currentTrackPath || ""
+            }
             const incomingPosition = uiBridge.positionSeconds
             const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath
             const nowMs = Date.now()
             const duration = Math.max(uiBridge.durationSeconds, 0)
-            if (uiBridge.playbackState !== "Playing") {
-                if ((uiBridge.playbackState || "") === "Stopped") {
+            if (playbackState !== "Playing") {
+                if (playbackState === "Stopped") {
                     spectrogramSurface.haltForCurrentMode()
                 }
                 root.positionSmoothingAnimationMs = 0
@@ -7300,6 +7309,7 @@ Kirigami.ApplicationWindow {
                 root.positionSmoothingLastMs = nowMs
                 root.positionSmoothingTrackPath = uiBridge.currentTrackPath
             }
+            root.lastSpectrogramPlaybackState = playbackState
         }
         function onLibraryTreeFrameReceived(version, treeBytes) {
             root.requestLibraryTreeApply(version, treeBytes || "")
