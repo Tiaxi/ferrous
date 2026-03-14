@@ -292,7 +292,9 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         return;
     }
     noteIncomingRowsLocked();
-    absorbPendingHistoryLocked(kLivePendingColumns);
+    if (m_seedHistoryOnNextAppend || m_columns.empty()) {
+        absorbPendingHistoryLocked(kLivePendingColumns);
+    }
     if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
     }
@@ -338,7 +340,9 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
         return;
     }
     noteIncomingRowsLocked();
-    absorbPendingHistoryLocked(kLivePendingColumns);
+    if (m_seedHistoryOnNextAppend || m_columns.empty()) {
+        absorbPendingHistoryLocked(kLivePendingColumns);
+    }
     if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
     }
