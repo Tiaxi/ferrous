@@ -111,30 +111,11 @@ QImage placeholderImage() {
     return image;
 }
 
-QRectF normalizedSourceRect(QSGTexture *texture, const QRect &source, const QSize &textureSize) {
-    if (texture == nullptr || textureSize.width() <= 0 || textureSize.height() <= 0 || source.isEmpty()) {
-        return QRectF();
-    }
-
-    const QRectF sourceNormalized(
-        static_cast<double>(source.x()) / static_cast<double>(textureSize.width()),
-        static_cast<double>(source.y()) / static_cast<double>(textureSize.height()),
-        static_cast<double>(source.width()) / static_cast<double>(textureSize.width()),
-        static_cast<double>(source.height()) / static_cast<double>(textureSize.height()));
-    const QRectF atlas = texture->normalizedTextureSubRect();
-    return QRectF(
-        atlas.x() + (sourceNormalized.x() * atlas.width()),
-        atlas.y() + (sourceNormalized.y() * atlas.height()),
-        sourceNormalized.width() * atlas.width(),
-        sourceNormalized.height() * atlas.height());
-}
-
 void configureTextureNode(
     QSGSimpleTextureNode *node,
     QSGTexture *texture,
     const QRectF &target,
     const QRect &source,
-    const QSize &textureSize,
     QSGTexture *placeholderTexture) {
     if (node == nullptr) {
         return;
@@ -151,7 +132,7 @@ void configureTextureNode(
     node->setTexture(texture);
     node->setFiltering(QSGTexture::Nearest);
     node->setRect(target);
-    node->setSourceRect(normalizedSourceRect(texture, source, textureSize));
+    node->setSourceRect(QRectF(source));
 }
 } // namespace
 
@@ -514,7 +495,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->canvasTexture,
             QRectF(drawX, 0.0, static_cast<double>(firstWidth), static_cast<double>(canvasSize.height())),
             QRect(srcStart, 0, firstWidth, canvasSize.height()),
-            canvasSize,
             node->placeholderTexture);
         configureTextureNode(
             node->second,
@@ -525,7 +505,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 static_cast<double>(remaining),
                 static_cast<double>(canvasSize.height())),
             QRect(0, 0, remaining, canvasSize.height()),
-            canvasSize,
             node->placeholderTexture);
         configureTextureNode(
             node->latest,
@@ -536,7 +515,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 scrollOffset,
                 static_cast<double>(canvasSize.height())),
             QRect(latestX, 0, scrollOffset > 0.0 ? 1 : 0, canvasSize.height()),
-            canvasSize,
             node->placeholderTexture);
     } else {
         configureTextureNode(
@@ -544,21 +522,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             nullptr,
             QRectF(),
             QRect(),
-            QSize(),
             node->placeholderTexture);
         configureTextureNode(
             node->second,
             nullptr,
             QRectF(),
             QRect(),
-            QSize(),
             node->placeholderTexture);
         configureTextureNode(
             node->latest,
             nullptr,
             QRectF(),
             QRect(),
-            QSize(),
             node->placeholderTexture);
     }
 
@@ -573,7 +548,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->overlayTexture,
             target,
             QRect(0, 0, overlaySize.width(), overlaySize.height()),
-            overlaySize,
             node->placeholderTexture);
     } else {
         configureTextureNode(
@@ -581,7 +555,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             nullptr,
             QRectF(),
             QRect(),
-            QSize(),
             node->placeholderTexture);
     }
 

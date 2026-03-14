@@ -378,7 +378,7 @@ void QmlSmokeTest::spectrogramItemRendersNonBackgroundPixels() {
     item->setHeight(180);
     item->setSampleRateHz(48000);
 
-    constexpr int rowCount = 48;
+    constexpr int rowCount = 320;
     constexpr int binsPerRow = 128;
     QByteArray packedRows;
     packedRows.resize(rowCount * binsPerRow);
@@ -397,16 +397,22 @@ void QmlSmokeTest::spectrogramItemRendersNonBackgroundPixels() {
     QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed");
 
     const QColor background(0x0b, 0x0b, 0x0f);
-    bool foundNonBackground = false;
-    for (int y = 0; y < frame.height() && !foundNonBackground; ++y) {
+    int minX = frame.width();
+    int maxX = -1;
+    int nonBackgroundPixels = 0;
+    for (int y = 0; y < frame.height(); ++y) {
         for (int x = 0; x < frame.width(); ++x) {
             if (frame.pixelColor(x, y) != background) {
-                foundNonBackground = true;
-                break;
+                ++nonBackgroundPixels;
+                minX = std::min(minX, x);
+                maxX = std::max(maxX, x);
             }
         }
     }
-    QVERIFY2(foundNonBackground, "Spectrogram rendered only the background color");
+    QVERIFY2(nonBackgroundPixels > (frame.width() * frame.height()) / 50,
+        "Spectrogram rendered too few non-background pixels");
+    QVERIFY2(maxX >= 0 && (maxX - minX) > frame.width() / 3,
+        "Spectrogram pixels did not span enough horizontal width");
 }
 
 void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
@@ -422,7 +428,7 @@ void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
     QTest::qWait(50);
     QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
 
-    constexpr int rowCount = 48;
+    constexpr int rowCount = 320;
     constexpr int binsPerRow = 128;
     QByteArray packedRows;
     packedRows.resize(rowCount * binsPerRow);
@@ -440,16 +446,22 @@ void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
     QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed after delayed append");
 
     const QColor background(0x0b, 0x0b, 0x0f);
-    bool foundNonBackground = false;
-    for (int y = 0; y < frame.height() && !foundNonBackground; ++y) {
+    int minX = frame.width();
+    int maxX = -1;
+    int nonBackgroundPixels = 0;
+    for (int y = 0; y < frame.height(); ++y) {
         for (int x = 0; x < frame.width(); ++x) {
             if (frame.pixelColor(x, y) != background) {
-                foundNonBackground = true;
-                break;
+                ++nonBackgroundPixels;
+                minX = std::min(minX, x);
+                maxX = std::max(maxX, x);
             }
         }
     }
-    QVERIFY2(foundNonBackground, "Spectrogram stayed blank after appending rows to an already visible item");
+    QVERIFY2(nonBackgroundPixels > (frame.width() * frame.height()) / 50,
+        "Spectrogram stayed nearly blank after delayed append");
+    QVERIFY2(maxX >= 0 && (maxX - minX) > frame.width() / 3,
+        "Delayed spectrogram append only rendered a narrow strip");
 }
 
 int main(int argc, char **argv) {
