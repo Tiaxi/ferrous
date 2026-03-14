@@ -30,6 +30,17 @@ bool fuzzyDifferent(double left, double right) {
     return std::abs(left - right) > 0.0005;
 }
 
+QString normalizedPlaybackState(const BridgeClient *bridge) {
+    if (bridge == nullptr) {
+        return QStringLiteral("Stopped");
+    }
+    const QString state = bridge->playbackState();
+    if (state == QStringLiteral("Playing") || state == QStringLiteral("Paused")) {
+        return state;
+    }
+    return QStringLiteral("Stopped");
+}
+
 } // namespace
 
 class MprisRootAdaptor final : public QDBusAbstractAdaptor {
@@ -136,6 +147,11 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
     new MprisRootAdaptor(this);
     new MprisPlayerAdaptor(this);
     if (m_bridge != nullptr) {
+        connect(m_bridge, &BridgeClient::playbackChanged, this, [this]() {
+            if (m_serviceRegistered) {
+                publishPlayerState();
+            }
+        });
         connect(m_bridge, &BridgeClient::snapshotChanged, this, [this]() {
             setEnabled(m_bridge->systemMediaControlsEnabled());
             if (m_serviceRegistered) {
@@ -211,17 +227,7 @@ QStringList MprisController::supportedMimeTypes() const {
 }
 
 QString MprisController::playbackStatus() const {
-    if (m_bridge == nullptr) {
-        return QStringLiteral("Stopped");
-    }
-    const QString state = m_bridge->playbackState();
-    if (state == QStringLiteral("Playing")) {
-        return state;
-    }
-    if (state == QStringLiteral("Paused")) {
-        return state;
-    }
-    return QStringLiteral("Stopped");
+    return normalizedPlaybackState(m_bridge);
 }
 
 QString MprisController::loopStatus() const {
@@ -286,7 +292,7 @@ bool MprisController::canPlay() const {
 }
 
 bool MprisController::canPause() const {
-    return canPlay();
+    return normalizedPlaybackState(m_bridge) == QStringLiteral("Playing");
 }
 
 bool MprisController::canSeek() const {
@@ -325,7 +331,7 @@ void MprisController::previous() {
 }
 
 void MprisController::pause() {
-    if (m_bridge != nullptr) {
+    if (m_bridge != nullptr && normalizedPlaybackState(m_bridge) == QStringLiteral("Playing")) {
         m_bridge->pause();
     }
 }
@@ -334,7 +340,7 @@ void MprisController::playPause() {
     if (m_bridge == nullptr) {
         return;
     }
-    if (m_bridge->playbackState() == QStringLiteral("Playing")) {
+    if (normalizedPlaybackState(m_bridge) == QStringLiteral("Playing")) {
         m_bridge->pause();
         return;
     }

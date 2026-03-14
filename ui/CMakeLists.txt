@@ -210,15 +210,18 @@ if(BUILD_TESTING)
         src/DiagnosticsLog.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
+        src/MprisController.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
+        src/WindowActivation.cpp
         src/WaveformItem.cpp
     )
     target_include_directories(ferrous_bridge_client_tests PRIVATE src)
     add_dependencies(ferrous_bridge_client_tests ferrous_rust_bridge)
     target_link_libraries(ferrous_bridge_client_tests PRIVATE
         Qt6::Core
+        Qt6::DBus
         Qt6::Gui
         Qt6::Qml
         Qt6::Quick

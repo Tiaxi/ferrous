@@ -408,6 +408,24 @@ mod tests {
         assert_eq!(prev_snap.current.as_ref(), Some(&b));
         assert_eq!(prev_snap.state, PlaybackState::Playing);
     }
+
+    #[test]
+    fn pause_from_stopped_keeps_stopped_state() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.command(PlaybackCommand::Stop);
+        engine.command(PlaybackCommand::Pause);
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&a));
+        assert_eq!(snap.state, PlaybackState::Stopped);
+        assert_eq!(snap.position, Duration::ZERO);
+    }
 }
 
 #[cfg(not(feature = "gst"))]
@@ -596,7 +614,9 @@ mod backend {
                             };
                         }
                         PlaybackCommand::Pause => {
-                            snapshot.state = PlaybackState::Paused;
+                            if snapshot.state == PlaybackState::Playing {
+                                snapshot.state = PlaybackState::Paused;
+                            }
                         }
                         PlaybackCommand::Stop => {
                             snapshot.state = PlaybackState::Stopped;
@@ -1286,6 +1306,9 @@ mod backend {
         }
 
         fn pause(&mut self) {
+            if self.snapshot.state != PlaybackState::Playing {
+                return;
+            }
             self.buffering_active = false;
             if self.playbin.set_state(gst::State::Paused).is_ok() {
                 self.snapshot.state = PlaybackState::Paused;

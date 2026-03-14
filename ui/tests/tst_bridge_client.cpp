@@ -4,6 +4,7 @@
 
 #define private public
 #include "../src/BridgeClient.h"
+#include "../src/MprisController.h"
 #undef private
 
 #include "../src/FerrousBridgeFfi.h"
@@ -30,6 +31,8 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void spectrogramDeltaSkipsMetadataOnlyChannels();
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
+    void mprisPublishesPlaybackStateOnPlaybackSignal();
+    void mprisCanPauseOnlyWhilePlaying();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -119,6 +122,48 @@ void BridgeClientTest::stoppedTrackChangeClearsPendingSpectrogramDelta() {
     QCOMPARE(client.m_currentTrackPath, QStringLiteral("/music/new-track.flac"));
     QCOMPARE(client.m_spectrogramChannels.size(), 0);
     QCOMPARE(client.m_spectrogramReset, false);
+}
+
+void BridgeClientTest::mprisPublishesPlaybackStateOnPlaybackSignal() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 1;
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_playbackState = QStringLiteral("Stopped");
+
+    MprisController controller(&client);
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+
+    emit client.playbackChanged();
+
+    QVERIFY(controller.m_hasPublishedPlayerState);
+    QCOMPARE(controller.m_lastPlayerState.playbackStatus, QStringLiteral("Stopped"));
+    QCOMPARE(controller.m_lastPlayerState.canPause, false);
+
+    client.m_playbackState = QStringLiteral("Playing");
+    emit client.playbackChanged();
+
+    QCOMPARE(controller.m_lastPlayerState.playbackStatus, QStringLiteral("Playing"));
+    QCOMPARE(controller.m_lastPlayerState.canPause, true);
+}
+
+void BridgeClientTest::mprisCanPauseOnlyWhilePlaying() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 1;
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+
+    MprisController controller(&client);
+
+    client.m_playbackState = QStringLiteral("Stopped");
+    QCOMPARE(controller.canPause(), false);
+
+    client.m_playbackState = QStringLiteral("Paused");
+    QCOMPARE(controller.canPause(), false);
+
+    client.m_playbackState = QStringLiteral("Playing");
+    QCOMPARE(controller.canPause(), true);
 }
 
 int main(int argc, char **argv) {
