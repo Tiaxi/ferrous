@@ -15,10 +15,10 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr int kMaxPendingColumns = 512;
-constexpr int kPendingStartupLeadColumns = 4;
-constexpr int kPendingLeadColumns = 2;
-constexpr int kPendingBacklogTarget = 48;
-constexpr double kRowRateWarmupSeconds = 0.18;
+constexpr int kPendingStartupLeadColumns = 2;
+constexpr int kPendingLeadColumns = 1;
+constexpr int kPendingSevereBacklogColumns = 8;
+constexpr double kRowRateWarmupSeconds = 0.12;
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
     {{65535, 65535, 65535}},
     {{65535, 65535, 65535}},
@@ -69,6 +69,13 @@ bool shouldLogProfileSpike(
     return true;
 }
 #endif
+
+double backlogCatchupScale(int backlogError) {
+    if (backlogError <= 0) {
+        return 0.0;
+    }
+    return std::clamp(0.06 * static_cast<double>(backlogError), 0.0, 0.35);
+}
 } // namespace
 
 SpectrogramItem::SpectrogramItem(QQuickItem *parent)
@@ -236,9 +243,7 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     }
     noteIncomingRowsLocked(rowsAdded);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed
-        && m_rowRateInitialized
-        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -285,9 +290,7 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     }
     noteIncomingRowsLocked(appended);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed
-        && m_rowRateInitialized
-        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -643,7 +646,7 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     const double prevPhase = m_pendingPhase;
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
     if (!m_scrollPrimed) {
-        if (!m_rowRateInitialized || static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
+        if (static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
             m_pendingPhase = 0.0;
             return std::abs(m_pendingPhase - prevPhase) > 0.0001;
         }
@@ -661,8 +664,12 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     }
     m_pendingPhase += rowsPerSecond * dt;
     const int backlog = static_cast<int>(m_pendingColumns.size());
-    if (backlog > kPendingBacklogTarget) {
-        m_pendingPhase += static_cast<double>(backlog - kPendingBacklogTarget) * 0.25;
+    const int backlogError = backlog - leadColumns;
+    if (backlogError > 0) {
+        m_pendingPhase += rowsPerSecond * dt * backlogCatchupScale(backlogError);
+    }
+    if (backlog > kPendingSevereBacklogColumns) {
+        m_pendingPhase += static_cast<double>(backlog - kPendingSevereBacklogColumns) * 0.25;
     }
 
     bool consumed = false;

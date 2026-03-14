@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::{bounded, select, tick, unbounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{after, bounded, select, unbounded, Receiver, Sender, TrySendError};
 use serde_json::json;
 use walkdir::WalkDir;
 
@@ -674,7 +674,6 @@ struct BridgeLoopRuntime {
     last_settings_save: Instant,
     last_session_save: Instant,
     last_saved_session: Option<SessionSnapshot>,
-    ticker: Receiver<Instant>,
     playing_poll_interval: Duration,
     last_playing_poll: Instant,
     idle_poll_interval: Duration,
@@ -785,7 +784,6 @@ impl BridgeLoopRuntime {
             last_settings_save: Instant::now(),
             last_session_save: Instant::now(),
             last_saved_session: None,
-            ticker: tick(Duration::from_millis(16)),
             playing_poll_interval,
             last_playing_poll: Instant::now()
                 .checked_sub(playing_poll_interval)
@@ -831,6 +829,7 @@ impl BridgeLoopRuntime {
     }
 
     fn handle_select(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) {
+        let poll_deadline = self.next_playback_poll_delay();
         select! {
             recv(cmd_rx) -> msg => {
                 match msg {
@@ -838,8 +837,17 @@ impl BridgeLoopRuntime {
                     Err(_) => self.flags.running = false,
                 }
             }
-            recv(self.ticker) -> _ => self.poll_playback_if_due(),
+            recv(after(poll_deadline)) -> _ => self.poll_playback_if_due(),
         }
+    }
+
+    fn next_playback_poll_delay(&self) -> Duration {
+        let (last_poll, poll_interval) = if self.state.playback.state == PlaybackState::Playing {
+            (self.last_playing_poll, self.playing_poll_interval)
+        } else {
+            (self.last_idle_poll, self.idle_poll_interval)
+        };
+        poll_interval.saturating_sub(last_poll.elapsed())
     }
 
     fn handle_command(&mut self, cmd: BridgeCommand, event_tx: &Sender<BridgeEvent>) {

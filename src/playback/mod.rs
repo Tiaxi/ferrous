@@ -985,6 +985,20 @@ mod backend {
     }
 
     impl GstPlaybackRuntime {
+        fn command_wait_timeout(&self) -> Duration {
+            if self.snapshot.state == PlaybackState::Playing
+                || self.buffering_active
+                || self.seek_hold.is_some()
+                || self.startup_gain_ramp
+            {
+                Duration::from_millis(20)
+            } else if self.snapshot.state == PlaybackState::Paused {
+                Duration::from_millis(80)
+            } else {
+                Duration::from_millis(250)
+            }
+        }
+
         fn new(
             playbin: gst::Element,
             queue_state: Arc<Mutex<GaplessQueue>>,
@@ -1458,7 +1472,7 @@ mod backend {
             .set_property("volume", f64::from(runtime.applied_volume));
 
         loop {
-            match cmd_rx.recv_timeout(Duration::from_millis(20)) {
+            match cmd_rx.recv_timeout(runtime.command_wait_timeout()) {
                 Ok(cmd) => runtime.apply_command(cmd),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
