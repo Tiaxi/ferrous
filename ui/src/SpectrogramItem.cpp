@@ -236,9 +236,7 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     }
     noteIncomingRowsLocked(rowsAdded);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed
-        && m_rowRateInitialized
-        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -285,9 +283,7 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     }
     noteIncomingRowsLocked(appended);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed
-        && m_rowRateInitialized
-        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -643,7 +639,7 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     const double prevPhase = m_pendingPhase;
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
     if (!m_scrollPrimed) {
-        if (!m_rowRateInitialized || static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
+        if (static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
             m_pendingPhase = 0.0;
             return std::abs(m_pendingPhase - prevPhase) > 0.0001;
         }
@@ -676,10 +672,10 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     }
 
     if (m_pendingColumns.empty()) {
-        m_scrollPrimed = false;
         const double idleSeconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - m_lastRowAppendTime).count();
         if (idleSeconds > 0.30) {
+            m_scrollPrimed = false;
             m_pendingPhase = 0.0;
         } else {
             m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
