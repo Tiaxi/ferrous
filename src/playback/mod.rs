@@ -79,6 +79,7 @@ pub enum PlaybackEvent {
         path: PathBuf,
         queue_index: usize,
         kind: TrackChangeKind,
+        track_token: u64,
     },
     Seeked,
 }
@@ -227,6 +228,7 @@ mod tests {
                     path,
                     queue_index: _,
                     kind,
+                    track_token: _,
                 } = evt
                 {
                     if path == b && matches!(kind, TrackChangeKind::Natural) {
@@ -463,6 +465,7 @@ mod backend {
                                     path,
                                     queue_index: queue_idx,
                                     kind: TrackChangeKind::Manual,
+                                    track_token: 0,
                                 });
                                 let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(48_000));
                             }
@@ -495,6 +498,7 @@ mod backend {
                                             path,
                                             queue_index: queue_idx,
                                             kind: TrackChangeKind::Manual,
+                                            track_token: 0,
                                         });
                                     }
                                 }
@@ -539,6 +543,7 @@ mod backend {
                                     path,
                                     queue_index: queue_idx,
                                     kind: TrackChangeKind::Manual,
+                                    track_token: 0,
                                 });
                             }
                         }
@@ -557,6 +562,7 @@ mod backend {
                                         path: next,
                                         queue_index: queue_idx,
                                         kind: TrackChangeKind::Manual,
+                                        track_token: 0,
                                     });
                                 }
                             }
@@ -576,6 +582,7 @@ mod backend {
                                         path: prev,
                                         queue_index: queue_idx,
                                         kind: TrackChangeKind::Manual,
+                                        track_token: 0,
                                     });
                                 }
                             }
@@ -623,6 +630,7 @@ mod backend {
                                 let _ = pcm_tx.try_send(AnalysisPcmChunk {
                                     samples: chunk,
                                     channel_labels: vec![SpectrogramChannelLabel::Mono],
+                                    track_token: 0,
                                 });
                             }
 
@@ -639,6 +647,7 @@ mod backend {
                                         path: next,
                                         queue_index: queue_idx,
                                         kind: TrackChangeKind::Natural,
+                                        track_token: 0,
                                     });
                                 } else {
                                     snapshot.state = PlaybackState::Stopped;
@@ -660,7 +669,10 @@ mod backend {
 #[cfg(feature = "gst")]
 mod backend {
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    };
     use std::time::{Duration, Instant};
 
     use anyhow::{anyhow, Context};
@@ -957,6 +969,8 @@ mod backend {
     struct GstPlaybackRuntime {
         playbin: gst::Element,
         queue_state: Arc<Mutex<GaplessQueue>>,
+        analysis_tx: Sender<AnalysisCommand>,
+        analysis_track_token: Arc<AtomicU64>,
         event_tx: Sender<PlaybackEvent>,
         snapshot: PlaybackSnapshot,
         target_volume: f32,
@@ -972,11 +986,18 @@ mod backend {
     ) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
         let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
+        let analysis_track_token = Arc::new(AtomicU64::new(0));
 
         let _ = std::thread::Builder::new()
             .name("ferrous-playback-gst".to_string())
             .spawn(move || {
-                if let Err(err) = run_gst_engine(&cmd_rx, event_tx.clone(), analysis_tx, pcm_tx) {
+                if let Err(err) = run_gst_engine(
+                    &cmd_rx,
+                    event_tx.clone(),
+                    analysis_tx,
+                    pcm_tx,
+                    analysis_track_token,
+                ) {
                     tracing::error!("gstreamer playback engine failed: {err:#}");
                 }
             });
@@ -1002,11 +1023,15 @@ mod backend {
         fn new(
             playbin: gst::Element,
             queue_state: Arc<Mutex<GaplessQueue>>,
+            analysis_tx: Sender<AnalysisCommand>,
+            analysis_track_token: Arc<AtomicU64>,
             event_tx: Sender<PlaybackEvent>,
         ) -> Self {
             Self {
                 playbin,
                 queue_state,
+                analysis_tx,
+                analysis_track_token,
                 event_tx,
                 snapshot: PlaybackSnapshot {
                     volume: 1.0,
@@ -1026,11 +1051,26 @@ mod backend {
                 .send(PlaybackEvent::Snapshot(self.snapshot.clone()));
         }
 
-        fn emit_track_changed(&self, path: PathBuf, queue_index: usize, kind: TrackChangeKind) {
+        fn advance_track_token(&self) -> u64 {
+            let track_token = self.analysis_track_token.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = self
+                .analysis_tx
+                .send(AnalysisCommand::SetTrackToken(track_token));
+            track_token
+        }
+
+        fn emit_track_changed(
+            &self,
+            path: PathBuf,
+            queue_index: usize,
+            kind: TrackChangeKind,
+            track_token: u64,
+        ) {
             let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
                 path,
                 queue_index,
                 kind,
+                track_token,
             });
         }
 
@@ -1049,6 +1089,7 @@ mod backend {
             let Some(uri) = file_uri(&path) else {
                 return;
             };
+            let track_token = self.advance_track_token();
             self.snapshot.current_queue_index = Some(queue_index);
             switch_track(
                 &self.playbin,
@@ -1060,7 +1101,7 @@ mod backend {
                 force_play,
             );
             self.buffering_active = false;
-            self.emit_track_changed(path, queue_index, kind);
+            self.emit_track_changed(path, queue_index, kind, track_token);
             self.emit_snapshot();
         }
 
@@ -1365,8 +1406,13 @@ mod backend {
                     }
                 }
             }
-            snapshot_changed |=
-                maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot, &self.event_tx);
+            if let Some((path, queue_index)) =
+                maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
+            {
+                let track_token = self.advance_track_token();
+                self.emit_track_changed(path, queue_index, TrackChangeKind::Natural, track_token);
+                snapshot_changed = true;
+            }
             if snapshot_changed {
                 self.emit_snapshot();
             }
@@ -1436,6 +1482,7 @@ mod backend {
         event_tx: Sender<PlaybackEvent>,
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
+        analysis_track_token: Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
         gst::init().context("gst::init failed")?;
 
@@ -1444,7 +1491,11 @@ mod backend {
             .map_err(|_| anyhow!("failed to create playbin"))?;
         configure_playbin_buffering(&playbin);
 
-        let analysis_sink = build_analysis_audio_sink(analysis_tx, pcm_tx)?;
+        let analysis_sink = build_analysis_audio_sink(
+            analysis_tx.clone(),
+            pcm_tx,
+            Arc::clone(&analysis_track_token),
+        )?;
         playbin.set_property("audio-sink", &analysis_sink);
 
         let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
@@ -1466,7 +1517,13 @@ mod backend {
         }
 
         let bus = playbin.bus().context("playbin has no bus")?;
-        let mut runtime = GstPlaybackRuntime::new(playbin, queue_state, event_tx);
+        let mut runtime = GstPlaybackRuntime::new(
+            playbin,
+            queue_state,
+            analysis_tx,
+            analysis_track_token,
+            event_tx,
+        );
         runtime
             .playbin
             .set_property("volume", f64::from(runtime.applied_volume));
@@ -1515,33 +1572,25 @@ mod backend {
     fn maybe_emit_natural_handoff(
         queue_state: &Arc<Mutex<GaplessQueue>>,
         snapshot: &mut PlaybackSnapshot,
-        event_tx: &Sender<PlaybackEvent>,
-    ) -> bool {
+    ) -> Option<(PathBuf, usize)> {
         // Gapless handoff sets next URI early in about-to-finish.
         // Emit TrackChanged only once playback has actually rolled over.
         if snapshot.state != PlaybackState::Playing {
-            return false;
+            return None;
         }
         let Ok(state) = queue_state.lock() else {
-            return false;
+            return None;
         };
-        let Some(current_path) = state.current() else {
-            return false;
-        };
+        let current_path = state.current()?;
         let current_index = state.current_index().unwrap_or(0);
         let path_changed = snapshot.current.as_ref() != Some(&current_path);
         let at_track_start = snapshot.position <= Duration::from_secs(2);
         if path_changed && at_track_start {
             snapshot.current = Some(current_path.clone());
             snapshot.current_queue_index = Some(current_index);
-            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                path: current_path,
-                queue_index: current_index,
-                kind: TrackChangeKind::Natural,
-            });
-            return true;
+            return Some((current_path, current_index));
         }
-        false
+        None
     }
 
     fn switch_track(
@@ -1689,6 +1738,7 @@ mod backend {
     struct AnalysisTapState {
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
+        track_token: Arc<AtomicU64>,
         last_rate_hz: u32,
         tap_chunk_samples: usize,
         profile_enabled: bool,
@@ -1702,11 +1752,13 @@ mod backend {
         fn new(
             analysis_tx: Sender<AnalysisCommand>,
             pcm_tx: Sender<AnalysisPcmChunk>,
+            track_token: Arc<AtomicU64>,
             tap_chunk_samples: usize,
         ) -> Self {
             Self {
                 analysis_tx,
                 pcm_tx,
+                track_token,
                 last_rate_hz: 0,
                 tap_chunk_samples,
                 profile_enabled: cfg!(feature = "profiling-logs")
@@ -1752,6 +1804,7 @@ mod backend {
                     .try_send(AnalysisPcmChunk {
                         samples: part.to_vec(),
                         channel_labels: channel_labels.clone(),
+                        track_token: self.track_token.load(Ordering::Relaxed),
                     })
                     .is_ok()
                 {
@@ -1902,6 +1955,7 @@ mod backend {
     fn build_analysis_audio_sink(
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
+        track_token: Arc<AtomicU64>,
     ) -> anyhow::Result<gst::Bin> {
         let bin = gst::Bin::new();
         let raw_audio_caps = build_raw_audio_caps();
@@ -1953,7 +2007,8 @@ mod backend {
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
             .map_or(2048, |v| v.clamp(256, 16384));
-        let mut tap_state = AnalysisTapState::new(analysis_tx, pcm_tx, tap_chunk_samples);
+        let mut tap_state =
+            AnalysisTapState::new(analysis_tx, pcm_tx, track_token, tap_chunk_samples);
 
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
@@ -2016,7 +2071,6 @@ mod backend {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crossbeam_channel::unbounded;
 
         fn setup_queue_two_tracks(a: &Path, b: &Path) -> Arc<Mutex<GaplessQueue>> {
             let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
@@ -2031,7 +2085,6 @@ mod backend {
 
         #[test]
         fn natural_handoff_emits_track_changed_near_track_start() {
-            let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
             let first = PathBuf::from("/tmp/gst_handoff_a.flac");
             let second = PathBuf::from("/tmp/gst_handoff_b.flac");
             let queue_state = setup_queue_two_tracks(&first, &second);
@@ -2042,27 +2095,13 @@ mod backend {
                 ..PlaybackSnapshot::default()
             };
 
-            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot, &event_tx);
-            assert!(emitted);
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot);
+            assert_eq!(emitted, Some((second.clone(), 1)));
             assert_eq!(snapshot.current.as_ref(), Some(&second));
-
-            let event = event_rx.try_recv().expect("natural handoff event");
-            match event {
-                PlaybackEvent::TrackChanged {
-                    path,
-                    queue_index: _,
-                    kind,
-                } => {
-                    assert_eq!(path, second);
-                    assert!(matches!(kind, TrackChangeKind::Natural));
-                }
-                other => panic!("unexpected event: {other:?}"),
-            }
         }
 
         #[test]
         fn natural_handoff_does_not_emit_before_track_start_window() {
-            let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
             let first = PathBuf::from("/tmp/gst_handoff_a.flac");
             let second = PathBuf::from("/tmp/gst_handoff_b.flac");
             let queue_state = setup_queue_two_tracks(&first, &second);
@@ -2073,10 +2112,9 @@ mod backend {
                 ..PlaybackSnapshot::default()
             };
 
-            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot, &event_tx);
-            assert!(!emitted);
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot);
+            assert_eq!(emitted, None);
             assert_eq!(snapshot.current.as_ref(), Some(&first));
-            assert!(event_rx.try_recv().is_err());
         }
 
         #[test]

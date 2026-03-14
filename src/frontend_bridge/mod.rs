@@ -408,6 +408,7 @@ struct LastFmPlaybackTracker {
 struct PendingWaveformTrack {
     path: PathBuf,
     reset_spectrogram: bool,
+    track_token: u64,
 }
 
 #[derive(Debug)]
@@ -4168,6 +4169,7 @@ fn pump_playback_events(
                         analysis.command(AnalysisCommand::SetTrack {
                             path: pending.path,
                             reset_spectrogram: pending.reset_spectrogram,
+                            track_token: pending.track_token,
                         });
                     }
                 }
@@ -4176,6 +4178,7 @@ fn pump_playback_events(
                 path,
                 queue_index,
                 kind,
+                track_token,
             } => {
                 state.playback.current_queue_index = Some(queue_index);
                 state.analysis.waveform_peaks.clear();
@@ -4187,19 +4190,19 @@ fn pump_playback_events(
                     state.pending_waveform_track = Some(PendingWaveformTrack {
                         path,
                         reset_spectrogram,
+                        track_token,
                     });
                 } else {
                     state.pending_waveform_track = None;
                     analysis.command(AnalysisCommand::SetTrack {
                         path,
                         reset_spectrogram,
+                        track_token,
                     });
                 }
                 changed = true;
             }
-            PlaybackEvent::Seeked => {
-                analysis.command(AnalysisCommand::ResetSpectrogram);
-            }
+            PlaybackEvent::Seeked => {}
         }
     }
     changed
@@ -6247,6 +6250,7 @@ mod tests {
                 path: p("/music/b.flac"),
                 queue_index: 1,
                 kind: TrackChangeKind::Manual,
+                track_token: 1,
             })
             .expect("send track-changed event");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
@@ -6269,6 +6273,7 @@ mod tests {
                 path: path.clone(),
                 queue_index: 0,
                 kind: TrackChangeKind::Manual,
+                track_token: 1,
             })
             .expect("send track-changed while stopped");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
@@ -6334,6 +6339,7 @@ mod tests {
                 path: p("/music/new.flac"),
                 queue_index: 1,
                 kind: TrackChangeKind::Natural,
+                track_token: 1,
             })
             .expect("send track-changed event");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata_service, &mut state);
