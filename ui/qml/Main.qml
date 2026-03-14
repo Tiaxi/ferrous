@@ -6215,6 +6215,17 @@ Kirigami.ApplicationWindow {
             }
         }
 
+        function haltForCurrentMode() {
+            pendingPackedBatches = []
+            pendingPackedFlushScheduled = false
+            for (let i = 0; i < spectrogramRepeater.count; ++i) {
+                const pane = spectrogramRepeater.itemAt(i)
+                if (pane && pane.spectrogramItem) {
+                    pane.spectrogramItem.halt()
+                }
+            }
+        }
+
         function appendPackedDelta(channels) {
             if (!channels || channels.length === 0) {
                 return
@@ -7196,6 +7207,9 @@ Kirigami.ApplicationWindow {
             }
         }
         function onSnapshotChanged() {
+            if ((uiBridge.playbackState || "") === "Stopped") {
+                spectrogramSurface.haltForCurrentMode()
+            }
             root.syncMutedVolumeState()
             if (root.albumArtViewerOpen
                     && root.albumArtViewerShowsCurrentTrack

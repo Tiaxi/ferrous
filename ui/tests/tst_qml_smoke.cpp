@@ -267,6 +267,7 @@ private slots:
     void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
     void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
     void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
+    void spectrogramHaltDropsPendingMotion();
 };
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -525,6 +526,40 @@ void QmlSmokeTest::spectrogramSteadyStateAppendKeepsRowsPendingForAnimation() {
     QCOMPARE(item.m_columns.size(), seededColumns);
     QCOMPARE(item.m_pendingColumns.size(), seededPending + static_cast<size_t>(extraRows));
     QVERIFY(!item.m_seedHistoryOnNextAppend);
+}
+
+void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setSampleRateHz(48000);
+
+    constexpr int initialRows = 24;
+    constexpr int extraRows = 8;
+    constexpr int binsPerRow = 32;
+    QByteArray initialPackedRows;
+    initialPackedRows.resize(initialRows * binsPerRow);
+    for (int row = 0; row < initialRows; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            initialPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 7 + bin * 3) % 256);
+        }
+    }
+    item.appendPackedRows(initialPackedRows, initialRows, binsPerRow);
+
+    QByteArray extraPackedRows;
+    extraPackedRows.resize(extraRows * binsPerRow);
+    for (int row = 0; row < extraRows; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            extraPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 17 + bin * 11) % 256);
+        }
+    }
+    item.appendPackedRows(extraPackedRows, extraRows, binsPerRow);
+    QVERIFY(!item.m_pendingColumns.empty());
+
+    item.halt();
+
+    QVERIFY(item.m_pendingColumns.empty());
+    QCOMPARE(item.m_pendingPhase, 0.0);
 }
 
 int main(int argc, char **argv) {

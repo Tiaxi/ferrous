@@ -258,6 +258,15 @@ void SpectrogramItem::reset() {
     update();
 }
 
+void SpectrogramItem::halt() {
+    QMutexLocker lock(&m_stateMutex);
+    m_pendingColumns.clear();
+    m_pendingPhase = 0.0;
+    m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
+    m_animationTickInitialized = false;
+    update();
+}
+
 void SpectrogramItem::appendRows(const QVariantList &rows) {
     QMutexLocker lock(&m_stateMutex);
     if (rows.isEmpty()) {

@@ -42,6 +42,7 @@ public:
     void setMaxColumns(int value);
 
     Q_INVOKABLE void reset();
+    Q_INVOKABLE void halt();
     Q_INVOKABLE void appendRows(const QVariantList &rows);
     Q_INVOKABLE void appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow);
 
