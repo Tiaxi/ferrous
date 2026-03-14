@@ -12,6 +12,8 @@ Baseline commit series:
 - `9bb0d28` `Preserve spectrogram history and stop draining fresh PCM`
 - `19bebc0` `Seed spectrogram bursts as history at startup`
 - `b5ef2d5` `Limit spectrogram history seeding to reset bursts`
+- `cd6c59b` `Reset spectrogram on stopped track switches`
+- `e1fddb2` `Reset spectrogram on resume after stopped track switch`
 
 Observed behavior to preserve:
 
@@ -19,6 +21,8 @@ Observed behavior to preserve:
 - playback start does not visibly stall or catch up
 - seeking does not clear history and does not visibly speed up before settling
 - fullscreen spectrogram remains smooth at high FPS
+- stopping playback freezes spectrogram motion immediately
+- stop, switch tracks, then play does not let old-track spectrogram content nudge forward before the new track takes over
 
 ## Locked-In Invariants
 
@@ -30,6 +34,8 @@ The current implementation depends on these rules:
 - Only the first post-reset spectrogram burst is seeded into history immediately.
 - Steady-state row appends remain animation-driven and must not synchronously absorb large batches into history on the UI thread.
 - Scroll cadence uses the backend visual hop cadence (`sampleRate / 1024`) rather than burst-size-derived startup estimates.
+- Stopped track switches must clear any pending bridge-side spectrogram delta before the next track resumes.
+- The stopped-track-switch reset must be enforced on the immediate `playbackChanged` path, not only the delayed `snapshotChanged` path, because quick stop-switch-play sequences can outrun the snapshot coalescing timer.
 
 ## Guardrail For Future Sync Work
 
@@ -42,5 +48,7 @@ Minimum acceptance bar before merging:
 - fullscreen smoothness unchanged
 - `./scripts/run-tests.sh --ui-only` passes
 - `ui/tests/tst_qml_smoke.cpp` spectrogram burst-handling tests still pass
+- `ui/tests/tst_bridge_client.cpp` stopped-track-switch delta clearing test still passes
+- `ui/tests/tst_qml_smoke.cpp` stopped-track-switch resume predicate test still passes
 
 If a latency improvement conflicts with these guarantees, treat it as an architectural problem and redesign the handoff instead of weakening the pacing rules.

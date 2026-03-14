@@ -268,6 +268,7 @@ private slots:
     void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
     void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
     void spectrogramHaltDropsPendingMotion();
+    void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
 };
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -560,6 +561,56 @@ void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {
 
     QVERIFY(item.m_pendingColumns.empty());
     QCOMPARE(item.m_pendingPhase, 0.0);
+}
+
+void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+
+    const QUrl url = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml"));
+    engine.load(url);
+    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    QObject *root = engine.rootObjects().constFirst();
+    QVERIFY(root != nullptr);
+
+    QVariant result;
+    bool invoked = QMetaObject::invokeMethod(
+        root,
+        "shouldResetSpectrogramForStoppedTrackSwitch",
+        Q_RETURN_ARG(QVariant, result),
+        Q_ARG(QVariant, QStringLiteral("Stopped")),
+        Q_ARG(QVariant, QStringLiteral("Playing")),
+        Q_ARG(QVariant, QStringLiteral("/music/old-track.flac")),
+        Q_ARG(QVariant, QStringLiteral("/music/new-track.flac")));
+    QVERIFY(invoked);
+    QCOMPARE(result.toBool(), true);
+
+    invoked = QMetaObject::invokeMethod(
+        root,
+        "shouldResetSpectrogramForStoppedTrackSwitch",
+        Q_RETURN_ARG(QVariant, result),
+        Q_ARG(QVariant, QStringLiteral("Playing")),
+        Q_ARG(QVariant, QStringLiteral("Playing")),
+        Q_ARG(QVariant, QStringLiteral("/music/old-track.flac")),
+        Q_ARG(QVariant, QStringLiteral("/music/new-track.flac")));
+    QVERIFY(invoked);
+    QCOMPARE(result.toBool(), false);
+
+    invoked = QMetaObject::invokeMethod(
+        root,
+        "shouldResetSpectrogramForStoppedTrackSwitch",
+        Q_RETURN_ARG(QVariant, result),
+        Q_ARG(QVariant, QStringLiteral("Stopped")),
+        Q_ARG(QVariant, QStringLiteral("Playing")),
+        Q_ARG(QVariant, QStringLiteral("/music/same-track.flac")),
+        Q_ARG(QVariant, QStringLiteral("/music/same-track.flac")));
+    QVERIFY(invoked);
+    QCOMPARE(result.toBool(), false);
 }
 
 int main(int argc, char **argv) {

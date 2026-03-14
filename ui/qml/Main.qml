@@ -148,6 +148,7 @@ Kirigami.ApplicationWindow {
     readonly property bool useWholeScreenViewerMode: uiBridge.viewerFullscreenMode === 1
     readonly property var uiBridge: bridge ? bridge : bridgeFallback
     readonly property var tagEditorApi: (typeof tagEditor !== "undefined" && tagEditor)
+
         ? tagEditor
         : tagEditorFallback
     readonly property var globalSearchModelApi: (uiBridge
@@ -156,6 +157,17 @@ Kirigami.ApplicationWindow {
         ? uiBridge.globalSearchModel
         : globalSearchModelFallback
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
+
+    function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
+        const previousState = previousPlaybackState || ""
+        const currentState = currentPlaybackState || ""
+        const stoppedPath = stoppedTrackPath || ""
+        const currentPath = currentTrackPath || ""
+        return currentState === "Playing"
+            && previousState === "Stopped"
+            && stoppedPath.length > 0
+            && stoppedPath !== currentPath
+    }
 
     function mixColor(colorA, colorB, amount) {
         const t = Math.max(0, Math.min(1, amount))
@@ -7262,10 +7274,11 @@ Kirigami.ApplicationWindow {
         }
         function onPlaybackChanged() {
             const playbackState = uiBridge.playbackState || ""
-            if (playbackState === "Playing"
-                    && root.lastSpectrogramPlaybackState === "Stopped"
-                    && root.stoppedSpectrogramTrackPath.length > 0
-                    && root.stoppedSpectrogramTrackPath !== (uiBridge.currentTrackPath || "")) {
+            if (root.shouldResetSpectrogramForStoppedTrackSwitch(
+                        root.lastSpectrogramPlaybackState,
+                        playbackState,
+                        root.stoppedSpectrogramTrackPath,
+                        uiBridge.currentTrackPath || "")) {
                 spectrogramSurface.resetForCurrentMode(true)
                 root.stoppedSpectrogramTrackPath = uiBridge.currentTrackPath || ""
             }
