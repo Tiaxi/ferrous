@@ -90,13 +90,7 @@ struct SpectrogramSceneNode final : public QSGNode {
     ~SpectrogramSceneNode() override {
         delete canvasTexture;
         delete overlayTexture;
-    }
-
-    void resetTextures() {
-        delete canvasTexture;
-        canvasTexture = nullptr;
-        delete overlayTexture;
-        overlayTexture = nullptr;
+        delete placeholderTexture;
     }
 
     QSGSimpleRectNode *background{nullptr};
@@ -106,9 +100,16 @@ struct SpectrogramSceneNode final : public QSGNode {
     QSGSimpleTextureNode *overlay{nullptr};
     QSGTexture *canvasTexture{nullptr};
     QSGTexture *overlayTexture{nullptr};
+    QSGTexture *placeholderTexture{nullptr};
     quintptr ownerWindowId{0};
     quint64 generation{0};
 };
+
+QImage placeholderImage() {
+    QImage image(1, 1, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    return image;
+}
 
 QRectF normalizedSourceRect(QSGTexture *texture, const QRect &source, const QSize &textureSize) {
     if (texture == nullptr || textureSize.width() <= 0 || textureSize.height() <= 0 || source.isEmpty()) {
@@ -133,14 +134,17 @@ void configureTextureNode(
     QSGTexture *texture,
     const QRectF &target,
     const QRect &source,
-    const QSize &textureSize) {
+    const QSize &textureSize,
+    QSGTexture *placeholderTexture) {
     if (node == nullptr) {
         return;
     }
     if (texture == nullptr || target.isEmpty() || source.isEmpty()) {
-        node->setTexture(nullptr);
+        if (placeholderTexture != nullptr) {
+            node->setTexture(placeholderTexture);
+        }
         node->setRect(QRectF());
-        node->setSourceRect(QRectF());
+        node->setSourceRect(QRectF(0.0, 0.0, 1.0, 1.0));
         return;
     }
 
@@ -382,20 +386,23 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     const auto paintStart = std::chrono::steady_clock::now();
 #endif
     auto *node = static_cast<SpectrogramSceneNode *>(oldNode);
-    if (node == nullptr) {
-        node = new SpectrogramSceneNode();
-    }
-
     QQuickWindow *currentWindow = window();
     const quintptr windowId = reinterpret_cast<quintptr>(currentWindow);
-    if (node->ownerWindowId != windowId || node->generation != m_sceneGraphGeneration) {
-        node->resetTextures();
-        configureTextureNode(node->first, nullptr, QRectF(), QRect(), QSize());
-        configureTextureNode(node->second, nullptr, QRectF(), QRect(), QSize());
-        configureTextureNode(node->latest, nullptr, QRectF(), QRect(), QSize());
-        configureTextureNode(node->overlay, nullptr, QRectF(), QRect(), QSize());
+    if (node != nullptr
+        && (node->ownerWindowId != windowId || node->generation != m_sceneGraphGeneration)) {
+        delete node;
+        node = nullptr;
+    }
+    if (node == nullptr) {
+        node = new SpectrogramSceneNode();
         node->ownerWindowId = windowId;
         node->generation = m_sceneGraphGeneration;
+    }
+    if (node->placeholderTexture == nullptr && currentWindow != nullptr) {
+        node->placeholderTexture = currentWindow->createTextureFromImage(placeholderImage());
+        if (node->placeholderTexture != nullptr) {
+            node->placeholderTexture->setFiltering(QSGTexture::Nearest);
+        }
     }
 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
@@ -465,13 +472,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         profileBinsPerColumn = m_binsPerColumn;
     }
 
-    if (!showOverlay && node->overlayTexture != nullptr) {
-        delete node->overlayTexture;
-        node->overlayTexture = nullptr;
-    }
+    QSGTexture *oldCanvasTexture = nullptr;
+    QSGTexture *oldOverlayTexture = nullptr;
 
     if (canvasChanged) {
-        delete node->canvasTexture;
+        oldCanvasTexture = node->canvasTexture;
         node->canvasTexture = nullptr;
         if (!canvasImage.isNull() && currentWindow != nullptr) {
             node->canvasTexture = currentWindow->createTextureFromImage(canvasImage);
@@ -481,7 +486,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
     }
     if (overlayChanged) {
-        delete node->overlayTexture;
+        oldOverlayTexture = node->overlayTexture;
         node->overlayTexture = nullptr;
         if (!overlayImage.isNull() && currentWindow != nullptr) {
             node->overlayTexture = currentWindow->createTextureFromImage(overlayImage);
@@ -492,12 +497,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     }
 
     if (hasCanvas && node->canvasTexture != nullptr) {
+        if (node->first == nullptr) {
+            node->first = new QSGSimpleTextureNode();
+            node->appendChildNode(node->first);
+        }
+        if (node->second == nullptr) {
+            node->second = new QSGSimpleTextureNode();
+            node->appendChildNode(node->second);
+        }
+        if (node->latest == nullptr) {
+            node->latest = new QSGSimpleTextureNode();
+            node->appendChildNode(node->latest);
+        }
         configureTextureNode(
             node->first,
             node->canvasTexture,
             QRectF(drawX, 0.0, static_cast<double>(firstWidth), static_cast<double>(canvasSize.height())),
             QRect(srcStart, 0, firstWidth, canvasSize.height()),
-            canvasSize);
+            canvasSize,
+            node->placeholderTexture);
         configureTextureNode(
             node->second,
             node->canvasTexture,
@@ -507,7 +525,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 static_cast<double>(remaining),
                 static_cast<double>(canvasSize.height())),
             QRect(0, 0, remaining, canvasSize.height()),
-            canvasSize);
+            canvasSize,
+            node->placeholderTexture);
         configureTextureNode(
             node->latest,
             node->canvasTexture,
@@ -517,11 +536,30 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 scrollOffset,
                 static_cast<double>(canvasSize.height())),
             QRect(latestX, 0, scrollOffset > 0.0 ? 1 : 0, canvasSize.height()),
-            canvasSize);
+            canvasSize,
+            node->placeholderTexture);
     } else {
-        configureTextureNode(node->first, nullptr, QRectF(), QRect(), QSize());
-        configureTextureNode(node->second, nullptr, QRectF(), QRect(), QSize());
-        configureTextureNode(node->latest, nullptr, QRectF(), QRect(), QSize());
+        configureTextureNode(
+            node->first,
+            nullptr,
+            QRectF(),
+            QRect(),
+            QSize(),
+            node->placeholderTexture);
+        configureTextureNode(
+            node->second,
+            nullptr,
+            QRectF(),
+            QRect(),
+            QSize(),
+            node->placeholderTexture);
+        configureTextureNode(
+            node->latest,
+            nullptr,
+            QRectF(),
+            QRect(),
+            QSize(),
+            node->placeholderTexture);
     }
 
     if (showOverlay && node->overlayTexture != nullptr && !overlaySize.isEmpty()) {
@@ -535,10 +573,20 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->overlayTexture,
             target,
             QRect(0, 0, overlaySize.width(), overlaySize.height()),
-            overlaySize);
+            overlaySize,
+            node->placeholderTexture);
     } else {
-        configureTextureNode(node->overlay, nullptr, QRectF(), QRect(), QSize());
+        configureTextureNode(
+            node->overlay,
+            nullptr,
+            QRectF(),
+            QRect(),
+            QSize(),
+            node->placeholderTexture);
     }
+
+    delete oldCanvasTexture;
+    delete oldOverlayTexture;
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
