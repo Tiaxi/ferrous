@@ -8,7 +8,7 @@ ScrollView {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property var windowRoot
     required property var promptAddLibraryRoot
     required property var openLibraryRootNameDialog
@@ -26,8 +26,8 @@ ScrollView {
 
         Components.SurfaceCard {
             Layout.fillWidth: true
-            color: root.palette.uiSurfaceColor
-            borderColor: root.palette.uiBorderColor
+            color: root.uiPalette.uiSurfaceColor
+            borderColor: root.uiPalette.uiBorderColor
             implicitHeight: libraryPrefsColumn.implicitHeight + 36
 
             ColumnLayout {
@@ -91,8 +91,8 @@ ScrollView {
                     Layout.preferredHeight: Math.min(
                         260,
                         (60 * Math.max(1, root.uiBridge.libraryRootEntries.length)) + 12)
-                    color: root.palette.uiSurfaceAltColor
-                    border.color: root.palette.uiBorderColor
+                    color: root.uiPalette.uiSurfaceAltColor
+                    border.color: root.uiPalette.uiBorderColor
                     radius: 8
                     visible: root.uiBridge.libraryRootEntries.length > 0
 
@@ -126,7 +126,7 @@ ScrollView {
                             width: ListView.view.width
                             height: 52
                             radius: 6
-                            color: root.palette.uiSurfaceRaisedColor
+                            color: root.uiPalette.uiSurfaceRaisedColor
                             border.color: Qt.rgba(0, 0, 0, 0.06)
 
                             RowLayout {
@@ -150,7 +150,7 @@ ScrollView {
                                         visible: rootName.length > 0
                                         text: rootPath
                                         elide: Text.ElideMiddle
-                                        color: root.palette.uiMutedTextColor
+                                        color: root.uiPalette.uiMutedTextColor
                                         font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
                                     }
                                 }

@@ -6,7 +6,7 @@ import org.kde.kirigami 2.20 as Kirigami
 ToolBar {
     id: root
 
-    required property var palette
+    required property var uiPalette
     required property var sections
     required property var channelStatusIconSource
     required property var mixColor
@@ -34,7 +34,7 @@ ToolBar {
                 Label {
                     visible: index > 0
                     text: "|"
-                    color: root.palette.uiMutedTextColor
+                    color: root.uiPalette.uiMutedTextColor
                 }
 
                 RowLayout {
@@ -71,12 +71,12 @@ ToolBar {
                             ? (modelData.emphasis
                                 ? root.mixColor(
                                     Kirigami.Theme.negativeTextColor,
-                                    root.palette.uiTextColor,
+                                    root.uiPalette.uiTextColor,
                                     root.themeIsDark ? 0.18 : 0.08)
                                 : Kirigami.Theme.negativeTextColor)
                             : (modelData.emphasis
                                 ? Kirigami.Theme.highlightColor
-                                : root.palette.uiTextColor)
+                                : root.uiPalette.uiTextColor)
                         font.weight: modelData.emphasis ? Font.DemiBold : Font.Normal
                     }
                 }

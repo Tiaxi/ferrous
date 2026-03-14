@@ -8,7 +8,7 @@ Rectangle {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property real preferredHeight
     required property int playlistIndicatorColumnWidth
     required property int playlistOrderColumnWidth
@@ -27,11 +27,11 @@ Rectangle {
 
     signal viewReady(var view)
 
-    color: root.palette.uiSurfaceRaisedColor
+    color: root.uiPalette.uiSurfaceRaisedColor
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight
     SplitView.minimumHeight: 220
-    border.color: root.palette.uiBorderColor
+    border.color: root.uiPalette.uiBorderColor
 
     ColumnLayout {
         anchors.fill: parent
@@ -40,8 +40,8 @@ Rectangle {
         Rectangle {
             Layout.fillWidth: true
             implicitHeight: 26
-            color: root.palette.uiHeaderColor
-            border.color: root.palette.uiBorderColor
+            color: root.uiPalette.uiHeaderColor
+            border.color: root.uiPalette.uiBorderColor
 
             RowLayout {
                 anchors.fill: parent
@@ -52,24 +52,24 @@ Rectangle {
                     text: "▶"
                     Layout.preferredWidth: root.playlistIndicatorColumnWidth
                     horizontalAlignment: Text.AlignHCenter
-                    color: root.palette.uiMutedTextColor
+                    color: root.uiPalette.uiMutedTextColor
                 }
 
                 Label {
                     text: "#"
                     Layout.preferredWidth: root.playlistOrderColumnWidth
                     horizontalAlignment: Text.AlignRight
-                    color: root.palette.uiMutedTextColor
+                    color: root.uiPalette.uiMutedTextColor
                 }
 
-                Label { text: "Title"; Layout.fillWidth: true; color: root.palette.uiMutedTextColor }
-                Label { text: "Artist"; Layout.preferredWidth: 170; color: root.palette.uiMutedTextColor }
-                Label { text: "Album"; Layout.preferredWidth: 190; color: root.palette.uiMutedTextColor }
+                Label { text: "Title"; Layout.fillWidth: true; color: root.uiPalette.uiMutedTextColor }
+                Label { text: "Artist"; Layout.preferredWidth: 170; color: root.uiPalette.uiMutedTextColor }
+                Label { text: "Album"; Layout.preferredWidth: 190; color: root.uiPalette.uiMutedTextColor }
                 Label {
                     text: "Length"
                     Layout.preferredWidth: 76
                     horizontalAlignment: Text.AlignRight
-                    color: root.palette.uiMutedTextColor
+                    color: root.uiPalette.uiMutedTextColor
                 }
             }
         }
@@ -140,9 +140,9 @@ Rectangle {
                     Drag.dragType: Drag.Automatic
                     Drag.supportedActions: Qt.MoveAction
                     color: root.isQueueIndexSelected(index)
-                        ? root.palette.uiSelectionColor
-                        : (index % 2 === 0 ? root.palette.uiSurfaceRaisedColor
-                                            : root.palette.uiSurfaceAltColor)
+                        ? root.uiPalette.uiSelectionColor
+                        : (index % 2 === 0 ? root.uiPalette.uiSurfaceRaisedColor
+                                            : root.uiPalette.uiSurfaceAltColor)
 
                     RowLayout {
                         anchors.fill: parent
@@ -167,12 +167,12 @@ Rectangle {
                             horizontalAlignment: Text.AlignHCenter
                             font.bold: true
                             color: root.isQueueIndexSelected(index)
-                                ? root.palette.uiSelectionTextColor
+                                ? root.uiPalette.uiSelectionTextColor
                                 : (playlistRow.isCurrentQueueRow
                                     ? (root.uiBridge.playbackState === "Playing"
-                                        ? root.palette.uiActiveIndicatorColor
-                                        : root.palette.uiMutedTextColor)
-                                    : root.palette.uiTextColor)
+                                        ? root.uiPalette.uiActiveIndicatorColor
+                                        : root.uiPalette.uiMutedTextColor)
+                                    : root.uiPalette.uiTextColor)
                         }
 
                         Label {
@@ -180,8 +180,8 @@ Rectangle {
                             Layout.preferredWidth: root.playlistOrderColumnWidth
                             horizontalAlignment: Text.AlignRight
                             color: root.isQueueIndexSelected(index)
-                                ? root.palette.uiSelectionTextColor
-                                : root.palette.uiTextColor
+                                ? root.uiPalette.uiSelectionTextColor
+                                : root.uiPalette.uiTextColor
                         }
 
                         Label {
@@ -189,8 +189,8 @@ Rectangle {
                             Layout.fillWidth: true
                             elide: Text.ElideRight
                             color: root.isQueueIndexSelected(index)
-                                ? root.palette.uiSelectionTextColor
-                                : root.palette.uiTextColor
+                                ? root.uiPalette.uiSelectionTextColor
+                                : root.uiPalette.uiTextColor
                         }
 
                         Label {
@@ -198,8 +198,8 @@ Rectangle {
                             Layout.preferredWidth: 170
                             elide: Text.ElideRight
                             color: root.isQueueIndexSelected(index)
-                                ? root.palette.uiSelectionTextColor
-                                : root.palette.uiTextColor
+                                ? root.uiPalette.uiSelectionTextColor
+                                : root.uiPalette.uiTextColor
                         }
 
                         Label {
@@ -207,8 +207,8 @@ Rectangle {
                             Layout.preferredWidth: 190
                             elide: Text.ElideRight
                             color: root.isQueueIndexSelected(index)
-                                ? root.palette.uiSelectionTextColor
-                                : root.palette.uiTextColor
+                                ? root.uiPalette.uiSelectionTextColor
+                                : root.uiPalette.uiTextColor
                         }
 
                         Label {
@@ -216,8 +216,8 @@ Rectangle {
                             Layout.preferredWidth: 76
                             horizontalAlignment: Text.AlignRight
                             color: root.isQueueIndexSelected(index)
-                                ? root.palette.uiSelectionTextColor
-                                : root.palette.uiTextColor
+                                ? root.uiPalette.uiSelectionTextColor
+                                : root.uiPalette.uiTextColor
                         }
                     }
 

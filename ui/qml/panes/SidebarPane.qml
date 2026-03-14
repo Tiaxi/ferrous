@@ -9,7 +9,7 @@ Rectangle {
 
     required property var uiBridge
     required property var libraryModel
-    required property var palette
+    required property var uiPalette
     required property real splitPreferredWidth
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
@@ -35,7 +35,7 @@ Rectangle {
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
 
-    color: root.palette.uiPaneColor
+    color: root.uiPalette.uiPaneColor
     SplitView.preferredWidth: root.splitPreferredWidth
     SplitView.minimumWidth: 250
 
@@ -44,6 +44,8 @@ Rectangle {
         spacing: 0
 
         Components.AlbumArtTile {
+            Layout.fillWidth: true
+            Layout.preferredHeight: width
             uiBridge: root.uiBridge
             replaceFromItunesAction: root.replaceFromItunesAction
             currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
@@ -56,7 +58,7 @@ Rectangle {
             Layout.fillHeight: true
             uiBridge: root.uiBridge
             libraryModel: root.libraryModel
-            palette: root.palette
+            uiPalette: root.uiPalette
             queueTrackNumberText: root.queueTrackNumberText
             snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
             snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity

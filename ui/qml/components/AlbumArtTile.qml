@@ -1,5 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
 
 Rectangle {
     id: root
@@ -8,6 +9,11 @@ Rectangle {
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var openAlbumArtViewer
+
+    implicitWidth: 320
+    implicitHeight: 320
+    Layout.fillWidth: true
+    Layout.preferredHeight: width
 
     color: "#0c0c0c"
 

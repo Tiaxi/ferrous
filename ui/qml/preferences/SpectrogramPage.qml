@@ -8,7 +8,7 @@ ScrollView {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property var spectrogramFftChoices
 
     clip: true
@@ -21,8 +21,8 @@ ScrollView {
 
         Components.SurfaceCard {
             Layout.fillWidth: true
-            color: root.palette.uiSurfaceColor
-            borderColor: root.palette.uiBorderColor
+            color: root.uiPalette.uiSurfaceColor
+            borderColor: root.uiPalette.uiBorderColor
             implicitHeight: contentColumn.implicitHeight + 36
 
             ColumnLayout {

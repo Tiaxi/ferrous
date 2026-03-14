@@ -7,7 +7,7 @@ Dialog {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property var windowRoot
     required property int popupTransitionMs
     required property string dialogMode
@@ -48,7 +48,7 @@ Dialog {
         Label {
             Layout.fillWidth: true
             text: "Path"
-            color: root.palette.uiMutedTextColor
+            color: root.uiPalette.uiMutedTextColor
         }
 
         TextField {
@@ -61,7 +61,7 @@ Dialog {
         Label {
             Layout.fillWidth: true
             text: "Custom Name (optional)"
-            color: root.palette.uiMutedTextColor
+            color: root.uiPalette.uiMutedTextColor
         }
 
         TextField {

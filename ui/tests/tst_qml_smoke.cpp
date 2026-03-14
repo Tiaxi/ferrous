@@ -1,8 +1,12 @@
 #include <QApplication>
 #include <QFileInfo>
 #include <QQuickWindow>
+#include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QScopedPointer>
 #include <QtEndian>
 #include <QtTest/QtTest>
 #include <qqml.h>
@@ -251,13 +255,88 @@ QByteArray multiRootBinary() {
     return encodeRows(rows);
 }
 
+QString formatQmlErrors(const QList<QQmlError> &errors) {
+    QStringList lines;
+    lines.reserve(errors.size());
+    for (const QQmlError &error : errors) {
+        lines.push_back(error.toString());
+    }
+    return lines.join('\n');
+}
+
+QMutex &capturedMessageMutex() {
+    static QMutex mutex;
+    return mutex;
+}
+
+QStringList &capturedMessages() {
+    static QStringList messages;
+    return messages;
+}
+
+QtMessageHandler &previousMessageHandler() {
+    static QtMessageHandler handler = nullptr;
+    return handler;
+}
+
+void captureQtMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
+    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
+        QMutexLocker locker(&capturedMessageMutex());
+        capturedMessages().push_back(message);
+    }
+    if (previousMessageHandler()) {
+        previousMessageHandler()(type, context, message);
+    } else {
+        qt_message_output(type, context, message);
+    }
+}
+
+void clearCapturedMessages() {
+    QMutexLocker locker(&capturedMessageMutex());
+    capturedMessages().clear();
+}
+
+QString takeCapturedMessagesText() {
+    QMutexLocker locker(&capturedMessageMutex());
+    const QString text = capturedMessages().join('\n');
+    capturedMessages().clear();
+    return text;
+}
+
+QObject *createQmlObjectFromSource(
+    QQmlEngine &engine,
+    const QByteArray &qmlSource,
+    const QUrl &baseUrl,
+    QString *errorText) {
+    QQmlComponent component(&engine);
+    component.setData(qmlSource, baseUrl);
+    if (!component.errors().isEmpty()) {
+        if (errorText) {
+            *errorText = formatQmlErrors(component.errors());
+        }
+        return nullptr;
+    }
+
+    QObject *object = component.create();
+    if (!object && errorText) {
+        *errorText = formatQmlErrors(component.errors());
+    }
+    return object;
+}
+
 } // namespace
 
 class QmlSmokeTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase();
+    void init();
+    void cleanup();
+    void cleanupTestCase();
     void loadsMainQmlWithFallbackBridge();
+    void loadsExtractedQmlSlicesWithFallbackProps();
+    void albumArtTileKeepsHeightInsideColumnLayout();
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void libraryTreeStartsCollapsedByDefault();
     void rootRowsStartExpandedByDefault();
@@ -270,6 +349,24 @@ private slots:
     void spectrogramHaltDropsPendingMotion();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
 };
+
+void QmlSmokeTest::initTestCase() {
+    previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+}
+
+void QmlSmokeTest::init() {
+    clearCapturedMessages();
+}
+
+void QmlSmokeTest::cleanup() {
+    const QString warnings = takeCapturedMessagesText();
+    QVERIFY2(warnings.isEmpty(), qPrintable(warnings));
+}
+
+void QmlSmokeTest::cleanupTestCase() {
+    qInstallMessageHandler(previousMessageHandler());
+    previousMessageHandler() = nullptr;
+}
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
@@ -285,6 +382,234 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     const QUrl url = QUrl::fromLocalFile(qmlPath);
     engine.load(url);
     QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+}
+
+void QmlSmokeTest::loadsExtractedQmlSlicesWithFallbackProps() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
+import "components" as Components
+import "dialogs" as Dialogs
+import "panes" as Panes
+import "viewers" as Viewers
+
+Item {
+    id: harness
+    width: 1600
+    height: 980
+
+    QtObject {
+        id: bridge
+        property bool connected: false
+        property string playbackState: "Stopped"
+        property string positionText: "00:00"
+        property string durationText: "00:00"
+        property real positionSeconds: 0
+        property real durationSeconds: 0
+        property real volume: 0.5
+        property var waveformPeaksPacked: ""
+        property real waveformCoverageSeconds: 0
+        property bool waveformComplete: false
+        property string currentTrackPath: ""
+        property string currentTrackCoverPath: ""
+        property string currentTrackTitle: ""
+        property string currentTrackArtist: ""
+        property string currentTrackAlbum: ""
+        property string currentTrackGenre: ""
+        property var currentTrackYear: null
+        property int selectedQueueIndex: -1
+        property int playingQueueIndex: -1
+        property int spectrogramViewMode: 0
+        property int fftSize: 8192
+        property real dbRange: 90
+        property bool logScale: false
+        property bool showFps: false
+        property int viewerFullscreenMode: 0
+        property int librarySortMode: 0
+        property var libraryRootEntries: []
+        property bool lastFmScrobblingEnabled: false
+        property bool lastFmBuildConfigured: false
+        property string lastFmStatusText: ""
+        property int lastFmPendingScrobbleCount: 0
+        property string lastFmUsername: ""
+        property bool systemMediaControlsEnabled: true
+        property string diagnosticsText: ""
+        property string diagnosticsLogPath: ""
+        property int sampleRateHz: 48000
+        signal diagnosticsChanged()
+        function setVolume(value) {}
+        function setLibrarySortMode(mode) {}
+        function rescanAllLibraryRoots() {}
+        function openInFileBrowser(path) {}
+        function rescanLibraryRoot(path) {}
+        function removeLibraryRoot(path) {}
+        function setSpectrogramViewMode(mode) {}
+        function setFftSize(value) {}
+        function setDbRange(value) {}
+        function setLogScale(value) {}
+        function setShowFps(value) {}
+        function setViewerFullscreenMode(mode) {}
+        function setLastFmScrobblingEnabled(value) {}
+        function beginLastFmAuth() {}
+        function completeLastFmAuth() {}
+        function disconnectLastFm() {}
+        function setSystemMediaControlsEnabled(value) {}
+        function openContainingFolder(path) {}
+        function reloadDiagnosticsFromDisk() {}
+        function clearDiagnostics() {}
+    }
+
+    Components.UiPalette {
+        id: palette
+        windowRoot: harness
+    }
+
+    Action { id: previousAction }
+    Action { id: playAction }
+    Action { id: pauseAction }
+    Action { id: stopAction }
+    Action { id: nextAction }
+
+    Dialogs.PreferencesDialog {
+        id: preferencesDialog
+        parent: harness
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: harness
+        popupTransitionMs: 0
+        spectrogramFftChoices: [512, 1024, 2048]
+        promptAddLibraryRoot: function(context) {}
+        openLibraryRootNameDialog: function(mode, path, name) {}
+        stepScrollView: function(scrollView, wheel, stepSize, stepsPerWheel) {}
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+    }
+
+    Dialogs.DiagnosticsDialog {
+        parent: harness
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: harness
+        popupTransitionMs: 0
+    }
+
+    Dialogs.LibraryRootNameDialog {
+        parent: harness
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: harness
+        popupTransitionMs: 0
+        dialogMode: "add"
+        pathValue: "/music"
+        nameValue: "Music"
+        onDismissed: function() {}
+    }
+
+    Panes.StatusBar {
+        id: statusBar
+        width: harness.width
+        uiPalette: palette
+        sections: [{ text: "Ready", emphasis: false, stretch: true }]
+        channelStatusIconSource: function(key) { return "" }
+        mixColor: function(colorA, colorB, amount) { return colorA }
+        themeIsDark: palette.themeIsDark
+    }
+
+    Panes.TransportBar {
+        parent: harness
+        width: harness.width
+        uiBridge: bridge
+        uiPalette: palette
+        previousAction: previousAction
+        playAction: playAction
+        pauseAction: pauseAction
+        stopAction: stopAction
+        nextAction: nextAction
+        mixColor: function(colorA, colorB, amount) { return colorA }
+        themeIsDark: palette.themeIsDark
+        volumeMuted: false
+        displayedPositionSeconds: 0
+        toggleMutedVolume: function() {}
+        setAppVolume: function(value) {}
+        normalizedVolumeValue: function(value) { return value || 0 }
+        seekCommitted: function(value) {}
+    }
+
+    Components.TrackMetadataCard {
+        parent: harness
+        width: 420
+        uiBridge: bridge
+        uiPalette: palette
+        queueTrackNumberText: function(index) { return "--" }
+    }
+
+    Viewers.SpectrogramSurface {
+        parent: harness
+        width: 420
+        height: 160
+        uiBridge: bridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+}
+
+void QmlSmokeTest::albumArtTileKeepsHeightInsideColumnLayout() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
+import "components" as Components
+
+Item {
+    width: 360
+    height: 700
+
+    QtObject {
+        id: bridge
+        property string currentTrackCoverPath: ""
+    }
+
+    Action { id: replaceFromItunesAction }
+
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        Components.AlbumArtTile {
+            id: albumArtTile
+            objectName: "albumArtTile"
+            uiBridge: bridge
+            replaceFromItunesAction: replaceFromItunesAction
+            currentTrackItunesArtworkDisabledReason: function() { return "" }
+            openAlbumArtViewer: function() {}
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+        }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *tile = root->findChild<QObject *>(QStringLiteral("albumArtTile"));
+    QVERIFY(tile != nullptr);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    QVERIFY2(tile->property("height").toReal() > 0.0, "AlbumArtTile collapsed to zero height");
 }
 
 void QmlSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {

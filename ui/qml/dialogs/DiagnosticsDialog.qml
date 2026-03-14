@@ -8,7 +8,7 @@ Dialog {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property var windowRoot
     required property int popupTransitionMs
 

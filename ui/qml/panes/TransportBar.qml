@@ -8,7 +8,7 @@ ToolBar {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property var previousAction
     required property var playAction
     required property var pauseAction
@@ -152,7 +152,7 @@ ToolBar {
                     Label {
                         id: dragTimeLabel
                         anchors.centerIn: parent
-                        text: root.formatSeekTime(seekSlider.value)
+                        text: FormatUtils.formatSeekTime(seekSlider.value)
                         color: "white"
                     }
                 }
@@ -183,7 +183,7 @@ ToolBar {
                 ? "audio-volume-muted"
                 : "audio-volume-high"
             icon.color: root.mixColor(
-                root.palette.uiTextColor,
+                root.uiPalette.uiTextColor,
                 "#ffffff",
                 root.themeIsDark ? 0.16 : 0.04)
             onClicked: root.toggleMutedVolume()

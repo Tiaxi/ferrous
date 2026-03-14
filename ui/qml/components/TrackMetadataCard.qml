@@ -8,7 +8,7 @@ Components.SurfaceCard {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property var queueTrackNumberText
 
     readonly property bool hasTrackContext: {
@@ -91,8 +91,8 @@ Components.SurfaceCard {
         return "----"
     }
 
-    color: root.palette.uiSurfaceRaisedColor
-    borderColor: root.palette.uiBorderColor
+    color: root.uiPalette.uiSurfaceRaisedColor
+    borderColor: root.uiPalette.uiBorderColor
     implicitHeight: nowPlayingColumn.implicitHeight + 12
 
     ColumnLayout {
@@ -105,8 +105,8 @@ Components.SurfaceCard {
             labelText: "Title:"
             valueText: root.resolvedTitle
             resetKey: root.marqueeResetKey
-            labelColor: root.palette.uiMutedTextColor
-            textColor: root.palette.uiTextColor
+            labelColor: root.uiPalette.uiMutedTextColor
+            textColor: root.uiPalette.uiTextColor
             emphasized: true
         }
 
@@ -114,16 +114,16 @@ Components.SurfaceCard {
             labelText: "Artist:"
             valueText: root.resolvedArtist
             resetKey: root.marqueeResetKey
-            labelColor: root.palette.uiMutedTextColor
-            textColor: root.palette.uiTextColor
+            labelColor: root.uiPalette.uiMutedTextColor
+            textColor: root.uiPalette.uiTextColor
         }
 
         Components.MetadataMarqueeRow {
             labelText: "Album:"
             valueText: root.resolvedAlbum
             resetKey: root.marqueeResetKey
-            labelColor: root.palette.uiMutedTextColor
-            textColor: root.palette.uiTextColor
+            labelColor: root.uiPalette.uiMutedTextColor
+            textColor: root.uiPalette.uiTextColor
         }
 
         RowLayout {
@@ -134,7 +134,7 @@ Components.SurfaceCard {
                 text: "Track:"
                 Layout.preferredWidth: 44
                 horizontalAlignment: Text.AlignRight
-                color: root.palette.uiMutedTextColor
+                color: root.uiPalette.uiMutedTextColor
                 font.pixelSize: 12
             }
 
@@ -142,7 +142,7 @@ Components.SurfaceCard {
                 Layout.fillWidth: true
                 text: root.resolvedTrackNumber
                 elide: Text.ElideRight
-                color: root.palette.uiTextColor
+                color: root.uiPalette.uiTextColor
                 font.pixelSize: 12
             }
         }
@@ -155,7 +155,7 @@ Components.SurfaceCard {
                 text: "Year:"
                 Layout.preferredWidth: 44
                 horizontalAlignment: Text.AlignRight
-                color: root.palette.uiMutedTextColor
+                color: root.uiPalette.uiMutedTextColor
                 font.pixelSize: 12
             }
 
@@ -163,7 +163,7 @@ Components.SurfaceCard {
                 Layout.fillWidth: true
                 text: root.resolvedYear
                 elide: Text.ElideRight
-                color: root.palette.uiTextColor
+                color: root.uiPalette.uiTextColor
                 font.pixelSize: 12
             }
         }
@@ -172,8 +172,8 @@ Components.SurfaceCard {
             labelText: "Genre:"
             valueText: root.resolvedGenre
             resetKey: root.marqueeResetKey
-            labelColor: root.palette.uiMutedTextColor
-            textColor: root.palette.uiTextColor
+            labelColor: root.uiPalette.uiMutedTextColor
+            textColor: root.uiPalette.uiTextColor
         }
     }
 }

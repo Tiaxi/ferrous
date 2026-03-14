@@ -9,7 +9,7 @@ Rectangle {
 
     required property var uiBridge
     required property var libraryModel
-    required property var palette
+    required property var uiPalette
     required property var queueTrackNumberText
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
@@ -31,8 +31,8 @@ Rectangle {
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
 
-    color: root.palette.uiPaneColor
-    border.color: root.palette.uiBorderColor
+    color: root.uiPalette.uiPaneColor
+    border.color: root.uiPalette.uiBorderColor
 
     ColumnLayout {
         anchors.fill: parent
@@ -42,7 +42,7 @@ Rectangle {
         Components.TrackMetadataCard {
             Layout.fillWidth: true
             uiBridge: root.uiBridge
-            palette: root.palette
+            uiPalette: root.uiPalette
             queueTrackNumberText: root.queueTrackNumberText
         }
 
@@ -141,10 +141,10 @@ Rectangle {
                 width: ListView.view.width
                 height: 24
                 color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                    ? root.palette.uiSelectionColor
+                    ? root.uiPalette.uiSelectionColor
                     : (index % 2 === 0
-                        ? root.palette.uiSurfaceRaisedColor
-                        : root.palette.uiSurfaceAltColor)
+                        ? root.uiPalette.uiSurfaceRaisedColor
+                        : root.uiPalette.uiSurfaceAltColor)
 
                 RowLayout {
                     anchors.fill: parent
@@ -167,8 +167,8 @@ Rectangle {
                         font.pixelSize: 20
                         font.bold: true
                         color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                            ? root.palette.uiSelectionTextColor
-                            : root.palette.uiMutedTextColor
+                            ? root.uiPalette.uiSelectionTextColor
+                            : root.uiPalette.uiMutedTextColor
                     }
 
                     Item {
@@ -199,8 +199,8 @@ Rectangle {
                         verticalAlignment: Text.AlignVCenter
                         text: rowTitle
                         color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                            ? root.palette.uiSelectionTextColor
-                            : root.palette.uiTextColor
+                            ? root.uiPalette.uiSelectionTextColor
+                            : root.uiPalette.uiTextColor
                     }
                 }
 
@@ -345,7 +345,7 @@ Rectangle {
             visible: libraryAlbumView.count === 0
                 && libraryAlbumView.contentHeight <= libraryAlbumView.height
             text: root.isLibraryTreeLoading() ? "Loading library..." : "Library is empty"
-            color: root.palette.uiMutedTextColor
+            color: root.uiPalette.uiMutedTextColor
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
         }

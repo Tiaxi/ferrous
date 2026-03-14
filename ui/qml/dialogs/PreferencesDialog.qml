@@ -8,7 +8,7 @@ Dialog {
     id: root
 
     required property var uiBridge
-    required property var palette
+    required property var uiPalette
     required property var windowRoot
     required property int popupTransitionMs
     required property var spectrogramFftChoices
@@ -41,9 +41,9 @@ Dialog {
         Rectangle {
             Layout.fillWidth: true
             implicitHeight: preferencesTabsRow.implicitHeight
-            color: root.palette.uiSurfaceAltColor
+            color: root.uiPalette.uiSurfaceAltColor
             radius: 8
-            border.color: root.palette.uiBorderColor
+            border.color: root.uiPalette.uiBorderColor
             clip: true
 
             RowLayout {
@@ -58,13 +58,13 @@ Dialog {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 40
                         color: root.pageIndex === index
-                            ? root.palette.uiSelectionColor
+                            ? root.uiPalette.uiSelectionColor
                             : "transparent"
 
                         Label {
                             anchors.centerIn: parent
                             text: modelData
-                            color: root.palette.uiTextColor
+                            color: root.uiPalette.uiTextColor
                             font.weight: root.pageIndex === index ? Font.DemiBold : Font.Normal
                         }
 
@@ -87,7 +87,7 @@ Dialog {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 uiBridge: root.uiBridge
-                palette: root.palette
+                uiPalette: root.uiPalette
                 windowRoot: root.windowRoot
                 promptAddLibraryRoot: root.promptAddLibraryRoot
                 openLibraryRootNameDialog: root.openLibraryRootNameDialog
@@ -100,7 +100,7 @@ Dialog {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 uiBridge: root.uiBridge
-                palette: root.palette
+                uiPalette: root.uiPalette
                 spectrogramFftChoices: root.spectrogramFftChoices
             }
 
@@ -108,21 +108,21 @@ Dialog {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 uiBridge: root.uiBridge
-                palette: root.palette
+                uiPalette: root.uiPalette
             }
 
             Preferences.LastFmPage {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 uiBridge: root.uiBridge
-                palette: root.palette
+                uiPalette: root.uiPalette
             }
 
             Preferences.SystemMediaPage {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 uiBridge: root.uiBridge
-                palette: root.palette
+                uiPalette: root.uiPalette
             }
         }
     }

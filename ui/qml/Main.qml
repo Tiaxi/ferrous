@@ -107,7 +107,9 @@ Kirigami.ApplicationWindow {
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
     readonly property bool useWholeScreenViewerMode: uiBridge.viewerFullscreenMode === 1
-    readonly property var uiBridge: bridge ? bridge : bridgeFallback
+    readonly property var uiBridge: (typeof bridge !== "undefined" && bridge)
+        ? bridge
+        : bridgeFallback
     readonly property var tagEditorApi: (typeof tagEditor !== "undefined" && tagEditor)
 
         ? tagEditor
@@ -118,6 +120,7 @@ Kirigami.ApplicationWindow {
         ? uiBridge.globalSearchModel
         : globalSearchModelFallback
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
+    readonly property var uiPalette: uiPaletteObject
     readonly property bool themeIsDark: uiPalette.themeIsDark
     readonly property color uiPaneColor: uiPalette.uiPaneColor
     readonly property color uiSurfaceColor: uiPalette.uiSurfaceColor
@@ -134,7 +137,7 @@ Kirigami.ApplicationWindow {
     readonly property color uiActiveIndicatorColor: uiPalette.uiActiveIndicatorColor
 
     Components.UiPalette {
-        id: uiPalette
+        id: uiPaletteObject
         windowRoot: root
     }
 
@@ -270,6 +273,8 @@ Kirigami.ApplicationWindow {
         property int currentTrackBitDepth: 0
         property int currentTrackCurrentBitrateKbps: 0
         property var waveformPeaksPacked: ""
+        property real waveformCoverageSeconds: 0
+        property bool waveformComplete: false
         property bool spectrogramReset: false
         property real dbRange: 90
         property int fftSize: 8192
@@ -312,7 +317,7 @@ Kirigami.ApplicationWindow {
         property int globalSearchAlbumCount: 0
         property int globalSearchTrackCount: 0
         property int globalSearchSeq: 0
-        property var globalSearchModel: null
+        property var globalSearchModel: globalSearchModelFallback
         property var itunesArtworkResults: []
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
@@ -401,6 +406,7 @@ Kirigami.ApplicationWindow {
         property string statusText: ""
         property string statusDetails: ""
         property var tableModel: []
+        signal statusChanged()
         function openSelection(selections) { return false }
         function openForPaths(paths) { return false }
         function close() {}
@@ -3069,8 +3075,8 @@ Kirigami.ApplicationWindow {
 
     Dialogs.PreferencesDialog {
         id: preferencesDialog
-        uiBridge: uiBridge
-        palette: uiPalette
+        uiBridge: root.uiBridge
+        uiPalette: root.uiPalette
         windowRoot: root
         popupTransitionMs: root.uiPopupTransitionMs
         spectrogramFftChoices: root.spectrogramFftChoices
@@ -3083,8 +3089,8 @@ Kirigami.ApplicationWindow {
 
     Dialogs.LibraryRootNameDialog {
         id: libraryRootNameDialog
-        uiBridge: uiBridge
-        palette: uiPalette
+        uiBridge: root.uiBridge
+        uiPalette: root.uiPalette
         windowRoot: root
         popupTransitionMs: root.uiPopupTransitionMs
         dialogMode: root.pendingLibraryRootDialogMode
@@ -3312,19 +3318,33 @@ Kirigami.ApplicationWindow {
                     }
 
                     delegate: Rectangle {
-                        readonly property string rowKind: kind || ""
-                        readonly property string rowTypeValue: rowType || ""
-                        readonly property string sectionTitleValue: sectionTitle || ""
-                        readonly property string labelValue: label || ""
-                        readonly property string artistValue: artist || ""
-                        readonly property string albumValue: album || ""
-                        readonly property string rootLabelValue: rootLabel || ""
-                        readonly property string genreValue: genre || ""
-                        readonly property string coverUrlValue: coverUrl || ""
-                        readonly property string lengthTextValue: lengthText || ""
-                        readonly property var yearValue: year
-                        readonly property var trackNumberValue: trackNumber
-                        readonly property var countValue: count
+                        readonly property string rowKind: typeof kind !== "undefined" ? (kind || "") : ""
+                        readonly property string rowTypeValue: typeof rowType !== "undefined"
+                            ? (rowType || "")
+                            : ""
+                        readonly property string sectionTitleValue: typeof sectionTitle !== "undefined"
+                            ? (sectionTitle || "")
+                            : ""
+                        readonly property string labelValue: typeof label !== "undefined" ? (label || "") : ""
+                        readonly property string artistValue: typeof artist !== "undefined"
+                            ? (artist || "")
+                            : ""
+                        readonly property string albumValue: typeof album !== "undefined" ? (album || "") : ""
+                        readonly property string rootLabelValue: typeof rootLabel !== "undefined"
+                            ? (rootLabel || "")
+                            : ""
+                        readonly property string genreValue: typeof genre !== "undefined" ? (genre || "") : ""
+                        readonly property string coverUrlValue: typeof coverUrl !== "undefined"
+                            ? (coverUrl || "")
+                            : ""
+                        readonly property string lengthTextValue: typeof lengthText !== "undefined"
+                            ? (lengthText || "")
+                            : ""
+                        readonly property var yearValue: typeof year !== "undefined" ? year : null
+                        readonly property var trackNumberValue: typeof trackNumber !== "undefined"
+                            ? trackNumber
+                            : null
+                        readonly property var countValue: typeof count !== "undefined" ? count : null
                         readonly property color rowTextColor: index === root.globalSearchSelectedDisplayIndex
                             ? root.uiSelectionTextColor
                             : root.uiTextColor
@@ -3702,8 +3722,8 @@ Kirigami.ApplicationWindow {
 
     Dialogs.DiagnosticsDialog {
         id: diagnosticsDialog
-        uiBridge: uiBridge
-        palette: uiPalette
+        uiBridge: root.uiBridge
+        uiPalette: root.uiPalette
         windowRoot: root
         popupTransitionMs: root.uiPopupTransitionMs
     }
@@ -3746,7 +3766,7 @@ Kirigami.ApplicationWindow {
     }
 
     footer: Panes.StatusBar {
-        palette: uiPalette
+        uiPalette: root.uiPalette
         sections: root.statusBarSections()
         channelStatusIconSource: root.channelStatusIconSource
         mixColor: root.mixColor
@@ -3760,8 +3780,8 @@ Kirigami.ApplicationWindow {
         Panes.TransportBar {
             id: transportBar
             Layout.fillWidth: true
-            uiBridge: uiBridge
-            palette: uiPalette
+            uiBridge: root.uiBridge
+            uiPalette: root.uiPalette
             previousAction: previousAction
             playAction: playAction
             pauseAction: pauseAction
@@ -3800,7 +3820,9 @@ Kirigami.ApplicationWindow {
                     spacing: 0
 
                     Components.AlbumArtTile {
-                        uiBridge: uiBridge
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: width
+                        uiBridge: root.uiBridge
                         replaceFromItunesAction: replaceFromItunesAction
                         currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
                         openAlbumArtViewer: root.openAlbumArtViewer
@@ -3819,8 +3841,8 @@ Kirigami.ApplicationWindow {
 
                             Components.TrackMetadataCard {
                                 Layout.fillWidth: true
-                                uiBridge: uiBridge
-                                palette: uiPalette
+                                uiBridge: root.uiBridge
+                                uiPalette: root.uiPalette
                                 queueTrackNumberText: root.queueTrackNumberText
                             }
 
@@ -4629,7 +4651,7 @@ Kirigami.ApplicationWindow {
             : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
-        uiBridge: uiBridge
+        uiBridge: root.uiBridge
     }
 
     Viewers.SpectrogramViewerShell {
