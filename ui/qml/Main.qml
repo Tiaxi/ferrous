@@ -7196,6 +7196,10 @@ Kirigami.ApplicationWindow {
         target: uiBridge
         function applyAnalysisDelta() {
             const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
+            if ((uiBridge.playbackState || "") === "Stopped") {
+                spectrogramSurface.haltForCurrentMode()
+                return
+            }
             if (uiBridge.spectrogramReset
                     && root.visualFeedsEnabled
                     && delta.channels
@@ -7249,6 +7253,9 @@ Kirigami.ApplicationWindow {
             const nowMs = Date.now()
             const duration = Math.max(uiBridge.durationSeconds, 0)
             if (uiBridge.playbackState !== "Playing") {
+                if ((uiBridge.playbackState || "") === "Stopped") {
+                    spectrogramSurface.haltForCurrentMode()
+                }
                 root.positionSmoothingAnimationMs = 0
                 root.displayedPositionSeconds = incomingPosition
                 root.positionSmoothingPrimed = false
