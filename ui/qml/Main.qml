@@ -6103,6 +6103,8 @@ Kirigami.ApplicationWindow {
         visible: parent !== null
         anchors.fill: parent
         property var channelDescriptors: []
+        property var pendingPackedBatches: []
+        property bool pendingPackedFlushScheduled: false
 
         function placeholderDescriptors() {
             return uiBridge.spectrogramViewMode === 1
@@ -6143,8 +6145,68 @@ Kirigami.ApplicationWindow {
             }
         }
 
-        function resetForCurrentMode() {
-            syncChannelDescriptors([])
+        function schedulePendingPackedFlush() {
+            if (pendingPackedFlushScheduled) {
+                return
+            }
+            pendingPackedFlushScheduled = true
+            Qt.callLater(function() {
+                pendingPackedFlushScheduled = false
+                flushPendingPackedDeltas()
+            })
+        }
+
+        function flushPendingPackedDeltas() {
+            if (!pendingPackedBatches || pendingPackedBatches.length === 0) {
+                return
+            }
+
+            const channels = pendingPackedBatches[0]
+            if (!channels || channels.length === 0) {
+                pendingPackedBatches.shift()
+                if (pendingPackedBatches.length > 0) {
+                    schedulePendingPackedFlush()
+                }
+                return
+            }
+
+            syncChannelDescriptors(channels)
+            if (spectrogramRepeater.count < channels.length) {
+                schedulePendingPackedFlush()
+                return
+            }
+
+            for (let i = 0; i < channels.length; ++i) {
+                const pane = spectrogramRepeater.itemAt(i)
+                if (!pane || !pane.spectrogramItem) {
+                    schedulePendingPackedFlush()
+                    return
+                }
+            }
+
+            pendingPackedBatches.shift()
+            for (let i = 0; i < channels.length; ++i) {
+                const pane = spectrogramRepeater.itemAt(i)
+                const channel = channels[i]
+                if (!pane || !pane.spectrogramItem || !channel) {
+                    continue
+                }
+                if ((channel.rows || 0) > 0 && (channel.bins || 0) > 0) {
+                    pane.spectrogramItem.appendPackedRows(channel.data, channel.rows, channel.bins)
+                }
+            }
+
+            if (pendingPackedBatches.length > 0) {
+                schedulePendingPackedFlush()
+            }
+        }
+
+        function resetForCurrentMode(preserveDescriptors) {
+            pendingPackedBatches = []
+            pendingPackedFlushScheduled = false
+            if (!preserveDescriptors) {
+                syncChannelDescriptors([])
+            }
             for (let i = 0; i < spectrogramRepeater.count; ++i) {
                 const pane = spectrogramRepeater.itemAt(i)
                 if (pane && pane.spectrogramItem) {
@@ -6157,17 +6219,8 @@ Kirigami.ApplicationWindow {
             if (!channels || channels.length === 0) {
                 return
             }
-            syncChannelDescriptors(channels)
-            for (let i = 0; i < channels.length; ++i) {
-                const pane = spectrogramRepeater.itemAt(i)
-                const channel = channels[i]
-                if (!pane || !pane.spectrogramItem || !channel) {
-                    continue
-                }
-                if ((channel.rows || 0) > 0 && (channel.bins || 0) > 0) {
-                    pane.spectrogramItem.appendPackedRows(channel.data, channel.rows, channel.bins)
-                }
-            }
+            pendingPackedBatches.push(channels)
+            flushPendingPackedDeltas()
         }
 
         Component.onCompleted: resetForCurrentMode()
@@ -7136,7 +7189,7 @@ Kirigami.ApplicationWindow {
                     && root.visualFeedsEnabled
                     && delta.channels
                     && delta.channels.length > 0) {
-                spectrogramSurface.resetForCurrentMode()
+                spectrogramSurface.resetForCurrentMode(true)
             }
             if (root.visualFeedsEnabled && delta.channels && delta.channels.length > 0) {
                 spectrogramSurface.appendPackedDelta(delta.channels)

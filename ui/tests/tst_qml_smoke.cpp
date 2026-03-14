@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QFileInfo>
+#include <QQuickWindow>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QtEndian>
@@ -260,6 +261,8 @@ private slots:
     void rootRowsStartExpandedByDefault();
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
+    void spectrogramItemRendersNonBackgroundPixels();
+    void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
 };
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -364,6 +367,89 @@ void QmlSmokeTest::lazyArtistRowRequestsBackendExpansion() {
     QCOMPARE(args.value(0).toString(), QStringLiteral("artist|/music|Artist A"));
     QCOMPARE(args.value(1).toBool(), true);
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
+}
+
+void QmlSmokeTest::spectrogramItemRendersNonBackgroundPixels() {
+    QQuickWindow window;
+    window.resize(320, 180);
+
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setWidth(320);
+    item->setHeight(180);
+    item->setSampleRateHz(48000);
+
+    constexpr int rowCount = 48;
+    constexpr int binsPerRow = 128;
+    QByteArray packedRows;
+    packedRows.resize(rowCount * binsPerRow);
+    for (int row = 0; row < rowCount; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            const int index = row * binsPerRow + bin;
+            packedRows[index] = static_cast<char>((row * 5 + bin * 3) % 256);
+        }
+    }
+    item->appendPackedRows(packedRows, rowCount, binsPerRow);
+
+    window.show();
+    QTest::qWait(100);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    const QImage frame = window.grabWindow();
+    QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed");
+
+    const QColor background(0x0b, 0x0b, 0x0f);
+    bool foundNonBackground = false;
+    for (int y = 0; y < frame.height() && !foundNonBackground; ++y) {
+        for (int x = 0; x < frame.width(); ++x) {
+            if (frame.pixelColor(x, y) != background) {
+                foundNonBackground = true;
+                break;
+            }
+        }
+    }
+    QVERIFY2(foundNonBackground, "Spectrogram rendered only the background color");
+}
+
+void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
+    QQuickWindow window;
+    window.resize(320, 180);
+
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setWidth(320);
+    item->setHeight(180);
+    item->setSampleRateHz(48000);
+
+    window.show();
+    QTest::qWait(50);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
+    constexpr int rowCount = 48;
+    constexpr int binsPerRow = 128;
+    QByteArray packedRows;
+    packedRows.resize(rowCount * binsPerRow);
+    for (int row = 0; row < rowCount; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            const int index = row * binsPerRow + bin;
+            packedRows[index] = static_cast<char>((row * 11 + bin * 7) % 256);
+        }
+    }
+    item->appendPackedRows(packedRows, rowCount, binsPerRow);
+
+    QTest::qWait(100);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    const QImage frame = window.grabWindow();
+    QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed after delayed append");
+
+    const QColor background(0x0b, 0x0b, 0x0f);
+    bool foundNonBackground = false;
+    for (int y = 0; y < frame.height() && !foundNonBackground; ++y) {
+        for (int x = 0; x < frame.width(); ++x) {
+            if (frame.pixelColor(x, y) != background) {
+                foundNonBackground = true;
+                break;
+            }
+        }
+    }
+    QVERIFY2(foundNonBackground, "Spectrogram stayed blank after appending rows to an already visible item");
 }
 
 int main(int argc, char **argv) {

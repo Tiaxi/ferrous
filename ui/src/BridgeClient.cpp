@@ -2950,6 +2950,11 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
     int totalRows = 0;
     qsizetype totalBytes = 0;
     for (auto &channel : m_spectrogramChannels) {
+        if (channel.packedRowsCount <= 0 || channel.packedBins <= 0 || channel.packedRows.isEmpty()) {
+            channel.packedRows.clear();
+            channel.packedRowsCount = 0;
+            continue;
+        }
         QVariantMap channelMap;
         channelMap.insert(QStringLiteral("label"), channel.label);
         channelMap.insert(QStringLiteral("rows"), channel.packedRowsCount);

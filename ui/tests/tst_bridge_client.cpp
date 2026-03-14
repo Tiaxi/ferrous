@@ -28,6 +28,7 @@ class BridgeClientTest : public QObject {
 private slots:
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void queueSnapshotKeepsRawCoverPathsInRows();
+    void spectrogramDeltaSkipsMetadataOnlyChannels();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -75,6 +76,22 @@ void BridgeClientTest::queueSnapshotKeepsRawCoverPathsInRows() {
     QCOMPARE(
         rows->data(rows->index(0, 0), QueueRowsModel::CoverPathRole).toString(),
         QStringLiteral("/music/Artist A/Album A/cover.jpg"));
+}
+
+void BridgeClientTest::spectrogramDeltaSkipsMetadataOnlyChannels() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    BridgeClient::SpectrogramChannelDelta channel;
+    channel.label = QStringLiteral("L");
+    channel.packedBins = 128;
+    channel.packedRowsCount = 0;
+    client.m_spectrogramChannels.push_back(channel);
+
+    const QVariantMap delta = client.takeSpectrogramRowsDeltaPacked();
+    const QVariantList channels = delta.value(QStringLiteral("channels")).toList();
+    QCOMPARE(channels.size(), 0);
+    QCOMPARE(client.m_spectrogramChannels.size(), 0);
 }
 
 int main(int argc, char **argv) {
