@@ -87,6 +87,31 @@ qt_add_qml_module(ferrous
     NO_IMPORT_SCAN
     QML_FILES
         qml/Main.qml
+        qml/components/AlbumArtTile.qml
+        qml/components/ColumnHeaderRow.qml
+        qml/components/MetadataMarqueeRow.qml
+        qml/components/PopupTransition.qml
+        qml/components/SurfaceCard.qml
+        qml/components/TrackMetadataCard.qml
+        qml/components/UiPalette.qml
+        qml/components/ViewerCloseButton.qml
+        qml/dialogs/AboutDialog.qml
+        qml/dialogs/DiagnosticsDialog.qml
+        qml/dialogs/LibraryRootNameDialog.qml
+        qml/dialogs/PreferencesDialog.qml
+        qml/panes/LibraryPane.qml
+        qml/panes/QueuePane.qml
+        qml/panes/SidebarPane.qml
+        qml/panes/SpectrogramPane.qml
+        qml/panes/StatusBar.qml
+        qml/panes/TransportBar.qml
+        qml/preferences/DisplayPage.qml
+        qml/preferences/LastFmPage.qml
+        qml/preferences/LibraryPage.qml
+        qml/preferences/SpectrogramPage.qml
+        qml/preferences/SystemMediaPage.qml
+        qml/viewers/SpectrogramSurface.qml
+        qml/viewers/SpectrogramViewerShell.qml
     RESOURCES
         qml/assets/channel-mono.svg
         qml/assets/channel-stereo.svg
@@ -94,6 +119,9 @@ qt_add_qml_module(ferrous
         qml/assets/channel-5_0.svg
         qml/assets/channel-5_1.svg
         qml/assets/channel-7_1.svg
+        qml/logic/ColorUtils.js
+        qml/logic/FormatUtils.js
+        qml/logic/PathUtils.js
 )
 
 if(NOT MSVC)

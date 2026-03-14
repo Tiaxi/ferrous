@@ -6,6 +6,10 @@ import QtQml 2.15
 import Qt.labs.platform 1.1 as Platform
 import FerrousUi 1.0
 import org.kde.kirigami 2.20 as Kirigami
+import "components" as Components
+import "dialogs" as Dialogs
+import "panes" as Panes
+import "viewers" as Viewers
 
 Kirigami.ApplicationWindow {
     id: root
@@ -95,49 +99,6 @@ Kirigami.ApplicationWindow {
     property var globalSearchContextRowData: ({})
     property bool globalSearchOpening: false
     property bool globalSearchIgnoreRefocusFind: false
-    readonly property bool themeIsDark: root.colorLuma(Kirigami.Theme.backgroundColor) < 0.45
-    readonly property color uiPaneColor: root.themeIsDark
-        ? root.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.08)
-        : root.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.20)
-    readonly property color uiSurfaceColor: root.themeIsDark
-        ? root.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.14)
-        : "#ffffff"
-    readonly property color uiSurfaceAltColor: root.themeIsDark
-        ? root.mixColor(root.uiSurfaceColor, Kirigami.Theme.textColor, 0.08)
-        : root.mixColor(root.uiSurfaceColor, Kirigami.Theme.textColor, 0.07)
-    readonly property color uiSurfaceRaisedColor: root.themeIsDark
-        ? root.mixColor(root.uiSurfaceColor, "#ffffff", 0.08)
-        : "#ffffff"
-    readonly property color uiHeaderColor: root.mixColor(
-        root.uiSurfaceAltColor,
-        Kirigami.Theme.highlightColor,
-        root.themeIsDark ? 0.12 : 0.10)
-    readonly property color uiSectionColor: root.mixColor(
-        root.uiSurfaceAltColor,
-        Kirigami.Theme.highlightColor,
-        root.themeIsDark ? 0.18 : 0.16)
-    readonly property color uiColumnsColor: root.mixColor(
-        root.uiSurfaceAltColor,
-        Kirigami.Theme.highlightColor,
-        root.themeIsDark ? 0.11 : 0.09)
-    readonly property color uiBorderColor: root.mixColor(
-        root.uiSurfaceColor,
-        Kirigami.Theme.textColor,
-        root.themeIsDark ? 0.22 : 0.18)
-    readonly property color uiTextColor: Kirigami.Theme.textColor
-    readonly property color uiMutedTextColor: root.mixColor(
-        Kirigami.Theme.disabledTextColor,
-        Kirigami.Theme.textColor,
-        root.themeIsDark ? 0.12 : 0.06)
-    readonly property color uiSelectionColor: root.mixColor(
-        Kirigami.Theme.highlightColor,
-        root.uiSurfaceColor,
-        root.themeIsDark ? 0.08 : 0.06)
-    readonly property color uiSelectionTextColor: Kirigami.Theme.highlightedTextColor
-    readonly property color uiActiveIndicatorColor: root.mixColor(
-        Kirigami.Theme.highlightColor,
-        Kirigami.Theme.positiveTextColor,
-        0.35)
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -157,6 +118,25 @@ Kirigami.ApplicationWindow {
         ? uiBridge.globalSearchModel
         : globalSearchModelFallback
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
+    readonly property bool themeIsDark: uiPalette.themeIsDark
+    readonly property color uiPaneColor: uiPalette.uiPaneColor
+    readonly property color uiSurfaceColor: uiPalette.uiSurfaceColor
+    readonly property color uiSurfaceAltColor: uiPalette.uiSurfaceAltColor
+    readonly property color uiSurfaceRaisedColor: uiPalette.uiSurfaceRaisedColor
+    readonly property color uiHeaderColor: uiPalette.uiHeaderColor
+    readonly property color uiSectionColor: uiPalette.uiSectionColor
+    readonly property color uiColumnsColor: uiPalette.uiColumnsColor
+    readonly property color uiBorderColor: uiPalette.uiBorderColor
+    readonly property color uiTextColor: uiPalette.uiTextColor
+    readonly property color uiMutedTextColor: uiPalette.uiMutedTextColor
+    readonly property color uiSelectionColor: uiPalette.uiSelectionColor
+    readonly property color uiSelectionTextColor: uiPalette.uiSelectionTextColor
+    readonly property color uiActiveIndicatorColor: uiPalette.uiActiveIndicatorColor
+
+    Components.UiPalette {
+        id: uiPalette
+        windowRoot: root
+    }
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
         const previousState = previousPlaybackState || ""
@@ -545,7 +525,7 @@ Kirigami.ApplicationWindow {
 
     Behavior on displayedPositionSeconds {
         enabled: root.positionSmoothingAnimationMs > 0
-            && !seekSlider.pressed
+            && !(transportBar && transportBar.seekPressed)
             && root.visualFeedsEnabled
         NumberAnimation {
             duration: root.positionSmoothingAnimationMs
@@ -2221,13 +2201,6 @@ Kirigami.ApplicationWindow {
         diagnosticsDialog.open()
     }
 
-    function refreshDiagnosticsTextView() {
-        if (!diagnosticsTextArea) {
-            return
-        }
-        diagnosticsTextArea.text = uiBridge.diagnosticsText || ""
-    }
-
     function requestLibraryRevealForSearchRow(row) {
         if (!row) {
             return
@@ -2565,17 +2538,7 @@ Kirigami.ApplicationWindow {
     }
 
     function syncSpectrogramViewerPresentation() {
-        const useWholeScreen = root.useWholeScreenViewerMode
-        if (spectrogramViewerOpen && !useWholeScreen) {
-            if (!spectrogramViewer.visible) {
-                spectrogramViewer.open()
-            }
-        } else if (spectrogramViewer.visible) {
-            spectrogramViewer.close()
-        }
-        if (spectrogramViewerOpen && useWholeScreen) {
-            spectrogramFullscreenWindow.requestActivate()
-        }
+        spectrogramViewerShell.syncPresentation()
     }
 
     function closeAlbumArtViewer() {
@@ -3099,642 +3062,35 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    Dialog {
+    Dialogs.AboutDialog {
         id: aboutDialog
-        modal: true
-        title: "About Ferrous"
-        standardButtons: Dialog.Ok
-        width: 420
-        enter: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        exit: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        contentItem: Label {
-            width: parent.width
-            wrapMode: Text.Wrap
-            text: "Ferrous is a KDE-first audio player prototype with a Qt/QML UI and Rust backend."
-            color: Kirigami.Theme.textColor
-        }
+        popupTransitionMs: root.uiPopupTransitionMs
     }
 
-    Dialog {
+    Dialogs.PreferencesDialog {
         id: preferencesDialog
-        modal: true
-        title: "Preferences"
-        standardButtons: Dialog.Close
-        property int pageIndex: 0
-        width: Math.min(760, root.width - 80)
-        height: Math.min(620, root.height - 80)
-        enter: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        exit: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-
-        contentItem: ColumnLayout {
-            spacing: 14
-
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: preferencesTabsRow.implicitHeight
-                color: root.uiSurfaceAltColor
-                radius: 8
-                border.color: root.uiBorderColor
-                clip: true
-
-                RowLayout {
-                    id: preferencesTabsRow
-                    anchors.fill: parent
-                    spacing: 0
-
-                    Repeater {
-                        model: ["Library", "Spectrogram", "Display", "Last.fm", "System Media"]
-
-                        delegate: Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 40
-                            color: preferencesDialog.pageIndex === index
-                                ? root.uiSelectionColor
-                                : "transparent"
-
-                            Label {
-                                anchors.centerIn: parent
-                                text: modelData
-                                color: root.uiTextColor
-                                font.weight: preferencesDialog.pageIndex === index
-                                    ? Font.DemiBold
-                                    : Font.Normal
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: preferencesDialog.pageIndex = index
-                            }
-                        }
-                    }
-                }
-            }
-
-            StackLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                currentIndex: preferencesDialog.pageIndex
-
-                ScrollView {
-                    id: libraryPrefsScroll
-                    clip: true
-                    contentWidth: availableWidth
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-                    ColumnLayout {
-                        width: libraryPrefsScroll.availableWidth
-                        spacing: 0
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            color: root.uiSurfaceColor
-                            radius: 10
-                            border.color: root.uiBorderColor
-                            implicitHeight: libraryPrefsColumn.implicitHeight + 36
-
-                            ColumnLayout {
-                                id: libraryPrefsColumn
-                                anchors.fill: parent
-                                anchors.margins: 18
-                                spacing: 14
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: "Library"
-                                    font.pixelSize: 16
-                                    font.weight: Font.DemiBold
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Button {
-                                        text: "Add Root..."
-                                        onClicked: root.promptAddLibraryRoot("preferences")
-                                    }
-                                    Button {
-                                        text: "Rescan All"
-                                        onClicked: uiBridge.rescanAllLibraryRoots()
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    Label {
-                                        text: "Album Sort"
-                                        Layout.preferredWidth: 120
-                                    }
-                                    ComboBox {
-                                        model: ["Year", "Title"]
-                                        currentIndex: Math.max(0, Math.min(1, uiBridge.librarySortMode))
-                                        onActivated: uiBridge.setLibrarySortMode(currentIndex)
-                                        Layout.preferredWidth: 180
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: uiBridge.libraryRootEntries.length === 0
-                                        ? "No library roots configured."
-                                        : "Configured roots"
-                                    color: Kirigami.Theme.disabledTextColor
-                                }
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    Layout.preferredHeight: Math.min(260, (60 * Math.max(1, uiBridge.libraryRootEntries.length)) + 12)
-                                    color: root.uiSurfaceAltColor
-                                    border.color: root.uiBorderColor
-                                    radius: 8
-                                    visible: uiBridge.libraryRootEntries.length > 0
-
-                                    ListView {
-                                        anchors.fill: parent
-                                        anchors.margins: 8
-                                        clip: true
-                                        model: uiBridge.libraryRootEntries
-                                        boundsBehavior: Flickable.StopAtBounds
-                                        boundsMovement: Flickable.StopAtBounds
-                                        flickDeceleration: root.snappyScrollFlickDeceleration
-                                        maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                                        pixelAligned: true
-                                        spacing: 4
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            acceptedButtons: Qt.NoButton
-                                            preventStealing: true
-                                            onWheel: function(wheel) {
-                                                root.stepScrollView(parent, wheel, 30, 3)
-                                            }
-                                        }
-                                        delegate: Rectangle {
-                                            readonly property var rootEntry: modelData || ({})
-                                            readonly property string rootPath: rootEntry.path || ""
-                                            readonly property string rootName: rootEntry.name || ""
-                                            readonly property string rootDisplayName: rootEntry.displayName || rootPath
-                                            width: ListView.view.width
-                                            height: 52
-                                            radius: 6
-                                            color: root.uiSurfaceRaisedColor
-                                            border.color: Qt.rgba(0, 0, 0, 0.06)
-
-                                            RowLayout {
-                                                anchors.fill: parent
-                                                anchors.leftMargin: 10
-                                                anchors.rightMargin: 10
-                                                spacing: 8
-
-                                                ColumnLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 2
-                                                    Label {
-                                                        Layout.fillWidth: true
-                                                        text: rootDisplayName
-                                                        elide: Text.ElideRight
-                                                    }
-                                                    Label {
-                                                        Layout.fillWidth: true
-                                                        visible: rootName.length > 0
-                                                        text: rootPath
-                                                        elide: Text.ElideMiddle
-                                                        color: root.uiMutedTextColor
-                                                        font.pixelSize: Math.max(11, root.font.pixelSize - 1)
-                                                    }
-                                                }
-                                                ToolButton {
-                                                    text: "Open"
-                                                    onClicked: uiBridge.openInFileBrowser(rootPath)
-                                                }
-                                                ToolButton {
-                                                    text: "Rename"
-                                                    onClicked: root.openLibraryRootNameDialog(
-                                                        "rename",
-                                                        rootPath,
-                                                        rootName)
-                                                }
-                                                ToolButton {
-                                                    text: "Rescan"
-                                                    onClicked: uiBridge.rescanLibraryRoot(rootPath)
-                                                }
-                                                ToolButton {
-                                                    text: "Remove"
-                                                    onClicked: uiBridge.removeLibraryRoot(rootPath)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                ScrollView {
-                    id: spectrogramPrefsScroll
-                    clip: true
-                    contentWidth: availableWidth
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-                    ColumnLayout {
-                        width: spectrogramPrefsScroll.availableWidth
-                        spacing: 0
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            color: root.uiSurfaceColor
-                            radius: 10
-                            border.color: root.uiBorderColor
-                            implicitHeight: spectrogramPrefsColumn.implicitHeight + 36
-
-                            ColumnLayout {
-                                id: spectrogramPrefsColumn
-                                anchors.fill: parent
-                                anchors.margins: 18
-                                spacing: 14
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: "Spectrogram"
-                                    font.pixelSize: 16
-                                    font.weight: Font.DemiBold
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    wrapMode: Text.Wrap
-                                    color: Kirigami.Theme.disabledTextColor
-                                    text: "Spectrogram-specific rendering and analysis options."
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    Label {
-                                        text: "View"
-                                        Layout.preferredWidth: 120
-                                    }
-                                    ComboBox {
-                                        Layout.preferredWidth: 220
-                                        model: ["Downmix", "Per-channel"]
-                                        currentIndex: Math.max(0, Math.min(1, uiBridge.spectrogramViewMode))
-                                        onActivated: uiBridge.setSpectrogramViewMode(currentIndex)
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    Label {
-                                        text: "FFT Window"
-                                        Layout.preferredWidth: 120
-                                    }
-                                    ComboBox {
-                                        Layout.preferredWidth: 220
-                                        model: root.spectrogramFftChoices
-                                        currentIndex: {
-                                            const index = root.spectrogramFftChoices.indexOf(uiBridge.fftSize)
-                                            return index >= 0 ? index : 0
-                                        }
-                                        onActivated: uiBridge.setFftSize(
-                                            root.spectrogramFftChoices[Math.max(0, currentIndex)])
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    Label {
-                                        text: "dB Range"
-                                        Layout.preferredWidth: 120
-                                    }
-                                    Slider {
-                                        id: prefsDbRangeSlider
-                                        Layout.fillWidth: true
-                                        from: 50
-                                        to: 120
-                                        stepSize: 1
-                                        value: uiBridge.dbRange
-                                        onMoved: uiBridge.setDbRange(value)
-                                        onPressedChanged: {
-                                            if (!pressed) {
-                                                uiBridge.setDbRange(value)
-                                            }
-                                        }
-                                    }
-                                    Label {
-                                        text: Math.round(prefsDbRangeSlider.value).toString()
-                                        Layout.preferredWidth: 32
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-                                }
-
-                                CheckBox {
-                                    text: "Log Scale Spectrogram"
-                                    focusPolicy: Qt.NoFocus
-                                    checked: uiBridge.logScale
-                                    onToggled: uiBridge.setLogScale(checked)
-                                }
-                                CheckBox {
-                                    text: "Show Spectrogram FPS Overlay"
-                                    focusPolicy: Qt.NoFocus
-                                    checked: uiBridge.showFps
-                                    onToggled: uiBridge.setShowFps(checked)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                ScrollView {
-                    id: displayPrefsScroll
-                    clip: true
-                    contentWidth: availableWidth
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-                    ColumnLayout {
-                        width: displayPrefsScroll.availableWidth
-                        spacing: 0
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            color: root.uiSurfaceColor
-                            radius: 10
-                            border.color: root.uiBorderColor
-                            implicitHeight: displayPrefsColumn.implicitHeight + 36
-
-                            ColumnLayout {
-                                id: displayPrefsColumn
-                                anchors.fill: parent
-                                anchors.margins: 18
-                                spacing: 14
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: "Display"
-                                    font.pixelSize: 16
-                                    font.weight: Font.DemiBold
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    wrapMode: Text.Wrap
-                                    color: Kirigami.Theme.disabledTextColor
-                                    text: "Shared viewer presentation options for album art and spectrogram."
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    Label {
-                                        text: "Viewer Fullscreen"
-                                        Layout.preferredWidth: 120
-                                    }
-                                    ComboBox {
-                                        Layout.preferredWidth: 220
-                                        model: ["Within app window", "Whole screen"]
-                                        currentIndex: Math.max(0, Math.min(1, uiBridge.viewerFullscreenMode))
-                                        onActivated: uiBridge.setViewerFullscreenMode(currentIndex)
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                ScrollView {
-                    id: lastFmPrefsScroll
-                    clip: true
-                    contentWidth: availableWidth
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-                    ColumnLayout {
-                        width: lastFmPrefsScroll.availableWidth
-                        spacing: 0
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            color: root.uiSurfaceColor
-                            radius: 10
-                            border.color: root.uiBorderColor
-                            implicitHeight: lastFmPrefsColumn.implicitHeight + 36
-
-                            ColumnLayout {
-                                id: lastFmPrefsColumn
-                                anchors.fill: parent
-                                anchors.margins: 18
-                                spacing: 14
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: "Last.fm"
-                                    font.pixelSize: 16
-                                    font.weight: Font.DemiBold
-                                }
-
-                                CheckBox {
-                                    text: "Enable Last.fm scrobbling"
-                                    focusPolicy: Qt.NoFocus
-                                    checked: uiBridge.lastFmScrobblingEnabled
-                                    onToggled: uiBridge.setLastFmScrobblingEnabled(checked)
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    wrapMode: Text.Wrap
-                                    color: Kirigami.Theme.disabledTextColor
-                                    text: "Ferrous follows Last.fm's rule: only tracks longer than 30 seconds are eligible, and a scrobble is sent when playback stops or the track ends after at least half the track or 4 minutes has been listened, whichever comes first."
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    wrapMode: Text.Wrap
-                                    text: !uiBridge.lastFmBuildConfigured
-                                        ? "Last.fm is not configured in this build."
-                                        : (uiBridge.lastFmUsername.length > 0
-                                            ? "Connected account: " + uiBridge.lastFmUsername
-                                            : "No Last.fm account connected.")
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    wrapMode: Text.Wrap
-                                    visible: uiBridge.lastFmStatusText.length > 0
-                                    color: Kirigami.Theme.disabledTextColor
-                                    text: uiBridge.lastFmStatusText
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    visible: uiBridge.lastFmPendingScrobbleCount > 0
-                                    color: Kirigami.Theme.disabledTextColor
-                                    text: "Pending scrobbles: " + uiBridge.lastFmPendingScrobbleCount
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 8
-
-                                    Button {
-                                        text: uiBridge.lastFmUsername.length > 0 ? "Reconnect" : "Connect"
-                                        enabled: uiBridge.lastFmBuildConfigured
-                                        onClicked: uiBridge.beginLastFmAuth()
-                                    }
-
-                                    Button {
-                                        text: "Complete Connection"
-                                        enabled: uiBridge.lastFmBuildConfigured && uiBridge.lastFmAuthState === 1
-                                        onClicked: uiBridge.completeLastFmAuth()
-                                    }
-
-                                    Button {
-                                        text: "Disconnect"
-                                        enabled: uiBridge.lastFmUsername.length > 0 || uiBridge.lastFmAuthState !== 0
-                                        onClicked: uiBridge.disconnectLastFm()
-                                    }
-
-                                    Item { Layout.fillWidth: true }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                ScrollView {
-                    id: systemMediaPrefsScroll
-                    clip: true
-                    contentWidth: availableWidth
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-                    ColumnLayout {
-                        width: systemMediaPrefsScroll.availableWidth
-                        spacing: 0
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            color: root.uiSurfaceColor
-                            radius: 10
-                            border.color: root.uiBorderColor
-                            implicitHeight: systemMediaPrefsColumn.implicitHeight + 36
-
-                            ColumnLayout {
-                                id: systemMediaPrefsColumn
-                                anchors.fill: parent
-                                anchors.margins: 18
-                                spacing: 14
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: "System Media"
-                                    font.pixelSize: 16
-                                    font.weight: Font.DemiBold
-                                }
-
-                                CheckBox {
-                                    text: "Enable KDE media controls and media buttons"
-                                    focusPolicy: Qt.NoFocus
-                                    checked: uiBridge.systemMediaControlsEnabled
-                                    onToggled: uiBridge.setSystemMediaControlsEnabled(checked)
-                                }
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    wrapMode: Text.Wrap
-                                    color: Kirigami.Theme.disabledTextColor
-                                    text: "When enabled, Ferrous appears in Plasma's media controls and responds to Play/Pause, Previous, Next, and Stop media buttons. Keyboard volume buttons always control system volume, not Ferrous volume."
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        uiBridge: uiBridge
+        palette: uiPalette
+        windowRoot: root
+        popupTransitionMs: root.uiPopupTransitionMs
+        spectrogramFftChoices: root.spectrogramFftChoices
+        promptAddLibraryRoot: root.promptAddLibraryRoot
+        openLibraryRootNameDialog: root.openLibraryRootNameDialog
+        stepScrollView: root.stepScrollView
+        snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
+        snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
     }
 
-    Dialog {
+    Dialogs.LibraryRootNameDialog {
         id: libraryRootNameDialog
-        modal: true
-        title: pendingLibraryRootDialogMode === "rename"
-            ? "Rename Library Root"
-            : "Add Library Root"
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        width: Math.min(560, root.width - 80)
-        enter: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        exit: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        onOpened: {
-            libraryRootNameField.forceActiveFocus()
-            libraryRootNameField.selectAll()
-        }
-        onAccepted: {
-            const resolvedPath = pendingLibraryRootPath || ""
-            const resolvedName = (libraryRootNameField.text || "").trim()
-            if (resolvedPath.length > 0) {
-                if (pendingLibraryRootDialogMode === "rename") {
-                    uiBridge.setLibraryRootName(resolvedPath, resolvedName)
-                } else {
-                    uiBridge.addLibraryRoot(resolvedPath, resolvedName)
-                }
-            }
-            root.resetLibraryRootNameDialog()
-        }
-        onRejected: root.resetLibraryRootNameDialog()
-
-        contentItem: ColumnLayout {
-            spacing: 10
-
-            Label {
-                Layout.fillWidth: true
-                text: "Path"
-                color: root.uiMutedTextColor
-            }
-            TextField {
-                Layout.fillWidth: true
-                readOnly: true
-                text: pendingLibraryRootPath || ""
-                selectByMouse: true
-            }
-
-            Label {
-                Layout.fillWidth: true
-                text: "Custom Name (optional)"
-                color: root.uiMutedTextColor
-            }
-            TextField {
-                id: libraryRootNameField
-                Layout.fillWidth: true
-                text: pendingLibraryRootName || ""
-                placeholderText: "Leave blank to use the path"
-                selectByMouse: true
-                onAccepted: libraryRootNameDialog.accept()
-            }
-        }
+        uiBridge: uiBridge
+        palette: uiPalette
+        windowRoot: root
+        popupTransitionMs: root.uiPopupTransitionMs
+        dialogMode: root.pendingLibraryRootDialogMode
+        pathValue: root.pendingLibraryRootPath
+        nameValue: root.pendingLibraryRootName
+        onDismissed: root.resetLibraryRootNameDialog()
     }
 
     Dialog {
@@ -4344,144 +3700,12 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    Dialog {
+    Dialogs.DiagnosticsDialog {
         id: diagnosticsDialog
-        modal: true
-        title: "Diagnostics"
-        standardButtons: Dialog.Close
-        width: Math.min(980, root.width - 80)
-        height: Math.min(680, root.height - 80)
-        enter: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        exit: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        onOpened: {
-            uiBridge.reloadDiagnosticsFromDisk()
-            root.refreshDiagnosticsTextView()
-        }
-        onClosed: {
-            if (diagnosticsTextArea) {
-                diagnosticsTextArea.text = ""
-            }
-        }
-
-        contentItem: ColumnLayout {
-            spacing: 8
-
-            RowLayout {
-                Layout.fillWidth: true
-                Label {
-                    text: "Log file:"
-                    color: Kirigami.Theme.disabledTextColor
-                }
-                TextField {
-                    Layout.fillWidth: true
-                    readOnly: true
-                    text: uiBridge.diagnosticsLogPath || ""
-                    selectByMouse: true
-                }
-                Button {
-                    text: "Open Folder"
-                    enabled: (uiBridge.diagnosticsLogPath || "").length > 0
-                    onClicked: uiBridge.openContainingFolder(uiBridge.diagnosticsLogPath || "")
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                Button {
-                    text: "Reload"
-                    onClicked: {
-                        uiBridge.reloadDiagnosticsFromDisk()
-                        root.refreshDiagnosticsTextView()
-                    }
-                }
-                Button {
-                    text: "Clear"
-                    onClicked: {
-                        uiBridge.clearDiagnostics()
-                        root.refreshDiagnosticsTextView()
-                    }
-                }
-                Item { Layout.fillWidth: true }
-                Button {
-                    text: "Copy All"
-                    onClicked: {
-                        if ((diagnosticsTextArea.text || "").length > 0) {
-                            diagnosticsTextArea.selectAll()
-                            diagnosticsTextArea.copy()
-                        }
-                    }
-                }
-            }
-
-            ScrollView {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                clip: true
-
-                TextArea {
-                    id: diagnosticsTextArea
-                    text: ""
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: TextEdit.NoWrap
-                    font.family: "Monospace"
-                    persistentSelection: true
-
-                    MouseArea {
-                        anchors.fill: parent
-                        acceptedButtons: Qt.RightButton
-                        propagateComposedEvents: true
-                        cursorShape: Qt.IBeamCursor
-                        onPressed: function(mouse) {
-                            if (mouse.button !== Qt.RightButton) {
-                                mouse.accepted = false
-                            }
-                        }
-                        onClicked: function(mouse) {
-                            if (mouse.button === Qt.RightButton) {
-                                diagnosticsTextArea.forceActiveFocus()
-                                diagnosticsContextMenu.popup()
-                            } else {
-                                mouse.accepted = false
-                            }
-                        }
-                    }
-
-                    Menu {
-                        id: diagnosticsContextMenu
-                        enter: Transition {
-                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                        }
-                        exit: Transition {
-                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                        }
-
-                        MenuItem {
-                            text: "Copy"
-                            enabled: (diagnosticsTextArea.selectedText || "").length > 0
-                            onTriggered: diagnosticsTextArea.copy()
-                        }
-                        MenuItem {
-                            text: "Select All"
-                            enabled: (diagnosticsTextArea.text || "").length > 0
-                            onTriggered: diagnosticsTextArea.selectAll()
-                        }
-                        MenuItem {
-                            text: "Copy All"
-                            enabled: (diagnosticsTextArea.text || "").length > 0
-                            onTriggered: {
-                                diagnosticsTextArea.selectAll()
-                                diagnosticsTextArea.copy()
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        uiBridge: uiBridge
+        palette: uiPalette
+        windowRoot: root
+        popupTransitionMs: root.uiPopupTransitionMs
     }
 
     Platform.FileDialog {
@@ -4521,269 +3745,42 @@ Kirigami.ApplicationWindow {
         onRejected: pendingFolderDialogContext = ""
     }
 
-    footer: ToolBar {
-        implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
-        leftPadding: 14
-        rightPadding: 10
-        topPadding: 2
-        bottomPadding: 2
-
-        contentItem: RowLayout {
-            spacing: 6
-
-            Repeater {
-                model: statusBarSections()
-
-                delegate: RowLayout {
-                    required property int index
-                    required property var modelData
-
-                    spacing: 6
-                    Layout.fillWidth: !!modelData.stretch
-
-                    Label {
-                        visible: index > 0
-                        text: "|"
-                        color: root.uiMutedTextColor
-                    }
-
-                    RowLayout {
-                        readonly property string channelIconSource: root.channelStatusIconSource(modelData.iconKey || "")
-                        spacing: channelIconSource.length > 0 ? 4 : 0
-                        Layout.fillWidth: !!modelData.stretch
-
-                        Item {
-                            id: channelIconItem
-                            visible: parent.channelIconSource.length > 0
-                            Layout.preferredWidth: visible ? 22 : 0
-                            Layout.preferredHeight: 20
-                            property url iconSource: parent.channelIconSource.length > 0
-                                ? parent.channelIconSource
-                                : ""
-
-                            Image {
-                                anchors.fill: parent
-                                source: channelIconItem.iconSource
-                                asynchronous: false
-                                fillMode: Image.PreserveAspectFit
-                                smooth: false
-                                sourceSize.width: 44
-                                sourceSize.height: 40
-                            }
-                        }
-
-                        Label {
-                            Layout.fillWidth: !!modelData.stretch
-                            text: modelData.text || ""
-                            elide: Text.ElideRight
-                            color: modelData.kind === "error"
-                                ? (modelData.emphasis
-                                    ? root.mixColor(
-                                        Kirigami.Theme.negativeTextColor,
-                                        root.uiTextColor,
-                                        root.themeIsDark ? 0.18 : 0.08)
-                                    : Kirigami.Theme.negativeTextColor)
-                                : (modelData.emphasis
-                                    ? Kirigami.Theme.highlightColor
-                                    : root.uiTextColor)
-                            font.weight: modelData.emphasis ? Font.DemiBold : Font.Normal
-                        }
-                    }
-                }
-            }
-        }
+    footer: Panes.StatusBar {
+        palette: uiPalette
+        sections: root.statusBarSections()
+        channelStatusIconSource: root.channelStatusIconSource
+        mixColor: root.mixColor
+        themeIsDark: root.themeIsDark
     }
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
-        ToolBar {
+        Panes.TransportBar {
             id: transportBar
             Layout.fillWidth: true
-            implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
-            leftPadding: 8
-            rightPadding: 12
-            topPadding: 4
-            bottomPadding: 4
-
-            contentItem: RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: transportBar.leftPadding
-                anchors.rightMargin: transportBar.rightPadding
-                anchors.topMargin: transportBar.topPadding
-                anchors.bottomMargin: transportBar.bottomPadding
-                spacing: 8
-
-                RowLayout {
-                    spacing: 2
-                    ToolButton { action: previousAction; display: AbstractButton.IconOnly }
-                    ToolButton { action: playAction; display: AbstractButton.IconOnly }
-                    ToolButton { action: pauseAction; display: AbstractButton.IconOnly }
-                    ToolButton { action: stopAction; display: AbstractButton.IconOnly }
-                    ToolButton { action: nextAction; display: AbstractButton.IconOnly }
-                }
-
-                Slider {
-                    id: seekSlider
-                    Layout.fillWidth: true
-                    from: 0
-                    to: Math.max(uiBridge.durationSeconds, 1.0)
-                    readonly property bool durationKnown: uiBridge.durationSeconds > 1.0
-                    readonly property bool seekAllowed: durationKnown && uiBridge.playbackState !== "Stopped"
-                    readonly property real stableVisualPosition: seekAllowed ? visualPosition : 0.0
-                    enabled: seekAllowed
-                    stepSize: 0
-                    onPressedChanged: {
-                        if (!pressed && seekAllowed) {
-                            root.positionSmoothingAnimationMs = 0
-                            root.displayedPositionSeconds = value
-                            root.positionSmoothingPrimed = true
-                            root.positionSmoothingAnchorSeconds = value
-                            root.positionSmoothingLastMs = Date.now()
-                            uiBridge.seek(value)
-                        }
-                    }
-
-                    background: Item {
-                        implicitHeight: 24
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        Rectangle {
-                            anchors.fill: parent
-                            color: "white"
-                            border.color: "#a0a9b3"
-                            radius: 1
-                        }
-
-                        WaveformItem {
-                            id: waveformItem
-                            anchors.fill: parent
-                            anchors.margins: 1
-                            visible: uiBridge.playbackState !== "Stopped"
-                            peaksData: uiBridge.playbackState === "Stopped"
-                                       ? ""
-                                       : uiBridge.waveformPeaksPacked
-                            generatedSeconds: uiBridge.waveformCoverageSeconds
-                            waveformComplete: uiBridge.waveformComplete
-                            positionSeconds: root.displayedPositionSeconds
-                            durationSeconds: uiBridge.durationSeconds
-                        }
-
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            visible: seekSlider.seekAllowed
-                            width: Math.round(parent.width * seekSlider.stableVisualPosition)
-                            color: Qt.rgba(120 / 255, 190 / 255, 1.0, 0.26)
-                        }
-
-                        Rectangle {
-                            visible: seekSlider.seekAllowed
-                            width: 1
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            x: Math.round(seekSlider.stableVisualPosition * (parent.width - 1))
-                            color: "#2f7cd6"
-                        }
-                    }
-
-                    handle: Rectangle {
-                        visible: seekSlider.seekAllowed
-                        x: seekSlider.leftPadding + seekSlider.stableVisualPosition * (seekSlider.availableWidth - width)
-                        y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
-                        implicitWidth: 3
-                        implicitHeight: seekSlider.height - 4
-                        radius: 1
-                        color: "#2f7cd6"
-                        border.color: "#1f5aa7"
-                    }
-
-                    Item {
-                        id: seekDragOverlay
-                        visible: seekSlider.pressed && seekSlider.seekAllowed
-                        z: 20
-                        property real playheadX: seekSlider.leftPadding
-                            + seekSlider.stableVisualPosition * seekSlider.availableWidth
-                        property real leftCandidateX: playheadX - width - 8
-                        property real rightCandidateX: playheadX + 8
-                        width: dragTimeLabel.implicitWidth + 14
-                        height: Math.max(18, seekSlider.availableHeight - 4)
-                        y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
-                        x: {
-                            const minX = 2
-                            const maxX = seekSlider.width - width - 2
-                            if (leftCandidateX >= minX) {
-                                return Math.min(maxX, leftCandidateX)
-                            }
-                            return Math.max(minX, Math.min(maxX, rightCandidateX))
-                        }
-
-                        Rectangle {
-                            id: bubbleRect
-                            anchors.fill: parent
-                            radius: 2
-                            color: Qt.rgba(52 / 255, 137 / 255, 235 / 255, 0.76)
-                            border.color: Qt.rgba(198 / 255, 229 / 255, 1.0, 0.52)
-
-                            Label {
-                                id: dragTimeLabel
-                                anchors.centerIn: parent
-                                text: root.formatSeekTime(seekSlider.value)
-                                color: "white"
-                            }
-                        }
-                    }
-                }
-
-                Binding {
-                    target: seekSlider
-                    property: "value"
-                    value: seekSlider.durationKnown ? root.displayedPositionSeconds : 0
-                    when: !seekSlider.pressed
-                }
-
-                Label {
-                    text: uiBridge.positionText + "/" + uiBridge.durationText
-                    horizontalAlignment: Text.AlignHCenter
-                    Layout.preferredWidth: 96
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                ToolButton {
-                    Layout.preferredWidth: 28
-                    Layout.preferredHeight: 28
-                    Layout.alignment: Qt.AlignVCenter
-                    display: AbstractButton.IconOnly
-                    flat: true
-                    icon.name: (root.volumeMuted || root.normalizedVolumeValue(uiBridge.volume) <= 0.0001)
-                        ? "audio-volume-muted"
-                        : "audio-volume-high"
-                    icon.color: root.mixColor(root.uiTextColor, "#ffffff", root.themeIsDark ? 0.16 : 0.04)
-                    onClicked: root.toggleMutedVolume()
-                }
-
-                Slider {
-                    id: volumeSlider
-                    Layout.preferredWidth: 140
-                    from: 0
-                    to: 1
-                    stepSize: 0
-                    onMoved: root.setAppVolume(value)
-                    onPressedChanged: {
-                        if (!pressed) {
-                            root.setAppVolume(value)
-                        }
-                    }
-                }
-
-                Binding {
-                    target: volumeSlider
-                    property: "value"
-                    value: uiBridge.volume
-                    when: !volumeSlider.pressed
-                }
+            uiBridge: uiBridge
+            palette: uiPalette
+            previousAction: previousAction
+            playAction: playAction
+            pauseAction: pauseAction
+            stopAction: stopAction
+            nextAction: nextAction
+            mixColor: root.mixColor
+            themeIsDark: root.themeIsDark
+            volumeMuted: root.volumeMuted
+            displayedPositionSeconds: root.displayedPositionSeconds
+            toggleMutedVolume: root.toggleMutedVolume
+            setAppVolume: root.setAppVolume
+            normalizedVolumeValue: root.normalizedVolumeValue
+            seekCommitted: function(value) {
+                root.positionSmoothingAnimationMs = 0
+                root.displayedPositionSeconds = value
+                root.positionSmoothingPrimed = true
+                root.positionSmoothingAnchorSeconds = value
+                root.positionSmoothingLastMs = Date.now()
+                uiBridge.seek(value)
             }
         }
 
@@ -4802,56 +3799,11 @@ Kirigami.ApplicationWindow {
                     anchors.fill: parent
                     spacing: 0
 
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: width
-                        color: "#0c0c0c"
-
-                        Image {
-                            id: albumArtImage
-                            anchors.fill: parent
-                            source: uiBridge.currentTrackCoverPath
-                            fillMode: Image.PreserveAspectFit
-                            smooth: true
-                            asynchronous: true
-                            cache: true
-                            retainWhileLoading: true
-                            sourceSize.width: Math.max(256, width)
-                            sourceSize.height: Math.max(256, height)
-                        }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "Album Art"
-                            color: "#8c8c8c"
-                            visible: uiBridge.currentTrackCoverPath.length === 0
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: true
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onPressed: function(mouse) {
-                                if (mouse.button === Qt.RightButton) {
-                                    nowPlayingAlbumArtMenu.popup()
-                                }
-                            }
-                            onDoubleClicked: function(mouse) {
-                                if (mouse.button === Qt.LeftButton) {
-                                    root.openAlbumArtViewer()
-                                }
-                            }
-                        }
-
-                        Menu {
-                            id: nowPlayingAlbumArtMenu
-                            MenuItem { action: replaceFromItunesAction }
-                            MenuItem {
-                                enabled: false
-                                visible: !replaceFromItunesAction.enabled
-                                text: root.currentTrackItunesArtworkDisabledReason()
-                            }
-                        }
+                    Components.AlbumArtTile {
+                        uiBridge: uiBridge
+                        replaceFromItunesAction: replaceFromItunesAction
+                        currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
+                        openAlbumArtViewer: root.openAlbumArtViewer
                     }
 
                     Rectangle {
@@ -4865,437 +3817,11 @@ Kirigami.ApplicationWindow {
                             anchors.margins: 6
                             spacing: 6
 
-                            Rectangle {
-                                id: nowPlayingCard
+                            Components.TrackMetadataCard {
                                 Layout.fillWidth: true
-                                readonly property bool hasTrackContext: {
-                                    const hasResolvedMetadata = (uiBridge.currentTrackTitle || "").trim().length > 0
-                                        || (uiBridge.currentTrackArtist || "").trim().length > 0
-                                        || (uiBridge.currentTrackAlbum || "").trim().length > 0
-                                    const playbackState = (uiBridge.playbackState || "").trim()
-                                    const hasActivePath = playbackState !== "Stopped"
-                                        && (uiBridge.currentTrackPath || "").trim().length > 0
-                                    return hasResolvedMetadata || hasActivePath
-                                }
-                                readonly property string marqueeResetKey: {
-                                    return (uiBridge.currentTrackPath || "")
-                                        + "|"
-                                        + (uiBridge.currentTrackTitle || "")
-                                        + "|"
-                                        + (uiBridge.currentTrackArtist || "")
-                                        + "|"
-                                        + (uiBridge.currentTrackAlbum || "")
-                                }
-                                readonly property string resolvedTitle: {
-                                    if (!hasTrackContext) {
-                                        return "No track loaded"
-                                    }
-                                    const explicitTitle = (uiBridge.currentTrackTitle || "").trim()
-                                    if (explicitTitle.length > 0) {
-                                        return explicitTitle
-                                    }
-                                    const pathValue = (uiBridge.currentTrackPath || "").trim()
-                                    if (pathValue.length > 0) {
-                                        const normalized = pathValue.replace(/\\/g, "/")
-                                        const parts = normalized.split("/")
-                                        const tail = parts.length > 0 ? parts[parts.length - 1] : ""
-                                        return tail.length > 0 ? tail : pathValue
-                                    }
-                                    return "Nothing playing"
-                                }
-                                readonly property string resolvedArtist: {
-                                    if (!hasTrackContext) {
-                                        return "—"
-                                    }
-                                    const artistValue = (uiBridge.currentTrackArtist || "").trim()
-                                    return artistValue.length > 0 ? artistValue : "Unknown artist"
-                                }
-                                readonly property string resolvedAlbum: {
-                                    if (!hasTrackContext) {
-                                        return "—"
-                                    }
-                                    const albumValue = (uiBridge.currentTrackAlbum || "").trim()
-                                    return albumValue.length > 0 ? albumValue : "Unknown album"
-                                }
-                                readonly property string resolvedGenre: {
-                                    if (!hasTrackContext) {
-                                        return "—"
-                                    }
-                                    const genreValue = (uiBridge.currentTrackGenre || "").trim()
-                                    return genreValue.length > 0 ? genreValue : "Unknown genre"
-                                }
-                                readonly property string resolvedTrackNumber: {
-                                    if (!hasTrackContext) {
-                                        return "—"
-                                    }
-                                    if (uiBridge.playingQueueIndex !== undefined
-                                            && uiBridge.playingQueueIndex !== null
-                                            && uiBridge.playingQueueIndex >= 0) {
-                                        return root.queueTrackNumberText(uiBridge.playingQueueIndex)
-                                    }
-                                    if (uiBridge.selectedQueueIndex !== undefined
-                                            && uiBridge.selectedQueueIndex !== null
-                                            && uiBridge.selectedQueueIndex >= 0) {
-                                        return root.queueTrackNumberText(uiBridge.selectedQueueIndex)
-                                    }
-                                    return "--"
-                                }
-                                readonly property string resolvedYear: {
-                                    if (!hasTrackContext) {
-                                        return "—"
-                                    }
-                                    const yearValue = uiBridge.currentTrackYear
-                                    if (yearValue !== undefined && yearValue !== null && String(yearValue).length > 0) {
-                                        return String(yearValue)
-                                    }
-                                    return "----"
-                                }
-                                implicitHeight: nowPlayingColumn.implicitHeight + 12
-                                radius: 6
-                                color: root.uiSurfaceRaisedColor
-                                border.color: root.uiBorderColor
-
-                                ColumnLayout {
-                                    id: nowPlayingColumn
-                                    anchors.fill: parent
-                                    anchors.margins: 6
-                                    spacing: 2
-
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 8
-                                        Label {
-                                            text: "Title:"
-                                            Layout.preferredWidth: 44
-                                            horizontalAlignment: Text.AlignRight
-                                            color: root.uiMutedTextColor
-                                            font.pixelSize: 12
-                                        }
-                                        Item {
-                                            id: titleMarquee
-                                            Layout.fillWidth: true
-                                            Layout.preferredHeight: 18
-                                            clip: true
-                                            property string resetKey: nowPlayingCard.marqueeResetKey
-                                            property real overflowPx: Math.max(0, titleInfoText.implicitWidth - width)
-                                            property real offsetPx: 0
-                                            onOverflowPxChanged: {
-                                                if (overflowPx <= 1) {
-                                                    offsetPx = 0
-                                                } else if (offsetPx > overflowPx) {
-                                                    offsetPx = overflowPx
-                                                }
-                                            }
-                                            onResetKeyChanged: {
-                                                offsetPx = 0
-                                                if (titleMarqueeAnimation.running) {
-                                                    titleMarqueeAnimation.restart()
-                                                }
-                                            }
-
-                                            Text {
-                                                id: titleInfoText
-                                                anchors.verticalCenter: titleMarquee.verticalCenter
-                                                x: -titleMarquee.offsetPx
-                                                text: nowPlayingCard.resolvedTitle
-                                                font.weight: Font.DemiBold
-                                                font.pixelSize: 12
-                                                color: root.uiTextColor
-                                                textFormat: Text.PlainText
-                                            }
-
-                                            SequentialAnimation {
-                                                id: titleMarqueeAnimation
-                                                running: titleMarquee.visible
-                                                    && titleMarquee.overflowPx > 1
-                                                    && root.visible
-                                                loops: Animation.Infinite
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: titleMarquee
-                                                    property: "offsetPx"
-                                                    to: titleMarquee.overflowPx
-                                                    duration: Math.max(900, titleMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: titleMarquee.offsetPx = titleMarquee.overflowPx
-                                                }
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: titleMarquee
-                                                    property: "offsetPx"
-                                                    to: 0
-                                                    duration: Math.max(900, titleMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: titleMarquee.offsetPx = 0
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 8
-                                        Label {
-                                            text: "Artist:"
-                                            Layout.preferredWidth: 44
-                                            horizontalAlignment: Text.AlignRight
-                                            color: root.uiMutedTextColor
-                                            font.pixelSize: 12
-                                        }
-                                        Item {
-                                            id: artistMarquee
-                                            Layout.fillWidth: true
-                                            Layout.preferredHeight: 18
-                                            clip: true
-                                            property string resetKey: nowPlayingCard.marqueeResetKey
-                                            property real overflowPx: Math.max(0, artistInfoText.implicitWidth - width)
-                                            property real offsetPx: 0
-                                            onOverflowPxChanged: {
-                                                if (overflowPx <= 1) {
-                                                    offsetPx = 0
-                                                } else if (offsetPx > overflowPx) {
-                                                    offsetPx = overflowPx
-                                                }
-                                            }
-                                            onResetKeyChanged: {
-                                                offsetPx = 0
-                                                if (artistMarqueeAnimation.running) {
-                                                    artistMarqueeAnimation.restart()
-                                                }
-                                            }
-
-                                            Text {
-                                                id: artistInfoText
-                                                anchors.verticalCenter: artistMarquee.verticalCenter
-                                                x: -artistMarquee.offsetPx
-                                                text: nowPlayingCard.resolvedArtist
-                                                color: root.uiTextColor
-                                                font.pixelSize: 12
-                                                textFormat: Text.PlainText
-                                            }
-
-                                            SequentialAnimation {
-                                                id: artistMarqueeAnimation
-                                                running: artistMarquee.visible
-                                                    && artistMarquee.overflowPx > 1
-                                                    && root.visible
-                                                loops: Animation.Infinite
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: artistMarquee
-                                                    property: "offsetPx"
-                                                    to: artistMarquee.overflowPx
-                                                    duration: Math.max(900, artistMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: artistMarquee.offsetPx = artistMarquee.overflowPx
-                                                }
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: artistMarquee
-                                                    property: "offsetPx"
-                                                    to: 0
-                                                    duration: Math.max(900, artistMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: artistMarquee.offsetPx = 0
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 8
-                                        Label {
-                                            text: "Album:"
-                                            Layout.preferredWidth: 44
-                                            horizontalAlignment: Text.AlignRight
-                                            color: root.uiMutedTextColor
-                                            font.pixelSize: 12
-                                        }
-                                        Item {
-                                            id: albumMarquee
-                                            Layout.fillWidth: true
-                                            Layout.preferredHeight: 18
-                                            clip: true
-                                            property string resetKey: nowPlayingCard.marqueeResetKey
-                                            property real overflowPx: Math.max(0, albumInfoText.implicitWidth - width)
-                                            property real offsetPx: 0
-                                            onOverflowPxChanged: {
-                                                if (overflowPx <= 1) {
-                                                    offsetPx = 0
-                                                } else if (offsetPx > overflowPx) {
-                                                    offsetPx = overflowPx
-                                                }
-                                            }
-                                            onResetKeyChanged: {
-                                                offsetPx = 0
-                                                if (albumMarqueeAnimation.running) {
-                                                    albumMarqueeAnimation.restart()
-                                                }
-                                            }
-
-                                            Text {
-                                                id: albumInfoText
-                                                anchors.verticalCenter: albumMarquee.verticalCenter
-                                                x: -albumMarquee.offsetPx
-                                                text: nowPlayingCard.resolvedAlbum
-                                                color: root.uiTextColor
-                                                font.pixelSize: 12
-                                                textFormat: Text.PlainText
-                                            }
-
-                                            SequentialAnimation {
-                                                id: albumMarqueeAnimation
-                                                running: albumMarquee.visible
-                                                    && albumMarquee.overflowPx > 1
-                                                    && root.visible
-                                                loops: Animation.Infinite
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: albumMarquee
-                                                    property: "offsetPx"
-                                                    to: albumMarquee.overflowPx
-                                                    duration: Math.max(900, albumMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: albumMarquee.offsetPx = albumMarquee.overflowPx
-                                                }
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: albumMarquee
-                                                    property: "offsetPx"
-                                                    to: 0
-                                                    duration: Math.max(900, albumMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: albumMarquee.offsetPx = 0
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 8
-                                        Label {
-                                            text: "Track:"
-                                            Layout.preferredWidth: 44
-                                            horizontalAlignment: Text.AlignRight
-                                            color: root.uiMutedTextColor
-                                            font.pixelSize: 12
-                                        }
-                                        Label {
-                                            Layout.fillWidth: true
-                                            text: nowPlayingCard.resolvedTrackNumber
-                                            elide: Text.ElideRight
-                                            color: root.uiTextColor
-                                            font.pixelSize: 12
-                                        }
-                                    }
-
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 8
-                                        Label {
-                                            text: "Year:"
-                                            Layout.preferredWidth: 44
-                                            horizontalAlignment: Text.AlignRight
-                                            color: root.uiMutedTextColor
-                                            font.pixelSize: 12
-                                        }
-                                        Label {
-                                            Layout.fillWidth: true
-                                            text: nowPlayingCard.resolvedYear
-                                            elide: Text.ElideRight
-                                            color: root.uiTextColor
-                                            font.pixelSize: 12
-                                        }
-                                    }
-
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 8
-                                        Label {
-                                            text: "Genre:"
-                                            Layout.preferredWidth: 44
-                                            horizontalAlignment: Text.AlignRight
-                                            color: root.uiMutedTextColor
-                                            font.pixelSize: 12
-                                        }
-                                        Item {
-                                            id: genreMarquee
-                                            Layout.fillWidth: true
-                                            Layout.preferredHeight: 18
-                                            clip: true
-                                            property string resetKey: nowPlayingCard.marqueeResetKey
-                                            property real overflowPx: Math.max(0, genreInfoText.implicitWidth - width)
-                                            property real offsetPx: 0
-                                            onOverflowPxChanged: {
-                                                if (overflowPx <= 1) {
-                                                    offsetPx = 0
-                                                } else if (offsetPx > overflowPx) {
-                                                    offsetPx = overflowPx
-                                                }
-                                            }
-                                            onResetKeyChanged: {
-                                                offsetPx = 0
-                                                if (genreMarqueeAnimation.running) {
-                                                    genreMarqueeAnimation.restart()
-                                                }
-                                            }
-
-                                            Text {
-                                                id: genreInfoText
-                                                anchors.verticalCenter: genreMarquee.verticalCenter
-                                                x: -genreMarquee.offsetPx
-                                                text: nowPlayingCard.resolvedGenre
-                                                color: root.uiTextColor
-                                                font.pixelSize: 12
-                                                textFormat: Text.PlainText
-                                            }
-
-                                            SequentialAnimation {
-                                                id: genreMarqueeAnimation
-                                                running: genreMarquee.visible
-                                                    && genreMarquee.overflowPx > 1
-                                                    && root.visible
-                                                loops: Animation.Infinite
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: genreMarquee
-                                                    property: "offsetPx"
-                                                    to: genreMarquee.overflowPx
-                                                    duration: Math.max(900, genreMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: genreMarquee.offsetPx = genreMarquee.overflowPx
-                                                }
-                                                PauseAnimation { duration: 1400 }
-                                                NumberAnimation {
-                                                    target: genreMarquee
-                                                    property: "offsetPx"
-                                                    to: 0
-                                                    duration: Math.max(900, genreMarquee.overflowPx * 24)
-                                                    easing.type: Easing.Linear
-                                                }
-                                                ScriptAction {
-                                                    script: genreMarquee.offsetPx = 0
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                uiBridge: uiBridge
+                                palette: uiPalette
+                                queueTrackNumberText: root.queueTrackNumberText
                             }
 
                             RowLayout {
@@ -6083,386 +4609,37 @@ Kirigami.ApplicationWindow {
                     }
                 }
 
-                Rectangle {
+                Panes.SpectrogramPane {
+                    id: spectrogramPane
                     SplitView.fillWidth: true
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: 220
-                    color: "#0b0b0f"
-                    border.color: Qt.rgba(0, 0, 0, 0.25)
-
-                    Item {
-                        id: spectrogramMainHost
-                        anchors.fill: parent
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        acceptedButtons: Qt.LeftButton
-                        onDoubleClicked: function(mouse) {
-                            if (mouse.button === Qt.LeftButton) {
-                                root.openSpectrogramViewer()
-                            }
-                        }
-                    }
+                    openViewer: root.openSpectrogramViewer
                 }
             }
         }
     }
 
-    Item {
+    Viewers.SpectrogramSurface {
         id: spectrogramSurface
         parent: root.spectrogramViewerOpen
-            ? (root.useWholeScreenViewerMode ? spectrogramWindowHost : spectrogramFullscreenHost)
-            : spectrogramMainHost
+            ? (root.useWholeScreenViewerMode
+                ? spectrogramViewerShell.windowHost
+                : spectrogramViewerShell.popupHost)
+            : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
-        property var channelDescriptors: []
-        property var pendingPackedBatches: []
-        property bool pendingPackedFlushScheduled: false
-
-        function placeholderDescriptors() {
-            return uiBridge.spectrogramViewMode === 1
-                ? [{ label: "M", showLabel: true }]
-                : [{ label: "", showLabel: false }]
-        }
-
-        function sameDescriptors(next) {
-            if (channelDescriptors.length !== next.length) {
-                return false
-            }
-            for (let i = 0; i < next.length; ++i) {
-                if (channelDescriptors[i].label !== next[i].label
-                        || channelDescriptors[i].showLabel !== next[i].showLabel) {
-                    return false
-                }
-            }
-            return true
-        }
-
-        function syncChannelDescriptors(channels) {
-            let next = []
-            if (channels && channels.length > 0) {
-                const showLabels = uiBridge.spectrogramViewMode === 1
-                for (let i = 0; i < channels.length; ++i) {
-                    const labelText = (channels[i].label || "").trim()
-                    next.push({
-                        label: labelText,
-                        showLabel: showLabels && labelText.length > 0
-                    })
-                }
-            }
-            if (next.length === 0) {
-                next = placeholderDescriptors()
-            }
-            if (!sameDescriptors(next)) {
-                channelDescriptors = next
-            }
-        }
-
-        function schedulePendingPackedFlush() {
-            if (pendingPackedFlushScheduled) {
-                return
-            }
-            pendingPackedFlushScheduled = true
-            Qt.callLater(function() {
-                pendingPackedFlushScheduled = false
-                flushPendingPackedDeltas()
-            })
-        }
-
-        function flushPendingPackedDeltas() {
-            if (!pendingPackedBatches || pendingPackedBatches.length === 0) {
-                return
-            }
-
-            const channels = pendingPackedBatches[0]
-            if (!channels || channels.length === 0) {
-                pendingPackedBatches.shift()
-                if (pendingPackedBatches.length > 0) {
-                    schedulePendingPackedFlush()
-                }
-                return
-            }
-
-            syncChannelDescriptors(channels)
-            if (spectrogramRepeater.count < channels.length) {
-                schedulePendingPackedFlush()
-                return
-            }
-
-            for (let i = 0; i < channels.length; ++i) {
-                const pane = spectrogramRepeater.itemAt(i)
-                if (!pane || !pane.spectrogramItem) {
-                    schedulePendingPackedFlush()
-                    return
-                }
-            }
-
-            pendingPackedBatches.shift()
-            for (let i = 0; i < channels.length; ++i) {
-                const pane = spectrogramRepeater.itemAt(i)
-                const channel = channels[i]
-                if (!pane || !pane.spectrogramItem || !channel) {
-                    continue
-                }
-                if ((channel.rows || 0) > 0 && (channel.bins || 0) > 0) {
-                    pane.spectrogramItem.appendPackedRows(channel.data, channel.rows, channel.bins)
-                }
-            }
-
-            if (pendingPackedBatches.length > 0) {
-                schedulePendingPackedFlush()
-            }
-        }
-
-        function resetForCurrentMode(preserveDescriptors) {
-            pendingPackedBatches = []
-            pendingPackedFlushScheduled = false
-            if (!preserveDescriptors) {
-                syncChannelDescriptors([])
-            }
-            for (let i = 0; i < spectrogramRepeater.count; ++i) {
-                const pane = spectrogramRepeater.itemAt(i)
-                if (pane && pane.spectrogramItem) {
-                    pane.spectrogramItem.reset()
-                }
-            }
-        }
-
-        function haltForCurrentMode() {
-            pendingPackedBatches = []
-            pendingPackedFlushScheduled = false
-            for (let i = 0; i < spectrogramRepeater.count; ++i) {
-                const pane = spectrogramRepeater.itemAt(i)
-                if (pane && pane.spectrogramItem) {
-                    pane.spectrogramItem.halt()
-                }
-            }
-        }
-
-        function appendPackedDelta(channels) {
-            if (!channels || channels.length === 0) {
-                return
-            }
-            pendingPackedBatches.push(channels)
-            flushPendingPackedDeltas()
-        }
-
-        Component.onCompleted: resetForCurrentMode()
-
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: spectrogramSurface.channelDescriptors.length > 1 ? 2 : 0
-
-            Repeater {
-                id: spectrogramRepeater
-                model: spectrogramSurface.channelDescriptors
-
-                delegate: Item {
-                    property alias spectrogramItem: spectrogramPaneItem
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.preferredHeight: 1
-                    Layout.minimumHeight: 0
-
-                    Rectangle {
-                        anchors.fill: parent
-                        color: "#0b0b0f"
-                    }
-
-                    SpectrogramItem {
-                        id: spectrogramPaneItem
-                        anchors.fill: parent
-                        maxColumns: Math.max(640, Math.floor(width))
-                        dbRange: uiBridge.dbRange
-                        logScale: uiBridge.logScale
-                        showFpsOverlay: index === 0 ? uiBridge.showFps : false
-                        sampleRateHz: uiBridge.sampleRateHz
-                    }
-
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.margins: 8
-                        width: labelText.implicitWidth + 8
-                        height: labelText.implicitHeight + 2
-                        radius: 4
-                        color: Qt.rgba(0.0, 0.0, 0.0, 0.18)
-                        visible: modelData.showLabel
-
-                        Text {
-                            id: labelText
-                            anchors.centerIn: parent
-                            text: modelData.label
-                            color: Qt.rgba(0.90, 0.93, 0.98, 0.74)
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                        }
-                    }
-                }
-            }
-        }
+        uiBridge: uiBridge
     }
 
-    Popup {
-        id: spectrogramViewer
-        parent: Overlay.overlay
-        x: 0
-        y: 0
-        width: root.width
-        height: root.height
-        modal: true
-        focus: true
-        padding: 0
-        closePolicy: Popup.CloseOnEscape
-        enter: Transition {
-            NumberAnimation {
-                properties: "opacity,scale,x,y"
-                duration: root.uiPopupTransitionMs
-            }
-        }
-        exit: Transition {
-            NumberAnimation {
-                properties: "opacity,scale,x,y"
-                duration: root.uiPopupTransitionMs
-            }
-        }
-        onClosed: {
-            if (root.spectrogramViewerOpen && !root.useWholeScreenViewerMode) {
-                root.spectrogramViewerOpen = false
-            }
-        }
-        background: Rectangle {
-            color: "#000000"
-            opacity: 0.87
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onClicked: root.closeSpectrogramViewer()
-        }
-
-        Rectangle {
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            width: 40
-            height: 40
-            radius: 8
-            color: Qt.rgba(0, 0, 0, 0.45)
-            border.color: Qt.rgba(1, 1, 1, 0.24)
-
-            ToolButton {
-                anchors.fill: parent
-                icon.name: "window-close"
-                onClicked: root.closeSpectrogramViewer()
-            }
-        }
-
-        Rectangle {
-            anchors.fill: parent
-            color: "#0b0b0f"
-            border.color: Qt.rgba(1, 1, 1, 0.12)
-
-            Item {
-                id: spectrogramFullscreenHost
-                anchors.fill: parent
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
-                onDoubleClicked: function(mouse) {
-                    if (mouse.button === Qt.LeftButton) {
-                        root.closeSpectrogramViewer()
-                    }
-                }
-            }
-        }
-    }
-
-    Window {
-        id: spectrogramFullscreenWindow
-        screen: root.screen
-        transientParent: root
-        modality: Qt.ApplicationModal
-        flags: Qt.Window | Qt.FramelessWindowHint
-        visibility: root.spectrogramViewerOpen && root.useWholeScreenViewerMode
-            ? Window.FullScreen
-            : Window.Hidden
-        color: "#000000"
-        title: root.title
-        onVisibilityChanged: function() {
-            if (spectrogramFullscreenWindow.visibility === Window.FullScreen) {
-                requestActivate()
-                spectrogramFullscreenFocusSink.forceActiveFocus()
-            }
-        }
-        onClosing: function(close) {
-            if (root.spectrogramViewerOpen && root.useWholeScreenViewerMode) {
-                root.spectrogramViewerOpen = false
-            }
-        }
-
-        FocusScope {
-            id: spectrogramFullscreenFocusSink
-            anchors.fill: parent
-            focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
-            Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
-                    event.accepted = true
-                    root.closeSpectrogramViewer()
-                }
-            }
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
-            onClicked: root.closeSpectrogramViewer()
-        }
-
-        Rectangle {
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            width: 40
-            height: 40
-            radius: 8
-            color: Qt.rgba(0, 0, 0, 0.45)
-            border.color: Qt.rgba(1, 1, 1, 0.24)
-
-            ToolButton {
-                anchors.fill: parent
-                icon.name: "window-close"
-                onClicked: root.closeSpectrogramViewer()
-            }
-        }
-
-        Rectangle {
-            anchors.fill: parent
-            color: "#0b0b0f"
-
-            Item {
-                id: spectrogramWindowHost
-                anchors.fill: parent
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
-                onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
-                onDoubleClicked: function(mouse) {
-                    if (mouse.button === Qt.LeftButton) {
-                        root.closeSpectrogramViewer()
-                    }
-                }
-            }
-        }
+    Viewers.SpectrogramViewerShell {
+        id: spectrogramViewerShell
+        windowRoot: root
+        viewerOpen: root.spectrogramViewerOpen
+        useWholeScreenViewerMode: root.useWholeScreenViewerMode
+        popupTransitionMs: root.uiPopupTransitionMs
+        titleText: root.title
+        closeViewer: root.closeSpectrogramViewer
     }
 
     Dialog {
