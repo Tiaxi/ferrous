@@ -8,7 +8,9 @@
 #include <qqml.h>
 
 #include "../src/LibraryTreeModel.h"
+#define private public
 #include "../src/SpectrogramItem.h"
+#undef private
 #include "../src/WaveformItem.h"
 
 namespace {
@@ -263,6 +265,8 @@ private slots:
     void lazyArtistRowRequestsBackendExpansion();
     void spectrogramItemRendersNonBackgroundPixels();
     void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
+    void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
+    void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
 };
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -462,6 +466,65 @@ void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
         "Spectrogram stayed nearly blank after delayed append");
     QVERIFY2(maxX >= 0 && (maxX - minX) > frame.width() / 3,
         "Delayed spectrogram append only rendered a narrow strip");
+}
+
+void QmlSmokeTest::spectrogramSeedsOnlyFirstResetBurstIntoHistory() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setSampleRateHz(48000);
+
+    constexpr int rowCount = 24;
+    constexpr int binsPerRow = 32;
+    QByteArray packedRows;
+    packedRows.resize(rowCount * binsPerRow);
+    for (int row = 0; row < rowCount; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            packedRows[row * binsPerRow + bin] = static_cast<char>((row * 13 + bin * 5) % 256);
+        }
+    }
+
+    item.appendPackedRows(packedRows, rowCount, binsPerRow);
+
+    QCOMPARE(item.m_columns.size(), static_cast<size_t>(rowCount - 2));
+    QCOMPARE(item.m_pendingColumns.size(), static_cast<size_t>(2));
+    QCOMPARE(item.m_binsPerColumn, binsPerRow);
+    QVERIFY(!item.m_seedHistoryOnNextAppend);
+}
+
+void QmlSmokeTest::spectrogramSteadyStateAppendKeepsRowsPendingForAnimation() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setSampleRateHz(48000);
+
+    constexpr int initialRows = 24;
+    constexpr int extraRows = 8;
+    constexpr int binsPerRow = 32;
+    QByteArray initialPackedRows;
+    initialPackedRows.resize(initialRows * binsPerRow);
+    for (int row = 0; row < initialRows; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            initialPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 7 + bin * 3) % 256);
+        }
+    }
+    item.appendPackedRows(initialPackedRows, initialRows, binsPerRow);
+
+    const size_t seededColumns = item.m_columns.size();
+    const size_t seededPending = item.m_pendingColumns.size();
+
+    QByteArray extraPackedRows;
+    extraPackedRows.resize(extraRows * binsPerRow);
+    for (int row = 0; row < extraRows; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            extraPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 17 + bin * 11) % 256);
+        }
+    }
+    item.appendPackedRows(extraPackedRows, extraRows, binsPerRow);
+
+    QCOMPARE(item.m_columns.size(), seededColumns);
+    QCOMPARE(item.m_pendingColumns.size(), seededPending + static_cast<size_t>(extraRows));
+    QVERIFY(!item.m_seedHistoryOnNextAppend);
 }
 
 int main(int argc, char **argv) {

@@ -52,6 +52,8 @@ This plan tracks test coverage additions for safe optimization/refactoring.
 - Scope:
   - Main QML loads headlessly and instantiates root object.
   - Bridge fallback path remains loadable.
+  - Spectrogram rendering keeps broad visible coverage after both immediate and delayed row appends.
+  - Spectrogram reset bursts seed history exactly once; steady-state appends stay animation-driven.
 - Status:
   - Phase 1 implemented:
     - `ui/tests/tst_qml_smoke.cpp`.
