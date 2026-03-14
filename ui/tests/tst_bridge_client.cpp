@@ -29,6 +29,7 @@ private slots:
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void spectrogramDeltaSkipsMetadataOnlyChannels();
+    void stoppedTrackChangeClearsPendingSpectrogramDelta();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -92,6 +93,32 @@ void BridgeClientTest::spectrogramDeltaSkipsMetadataOnlyChannels() {
     const QVariantList channels = delta.value(QStringLiteral("channels")).toList();
     QCOMPARE(channels.size(), 0);
     QCOMPARE(client.m_spectrogramChannels.size(), 0);
+}
+
+void BridgeClientTest::stoppedTrackChangeClearsPendingSpectrogramDelta() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_playbackState = QStringLiteral("Stopped");
+    client.m_currentTrackPath = QStringLiteral("/music/old-track.flac");
+    client.m_spectrogramReset = true;
+
+    BridgeClient::SpectrogramChannelDelta channel;
+    channel.label = QStringLiteral("L");
+    channel.packedBins = 4;
+    channel.packedRows = QByteArray::fromHex("01020304");
+    channel.packedRowsCount = 1;
+    client.m_spectrogramChannels.push_back(channel);
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 0;
+    snapshot.playback.currentPath = QStringLiteral("/music/new-track.flac");
+
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.m_currentTrackPath, QStringLiteral("/music/new-track.flac"));
+    QCOMPARE(client.m_spectrogramChannels.size(), 0);
+    QCOMPARE(client.m_spectrogramReset, false);
 }
 
 int main(int argc, char **argv) {

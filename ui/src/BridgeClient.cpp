@@ -2987,6 +2987,11 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
     return out;
 }
 
+void BridgeClient::clearSpectrogramDeltaState() {
+    m_spectrogramChannels.clear();
+    m_spectrogramReset = false;
+}
+
 void BridgeClient::requestSnapshot() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot));
 }
@@ -4051,6 +4056,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     int nextTrackCurrentBitrateKbps = currentPath.isEmpty() ? 0 : m_currentTrackCurrentBitrateKbps;
     QString queueTrackCover;
     const bool stoppedTrackAdvanced = isStopped && hadTrackContextPath && currentPathChanged;
+    if (stoppedTrackAdvanced
+        && (!m_spectrogramChannels.isEmpty() || m_spectrogramReset)) {
+        clearSpectrogramDeltaState();
+    }
     if (!metadataMatchesCurrentPath && !currentPath.isEmpty() && nextTrackFormatLabel.isEmpty()) {
         nextTrackFormatLabel = formatLabelFromPath(currentPath);
     }

@@ -55,6 +55,7 @@ Kirigami.ApplicationWindow {
     property int positionSmoothingAnimationMs: 0
     property real positionSmoothingLastMs: 0
     property string positionSmoothingTrackPath: ""
+    property string stoppedSpectrogramTrackPath: ""
     property real albumArtZoom: 1.0
     property real albumArtPanX: 0.0
     property real albumArtPanY: 0.0
@@ -7211,8 +7212,19 @@ Kirigami.ApplicationWindow {
             }
         }
         function onSnapshotChanged() {
-            if ((uiBridge.playbackState || "") === "Stopped") {
-                spectrogramSurface.haltForCurrentMode()
+            const stopped = (uiBridge.playbackState || "") === "Stopped"
+            const currentTrackPath = uiBridge.currentTrackPath || ""
+            if (stopped) {
+                const stoppedTrackChanged = root.stoppedSpectrogramTrackPath.length > 0
+                    && root.stoppedSpectrogramTrackPath !== currentTrackPath
+                if (stoppedTrackChanged) {
+                    spectrogramSurface.resetForCurrentMode(true)
+                } else {
+                    spectrogramSurface.haltForCurrentMode()
+                }
+                root.stoppedSpectrogramTrackPath = currentTrackPath
+            } else {
+                root.stoppedSpectrogramTrackPath = currentTrackPath
             }
             root.syncMutedVolumeState()
             if (root.albumArtViewerOpen

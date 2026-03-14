@@ -392,6 +392,7 @@ private:
     void appendDiagnosticLine(const QString &line);
     void rebuildDiagnosticsText();
     static QString resolveDiagnosticsLogPath();
+    void clearSpectrogramDeltaState();
     void schedulePlaybackChanged();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
