@@ -6195,7 +6195,7 @@ Kirigami.ApplicationWindow {
                     SpectrogramItem {
                         id: spectrogramPaneItem
                         anchors.fill: parent
-                        maxColumns: Math.max(640, Math.min(1600, Math.floor(width)))
+                        maxColumns: Math.max(640, Math.floor(width))
                         dbRange: uiBridge.dbRange
                         logScale: uiBridge.logScale
                         showFpsOverlay: index === 0 ? uiBridge.showFps : false

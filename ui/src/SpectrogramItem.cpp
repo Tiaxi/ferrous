@@ -15,10 +15,10 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr int kMaxPendingColumns = 512;
-constexpr int kPendingStartupLeadColumns = 2;
-constexpr int kPendingLeadColumns = 1;
-constexpr int kPendingSevereBacklogColumns = 8;
-constexpr double kRowRateWarmupSeconds = 0.12;
+constexpr int kPendingStartupLeadColumns = 4;
+constexpr int kPendingLeadColumns = 2;
+constexpr int kPendingBacklogTarget = 48;
+constexpr double kRowRateWarmupSeconds = 0.18;
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
     {{65535, 65535, 65535}},
     {{65535, 65535, 65535}},
@@ -236,7 +236,9 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     }
     noteIncomingRowsLocked(rowsAdded);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed
+        && m_rowRateInitialized
+        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -283,7 +285,9 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     }
     noteIncomingRowsLocked(appended);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed
+        && m_rowRateInitialized
+        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -324,21 +328,18 @@ void SpectrogramItem::paint(QPainter *painter) {
             if (drawCols > 0) {
                 const int srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
                 const double scrollOffset = std::clamp(m_pendingPhase, 0.0, 0.999);
-                const double xScale = static_cast<double>(w) / static_cast<double>(std::max(1, m_canvas.width()));
-                const double scaledDrawCols = static_cast<double>(drawCols) * xScale;
-                const double drawX = static_cast<double>(w) - scaledDrawCols - (scrollOffset * xScale);
+                const double drawX = static_cast<double>(w - drawCols) - scrollOffset;
                 const int firstWidth = std::min(m_canvas.width() - srcStart, drawCols);
-                const double scaledFirstWidth = static_cast<double>(firstWidth) * xScale;
-                const QRectF targetFirst(drawX, 0.0, scaledFirstWidth, static_cast<double>(h));
+                const QRectF targetFirst(drawX, 0.0, static_cast<double>(firstWidth), m_canvas.height());
                 const QRect sourceFirst(srcStart, 0, firstWidth, m_canvas.height());
                 painter->drawImage(targetFirst, m_canvas, sourceFirst);
                 const int remaining = drawCols - firstWidth;
                 if (remaining > 0) {
                     const QRectF targetSecond(
-                        drawX + scaledFirstWidth,
+                        drawX + static_cast<double>(firstWidth),
                         0.0,
-                        static_cast<double>(remaining) * xScale,
-                        static_cast<double>(h));
+                        static_cast<double>(remaining),
+                        m_canvas.height());
                     const QRect sourceSecond(0, 0, remaining, m_canvas.height());
                     painter->drawImage(targetSecond, m_canvas, sourceSecond);
                 }
@@ -346,10 +347,10 @@ void SpectrogramItem::paint(QPainter *painter) {
                     const int latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
                     const QRect sourceLatest(latestX, 0, 1, m_canvas.height());
                     const QRectF targetLatest(
-                        static_cast<double>(w) - (scrollOffset * xScale),
+                        static_cast<double>(w) - scrollOffset,
                         0.0,
-                        scrollOffset * xScale,
-                        static_cast<double>(h));
+                        scrollOffset,
+                        m_canvas.height());
                     painter->drawImage(targetLatest, m_canvas, sourceLatest);
                 }
             }
@@ -642,7 +643,7 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     const double prevPhase = m_pendingPhase;
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
     if (!m_scrollPrimed) {
-        if (static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
+        if (!m_rowRateInitialized || static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
             m_pendingPhase = 0.0;
             return std::abs(m_pendingPhase - prevPhase) > 0.0001;
         }
@@ -660,8 +661,8 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     }
     m_pendingPhase += rowsPerSecond * dt;
     const int backlog = static_cast<int>(m_pendingColumns.size());
-    if (backlog > kPendingSevereBacklogColumns) {
-        m_pendingPhase += static_cast<double>(backlog - kPendingSevereBacklogColumns) * 0.25;
+    if (backlog > kPendingBacklogTarget) {
+        m_pendingPhase += static_cast<double>(backlog - kPendingBacklogTarget) * 0.25;
     }
 
     bool consumed = false;
@@ -675,10 +676,10 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     }
 
     if (m_pendingColumns.empty()) {
+        m_scrollPrimed = false;
         const double idleSeconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - m_lastRowAppendTime).count();
         if (idleSeconds > 0.30) {
-            m_scrollPrimed = false;
             m_pendingPhase = 0.0;
         } else {
             m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
