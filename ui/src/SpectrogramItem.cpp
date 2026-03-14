@@ -19,7 +19,7 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr int kMaxPendingColumns = 512;
-constexpr int kPendingBacklogTarget = 48;
+constexpr int kLivePendingColumns = 2;
 const QColor kBackgroundColor(0x0b, 0x0b, 0x0f);
 const QColor kOverlayColor(190, 190, 200, 150);
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
@@ -249,8 +249,7 @@ void SpectrogramItem::reset() {
     m_columns.clear();
     m_pendingColumns.clear();
     m_pendingPhase = 0.0;
-    m_rowRateInitialized = false;
-    m_estimatedRowsPerSecond = 0.0;
+    m_seedHistoryOnNextAppend = true;
     m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
     m_binsPerColumn = 0;
@@ -292,7 +291,8 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     if (rowsAdded <= 0) {
         return;
     }
-    noteIncomingRowsLocked(rowsAdded);
+    noteIncomingRowsLocked();
+    absorbPendingHistoryLocked(kLivePendingColumns);
     if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
     }
@@ -337,7 +337,8 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     if (appended <= 0) {
         return;
     }
-    noteIncomingRowsLocked(appended);
+    noteIncomingRowsLocked();
+    absorbPendingHistoryLocked(kLivePendingColumns);
     if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
     }
@@ -851,6 +852,17 @@ bool SpectrogramItem::consumePendingColumnsLocked(int requested) {
     return consumed;
 }
 
+void SpectrogramItem::absorbPendingHistoryLocked(int retainPending) {
+    const int retain = std::max(0, retainPending);
+    const int pending = static_cast<int>(m_pendingColumns.size());
+    const int absorb = std::max(0, pending - retain);
+    if (absorb > 0) {
+        consumePendingColumnsLocked(absorb);
+        m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
+    }
+    m_seedHistoryOnNextAppend = false;
+}
+
 bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     double dt = elapsedSeconds;
     if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.25) {
@@ -858,10 +870,7 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         dt = 1.0 / std::max(30.0, fallbackFps);
     }
 
-    double rowsPerSecond = m_estimatedRowsPerSecond;
-    if ((!m_rowRateInitialized || !std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) && m_sampleRateHz > 0) {
-        rowsPerSecond = static_cast<double>(m_sampleRateHz) / kReferenceHopSamples;
-    }
+    const double rowsPerSecond = targetRowsPerSecondLocked();
     if (!std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
         if (m_pendingPhase > 0.0) {
             m_pendingPhase = 0.0;
@@ -869,14 +878,10 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         }
         return false;
     }
-    rowsPerSecond = std::clamp(rowsPerSecond, 30.0, 400.0);
 
     const double prevPhase = m_pendingPhase;
     m_pendingPhase += rowsPerSecond * dt;
     const int backlog = static_cast<int>(m_pendingColumns.size());
-    if (backlog > kPendingBacklogTarget) {
-        m_pendingPhase += static_cast<double>(backlog - kPendingBacklogTarget) * 0.25;
-    }
 
     bool consumed = false;
     const int ready = static_cast<int>(std::floor(m_pendingPhase));
@@ -903,23 +908,16 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     return consumed || phaseChanged;
 }
 
-void SpectrogramItem::noteIncomingRowsLocked(int rowCount) {
-    if (rowCount <= 0) {
-        return;
+void SpectrogramItem::noteIncomingRowsLocked() {
+    m_lastRowAppendTime = std::chrono::steady_clock::now();
+}
+
+double SpectrogramItem::targetRowsPerSecondLocked() const {
+    if (m_sampleRateHz > 0) {
+        const double stableRate = static_cast<double>(m_sampleRateHz) / kReferenceHopSamples;
+        return std::clamp(stableRate, 1.0, 400.0);
     }
-    const auto now = std::chrono::steady_clock::now();
-    if (m_rowRateInitialized) {
-        const double elapsed = std::chrono::duration<double>(now - m_lastRowAppendTime).count();
-        if (elapsed > 0.0005) {
-            const double instantRate = std::clamp(static_cast<double>(rowCount) / elapsed, 1.0, 1200.0);
-            constexpr double alpha = 0.20;
-            m_estimatedRowsPerSecond = (alpha * instantRate) + ((1.0 - alpha) * m_estimatedRowsPerSecond);
-        }
-    } else {
-        m_estimatedRowsPerSecond = std::clamp(static_cast<double>(rowCount) * 60.0, 30.0, 400.0);
-        m_rowRateInitialized = true;
-    }
-    m_lastRowAppendTime = now;
+    return 0.0;
 }
 
 void SpectrogramItem::updateOverlayImageLocked() {
