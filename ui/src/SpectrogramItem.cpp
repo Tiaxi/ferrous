@@ -236,9 +236,7 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     }
     noteIncomingRowsLocked(rowsAdded);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed
-        && m_rowRateInitialized
-        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -285,9 +283,7 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     }
     noteIncomingRowsLocked(appended);
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed
-        && m_rowRateInitialized
-        && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
         consumePendingColumnsLocked(1);
         m_scrollPrimed = !m_columns.empty();
     }
@@ -328,18 +324,21 @@ void SpectrogramItem::paint(QPainter *painter) {
             if (drawCols > 0) {
                 const int srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
                 const double scrollOffset = std::clamp(m_pendingPhase, 0.0, 0.999);
-                const double drawX = static_cast<double>(w - drawCols) - scrollOffset;
+                const double xScale = static_cast<double>(w) / static_cast<double>(std::max(1, m_canvas.width()));
+                const double scaledDrawCols = static_cast<double>(drawCols) * xScale;
+                const double drawX = static_cast<double>(w) - scaledDrawCols - (scrollOffset * xScale);
                 const int firstWidth = std::min(m_canvas.width() - srcStart, drawCols);
-                const QRectF targetFirst(drawX, 0.0, static_cast<double>(firstWidth), m_canvas.height());
+                const double scaledFirstWidth = static_cast<double>(firstWidth) * xScale;
+                const QRectF targetFirst(drawX, 0.0, scaledFirstWidth, static_cast<double>(h));
                 const QRect sourceFirst(srcStart, 0, firstWidth, m_canvas.height());
                 painter->drawImage(targetFirst, m_canvas, sourceFirst);
                 const int remaining = drawCols - firstWidth;
                 if (remaining > 0) {
                     const QRectF targetSecond(
-                        drawX + static_cast<double>(firstWidth),
+                        drawX + scaledFirstWidth,
                         0.0,
-                        static_cast<double>(remaining),
-                        m_canvas.height());
+                        static_cast<double>(remaining) * xScale,
+                        static_cast<double>(h));
                     const QRect sourceSecond(0, 0, remaining, m_canvas.height());
                     painter->drawImage(targetSecond, m_canvas, sourceSecond);
                 }
@@ -347,10 +346,10 @@ void SpectrogramItem::paint(QPainter *painter) {
                     const int latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
                     const QRect sourceLatest(latestX, 0, 1, m_canvas.height());
                     const QRectF targetLatest(
-                        static_cast<double>(w) - scrollOffset,
+                        static_cast<double>(w) - (scrollOffset * xScale),
                         0.0,
-                        scrollOffset,
-                        m_canvas.height());
+                        scrollOffset * xScale,
+                        static_cast<double>(h));
                     painter->drawImage(targetLatest, m_canvas, sourceLatest);
                 }
             }
@@ -643,7 +642,7 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     const double prevPhase = m_pendingPhase;
     const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
     if (!m_scrollPrimed) {
-        if (!m_rowRateInitialized || static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
+        if (static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
             m_pendingPhase = 0.0;
             return std::abs(m_pendingPhase - prevPhase) > 0.0001;
         }
