@@ -4197,7 +4197,9 @@ fn pump_playback_events(
                 }
                 changed = true;
             }
-            PlaybackEvent::Seeked => {}
+            PlaybackEvent::Seeked => {
+                analysis.command(AnalysisCommand::ResetSpectrogram);
+            }
         }
     }
     changed

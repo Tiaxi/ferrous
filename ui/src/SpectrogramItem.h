@@ -3,7 +3,7 @@
 #include <QImage>
 #include <QMetaObject>
 #include <QMutex>
-#include <QQuickPaintedItem>
+#include <QQuickItem>
 #include <QByteArray>
 #include <QVariantList>
 
@@ -13,8 +13,9 @@
 #include <vector>
 
 class QQuickWindow;
+class QSGNode;
 
-class SpectrogramItem : public QQuickPaintedItem {
+class SpectrogramItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY dbRangeChanged)
     Q_PROPERTY(bool logScale READ logScale WRITE setLogScale NOTIFY logScaleChanged)
@@ -44,8 +45,6 @@ public:
     Q_INVOKABLE void appendRows(const QVariantList &rows);
     Q_INVOKABLE void appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow);
 
-    void paint(QPainter *painter) override;
-
 signals:
     void dbRangeChanged();
     void logScaleChanged();
@@ -55,6 +54,8 @@ signals:
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
+    void releaseResources() override;
 
 private:
     static constexpr int kGradientTableSize = 2048;
@@ -68,13 +69,12 @@ private:
     void drawColumnAt(int x, const std::vector<quint8> &col);
     bool consumePendingColumnsLocked(int requested);
     bool advanceAnimationLocked(double elapsedSeconds);
-    double targetRowsPerSecondLocked() const;
     void noteIncomingRowsLocked(int rowCount);
+    void updateOverlayImageLocked();
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
     void updateFpsEstimateLocked();
-    void drawFpsOverlay(QPainter *painter) const;
 
     double m_dbRange{90.0};
     bool m_logScale{false};
@@ -89,16 +89,16 @@ private:
 
     QImage m_canvas;
     bool m_canvasDirty{true};
+    bool m_textureDirty{true};
+    QImage m_overlayImage;
+    bool m_overlayDirty{true};
     int m_canvasWriteX{0};
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
     std::deque<std::vector<quint8>> m_pendingColumns;
     double m_pendingPhase{0.0};
-    bool m_scrollPrimed{false};
     bool m_rowRateInitialized{false};
     double m_estimatedRowsPerSecond{0.0};
-    int m_rowRateWindowRows{0};
-    std::chrono::steady_clock::time_point m_rowRateWindowStart{};
     std::chrono::steady_clock::time_point m_lastRowAppendTime{};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};
@@ -116,6 +116,7 @@ private:
     std::chrono::steady_clock::time_point m_profileLastPaintSpike{};
     quint64 m_profilePaints{0};
     double m_profilePaintMs{0.0};
+    quint64 m_sceneGraphGeneration{0};
     QMetaObject::Connection m_animationTickConnection;
     mutable QMutex m_stateMutex;
 };

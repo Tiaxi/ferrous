@@ -7131,10 +7131,13 @@ Kirigami.ApplicationWindow {
     Connections {
         target: uiBridge
         function applyAnalysisDelta() {
-            if (uiBridge.spectrogramReset && root.visualFeedsEnabled) {
+            const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
+            if (uiBridge.spectrogramReset
+                    && root.visualFeedsEnabled
+                    && delta.channels
+                    && delta.channels.length > 0) {
                 spectrogramSurface.resetForCurrentMode()
             }
-            const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
             if (root.visualFeedsEnabled && delta.channels && delta.channels.length > 0) {
                 spectrogramSurface.appendPackedDelta(delta.channels)
             }

@@ -45,6 +45,7 @@ pub enum AnalysisCommand {
         path: PathBuf,
         reset_spectrogram: bool,
     },
+    ResetSpectrogram,
     SetSampleRate(u32),
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
@@ -261,6 +262,10 @@ impl AnalysisRuntimeState {
                 waveform_job_tx,
                 waveform_decode_active_token,
             ),
+            AnalysisCommand::ResetSpectrogram => {
+                self.reset_spectrogram_state(pcm_rx);
+                self.emit_snapshot(event_tx, true);
+            }
             AnalysisCommand::SetSampleRate(rate) => {
                 if rate > 0 {
                     self.snapshot.sample_rate_hz = rate;
@@ -906,10 +911,13 @@ fn emit_snapshot(
     last_emit: &mut std::time::Instant,
     force: bool,
 ) {
-    if !force && last_emit.elapsed() < std::time::Duration::from_millis(16) {
+    if !*waveform_dirty && pending_channels.is_empty() && !force {
         return;
     }
-    if !*waveform_dirty && pending_channels.is_empty() && !force {
+    if !force
+        && pending_channels.is_empty()
+        && last_emit.elapsed() < std::time::Duration::from_millis(16)
+    {
         return;
     }
 
@@ -2054,6 +2062,45 @@ mod tests {
         match evt {
             AnalysisEvent::Snapshot(s) => assert_eq!(s.waveform_peaks, vec![0.1, 0.2]),
         }
+    }
+
+    #[test]
+    fn emit_snapshot_bypasses_throttle_for_pending_spectrogram_rows() {
+        let (tx, rx) = unbounded::<AnalysisEvent>();
+        let snapshot = AnalysisSnapshot {
+            waveform_peaks: Vec::new(),
+            waveform_coverage_seconds: 0.0,
+            waveform_complete: false,
+            spectrogram_channels: Vec::new(),
+            spectrogram_seq: 4,
+            sample_rate_hz: 48_000,
+            spectrogram_view_mode: SpectrogramViewMode::Downmix,
+        };
+        let mut pending_channels = vec![AnalysisSpectrogramChannel {
+            label: SpectrogramChannelLabel::Mono,
+            rows: vec![vec![0.1, 0.2, 0.3]],
+        }];
+        let mut waveform_dirty = false;
+        let mut last_emit = std::time::Instant::now();
+
+        emit_snapshot(
+            &tx,
+            &snapshot,
+            &mut pending_channels,
+            &mut waveform_dirty,
+            &mut last_emit,
+            false,
+        );
+
+        let evt = rx.try_recv().expect("spectrogram snapshot event");
+        match evt {
+            AnalysisEvent::Snapshot(s) => {
+                assert_eq!(s.spectrogram_seq, 4);
+                assert_eq!(s.spectrogram_channels.len(), 1);
+                assert_eq!(s.spectrogram_channels[0].rows.len(), 1);
+            }
+        }
+        assert!(pending_channels.is_empty());
     }
 
     #[test]
