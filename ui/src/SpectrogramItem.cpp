@@ -235,10 +235,8 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         return;
     }
     noteIncomingRowsLocked(rowsAdded);
-    const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
-        m_scrollPrimed = !m_columns.empty();
     }
     update();
 }
@@ -282,10 +280,8 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
         return;
     }
     noteIncomingRowsLocked(appended);
-    const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed && static_cast<int>(m_pendingColumns.size()) > leadColumns) {
+    if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
-        m_scrollPrimed = !m_columns.empty();
     }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
@@ -636,25 +632,17 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         dt = 1.0 / std::max(30.0, fallbackFps);
     }
 
-    const double prevPhase = m_pendingPhase;
-    const int leadColumns = m_rowRateInitialized ? kPendingLeadColumns : kPendingStartupLeadColumns;
-    if (!m_scrollPrimed) {
-        if (static_cast<int>(m_pendingColumns.size()) <= leadColumns) {
-            m_pendingPhase = 0.0;
-            return std::abs(m_pendingPhase - prevPhase) > 0.0001;
-        }
-        consumePendingColumnsLocked(1);
-        m_scrollPrimed = !m_columns.empty();
-    }
-
-    const double rowsPerSecond = targetRowsPerSecondLocked();
-    if (!std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
+    double rowsPerSecond = m_estimatedRowsPerSecond;
+    if (!m_rowRateInitialized || !std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
         if (m_pendingPhase > 0.0) {
             m_pendingPhase = 0.0;
             return true;
         }
         return false;
     }
+    rowsPerSecond = std::clamp(rowsPerSecond, 30.0, 400.0);
+
+    const double prevPhase = m_pendingPhase;
     m_pendingPhase += rowsPerSecond * dt;
     const int backlog = static_cast<int>(m_pendingColumns.size());
     if (backlog > kPendingBacklogTarget) {
@@ -675,7 +663,6 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         const double idleSeconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - m_lastRowAppendTime).count();
         if (idleSeconds > 0.30) {
-            m_scrollPrimed = false;
             m_pendingPhase = 0.0;
         } else {
             m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
@@ -703,29 +690,20 @@ void SpectrogramItem::noteIncomingRowsLocked(int rowCount) {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
-    if (m_rowRateWindowStart.time_since_epoch().count() == 0) {
-        m_rowRateWindowStart = now;
-        m_rowRateWindowRows = 0;
-    }
-    m_rowRateWindowRows += rowCount;
-    const double windowElapsed =
-        std::chrono::duration<double>(now - m_rowRateWindowStart).count();
-    if (windowElapsed >= kRowRateWarmupSeconds) {
-        const double instantRate = std::clamp(
-            static_cast<double>(m_rowRateWindowRows) / windowElapsed,
-            1.0,
-            400.0);
-        if (m_rowRateInitialized) {
-            constexpr double alpha = 0.18;
-            m_estimatedRowsPerSecond =
-                (alpha * instantRate) + ((1.0 - alpha) * m_estimatedRowsPerSecond);
-        } else {
-            m_estimatedRowsPerSecond = instantRate;
-            m_rowRateInitialized = true;
-            m_pendingPhase = std::max(0.0, m_pendingPhase);
+    if (m_rowRateInitialized) {
+        const double elapsed = std::chrono::duration<double>(now - m_lastRowAppendTime).count();
+        if (elapsed > 0.0005) {
+            const double instantRate = std::clamp(
+                static_cast<double>(rowCount) / elapsed,
+                1.0,
+                1200.0);
+            constexpr double alpha = 0.20;
+            m_estimatedRowsPerSecond = (alpha * instantRate) + ((1.0 - alpha) * m_estimatedRowsPerSecond);
         }
-        m_rowRateWindowStart = now;
-        m_rowRateWindowRows = 0;
+    } else {
+        m_estimatedRowsPerSecond = std::clamp(static_cast<double>(rowCount) * 60.0, 30.0, 400.0);
+        m_rowRateInitialized = true;
+        m_pendingPhase = std::max(0.0, m_pendingPhase);
     }
     m_lastRowAppendTime = now;
 }
@@ -771,9 +749,10 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     }
     m_animationTickConnection = connect(
         window,
-        &QQuickWindow::afterAnimating,
+        &QQuickWindow::frameSwapped,
         this,
-        &SpectrogramItem::handleWindowAfterAnimating);
+        &SpectrogramItem::handleWindowAfterAnimating,
+        Qt::QueuedConnection);
 }
 
 void SpectrogramItem::handleWindowAfterAnimating() {
