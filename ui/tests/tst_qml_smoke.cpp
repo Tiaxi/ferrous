@@ -404,6 +404,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import "components" as Components
+import "controllers" as Controllers
 import "dialogs" as Dialogs
 import "panes" as Panes
 import "viewers" as Viewers
@@ -517,7 +518,18 @@ Item {
 
     QtObject {
         id: globalSearchModelApi
+        function isSelectableIndex(index) { return false }
+        function nextSelectableIndex(startIndex, step, wrap) { return -1 }
         function rowDataAt(index) { return null }
+    }
+
+    Controllers.GlobalSearchController {
+        id: globalSearchController
+        uiBridge: bridge
+        globalSearchModelApi: globalSearchModelApi
+        requestLibraryRevealForSearchRow: function(row) {}
+        focusLibraryViewForNavigation: function() {}
+        requestOpenInFileBrowserForSearchRow: function(row) {}
     }
 
     QtObject {
@@ -601,16 +613,13 @@ Item {
 
     Dialogs.GlobalSearchDialog {
         parent: harness
-        uiBridge: bridge
+        controller: globalSearchController
         uiPalette: palette
         windowRoot: harness
         popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
-        globalSearchModelApi: globalSearchModelApi
-        selectedDisplayIndex: -1
         globalSearchShowsRootColumn: false
-        globalSearchIgnoreRefocusFind: false
         globalSearchTrackNumberColumnWidth: 42
         globalSearchCoverColumnWidth: 28
         globalSearchArtistColumnWidth: 180
@@ -620,20 +629,6 @@ Item {
         globalSearchTrackGenreColumnWidth: 110
         globalSearchAlbumCountColumnWidth: 44
         globalSearchTrackLengthColumnWidth: 64
-        handleOpened: function(queryText) {}
-        handleClosed: function(closeDialog) {}
-        focusQueryField: function(selectAll) {}
-        stepResultsView: function(wheel) {}
-        nextSelectableIndex: function(startIndex, step, wrap) { return -1 }
-        selectDisplayIndex: function(index) { return false }
-        searchFirstSelectableIndex: function() { return -1 }
-        searchLastSelectableIndex: function() { return -1 }
-        moveSelectionByPage: function(direction) { return false }
-        activateSelection: function() {}
-        navigateSelectionToLibrary: function() {}
-        activateRow: function(row) {}
-        queueRow: function(row) {}
-        openRowInFileBrowser: function(row) {}
     }
 
     Dialogs.ItunesArtworkDialog {

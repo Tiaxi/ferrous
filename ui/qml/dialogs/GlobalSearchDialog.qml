@@ -7,16 +7,13 @@ import "../components" as Components
 Dialog {
     id: root
 
-    required property var uiBridge
+    required property var controller
     required property var uiPalette
     required property var windowRoot
     required property int popupTransitionMs
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
-    required property var globalSearchModelApi
-    required property int selectedDisplayIndex
     required property bool globalSearchShowsRootColumn
-    required property bool globalSearchIgnoreRefocusFind
     required property int globalSearchTrackNumberColumnWidth
     required property int globalSearchCoverColumnWidth
     required property int globalSearchArtistColumnWidth
@@ -26,24 +23,8 @@ Dialog {
     required property int globalSearchTrackGenreColumnWidth
     required property int globalSearchAlbumCountColumnWidth
     required property int globalSearchTrackLengthColumnWidth
-    required property var handleOpened
-    required property var handleClosed
-    required property var focusQueryField
-    required property var stepResultsView
-    required property var nextSelectableIndex
-    required property var selectDisplayIndex
-    required property var searchFirstSelectableIndex
-    required property var searchLastSelectableIndex
-    required property var moveSelectionByPage
-    required property var activateSelection
-    required property var navigateSelectionToLibrary
-    required property var activateRow
-    required property var queueRow
-    required property var openRowInFileBrowser
 
     property var contextRowData: ({})
-
-    signal refsReady(var dialog, var queryField, var resultsView)
 
     modal: true
     title: "Global Search"
@@ -53,10 +34,10 @@ Dialog {
     enter: Components.PopupTransition { duration: root.popupTransitionMs }
     exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
-    Component.onCompleted: root.refsReady(root, globalSearchQueryField, globalSearchResultsView)
+    Component.onCompleted: root.controller.registerRefs(root, globalSearchQueryField, globalSearchResultsView)
 
-    onOpened: root.handleOpened(globalSearchQueryField.text || "")
-    onClosed: root.handleClosed(true)
+    onOpened: root.controller.handleDialogOpened(globalSearchQueryField.text || "")
+    onClosed: root.controller.endOpen(true)
 
     contentItem: ColumnLayout {
         spacing: 8
@@ -65,70 +46,76 @@ Dialog {
             id: globalSearchQueryField
             Layout.fillWidth: true
             placeholderText: "Type artist, album, or track"
-            onTextChanged: root.uiBridge.setGlobalSearchQuery(text)
+            onTextChanged: root.controller.uiBridge.setGlobalSearchQuery(text)
             Keys.onPressed: function(event) {
                 if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                    root.focusQueryField(!root.globalSearchIgnoreRefocusFind)
+                    root.controller.focusQueryField(!root.controller.ignoreRefocusFind)
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                    root.navigateSelectionToLibrary()
+                    root.controller.navigateSelectionToLibrary()
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_Down) {
-                    const next = root.nextSelectableIndex(root.selectedDisplayIndex, 1, true)
+                    const next = root.controller.nextSelectableIndex(
+                        root.controller.selectedDisplayIndex,
+                        1,
+                        true)
                     if (next >= 0) {
-                        root.selectDisplayIndex(next)
+                        root.controller.selectDisplayIndex(next)
                         globalSearchResultsView.forceActiveFocus()
                     }
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_Up) {
-                    const next = root.nextSelectableIndex(root.selectedDisplayIndex, -1, true)
+                    const next = root.controller.nextSelectableIndex(
+                        root.controller.selectedDisplayIndex,
+                        -1,
+                        true)
                     if (next >= 0) {
-                        root.selectDisplayIndex(next)
+                        root.controller.selectDisplayIndex(next)
                         globalSearchResultsView.forceActiveFocus()
                     }
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_PageDown) {
-                    if (root.moveSelectionByPage(1)) {
+                    if (root.controller.moveSelectionByPage(1)) {
                         globalSearchResultsView.forceActiveFocus()
                     }
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_PageUp) {
-                    if (root.moveSelectionByPage(-1)) {
+                    if (root.controller.moveSelectionByPage(-1)) {
                         globalSearchResultsView.forceActiveFocus()
                     }
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_Home) {
-                    const first = root.searchFirstSelectableIndex()
+                    const first = root.controller.searchFirstSelectableIndex()
                     if (first >= 0) {
-                        root.selectDisplayIndex(first)
+                        root.controller.selectDisplayIndex(first)
                         globalSearchResultsView.forceActiveFocus()
                     }
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_End) {
-                    const last = root.searchLastSelectableIndex()
+                    const last = root.controller.searchLastSelectableIndex()
                     if (last >= 0) {
-                        root.selectDisplayIndex(last)
+                        root.controller.selectDisplayIndex(last)
                         globalSearchResultsView.forceActiveFocus()
                     }
                     event.accepted = true
                     return
                 }
                 if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                    root.activateSelection()
+                    root.controller.activateSelection()
                     event.accepted = true
                 }
             }
@@ -137,9 +124,9 @@ Dialog {
         Label {
             Layout.fillWidth: true
             color: root.uiPalette.uiMutedTextColor
-            text: "Artists: " + (root.uiBridge.globalSearchArtistCount || 0)
-                + " | Albums: " + (root.uiBridge.globalSearchAlbumCount || 0)
-                + " | Tracks: " + (root.uiBridge.globalSearchTrackCount || 0)
+            text: "Artists: " + (root.controller.uiBridge.globalSearchArtistCount || 0)
+                + " | Albums: " + (root.controller.uiBridge.globalSearchAlbumCount || 0)
+                + " | Tracks: " + (root.controller.uiBridge.globalSearchTrackCount || 0)
         }
 
         Rectangle {
@@ -152,7 +139,7 @@ Dialog {
                 id: globalSearchResultsView
                 anchors.fill: parent
                 clip: true
-                model: root.uiBridge.globalSearchModel || []
+                model: root.controller.uiBridge.globalSearchModel || []
                 reuseItems: true
                 spacing: 0
                 boundsBehavior: Flickable.StopAtBounds
@@ -174,65 +161,71 @@ Dialog {
                     acceptedButtons: Qt.NoButton
                     preventStealing: true
                     onWheel: function(wheel) {
-                        root.stepResultsView(wheel)
+                        root.controller.stepResultsView(wheel)
                     }
                 }
 
                 Keys.onPressed: function(event) {
                     if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                        root.focusQueryField(!root.globalSearchIgnoreRefocusFind)
+                        root.controller.focusQueryField(!root.controller.ignoreRefocusFind)
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                        root.navigateSelectionToLibrary()
+                        root.controller.navigateSelectionToLibrary()
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_Down) {
-                        const next = root.nextSelectableIndex(root.selectedDisplayIndex, 1, true)
+                        const next = root.controller.nextSelectableIndex(
+                            root.controller.selectedDisplayIndex,
+                            1,
+                            true)
                         if (next >= 0) {
-                            root.selectDisplayIndex(next)
+                            root.controller.selectDisplayIndex(next)
                         }
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_Up) {
-                        const next = root.nextSelectableIndex(root.selectedDisplayIndex, -1, true)
+                        const next = root.controller.nextSelectableIndex(
+                            root.controller.selectedDisplayIndex,
+                            -1,
+                            true)
                         if (next >= 0) {
-                            root.selectDisplayIndex(next)
+                            root.controller.selectDisplayIndex(next)
                         }
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_PageDown) {
-                        root.moveSelectionByPage(1)
+                        root.controller.moveSelectionByPage(1)
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_PageUp) {
-                        root.moveSelectionByPage(-1)
+                        root.controller.moveSelectionByPage(-1)
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_Home) {
-                        const first = root.searchFirstSelectableIndex()
+                        const first = root.controller.searchFirstSelectableIndex()
                         if (first >= 0) {
-                            root.selectDisplayIndex(first)
+                            root.controller.selectDisplayIndex(first)
                         }
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_End) {
-                        const last = root.searchLastSelectableIndex()
+                        const last = root.controller.searchLastSelectableIndex()
                         if (last >= 0) {
-                            root.selectDisplayIndex(last)
+                            root.controller.selectDisplayIndex(last)
                         }
                         event.accepted = true
                         return
                     }
                     if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                        root.activateSelection()
+                        root.controller.activateSelection()
                         event.accepted = true
                     }
                 }
@@ -265,7 +258,7 @@ Dialog {
                         ? trackNumber
                         : null
                     readonly property var countValue: typeof count !== "undefined" ? count : null
-                    readonly property color rowTextColor: index === root.selectedDisplayIndex
+                    readonly property color rowTextColor: index === root.controller.selectedDisplayIndex
                         ? root.uiPalette.uiSelectionTextColor
                         : root.uiPalette.uiTextColor
 
@@ -275,7 +268,7 @@ Dialog {
                         ? root.uiPalette.uiSectionColor
                         : (rowKind === "columns"
                             ? root.uiPalette.uiColumnsColor
-                            : (index === root.selectedDisplayIndex
+                            : (index === root.controller.selectedDisplayIndex
                                 ? root.uiPalette.uiSelectionColor
                                 : (index % 2 === 0
                                     ? root.uiPalette.uiSurfaceRaisedColor
@@ -623,10 +616,10 @@ Dialog {
                         enabled: rowKind === "item"
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                         onClicked: function(mouse) {
-                            root.selectDisplayIndex(index)
+                            root.controller.selectDisplayIndex(index)
                             if (mouse.button === Qt.RightButton) {
-                                root.contextRowData = root.globalSearchModelApi
-                                    ? (root.globalSearchModelApi.rowDataAt(index) || ({}))
+                                root.contextRowData = root.controller.globalSearchModelApi
+                                    ? (root.controller.globalSearchModelApi.rowDataAt(index) || ({}))
                                     : ({})
                                 globalSearchContextMenu.popup()
                                 return
@@ -637,8 +630,8 @@ Dialog {
                         }
                         onDoubleClicked: function(mouse) {
                             if (mouse.button === Qt.LeftButton) {
-                                root.selectDisplayIndex(index)
-                                root.activateSelection()
+                                root.controller.selectDisplayIndex(index)
+                                root.controller.activateSelection()
                             }
                         }
                     }
@@ -655,34 +648,34 @@ Dialog {
                 MenuItem {
                     text: "Play"
                     enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.activateRow(globalSearchContextMenu.rowData)
+                    onTriggered: root.controller.activateRow(globalSearchContextMenu.rowData)
                 }
                 MenuItem {
                     text: "Queue"
                     enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.queueRow(globalSearchContextMenu.rowData)
+                    onTriggered: root.controller.queueRow(globalSearchContextMenu.rowData)
                 }
                 MenuSeparator {}
                 MenuItem {
-                    text: "Open in " + root.uiBridge.fileBrowserName
+                    text: "Open in " + root.controller.uiBridge.fileBrowserName
                     visible: (globalSearchContextMenu.rowData.rowType || "") !== "track"
                     enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.openRowInFileBrowser(globalSearchContextMenu.rowData)
+                    onTriggered: root.controller.openRowInFileBrowser(globalSearchContextMenu.rowData)
                 }
                 MenuItem {
                     text: "Open containing folder"
                     visible: (globalSearchContextMenu.rowData.rowType || "") === "track"
                     enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.openRowInFileBrowser(globalSearchContextMenu.rowData)
+                    onTriggered: root.controller.openRowInFileBrowser(globalSearchContextMenu.rowData)
                 }
             }
         }
 
         Label {
             Layout.fillWidth: true
-            visible: (root.uiBridge.globalSearchArtistCount || 0) === 0
-                && (root.uiBridge.globalSearchAlbumCount || 0) === 0
-                && (root.uiBridge.globalSearchTrackCount || 0) === 0
+            visible: (root.controller.uiBridge.globalSearchArtistCount || 0) === 0
+                && (root.controller.uiBridge.globalSearchAlbumCount || 0) === 0
+                && (root.controller.uiBridge.globalSearchTrackCount || 0) === 0
             text: (globalSearchQueryField.text || "").trim().length === 0
                 ? "Type to search"
                 : "No matches"

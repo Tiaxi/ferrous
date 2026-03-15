@@ -7,6 +7,7 @@ import Qt.labs.platform 1.1 as Platform
 import FerrousUi 1.0
 import org.kde.kirigami 2.20 as Kirigami
 import "components" as Components
+import "controllers" as Controllers
 import "dialogs" as Dialogs
 import "panes" as Panes
 import "viewers" as Viewers
@@ -98,19 +99,11 @@ Kirigami.ApplicationWindow {
     property string pendingSearchOpenSelectionKey: ""
     property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
-    property int globalSearchSelectedDisplayIndex: -1
-    property bool globalSearchOpening: false
-    property bool globalSearchIgnoreRefocusFind: false
-    property var globalSearchDialogRef: null
-    property var globalSearchQueryFieldRef: null
-    property var globalSearchResultsViewRef: null
     property var libraryViewRef: null
     property var playlistViewRef: null
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
-    property string pendingGlobalSearchPrefillText: ""
-    property string globalSearchOpenInitialText: ""
     readonly property bool visualFeedsEnabled: visible
         && visibility !== Window.Minimized
     readonly property bool useWholeScreenViewerMode: uiBridge.viewerFullscreenMode === 1
@@ -149,6 +142,15 @@ Kirigami.ApplicationWindow {
     Components.UiPalette {
         id: uiPaletteObject
         windowRoot: root
+    }
+
+    Controllers.GlobalSearchController {
+        id: globalSearchController
+        uiBridge: root.uiBridge
+        globalSearchModelApi: root.globalSearchModelApi
+        requestLibraryRevealForSearchRow: root.requestLibraryRevealForSearchRow
+        focusLibraryViewForNavigation: root.focusLibraryViewForNavigation
+        requestOpenInFileBrowserForSearchRow: root.openGlobalSearchRowInFileBrowser
     }
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
@@ -575,13 +577,6 @@ Kirigami.ApplicationWindow {
         interval: 80
         repeat: false
         onTriggered: root.applyPendingSearchOpen()
-    }
-
-    Timer {
-        id: globalSearchOpenSettleTimer
-        interval: 260
-        repeat: false
-        onTriggered: root.globalSearchIgnoreRefocusFind = false
     }
 
     function moveSelected(delta) {
@@ -1069,83 +1064,6 @@ Kirigami.ApplicationWindow {
         const targetY = view.contentY + (direction * notches * stepPx)
         view.contentY = Math.max(0, Math.min(maxY, targetY))
         wheel.accepted = true
-    }
-
-    function stepGlobalSearchResultsView(wheel) {
-        if (!globalSearchResultsViewRef || !wheel) {
-            return
-        }
-        let deltaY = 0
-        if (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0) {
-            deltaY = wheel.angleDelta.y
-        } else if (wheel.pixelDelta && wheel.pixelDelta.y !== undefined && wheel.pixelDelta.y !== 0) {
-            deltaY = wheel.pixelDelta.y
-        }
-        if (deltaY === 0) {
-            return
-        }
-        const maxY = Math.max(0, globalSearchResultsViewRef.contentHeight - globalSearchResultsViewRef.height)
-        if (maxY <= 0) {
-            return
-        }
-        const rowPx = 24
-        const stepPx = rowPx * 3
-        const notches = (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0)
-            ? Math.max(1, Math.round(Math.abs(wheel.angleDelta.y) / 120))
-            : Math.max(1, Math.round(Math.abs(deltaY) / stepPx))
-        const direction = deltaY > 0 ? -1 : 1
-        let targetY = globalSearchResultsViewRef.contentY + (direction * notches * stepPx)
-        targetY = Math.max(0, Math.min(maxY, targetY))
-
-        if (direction > 0 && globalSearchRowCount() > 0) {
-            const lastIndex = globalSearchRowCount() - 1
-            const lastRowTop = globalSearchRowTop(lastIndex)
-            const lastRowBottom = lastRowTop + globalSearchRowHeight(lastIndex)
-            const viewportBottom = targetY + globalSearchResultsViewRef.height
-            const lastRowPartiallyVisible = lastRowTop < viewportBottom && lastRowBottom > viewportBottom
-            if (lastRowPartiallyVisible) {
-                targetY = Math.max(0, Math.min(maxY, lastRowBottom - globalSearchResultsViewRef.height))
-            } else if ((maxY - targetY) <= globalSearchRowHeight(lastIndex)) {
-                targetY = maxY
-            }
-        }
-
-        globalSearchResultsViewRef.contentY = targetY
-        if (direction > 0 && globalSearchRowCount() > 0) {
-            const lastIndex = globalSearchRowCount() - 1
-            const probeX = Math.max(0, Math.min(8, globalSearchResultsViewRef.width - 1))
-            const probeY = Math.max(0, globalSearchResultsViewRef.height - 2)
-            const bottomIndex = globalSearchResultsViewRef.indexAt(probeX, probeY)
-            if (bottomIndex >= lastIndex - 1
-                    || (maxY - globalSearchResultsViewRef.contentY) <= globalSearchRowHeight(lastIndex)) {
-                globalSearchResultsViewRef.positionViewAtIndex(lastIndex, ListView.End)
-                Qt.callLater(function() {
-                    if (globalSearchResultsViewRef) {
-                        globalSearchResultsViewRef.positionViewAtIndex(lastIndex, ListView.End)
-                    }
-                })
-            }
-        }
-        wheel.accepted = true
-    }
-
-    function globalSearchRowHeight(index) {
-        if (index < 0 || !globalSearchModelApi) {
-            return 24
-        }
-        const row = globalSearchModelApi.rowDataAt(index)
-        return row && (row.kind || "") === "section" ? 30 : 24
-    }
-
-    function globalSearchRowTop(index) {
-        if (index <= 0) {
-            return 0
-        }
-        let y = 0
-        for (let i = 0; i < index; ++i) {
-            y += globalSearchRowHeight(i)
-        }
-        return y
     }
 
     function captureLibraryViewAnchor() {
@@ -1984,7 +1902,7 @@ Kirigami.ApplicationWindow {
     }
 
     function handleLibraryKeyPress(event) {
-        if (root.tryCaptureGlobalSearchPrefill(event)) {
+        if (globalSearchController.tryCapturePrefill(event)) {
             return
         }
         if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
@@ -2042,228 +1960,6 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    function globalSearchRowCount() {
-        return globalSearchResultsViewRef ? (globalSearchResultsViewRef.count || 0) : 0
-    }
-
-    function syncGlobalSearchSelectionAfterResultsChange() {
-        const firstIndex = nextSearchSelectableIndex(-1, 1, false)
-        if (globalSearchSelectedDisplayIndex < 0 || !isSearchRowSelectable(globalSearchSelectedDisplayIndex)) {
-            globalSearchSelectedDisplayIndex = firstIndex
-        } else if (globalSearchSelectedDisplayIndex >= globalSearchRowCount()) {
-            globalSearchSelectedDisplayIndex = firstIndex
-        }
-    }
-
-    function searchFirstSelectableIndex() {
-        return nextSearchSelectableIndex(-1, 1, false)
-    }
-
-    function searchLastSelectableIndex() {
-        return nextSearchSelectableIndex(globalSearchRowCount(), -1, false)
-    }
-
-    function isSearchRowSelectable(index) {
-        return globalSearchModelApi ? !!globalSearchModelApi.isSelectableIndex(index) : false
-    }
-
-    function nextSearchSelectableIndex(startIndex, step, wrap) {
-        if (!globalSearchModelApi) {
-            return -1
-        }
-        return globalSearchModelApi.nextSelectableIndex(startIndex, step, wrap)
-    }
-
-    function moveGlobalSearchSelectionByPage(direction) {
-        if (globalSearchRowCount() === 0) {
-            return false
-        }
-        const stepDir = direction < 0 ? -1 : 1
-        const pageRows = Math.max(
-            1,
-            Math.floor(((globalSearchResultsViewRef ? globalSearchResultsViewRef.height : 240) / 24)) - 1)
-        let index = globalSearchSelectedDisplayIndex
-        if (!isSearchRowSelectable(index)) {
-            index = stepDir > 0 ? searchFirstSelectableIndex() : searchLastSelectableIndex()
-        }
-        if (index < 0) {
-            return false
-        }
-        let moved = false
-        for (let i = 0; i < pageRows; ++i) {
-            const next = nextSearchSelectableIndex(index, stepDir, false)
-            if (next < 0) {
-                break
-            }
-            index = next
-            moved = true
-        }
-        if (!moved) {
-            return false
-        }
-        return selectGlobalSearchDisplayIndex(index)
-    }
-
-    function selectGlobalSearchDisplayIndex(index) {
-        if (!isSearchRowSelectable(index)) {
-            return false
-        }
-        globalSearchSelectedDisplayIndex = index
-        if (globalSearchResultsViewRef && index >= 0 && index < globalSearchRowCount()) {
-            const firstSelectable = searchFirstSelectableIndex()
-            if (index === firstSelectable && globalSearchModelApi) {
-                globalSearchResultsViewRef.contentY = 0
-                Qt.callLater(function() {
-                    if (globalSearchResultsViewRef) {
-                        globalSearchResultsViewRef.contentY = 0
-                    }
-                })
-            } else {
-                globalSearchResultsViewRef.positionViewAtIndex(index, ListView.Contain)
-            }
-        }
-        return true
-    }
-
-    function selectedGlobalSearchRow() {
-        if (!isSearchRowSelectable(globalSearchSelectedDisplayIndex)) {
-            return null
-        }
-        const row = globalSearchModelApi
-            ? globalSearchModelApi.rowDataAt(globalSearchSelectedDisplayIndex)
-            : null
-        return row || null
-    }
-
-    function openGlobalSearch() {
-        if (globalSearchDialogRef && globalSearchDialogRef.visible) {
-            focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
-            return
-        }
-        beginGlobalSearchOpen()
-        if (globalSearchDialogRef) {
-            globalSearchDialogRef.open()
-        }
-    }
-
-    function focusGlobalSearchQueryField(selectAll) {
-        if (!globalSearchQueryFieldRef) {
-            return
-        }
-        globalSearchQueryFieldRef.forceActiveFocus()
-        if (selectAll) {
-            globalSearchQueryFieldRef.selectAll()
-        } else {
-            globalSearchQueryFieldRef.cursorPosition = (globalSearchQueryFieldRef.text || "").length
-        }
-    }
-
-    function beginGlobalSearchOpen() {
-        root.globalSearchOpening = true
-        root.globalSearchIgnoreRefocusFind = true
-        root.pendingGlobalSearchPrefillText = ""
-        root.globalSearchOpenInitialText = globalSearchQueryFieldRef
-            ? (globalSearchQueryFieldRef.text || "")
-            : ""
-    }
-
-    function handleGlobalSearchDialogOpened(queryText) {
-        root.globalSearchOpening = false
-        root.globalSearchIgnoreRefocusFind = true
-        globalSearchOpenSettleTimer.restart()
-        root.syncGlobalSearchSelectionAfterResultsChange()
-        root.focusGlobalSearchQueryField(false)
-        root.applyGlobalSearchOpenText()
-        uiBridge.setGlobalSearchQuery(queryText || "")
-    }
-
-    function endGlobalSearchOpen(closeDialog) {
-        root.globalSearchOpening = false
-        root.globalSearchIgnoreRefocusFind = false
-        globalSearchOpenSettleTimer.stop()
-        root.pendingGlobalSearchPrefillText = ""
-        root.globalSearchOpenInitialText = ""
-        if (closeDialog) {
-            uiBridge.setGlobalSearchQuery("")
-        }
-    }
-
-    function isGlobalSearchPrintableChar(text) {
-        return text.length === 1
-            && text !== "\n"
-            && text !== "\r"
-            && text !== "\t"
-    }
-
-    function trimInitialSearchPrefix(currentText, initialText) {
-        const current = currentText || ""
-        const initial = initialText || ""
-        if (initial.length > 0 && current !== initial && current.startsWith(initial)) {
-            return current.slice(initial.length)
-        }
-        return current
-    }
-
-    function applyGlobalSearchOpenText() {
-        if (!globalSearchQueryFieldRef) {
-            return
-        }
-        if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
-            globalSearchQueryFieldRef.text = root.pendingGlobalSearchPrefillText
-            root.pendingGlobalSearchPrefillText = ""
-            return
-        }
-
-        const current = globalSearchQueryFieldRef.text || ""
-        const initial = root.globalSearchOpenInitialText || ""
-        if (current.length <= 0) {
-            return
-        }
-        const trimmed = trimInitialSearchPrefix(current, initial)
-        if (trimmed !== current) {
-            globalSearchQueryFieldRef.text = trimmed
-            globalSearchQueryFieldRef.cursorPosition = (globalSearchQueryFieldRef.text || "").length
-            return
-        }
-        if (current === initial) {
-            globalSearchQueryFieldRef.selectAll()
-        }
-    }
-
-    function tryCaptureGlobalSearchPrefill(event) {
-        const shouldCapture = root.globalSearchOpening
-            || ((globalSearchDialogRef && globalSearchDialogRef.visible)
-                && root.globalSearchIgnoreRefocusFind
-                && (!globalSearchQueryFieldRef || !globalSearchQueryFieldRef.activeFocus))
-        if (!shouldCapture) {
-            return false
-        }
-        if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
-            return false
-        }
-        const openingText = event.text || ""
-        if (!isGlobalSearchPrintableChar(openingText)) {
-            return false
-        }
-        if (globalSearchDialogRef && globalSearchDialogRef.visible && !root.globalSearchOpening
-                && globalSearchQueryFieldRef) {
-            const hasSelection = (globalSearchQueryFieldRef.selectedText || "").length > 0
-            const current = globalSearchQueryFieldRef.text || ""
-            if (hasSelection) {
-                globalSearchQueryFieldRef.text = openingText
-            } else {
-                const alreadyTyped = trimInitialSearchPrefix(current, root.globalSearchOpenInitialText || "")
-                globalSearchQueryFieldRef.text = alreadyTyped + openingText
-            }
-            globalSearchQueryFieldRef.cursorPosition = (globalSearchQueryFieldRef.text || "").length
-            root.focusGlobalSearchQueryField(false)
-        } else {
-            root.pendingGlobalSearchPrefillText += openingText
-        }
-        event.accepted = true
-        return true
-    }
-
     function openDiagnostics() {
         diagnosticsDialog.open()
     }
@@ -2286,25 +1982,6 @@ Kirigami.ApplicationWindow {
         pendingLibraryRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")
         pendingLibraryRevealAttempts = 80
         Qt.callLater(root.applyPendingLibraryReveal)
-    }
-
-    function navigateGlobalSearchSelectionToLibrary() {
-        let row = selectedGlobalSearchRow()
-        if (!row) {
-            const first = searchFirstSelectableIndex()
-            if (first >= 0) {
-                selectGlobalSearchDisplayIndex(first)
-                row = selectedGlobalSearchRow()
-            }
-        }
-        if (!row) {
-            return
-        }
-        requestLibraryRevealForSearchRow(row)
-        if (globalSearchDialogRef) {
-            globalSearchDialogRef.close()
-        }
-        Qt.callLater(root.focusLibraryViewForNavigation)
     }
 
     function ensureLibraryKeyExpanded(key) {
@@ -2391,48 +2068,6 @@ Kirigami.ApplicationWindow {
         searchOpenRetryTimer.restart()
     }
 
-    function activateGlobalSearchRow(row) {
-        if (!row || row.kind !== "item") {
-            return
-        }
-        const rowType = row.rowType || ""
-        if (rowType === "track") {
-            uiBridge.replaceWithPaths([row.trackPath || ""])
-        } else if (rowType === "album") {
-            const albumName = (row.album || row.label || "").trim()
-            uiBridge.replaceAlbumByKey(
-                (row.artistKey || row.artist || "").trim(),
-                (row.albumKey || albumName).trim())
-        } else if (rowType === "artist") {
-            uiBridge.replaceArtistByName((row.artistKey || row.artist || row.label || "").trim())
-        }
-        requestLibraryRevealForSearchRow(row)
-        if (globalSearchDialogRef) {
-            globalSearchDialogRef.close()
-        }
-    }
-
-    function queueGlobalSearchRow(row) {
-        if (!row || row.kind !== "item") {
-            return
-        }
-        const rowType = row.rowType || ""
-        if (rowType === "track") {
-            uiBridge.appendTrack(row.trackPath || "")
-            return
-        }
-        if (rowType === "album") {
-            const albumName = (row.album || row.label || "").trim()
-            uiBridge.appendAlbumByKey(
-                (row.artistKey || row.artist || "").trim(),
-                (row.albumKey || albumName).trim())
-            return
-        }
-        if (rowType === "artist") {
-            uiBridge.appendArtistByName((row.artistKey || row.artist || row.label || "").trim())
-        }
-    }
-
     function openGlobalSearchRowInFileBrowser(row) {
         if (!row || row.kind !== "item") {
             return
@@ -2457,13 +2092,6 @@ Kirigami.ApplicationWindow {
         pendingSearchOpenExpandKeys = expandKeys
         pendingSearchOpenAttempts = 80
         Qt.callLater(root.applyPendingSearchOpen)
-    }
-
-    function activateGlobalSearchSelection() {
-        const row = selectedGlobalSearchRow()
-        if (row) {
-            activateGlobalSearchRow(row)
-        }
     }
 
     function urlToLocalPath(urlValue) {
@@ -2832,7 +2460,7 @@ Kirigami.ApplicationWindow {
         id: globalSearchAction
         text: "Global Search..."
         shortcut: StandardKey.Find
-        onTriggered: root.openGlobalSearch()
+        onTriggered: globalSearchController.openDialog()
     }
     Action {
         id: diagnosticsAction
@@ -2944,9 +2572,7 @@ Kirigami.ApplicationWindow {
     Shortcut {
         sequence: "Space"
         enabled: !(libraryViewRef && libraryViewRef.activeFocus)
-            && !(globalSearchDialogRef && globalSearchDialogRef.visible
-                && ((globalSearchQueryFieldRef && globalSearchQueryFieldRef.activeFocus)
-                    || (globalSearchResultsViewRef && globalSearchResultsViewRef.activeFocus)))
+            && !globalSearchController.dialogHasActiveInputFocus
         onActivated: root.togglePlayPause()
     }
     menuBar: MenuBar {
@@ -3109,16 +2735,13 @@ Kirigami.ApplicationWindow {
     }
 
     Dialogs.GlobalSearchDialog {
-        uiBridge: root.uiBridge
+        controller: globalSearchController
         uiPalette: root.uiPalette
         windowRoot: root
         popupTransitionMs: root.uiPopupTransitionMs
         snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
         snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
-        globalSearchModelApi: root.globalSearchModelApi
-        selectedDisplayIndex: root.globalSearchSelectedDisplayIndex
         globalSearchShowsRootColumn: root.globalSearchShowsRootColumn
-        globalSearchIgnoreRefocusFind: root.globalSearchIgnoreRefocusFind
         globalSearchTrackNumberColumnWidth: root.globalSearchTrackNumberColumnWidth
         globalSearchCoverColumnWidth: root.globalSearchCoverColumnWidth
         globalSearchArtistColumnWidth: root.globalSearchArtistColumnWidth
@@ -3128,25 +2751,6 @@ Kirigami.ApplicationWindow {
         globalSearchTrackGenreColumnWidth: root.globalSearchTrackGenreColumnWidth
         globalSearchAlbumCountColumnWidth: root.globalSearchAlbumCountColumnWidth
         globalSearchTrackLengthColumnWidth: root.globalSearchTrackLengthColumnWidth
-        handleOpened: root.handleGlobalSearchDialogOpened
-        handleClosed: root.endGlobalSearchOpen
-        focusQueryField: root.focusGlobalSearchQueryField
-        stepResultsView: root.stepGlobalSearchResultsView
-        nextSelectableIndex: root.nextSearchSelectableIndex
-        selectDisplayIndex: root.selectGlobalSearchDisplayIndex
-        searchFirstSelectableIndex: root.searchFirstSelectableIndex
-        searchLastSelectableIndex: root.searchLastSelectableIndex
-        moveSelectionByPage: root.moveGlobalSearchSelectionByPage
-        activateSelection: root.activateGlobalSearchSelection
-        navigateSelectionToLibrary: root.navigateGlobalSearchSelectionToLibrary
-        activateRow: root.activateGlobalSearchRow
-        queueRow: root.queueGlobalSearchRow
-        openRowInFileBrowser: root.openGlobalSearchRowInFileBrowser
-        onRefsReady: function(dialog, queryField, resultsView) {
-            root.globalSearchDialogRef = dialog
-            root.globalSearchQueryFieldRef = queryField
-            root.globalSearchResultsViewRef = resultsView
-        }
     }
 
     Dialogs.DiagnosticsDialog {
@@ -3525,7 +3129,7 @@ Kirigami.ApplicationWindow {
             applyAnalysisDelta()
         }
         function onGlobalSearchResultsChanged() {
-            root.syncGlobalSearchSelectionAfterResultsChange()
+            globalSearchController.syncSelectionAfterResultsChange()
         }
         function onBridgeError(message) {
             if (message.indexOf("[analysis]") !== -1
@@ -3574,6 +3178,6 @@ Kirigami.ApplicationWindow {
         root.syncQueueSelectionToCurrentQueue()
         root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
         root.syncLibrarySelectionToVisibleRows()
-        root.syncGlobalSearchSelectionAfterResultsChange()
+        globalSearchController.syncSelectionAfterResultsChange()
     }
 }
