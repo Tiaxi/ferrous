@@ -193,7 +193,10 @@ Progress update (2026-03-15):
 - Completed: spectrogram delta delivery is now bounded per UI turn. `BridgeClient::takeSpectrogramRowsDeltaPacked(maxRowsPerChannel)` drains packed rows in small chunks, preserves ordering, and re-queues `analysisChanged()` while backlog remains so a seek-induced burst no longer lands in one GUI-thread turn.
 - Completed: `Main.qml` now consumes the per-delta `reset` flag instead of re-reading a sticky bridge property, so partial draining after a reset only clears the surface once.
 - Completed: `SpectrogramSurface` no longer flushes packed deltas synchronously on the `analysisChanged` handler stack; it schedules the flush to the next turn.
-- Remaining: `SpectrogramItem` still recreates the full texture image for incremental updates, so the texture-upload part of the Phase 4 spectrogram work is still outstanding.
+- Completed: `SpectrogramItem` now keeps a fixed tile pool for the canvas texture and only recreates/upload dirty tiles instead of rebuilding a full-canvas texture on every incremental update.
+- Completed: spectrogram row consumption no longer happens inside the frame callback. `handleWindowAfterAnimating()` now advances presentation state and schedules queued drains, while the actual column-to-canvas work runs in bounded async passes.
+- Completed: `WaveformItem` now uses a cached raster image plus partial `update(rect)` invalidation, so progressive waveform generation repaints only the newly affected span instead of repainting the full control width on each update.
+- Validation: `./scripts/run-tests.sh --ui-only` passed after the Phase 4 renderer changes.
 
 #### Spectrogram
 

@@ -1,10 +1,10 @@
 #pragma once
 
+#include <QByteArray>
 #include <QImage>
 #include <QMetaObject>
 #include <QMutex>
 #include <QQuickItem>
-#include <QByteArray>
 #include <QVariantList>
 
 #include <array>
@@ -60,6 +60,7 @@ protected:
 
 private:
     static constexpr int kGradientTableSize = 2048;
+    static constexpr int kCanvasTileWidth = 64;
 
     void rebuildPalette();
     void invalidateMapping();
@@ -68,9 +69,15 @@ private:
     void ensureCanvas(int width, int height);
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
+    void resizeDirtyTilesLocked();
+    void markTileDirtyLocked(int x);
+    void markAllTilesDirtyLocked();
     bool consumePendingColumnsLocked(int requested);
     void absorbPendingHistoryLocked(int retainPending);
-    bool advanceAnimationLocked(double elapsedSeconds);
+    bool advanceAnimationLocked(double elapsedSeconds, bool *drainReady);
+    int readyPendingColumnsLocked() const;
+    void schedulePendingDrain();
+    void drainPendingColumns();
     void noteIncomingRowsLocked();
     double targetRowsPerSecondLocked() const;
     void updateOverlayImageLocked();
@@ -92,15 +99,16 @@ private:
 
     QImage m_canvas;
     bool m_canvasDirty{true};
-    bool m_textureDirty{true};
     QImage m_overlayImage;
     bool m_overlayDirty{true};
     int m_canvasWriteX{0};
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
     std::deque<std::vector<quint8>> m_pendingColumns;
+    std::vector<unsigned char> m_dirtyTiles;
     double m_pendingPhase{0.0};
     bool m_seedHistoryOnNextAppend{true};
+    bool m_pendingDrainScheduled{false};
     std::chrono::steady_clock::time_point m_lastRowAppendTime{};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};

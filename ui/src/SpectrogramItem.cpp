@@ -18,8 +18,10 @@
 namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
+constexpr int kMaxDrainColumnsPerPass = 8;
 constexpr int kMaxPendingColumns = 512;
 constexpr int kLivePendingColumns = 2;
+constexpr int kMaxTileNodes = 64;
 const QColor kBackgroundColor(0x0b, 0x0b, 0x0f);
 const QColor kOverlayColor(190, 190, 200, 150);
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
@@ -76,29 +78,35 @@ bool shouldLogProfileSpike(
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
-        first = new QSGSimpleTextureNode();
-        second = new QSGSimpleTextureNode();
+        tilesRoot = new QSGNode();
         latest = new QSGSimpleTextureNode();
         overlay = new QSGSimpleTextureNode();
         appendChildNode(background);
-        appendChildNode(first);
-        appendChildNode(second);
+        appendChildNode(tilesRoot);
         appendChildNode(latest);
         appendChildNode(overlay);
+        tileNodes.reserve(kMaxTileNodes);
+        tileTextures.reserve(kMaxTileNodes);
+        for (int i = 0; i < kMaxTileNodes; ++i) {
+            auto *tileNode = new QSGSimpleTextureNode();
+            tilesRoot->appendChildNode(tileNode);
+            tileNodes.push_back(tileNode);
+            tileTextures.push_back(nullptr);
+        }
     }
 
     ~SpectrogramSceneNode() override {
-        delete canvasTexture;
+        qDeleteAll(tileTextures);
         delete overlayTexture;
         delete placeholderTexture;
     }
 
     QSGSimpleRectNode *background{nullptr};
-    QSGSimpleTextureNode *first{nullptr};
-    QSGSimpleTextureNode *second{nullptr};
+    QSGNode *tilesRoot{nullptr};
     QSGSimpleTextureNode *latest{nullptr};
     QSGSimpleTextureNode *overlay{nullptr};
-    QSGTexture *canvasTexture{nullptr};
+    QVector<QSGSimpleTextureNode *> tileNodes;
+    QVector<QSGTexture *> tileTextures;
     QSGTexture *overlayTexture{nullptr};
     QSGTexture *placeholderTexture{nullptr};
     quintptr ownerWindowId{0};
@@ -250,6 +258,7 @@ void SpectrogramItem::reset() {
     m_pendingColumns.clear();
     m_pendingPhase = 0.0;
     m_seedHistoryOnNextAppend = true;
+    m_pendingDrainScheduled = false;
     m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
     m_binsPerColumn = 0;
@@ -262,6 +271,7 @@ void SpectrogramItem::halt() {
     QMutexLocker lock(&m_stateMutex);
     m_pendingColumns.clear();
     m_pendingPhase = 0.0;
+    m_pendingDrainScheduled = false;
     m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
     update();
@@ -306,6 +316,11 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     }
     if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
+    }
+    const bool drainReady = readyPendingColumnsLocked() > 0;
+    lock.unlock();
+    if (drainReady) {
+        schedulePendingDrain();
     }
     update();
 }
@@ -355,6 +370,7 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
     if (m_columns.empty()) {
         consumePendingColumnsLocked(1);
     }
+    const bool drainReady = readyPendingColumnsLocked() > 0;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
         const auto now = std::chrono::steady_clock::now();
@@ -373,6 +389,10 @@ void SpectrogramItem::appendPackedRows(const QByteArray &packedRows, int rowCoun
         }
     }
 #endif
+    lock.unlock();
+    if (drainReady) {
+        schedulePendingDrain();
+    }
     update();
 }
 
@@ -406,16 +426,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     node->background->setColor(kBackgroundColor);
 
     bool hasCanvas = false;
-    bool canvasChanged = false;
-    QImage canvasImage;
     QSize canvasSize;
     int drawCols = 0;
     int srcStart = 0;
-    int firstWidth = 0;
-    int remaining = 0;
     int latestX = 0;
     double scrollOffset = 0.0;
     double drawX = 0.0;
+    QVector<QImage> tileImages;
+    QVector<int> tileDirtyIndexes;
     bool showOverlay = false;
     bool overlayChanged = false;
     QImage overlayImage;
@@ -432,6 +450,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 rebuildCanvasFromColumns();
             }
             if (!m_canvas.isNull()) {
+                resizeDirtyTilesLocked();
                 drawCols = std::min(m_canvasFilledCols, m_canvas.width());
                 if (drawCols > 0) {
                     hasCanvas = true;
@@ -439,13 +458,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
                     scrollOffset = std::clamp(m_pendingPhase, 0.0, 0.999);
                     drawX = static_cast<double>(w - drawCols) - scrollOffset;
-                    firstWidth = std::min(m_canvas.width() - srcStart, drawCols);
-                    remaining = drawCols - firstWidth;
                     latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
-                    if (m_textureDirty || node->canvasTexture == nullptr) {
-                        canvasImage = m_canvas;
-                        canvasChanged = true;
-                        m_textureDirty = false;
+                    const int tileCount = static_cast<int>(m_dirtyTiles.size());
+                    const bool refreshAllTiles = node->tileTextures.size() != tileCount;
+                    tileImages.reserve(tileCount);
+                    tileDirtyIndexes.reserve(tileCount);
+                    for (int tileIndex = 0; tileIndex < tileCount; ++tileIndex) {
+                        if (!refreshAllTiles
+                            && !m_dirtyTiles[static_cast<size_t>(tileIndex)]
+                            && node->tileTextures.value(tileIndex) != nullptr) {
+                            continue;
+                        }
+                        const int tileStart = tileIndex * kCanvasTileWidth;
+                        const int tileWidth = std::min(kCanvasTileWidth, m_canvas.width() - tileStart);
+                        if (tileWidth <= 0) {
+                            continue;
+                        }
+                        tileDirtyIndexes.push_back(tileIndex);
+                        tileImages.push_back(m_canvas.copy(tileStart, 0, tileWidth, m_canvas.height()));
+                        m_dirtyTiles[static_cast<size_t>(tileIndex)] = 0;
                     }
                 }
             }
@@ -467,16 +498,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         profileBinsPerColumn = m_binsPerColumn;
     }
 
-    QSGTexture *oldCanvasTexture = nullptr;
     QSGTexture *oldOverlayTexture = nullptr;
 
-    if (canvasChanged) {
-        oldCanvasTexture = node->canvasTexture;
-        node->canvasTexture = nullptr;
-        if (!canvasImage.isNull() && currentWindow != nullptr) {
-            node->canvasTexture = currentWindow->createTextureFromImage(canvasImage);
-            if (node->canvasTexture != nullptr) {
-                node->canvasTexture->setFiltering(QSGTexture::Nearest);
+    for (int i = 0; i < tileDirtyIndexes.size(); ++i) {
+        const int tileIndex = tileDirtyIndexes[i];
+        if (tileIndex < 0 || tileIndex >= node->tileTextures.size()) {
+            continue;
+        }
+        delete node->tileTextures[tileIndex];
+        node->tileTextures[tileIndex] = nullptr;
+        if (!tileImages[i].isNull() && currentWindow != nullptr) {
+            node->tileTextures[tileIndex] = currentWindow->createTextureFromImage(tileImages[i]);
+            if (node->tileTextures[tileIndex] != nullptr) {
+                node->tileTextures[tileIndex]->setFiltering(QSGTexture::Nearest);
             }
         }
     }
@@ -491,58 +525,86 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
     }
 
-    if (hasCanvas && node->canvasTexture != nullptr) {
-        if (node->first == nullptr) {
-            node->first = new QSGSimpleTextureNode();
-            node->appendChildNode(node->first);
-        }
-        if (node->second == nullptr) {
-            node->second = new QSGSimpleTextureNode();
-            node->appendChildNode(node->second);
-        }
-        if (node->latest == nullptr) {
-            node->latest = new QSGSimpleTextureNode();
-            node->appendChildNode(node->latest);
-        }
+    for (QSGSimpleTextureNode *tileNode : node->tileNodes) {
         configureTextureNode(
-            node->first,
-            node->canvasTexture,
-            QRectF(drawX, 0.0, static_cast<double>(firstWidth), static_cast<double>(canvasSize.height())),
-            QRect(srcStart, 0, firstWidth, canvasSize.height()),
+            tileNode,
+            nullptr,
+            QRectF(),
+            QRect(),
             node->placeholderTexture);
-        configureTextureNode(
-            node->second,
-            node->canvasTexture,
-            QRectF(
-                drawX + static_cast<double>(firstWidth),
-                0.0,
-                static_cast<double>(remaining),
-                static_cast<double>(canvasSize.height())),
-            QRect(0, 0, remaining, canvasSize.height()),
-            node->placeholderTexture);
-        configureTextureNode(
-            node->latest,
-            node->canvasTexture,
-            QRectF(
-                static_cast<double>(w) - scrollOffset,
-                0.0,
-                scrollOffset,
-                static_cast<double>(canvasSize.height())),
-            QRect(latestX, 0, scrollOffset > 0.0 ? 1 : 0, canvasSize.height()),
-            node->placeholderTexture);
+    }
+
+    if (hasCanvas) {
+        auto configureSegment = [&](int canvasOffset, int length, double targetX) {
+            int remainingLength = length;
+            int segmentOffset = canvasOffset;
+            double segmentTargetX = targetX;
+            while (remainingLength > 0) {
+                const int tileIndex = segmentOffset / kCanvasTileWidth;
+                if (tileIndex < 0 || tileIndex >= node->tileNodes.size()) {
+                    break;
+                }
+                const int tileStart = tileIndex * kCanvasTileWidth;
+                const int tileWidth = std::min(kCanvasTileWidth, canvasSize.width() - tileStart);
+                const int withinTile = segmentOffset - tileStart;
+                const int span = std::min(remainingLength, tileWidth - withinTile);
+                QSGTexture *tileTexture = node->tileTextures[tileIndex];
+                configureTextureNode(
+                    node->tileNodes[tileIndex],
+                    tileTexture,
+                    QRectF(
+                        segmentTargetX,
+                        0.0,
+                        static_cast<double>(span),
+                        static_cast<double>(canvasSize.height())),
+                    QRect(withinTile, 0, span, canvasSize.height()),
+                    node->placeholderTexture);
+                segmentOffset += span;
+                segmentTargetX += static_cast<double>(span);
+                remainingLength -= span;
+            }
+        };
+
+        const int firstLength = std::min(canvasSize.width() - srcStart, drawCols);
+        const int secondLength = drawCols - firstLength;
+        configureSegment(srcStart, firstLength, drawX);
+        if (secondLength > 0) {
+            configureSegment(0, secondLength, drawX + static_cast<double>(firstLength));
+        }
+
+        int latestTileIndex = latestX / kCanvasTileWidth;
+        if (scrollOffset > 0.0
+            && latestTileIndex >= 0
+            && latestTileIndex < node->tileTextures.size()) {
+            QSGTexture *latestTexture = node->tileTextures[latestTileIndex];
+            const int latestWithinTile = latestX - (latestTileIndex * kCanvasTileWidth);
+            configureTextureNode(
+                node->latest,
+                latestTexture,
+                QRectF(
+                    static_cast<double>(w) - scrollOffset,
+                    0.0,
+                    scrollOffset,
+                    static_cast<double>(canvasSize.height())),
+                QRect(latestWithinTile, 0, 1, canvasSize.height()),
+                node->placeholderTexture);
+        } else {
+            configureTextureNode(
+                node->latest,
+                nullptr,
+                QRectF(),
+                QRect(),
+                node->placeholderTexture);
+        }
     } else {
-        configureTextureNode(
-            node->first,
-            nullptr,
-            QRectF(),
-            QRect(),
-            node->placeholderTexture);
-        configureTextureNode(
-            node->second,
-            nullptr,
-            QRectF(),
-            QRect(),
-            node->placeholderTexture);
+        for (QSGSimpleTextureNode *tileNode : node->tileNodes) {
+            configureTextureNode(
+                tileNode,
+                nullptr,
+                QRectF(),
+                QRect(),
+                node->placeholderTexture);
+        }
         configureTextureNode(
             node->latest,
             nullptr,
@@ -572,7 +634,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->placeholderTexture);
     }
 
-    delete oldCanvasTexture;
     delete oldOverlayTexture;
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -615,7 +676,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 void SpectrogramItem::releaseResources() {
     QMutexLocker lock(&m_stateMutex);
     m_sceneGraphGeneration += 1;
-    m_textureDirty = true;
+    markAllTilesDirtyLocked();
     m_overlayDirty = true;
 }
 
@@ -668,9 +729,34 @@ void SpectrogramItem::invalidateMapping() {
 void SpectrogramItem::invalidateCanvas() {
     m_canvas = QImage();
     m_canvasDirty = true;
-    m_textureDirty = true;
     m_canvasWriteX = 0;
     m_canvasFilledCols = 0;
+    m_dirtyTiles.clear();
+}
+
+void SpectrogramItem::resizeDirtyTilesLocked() {
+    if (m_canvas.isNull() || m_canvas.width() <= 0) {
+        m_dirtyTiles.clear();
+        return;
+    }
+    const int tileCount = std::max(1, (m_canvas.width() + kCanvasTileWidth - 1) / kCanvasTileWidth);
+    if (static_cast<int>(m_dirtyTiles.size()) != tileCount) {
+        m_dirtyTiles.assign(static_cast<size_t>(tileCount), 1);
+    }
+}
+
+void SpectrogramItem::markTileDirtyLocked(int x) {
+    if (m_canvas.isNull() || m_canvas.width() <= 0) {
+        return;
+    }
+    resizeDirtyTilesLocked();
+    const int tileIndex = std::clamp(x / kCanvasTileWidth, 0, static_cast<int>(m_dirtyTiles.size()) - 1);
+    m_dirtyTiles[static_cast<size_t>(tileIndex)] = 1;
+}
+
+void SpectrogramItem::markAllTilesDirtyLocked() {
+    resizeDirtyTilesLocked();
+    std::fill(m_dirtyTiles.begin(), m_dirtyTiles.end(), 1);
 }
 
 void SpectrogramItem::ensureMapping(int height) {
@@ -720,6 +806,8 @@ void SpectrogramItem::ensureCanvas(int width, int height) {
         m_canvas = QImage(cols, height, QImage::Format_RGB32);
         m_canvas.fill(Qt::black);
         m_canvasDirty = true;
+        resizeDirtyTilesLocked();
+        markAllTilesDirtyLocked();
     }
     if (m_canvasDirty) {
         rebuildCanvasFromColumns();
@@ -736,7 +824,7 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
     const int cols = m_canvas.width();
     if (m_columns.empty() || cols <= 0) {
         m_canvasDirty = false;
-        m_textureDirty = true;
+        markAllTilesDirtyLocked();
         return;
     }
     const int available = static_cast<int>(m_columns.size());
@@ -748,13 +836,15 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
         m_canvasFilledCols = std::min(cols, m_canvasFilledCols + 1);
     }
     m_canvasDirty = false;
-    m_textureDirty = true;
+    markAllTilesDirtyLocked();
 }
 
 void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
     if (m_canvas.isNull() || x < 0 || x >= m_canvas.width() || col.empty()) {
         return;
     }
+
+    markTileDirtyLocked(x);
 
     const int height = m_canvas.height();
     const int srcBins = std::max(1, m_binsPerColumn);
@@ -858,7 +948,6 @@ bool SpectrogramItem::consumePendingColumnsLocked(int requested) {
             drawColumnAt(m_canvasWriteX, m_columns.back());
             m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
             m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
-            m_textureDirty = true;
         }
         consumed = true;
     }
@@ -876,7 +965,16 @@ void SpectrogramItem::absorbPendingHistoryLocked(int retainPending) {
     m_seedHistoryOnNextAppend = false;
 }
 
-bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
+int SpectrogramItem::readyPendingColumnsLocked() const {
+    if (m_pendingColumns.empty()) {
+        return 0;
+    }
+    return std::min(
+        static_cast<int>(std::floor(m_pendingPhase)),
+        static_cast<int>(m_pendingColumns.size()));
+}
+
+bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds, bool *drainReady) {
     double dt = elapsedSeconds;
     if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.25) {
         const double fallbackFps = m_fpsValue > 0 ? static_cast<double>(m_fpsValue) : 60.0;
@@ -894,17 +992,6 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
 
     const double prevPhase = m_pendingPhase;
     m_pendingPhase += rowsPerSecond * dt;
-    const int backlog = static_cast<int>(m_pendingColumns.size());
-
-    bool consumed = false;
-    const int ready = static_cast<int>(std::floor(m_pendingPhase));
-    if (ready > 0 && backlog > 0) {
-        const int consume = std::min(ready, backlog);
-        consumed = consumePendingColumnsLocked(consume);
-        if (consumed) {
-            m_pendingPhase = std::max(0.0, m_pendingPhase - static_cast<double>(consume));
-        }
-    }
 
     if (m_pendingColumns.empty()) {
         const double idleSeconds = m_lastRowAppendTime.time_since_epoch().count() == 0
@@ -917,8 +1004,57 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         }
     }
 
+    if (drainReady != nullptr) {
+        *drainReady = readyPendingColumnsLocked() > 0;
+    }
     const bool phaseChanged = std::abs(m_pendingPhase - prevPhase) > 0.0001;
-    return consumed || phaseChanged;
+    return phaseChanged;
+}
+
+void SpectrogramItem::schedulePendingDrain() {
+    bool shouldSchedule = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_pendingDrainScheduled && readyPendingColumnsLocked() > 0) {
+            m_pendingDrainScheduled = true;
+            shouldSchedule = true;
+        }
+    }
+    if (!shouldSchedule) {
+        return;
+    }
+
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            drainPendingColumns();
+        },
+        Qt::QueuedConnection);
+}
+
+void SpectrogramItem::drainPendingColumns() {
+    bool consumed = false;
+    bool moreReady = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_pendingDrainScheduled = false;
+        const int ready = readyPendingColumnsLocked();
+        const int consume = std::min(ready, kMaxDrainColumnsPerPass);
+        if (consume > 0) {
+            consumed = consumePendingColumnsLocked(consume);
+            if (consumed) {
+                m_pendingPhase = std::max(0.0, m_pendingPhase - static_cast<double>(consume));
+            }
+        }
+        moreReady = readyPendingColumnsLocked() > 0;
+    }
+
+    if (consumed) {
+        update();
+    }
+    if (moreReady) {
+        schedulePendingDrain();
+    }
 }
 
 void SpectrogramItem::noteIncomingRowsLocked() {
@@ -990,7 +1126,7 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     {
         QMutexLocker lock(&m_stateMutex);
         m_sceneGraphGeneration += 1;
-        m_textureDirty = true;
+        markAllTilesDirtyLocked();
         m_overlayDirty = true;
         m_fpsInitialized = false;
         m_fpsValue = 0;
@@ -1018,6 +1154,7 @@ void SpectrogramItem::handleWindowAfterAnimating() {
 
     bool advanced = false;
     bool pending = false;
+    bool drainReady = false;
     double elapsed = 0.0;
     QMutexLocker lock(&m_stateMutex);
     if (m_animationTickInitialized) {
@@ -1032,7 +1169,7 @@ void SpectrogramItem::handleWindowAfterAnimating() {
         updateFpsEstimateLocked();
         changed = m_fpsValue != prev;
     }
-    advanced = advanceAnimationLocked(elapsed);
+    advanced = advanceAnimationLocked(elapsed, &drainReady);
     pending = !m_pendingColumns.empty();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled
@@ -1049,6 +1186,9 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     }
 #endif
     lock.unlock();
+    if (drainReady) {
+        schedulePendingDrain();
+    }
     if (changed || advanced || pending) {
         update();
     }

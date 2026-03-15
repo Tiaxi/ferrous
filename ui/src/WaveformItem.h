@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QImage>
 #include <QMutex>
 #include <QQuickPaintedItem>
 
@@ -42,12 +43,24 @@ signals:
     void durationSecondsChanged();
 
 private:
+    int currentWidthLocked() const;
+    int currentHeightLocked() const;
+    int drawnWidthLocked(double generatedSeconds, bool waveformComplete, double durationSeconds) const;
+    int xForPeakIndexLocked(int peakIndex, int peakCount, int drawWidth) const;
+    void ensureCacheLocked(int width, int height);
+    void markDirtyRangeLocked(int x0, int x1);
+    void markDirtyAllLocked();
+    void updateWaveformCacheLocked();
+
     mutable QMutex m_stateMutex;
     QByteArray m_peaksData;
     double m_generatedSeconds{0.0};
     bool m_waveformComplete{false};
     double m_positionSeconds{0.0};
     double m_durationSeconds{0.0};
+    QImage m_waveformCache;
+    QRect m_dirtyRect;
+    bool m_cacheDirty{true};
     bool m_profileEnabled{false};
     std::chrono::steady_clock::time_point m_profileLast{};
     quint64 m_profilePaints{0};

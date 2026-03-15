@@ -1,5 +1,7 @@
 #include <QApplication>
 #include <QFileInfo>
+#include <QImage>
+#include <QPainter>
 #include <QQuickWindow>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
@@ -14,8 +16,8 @@
 #include "../src/LibraryTreeModel.h"
 #define private public
 #include "../src/SpectrogramItem.h"
-#undef private
 #include "../src/WaveformItem.h"
+#undef private
 
 namespace {
 
@@ -364,7 +366,10 @@ private slots:
     void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
     void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
     void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
+    void spectrogramQueuedDrainConsumesReadyRows();
     void spectrogramHaltDropsPendingMotion();
+    void waveformProgressInvalidatesOnlyTailSpan();
+    void waveformPeakUpdatesInvalidateChangedSuffix();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
 };
 
@@ -1185,6 +1190,46 @@ void QmlSmokeTest::spectrogramSteadyStateAppendKeepsRowsPendingForAnimation() {
     QVERIFY(!item.m_seedHistoryOnNextAppend);
 }
 
+void QmlSmokeTest::spectrogramQueuedDrainConsumesReadyRows() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setSampleRateHz(48000);
+
+    constexpr int initialRows = 24;
+    constexpr int extraRows = 8;
+    constexpr int binsPerRow = 32;
+    QByteArray initialPackedRows;
+    initialPackedRows.resize(initialRows * binsPerRow);
+    for (int row = 0; row < initialRows; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            initialPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 5 + bin * 7) % 256);
+        }
+    }
+    item.appendPackedRows(initialPackedRows, initialRows, binsPerRow);
+
+    QByteArray extraPackedRows;
+    extraPackedRows.resize(extraRows * binsPerRow);
+    for (int row = 0; row < extraRows; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            extraPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 19 + bin * 3) % 256);
+        }
+    }
+    item.appendPackedRows(extraPackedRows, extraRows, binsPerRow);
+
+    const size_t columnsBefore = item.m_columns.size();
+    const size_t pendingBefore = item.m_pendingColumns.size();
+    QVERIFY(pendingBefore >= static_cast<size_t>(extraRows));
+
+    item.m_pendingPhase = 3.0;
+    item.schedulePendingDrain();
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_pendingDrainScheduled, 1000);
+
+    QCOMPARE(item.m_columns.size(), columnsBefore + 3);
+    QCOMPARE(item.m_pendingColumns.size(), pendingBefore - 3);
+    QCOMPARE(item.m_pendingPhase, 0.0);
+}
+
 void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {
     SpectrogramItem item;
     item.setWidth(320);
@@ -1217,6 +1262,59 @@ void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {
 
     QVERIFY(item.m_pendingColumns.empty());
     QCOMPARE(item.m_pendingPhase, 0.0);
+}
+
+void QmlSmokeTest::waveformProgressInvalidatesOnlyTailSpan() {
+    WaveformItem item;
+    item.setWidth(200);
+    item.setHeight(24);
+    item.setDurationSeconds(10.0);
+
+    QByteArray peaks(100, '\x33');
+    item.setPeaksData(peaks);
+    item.setGeneratedSeconds(5.0);
+
+    QImage canvas(200, 24, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(item.m_dirtyRect.isNull());
+
+    item.setGeneratedSeconds(7.0);
+
+    QCOMPARE(item.m_dirtyRect, QRect(100, 0, 40, 24));
+    QVERIFY(item.m_cacheDirty);
+}
+
+void QmlSmokeTest::waveformPeakUpdatesInvalidateChangedSuffix() {
+    WaveformItem item;
+    item.setWidth(200);
+    item.setHeight(24);
+    item.setDurationSeconds(10.0);
+    item.setWaveformComplete(true);
+
+    QByteArray peaks(100, '\x22');
+    item.setPeaksData(peaks);
+
+    QImage canvas(200, 24, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(item.m_dirtyRect.isNull());
+
+    QByteArray updated = peaks;
+    for (int i = 80; i < updated.size(); ++i) {
+        updated[i] = '\x66';
+    }
+    item.setPeaksData(updated);
+
+    QVERIFY(item.m_cacheDirty);
+    QVERIFY(item.m_dirtyRect.x() >= 160);
+    QCOMPARE(item.m_dirtyRect.height(), 24);
 }
 
 void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
