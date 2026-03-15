@@ -20,6 +20,14 @@
 - Inspect the relevant code paths and data flow until there is a concrete, defensible root cause for the observed behavior.
 - Only then implement the fix. If multiple plausible causes remain, keep investigating or explicitly state the remaining uncertainty instead of presenting a blind guess as the answer.
 
+## UI Responsiveness Rule
+- Always target buttery smooth, hitching-free, stutter-free, immediately responsive UI behavior.
+- Do not put blocking or long-running work on the UI thread.
+- Backend and frontend changes must preserve immediate reaction to user input, scrolling, animation, window interaction, and playback controls.
+- Prefer asynchronous/background execution, incremental updates, batching, and cancellation over synchronous work that can stall rendering or input handling.
+- Treat UI jank, visible hitching, delayed feedback, and blocked interaction as correctness issues, not polish-only issues.
+- Apply this rule to both backend and frontend design and implementation work, especially when introducing I/O, parsing, image processing, model updates, or expensive recomputation.
+
 ## Commit Policy
 - Autonomous commits are allowed in this repository.
 - Commit when all of the following are true:
