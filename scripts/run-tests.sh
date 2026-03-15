@@ -145,7 +145,8 @@ fi
 if [[ ${RUN_UI} -eq 1 ]]; then
     if [[ ${DO_CONFIGURE} -eq 1 ]]; then
         reset_stale_cmake_cache
-        cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}"
+        cmake -S "${UI_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}" \
+            -DFERROUS_ENABLE_PROFILE_LOGS=OFF
     fi
     if [[ ${DO_BUILD} -eq 1 ]]; then
         cmake --build "${BUILD_DIR}"

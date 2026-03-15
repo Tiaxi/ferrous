@@ -64,9 +64,11 @@ impl LibraryRoot {
 #[derive(Debug, Clone, Default)]
 pub struct LibrarySearchTrack {
     pub path: PathBuf,
+    pub root_path: PathBuf,
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub cover_path: String,
     pub genre: String,
     pub year: Option<i32>,
     pub track_no: Option<u32>,
@@ -684,9 +686,11 @@ pub fn search_tracks_fts(raw_query: &str, limit: usize) -> Result<Vec<LibrarySea
             r"
             SELECT
                 t.path,
+                t.root_path,
                 t.title,
                 t.artist,
                 t.album,
+                t.cover_path,
                 t.genre,
                 t.year,
                 t.track_no,
@@ -705,18 +709,20 @@ pub fn search_tracks_fts(raw_query: &str, limit: usize) -> Result<Vec<LibrarySea
         .query_map(params![query, limit], |row| {
             Ok(LibrarySearchTrack {
                 path: PathBuf::from(row.get::<_, String>(0)?),
-                title: row.get::<_, String>(1)?,
-                artist: row.get::<_, String>(2)?,
-                album: row.get::<_, String>(3)?,
-                genre: row.get::<_, String>(4)?,
+                root_path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get::<_, String>(2)?,
+                artist: row.get::<_, String>(3)?,
+                album: row.get::<_, String>(4)?,
+                cover_path: row.get::<_, String>(5)?,
+                genre: row.get::<_, String>(6)?,
                 year: row
-                    .get::<_, Option<i64>>(5)?
+                    .get::<_, Option<i64>>(7)?
                     .and_then(|v| i32::try_from(v).ok()),
                 track_no: row
-                    .get::<_, Option<i64>>(6)?
+                    .get::<_, Option<i64>>(8)?
                     .and_then(|v| u32::try_from(v).ok()),
-                duration_secs: row.get::<_, Option<f32>>(7)?,
-                score: row.get::<_, f64>(8).map_or(0.0, f64_to_f32),
+                duration_secs: row.get::<_, Option<f32>>(9)?,
+                score: row.get::<_, f64>(10).map_or(0.0, f64_to_f32),
             })
         })
         .map_err(|e| format!("failed to execute search query: {e}"))?;

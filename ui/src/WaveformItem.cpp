@@ -164,15 +164,17 @@ void WaveformItem::setDurationSeconds(double value) {
 void WaveformItem::paint(QPainter *painter) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto paint_start = std::chrono::steady_clock::now();
+    int peaksCountLocal = 0;
 #endif
     QImage waveformCacheLocal;
-    int peaksCountLocal = 0;
     {
         QMutexLocker lock(&m_stateMutex);
         ensureCacheLocked(currentWidthLocked(), currentHeightLocked());
         updateWaveformCacheLocked();
         waveformCacheLocal = m_waveformCache;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         peaksCountLocal = m_peaksData.size();
+#endif
     }
 
     const QRect clipRect = painter->clipBoundingRect().toAlignedRect();

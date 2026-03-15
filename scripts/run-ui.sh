@@ -199,10 +199,8 @@ if [[ ${DO_CONFIGURE} -eq 1 ]]; then
         -B "${BUILD_DIR}"
         -G "${GENERATOR}"
         -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+        -DFERROUS_ENABLE_PROFILE_LOGS=$([[ ${ENABLE_PROFILE_LOGS} -eq 1 ]] && echo ON || echo OFF)
     )
-    if [[ ${ENABLE_PROFILE_LOGS} -eq 1 ]]; then
-        CMAKE_ARGS+=(-DFERROUS_ENABLE_PROFILE_LOGS=ON)
-    fi
     cmake "${CMAKE_ARGS[@]}"
 fi
 

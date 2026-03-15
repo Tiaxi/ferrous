@@ -43,7 +43,12 @@
 #include <QtEndian>
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-#define FERROUS_PROFILE_LOG_DIAGNOSTIC(category, message) logDiagnostic(category, message)
+#define FERROUS_PROFILE_LOG_DIAGNOSTIC(category, message) \
+    do {                                                  \
+        if (m_profileUiEnabled) {                         \
+            logDiagnostic(category, message);             \
+        }                                                 \
+    } while (false)
 #else
 #define FERROUS_PROFILE_LOG_DIAGNOSTIC(category, message) \
     do {                                                  \
@@ -1723,6 +1728,20 @@ void BridgeClient::searchApplyWorkerLoop() {
         if (decodedOk) {
             QElapsedTimer materializeTimer;
             materializeTimer.start();
+            QHash<QString, QString> coverUrlCache;
+            coverUrlCache.reserve(decoded.rows.size());
+            const auto coverUrlForSearchRow = [&coverUrlCache](const QString &coverPath) {
+                if (coverPath.isEmpty()) {
+                    return QString{};
+                }
+                const auto existing = coverUrlCache.constFind(coverPath);
+                if (existing != coverUrlCache.constEnd()) {
+                    return existing.value();
+                }
+                const QString coverUrl = searchCoverUrlFast(coverPath);
+                coverUrlCache.insert(coverPath, coverUrl);
+                return coverUrl;
+            };
             QVector<GlobalSearchResultsModel::SearchDisplayRow> artistRows;
             QVector<GlobalSearchResultsModel::SearchDisplayRow> albumRows;
             QVector<GlobalSearchResultsModel::SearchDisplayRow> trackRows;
@@ -1763,7 +1782,7 @@ void BridgeClient::searchApplyWorkerLoop() {
                 item.rootLabel = row.rootLabel;
                 item.genre = row.genre;
                 item.coverPath = row.coverPath;
-                item.coverUrl = searchCoverUrlFast(row.coverPath);
+                item.coverUrl = coverUrlForSearchRow(row.coverPath);
                 item.artistKey = row.artistKey;
                 item.albumKey = row.albumKey;
                 item.sectionKey = row.sectionKey;
@@ -2824,9 +2843,11 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
             emit globalSearchResultsChanged();
         }
         m_globalSearchSentAtMs.clear();
-        FERROUS_PROFILE_LOG_DIAGNOSTIC(
-            QStringLiteral("search"),
-            QStringLiteral("clear query"));
+        if (m_profileUiEnabled) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("search"),
+                QStringLiteral("clear query"));
+        }
         m_globalSearchDebounceTimer.stop();
         flushGlobalSearchQuery();
         return;
@@ -3523,6 +3544,20 @@ QString BridgeClient::resolveDiagnosticsLogPath() {
 bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame) {
     SearchWorkerOutputFrame out;
     out.seq = frame.seq;
+    QHash<QString, QString> coverUrlCache;
+    coverUrlCache.reserve(frame.rows.size());
+    const auto coverUrlForSearchRow = [&coverUrlCache](const QString &coverPath) {
+        if (coverPath.isEmpty()) {
+            return QString{};
+        }
+        const auto existing = coverUrlCache.constFind(coverPath);
+        if (existing != coverUrlCache.constEnd()) {
+            return existing.value();
+        }
+        const QString coverUrl = searchCoverUrlFast(coverPath);
+        coverUrlCache.insert(coverPath, coverUrl);
+        return coverUrl;
+    };
     QVector<GlobalSearchResultsModel::SearchDisplayRow> artistRows;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> albumRows;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> trackRows;
@@ -3563,7 +3598,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         item.rootLabel = row.rootLabel;
         item.genre = row.genre;
         item.coverPath = row.coverPath;
-        item.coverUrl = searchCoverUrlFast(row.coverPath);
+        item.coverUrl = coverUrlForSearchRow(row.coverPath);
         item.artistKey = row.artistKey;
         item.albumKey = row.albumKey;
         item.sectionKey = row.sectionKey;
@@ -3668,11 +3703,13 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     m_searchFramesReceived++;
     if (!frame.decodeError.isEmpty()) {
         m_searchFramesDecodeErrors++;
-        FERROUS_PROFILE_LOG_DIAGNOSTIC(
-            QStringLiteral("search"),
-            QStringLiteral("decode error seq=%1 error=%2")
-                .arg(frame.seq)
-                .arg(frame.decodeError));
+        if (m_profileUiEnabled) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("search"),
+                QStringLiteral("decode error seq=%1 error=%2")
+                    .arg(frame.seq)
+                    .arg(frame.decodeError));
+        }
         emit bridgeError(QStringLiteral("invalid search frame: %1").arg(frame.decodeError));
         return false;
     }
@@ -3681,12 +3718,14 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
         && !isNewerSeq(frame.seq, m_latestGlobalSearchSeqSent)) {
         m_searchFramesDroppedStale++;
         m_globalSearchSentAtMs.remove(frame.seq);
-        FERROUS_PROFILE_LOG_DIAGNOSTIC(
-            QStringLiteral("search"),
-            QStringLiteral("drop stale frame seq=%1 latestSent=%2 dropped=%3")
-                .arg(frame.seq)
-                .arg(m_latestGlobalSearchSeqSent)
-                .arg(m_searchFramesDroppedStale));
+        if (m_profileUiEnabled) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("search"),
+                QStringLiteral("drop stale frame seq=%1 latestSent=%2 dropped=%3")
+                    .arg(frame.seq)
+                    .arg(m_latestGlobalSearchSeqSent)
+                    .arg(m_searchFramesDroppedStale));
+        }
         return false;
     }
     if (m_globalSearchSeq != 0
@@ -3694,12 +3733,14 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
         && !isNewerSeq(frame.seq, m_globalSearchSeq)) {
         m_searchFramesDroppedStale++;
         m_globalSearchSentAtMs.remove(frame.seq);
-        FERROUS_PROFILE_LOG_DIAGNOSTIC(
-            QStringLiteral("search"),
-            QStringLiteral("drop non-new frame seq=%1 current=%2 dropped=%3")
-                .arg(frame.seq)
-                .arg(m_globalSearchSeq)
-                .arg(m_searchFramesDroppedStale));
+        if (m_profileUiEnabled) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("search"),
+                QStringLiteral("drop non-new frame seq=%1 current=%2 dropped=%3")
+                    .arg(frame.seq)
+                    .arg(m_globalSearchSeq)
+                    .arg(m_searchFramesDroppedStale));
+        }
         return false;
     }
     if (frame.seq != 0 && frame.seq == m_globalSearchSeq) {
@@ -3741,26 +3782,28 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 latencyMs = sentAtMs > 0 ? (nowMs - sentAtMs) : -1;
     const qint64 queueDelayMs = frame.ffiPoppedAtMs > 0 ? (nowMs - frame.ffiPoppedAtMs) : -1;
-    FERROUS_PROFILE_LOG_DIAGNOSTIC(
-        QStringLiteral("search"),
-        QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5 ffiPopMs=%6 decodeMs=%7 materializeMs=%8 modelApplyMs=%9 queueDelayMs=%10 workerMs=%11 coalesced=%12 coalescedUi=%13 recv=%14 applied=%15 dropped=%16 decodeErr=%17")
-            .arg(frame.seq)
-            .arg(artistCount)
-            .arg(albumCount)
-            .arg(trackCount)
-            .arg(latencyMs)
-            .arg(frame.ffiPopMs)
-            .arg(frame.decodeMs)
-            .arg(frame.materializeMs)
-            .arg(modelApplyMs)
-            .arg(queueDelayMs)
-            .arg(frame.workerTotalMs)
-            .arg(frame.coalescedInputDrops)
-            .arg(frame.coalescedOutputDrops)
-            .arg(m_searchFramesReceived)
-            .arg(m_searchFramesApplied)
-            .arg(m_searchFramesDroppedStale)
-            .arg(m_searchFramesDecodeErrors));
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("search"),
+            QStringLiteral("apply frame seq=%1 artists=%2 albums=%3 tracks=%4 latencyMs=%5 ffiPopMs=%6 decodeMs=%7 materializeMs=%8 modelApplyMs=%9 queueDelayMs=%10 workerMs=%11 coalesced=%12 coalescedUi=%13 recv=%14 applied=%15 dropped=%16 decodeErr=%17")
+                .arg(frame.seq)
+                .arg(artistCount)
+                .arg(albumCount)
+                .arg(trackCount)
+                .arg(latencyMs)
+                .arg(frame.ffiPopMs)
+                .arg(frame.decodeMs)
+                .arg(frame.materializeMs)
+                .arg(modelApplyMs)
+                .arg(queueDelayMs)
+                .arg(frame.workerTotalMs)
+                .arg(frame.coalescedInputDrops)
+                .arg(frame.coalescedOutputDrops)
+                .arg(m_searchFramesReceived)
+                .arg(m_searchFramesApplied)
+                .arg(m_searchFramesDroppedStale)
+                .arg(m_searchFramesDecodeErrors));
+    }
 #else
     m_globalSearchSentAtMs.take(frame.seq);
 #endif
@@ -3769,15 +3812,19 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
 
 void BridgeClient::flushGlobalSearchQuery() {
     if (m_ffiBridge == nullptr) {
-        FERROUS_PROFILE_LOG_DIAGNOSTIC(
-            QStringLiteral("search"),
-            QStringLiteral("skip send: bridge unavailable"));
+        if (m_profileUiEnabled) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("search"),
+                QStringLiteral("skip send: bridge unavailable"));
+        }
         return;
     }
     if (m_pendingGlobalSearchQuery == m_lastGlobalSearchQuerySent) {
-        FERROUS_PROFILE_LOG_DIAGNOSTIC(
-            QStringLiteral("search"),
-            QStringLiteral("skip duplicate query"));
+        if (m_profileUiEnabled) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("search"),
+                QStringLiteral("skip duplicate query"));
+        }
         return;
     }
     const quint32 seq = m_nextGlobalSearchSeq++;
@@ -3792,12 +3839,14 @@ void BridgeClient::flushGlobalSearchQuery() {
     if (preview.size() > 64) {
         preview = preview.left(64) + QStringLiteral("...");
     }
-    FERROUS_PROFILE_LOG_DIAGNOSTIC(
-        QStringLiteral("search"),
-        QStringLiteral("send query seq=%1 chars=%2 text=\"%3\"")
-            .arg(seq)
-            .arg(trimmedQuery.size())
-            .arg(preview));
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("search"),
+            QStringLiteral("send query seq=%1 chars=%2 text=\"%3\"")
+                .arg(seq)
+                .arg(trimmedQuery.size())
+                .arg(preview));
+    }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandSearchQuery(
         BinaryBridgeCodec::CmdSetSearchQuery,
         seq,
@@ -4327,7 +4376,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
     const QString previousPlaybackState = m_playbackState;
     const QString previousTrackPath = m_currentTrackPath;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const int previousPlayingIndex = m_playingQueueIndex;
+#endif
 
     if (snapshot.queue.present && !m_loggedStartupQueuePresent) {
         logDiagnostic(

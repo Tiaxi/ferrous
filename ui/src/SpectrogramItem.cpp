@@ -469,9 +469,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     bool overlayChanged = false;
     QImage overlayImage;
     QSize overlaySize;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     size_t profilePendingColumns = 0;
     size_t profileColumnCount = 0;
     int profileBinsPerColumn = 0;
+#endif
 
     {
         QMutexLocker lock(&m_stateMutex);
@@ -524,9 +526,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 overlaySize = m_overlayImage.size();
             }
         }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         profilePendingColumns = m_pendingColumns.size();
         profileColumnCount = m_columns.size();
         profileBinsPerColumn = m_binsPerColumn;
+#endif
     }
 
     QVector<QSGTexture *> retiredTileTextures;
@@ -1164,7 +1168,9 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
 void SpectrogramItem::handleWindowAfterAnimating() {
     using Clock = std::chrono::steady_clock;
     const auto now = Clock::now();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+#endif
 
     bool advanced = false;
     bool pending = false;

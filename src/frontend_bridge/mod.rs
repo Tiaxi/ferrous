@@ -454,11 +454,13 @@ struct AlbumInventoryAcc {
 #[derive(Debug, Clone)]
 struct PreparedSearchTrack {
     path: PathBuf,
+    root_path: PathBuf,
     path_string: String,
     path_lower: String,
     title: String,
     artist: String,
     album: String,
+    cover_path: String,
     genre: String,
     year: Option<i32>,
     track_no: Option<u32>,
@@ -472,9 +474,7 @@ struct PreparedSearchTrack {
 
 #[derive(Debug, Clone, Default)]
 struct PreparedSearchLibrary {
-    roots: Vec<LibraryRoot>,
     tracks: Vec<PreparedSearchTrack>,
-    context_by_path: HashMap<String, TreePathContext>,
     album_inventory: HashMap<String, AlbumInventoryAcc>,
 }
 
@@ -506,8 +506,7 @@ impl SearchWorkerPreparedCache {
         let prepared = Arc::new(prepare_search_library(library.as_ref()));
         if search_profile_enabled() {
             profile_eprintln!(
-                "[search-worker] cache rebuild roots={} tracks={} elapsed_ms={}",
-                prepared.roots.len(),
+                "[search-worker] cache rebuild tracks={} elapsed_ms={}",
                 prepared.tracks.len(),
                 started.elapsed().as_millis()
             );
@@ -1114,6 +1113,13 @@ impl BridgeLoopRuntime {
         if urgency.is_pending() {
             self.flags.session_dirty = true;
             self.handle_library_refresh(urgency);
+            if !self.state.library.scan_in_progress {
+                let _ = self.search_query_tx.send(SearchWorkerQuery {
+                    seq: 0,
+                    query: String::new(),
+                    library: Arc::clone(&self.state.library),
+                });
+            }
         }
         urgency
     }
@@ -1508,15 +1514,24 @@ fn run_search_worker(
 
         #[allow(unused_variables)]
         let query_started = Instant::now();
-        let prepared = prepared_cache.prepared_for(&query.library);
-        match build_search_results_frame(&query, prepared.as_ref(), query_rx) {
+        if query.seq == 0 && query.query.is_empty() {
+            let _ = prepared_cache.prepared_for(&query.library);
+            match query_rx.recv() {
+                Ok(next) => {
+                    query = next;
+                }
+                Err(_) => break,
+            }
+            continue;
+        }
+        match build_search_results_frame(&query, &mut prepared_cache, query_rx) {
             SearchBuildOutcome::Frame(frame) => {
                 if profile_search {
                     profile_eprintln!(
                         "[search-worker] seq={} chars={} tracks={} rows={} elapsed_ms={}",
                         query.seq,
                         query.query.chars().count(),
-                        prepared.tracks.len(),
+                        query.library.tracks.len(),
                         frame.rows.len(),
                         query_started.elapsed().as_millis()
                     );
@@ -3496,7 +3511,6 @@ struct TreePathContext {
     album_folder: Option<String>,
     album_key: Option<String>,
     section_key: Option<String>,
-    album_path: Option<PathBuf>,
     track_key: String,
     is_main_level_album_track: bool,
     is_disc_section_album_track: bool,
@@ -3531,6 +3545,7 @@ struct SearchRowBuckets {
 
 struct SearchRowAccumulator {
     roots: Vec<LibraryRoot>,
+    roots_by_path: HashMap<PathBuf, PreparedSearchRoot>,
     album_cover_paths: HashMap<String, String>,
     artist_groups: SearchGroupMap,
     album_groups: SearchGroupMap,
@@ -3541,6 +3556,7 @@ struct SearchRowAccumulator {
 impl SearchRowAccumulator {
     fn new(roots: Vec<LibraryRoot>) -> Self {
         Self {
+            roots_by_path: roots_by_path_for_search(&roots),
             roots,
             album_cover_paths: HashMap::new(),
             artist_groups: HashMap::new(),
@@ -3550,21 +3566,11 @@ impl SearchRowAccumulator {
         }
     }
 
-    fn push_hit(
-        &mut self,
-        prepared: &PreparedSearchLibrary,
-        hit: &LibrarySearchTrack,
-        query_terms: &[String],
-    ) {
-        let hit_path_string = hit.path.to_string_lossy().to_string();
-        let Some(context) = prepared
-            .context_by_path
-            .get(&hit_path_string)
-            .cloned()
-            .or_else(|| derive_tree_path_context(&hit.path, &self.roots, &hit.artist))
-        else {
+    fn push_hit(&mut self, hit: &LibrarySearchTrack, query_terms: &[String]) {
+        let Some(context) = derive_hit_context(hit, &self.roots, &self.roots_by_path) else {
             return;
         };
+        let hit_path_string = hit.path.to_string_lossy().to_string();
         let hit_artist = if hit.artist.trim().is_empty() {
             context.artist_name.clone()
         } else {
@@ -3617,6 +3623,19 @@ impl SearchRowAccumulator {
                 );
             }
         }
+        let row_cover_path = if let Some(album_key_value) = album_key.clone() {
+            if !hit.cover_path.is_empty() {
+                self.album_cover_paths
+                    .entry(album_key_value.clone())
+                    .or_insert_with(|| hit.cover_path.clone());
+            }
+            self.album_cover_paths
+                .get(&album_key_value)
+                .cloned()
+                .unwrap_or_else(|| hit.cover_path.clone())
+        } else {
+            hit.cover_path.clone()
+        };
         self.track_rows.push(build_track_search_result_row(
             hit,
             &context,
@@ -3624,7 +3643,7 @@ impl SearchRowAccumulator {
             &hit_album,
             album_key,
             hit_path_string,
-            &mut self.album_cover_paths,
+            row_cover_path,
         ));
     }
 
@@ -3678,7 +3697,7 @@ fn build_track_search_result_row(
     hit_album: &str,
     album_key: Option<String>,
     hit_path_string: String,
-    album_cover_paths: &mut HashMap<String, String>,
+    cover_path: String,
 ) -> BridgeSearchResultRow {
     BridgeSearchResultRow {
         row_type: BridgeSearchResultRowType::Track,
@@ -3698,9 +3717,7 @@ fn build_track_search_result_row(
         album: hit_album.to_string(),
         root_label: context.root_label.clone(),
         genre: hit.genre.trim().to_string(),
-        cover_path: album_key.as_ref().map_or_else(String::new, |key| {
-            cached_album_cover_path(key, context.album_path.as_ref(), album_cover_paths)
-        }),
+        cover_path,
         artist_key: context.artist_key.clone(),
         album_key: album_key.unwrap_or_default(),
         section_key: context.section_key.clone().unwrap_or_default(),
@@ -3742,80 +3759,24 @@ fn search_result_limits(query_text: &str) -> SearchResultLimits {
     }
 }
 
-fn resolve_search_hits(
-    query_text: &str,
-    prepared: &PreparedSearchLibrary,
-    query_rx: &Receiver<SearchWorkerQuery>,
-    fallback_limit: usize,
-) -> SearchBuildOutcome {
-    let use_fts = std::env::var_os("FERROUS_SEARCH_USE_FTS").is_some();
-    let hits = if use_fts {
-        match search_tracks_fts(query_text, fallback_limit) {
-            Ok(rows) if !rows.is_empty() => rows,
-            Ok(_) | Err(_) => {
-                match search_tracks_fallback_prepared(
-                    query_text,
-                    prepared,
-                    fallback_limit,
-                    query_rx,
-                ) {
-                    SearchFallbackOutcome::Hits(rows) => rows,
-                    SearchFallbackOutcome::Cancelled(next) => {
-                        return SearchBuildOutcome::Cancelled(next);
-                    }
-                }
-            }
-        }
-    } else {
-        match search_tracks_fallback_prepared(query_text, prepared, fallback_limit, query_rx) {
-            SearchFallbackOutcome::Hits(rows) => rows,
-            SearchFallbackOutcome::Cancelled(next) => {
-                return SearchBuildOutcome::Cancelled(next);
-            }
-        }
-    };
-
-    SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
-        seq: 0,
-        rows: hits
-            .into_iter()
-            .map(|hit| BridgeSearchResultRow {
-                row_type: BridgeSearchResultRowType::Track,
-                score: hit.score,
-                year: hit.year,
-                track_number: hit.track_no,
-                count: 0,
-                length_seconds: hit.duration_secs,
-                label: hit.title,
-                artist: hit.artist,
-                album: hit.album,
-                root_label: String::new(),
-                genre: hit.genre,
-                cover_path: String::new(),
-                artist_key: String::new(),
-                album_key: String::new(),
-                section_key: String::new(),
-                track_key: String::new(),
-                track_path: hit.path.to_string_lossy().to_string(),
-            })
-            .collect(),
-    })
+fn search_fts_enabled() -> bool {
+    std::env::var_os("FERROUS_SEARCH_DISABLE_FTS").is_none()
 }
 
 fn populate_search_rows(
-    prepared: &PreparedSearchLibrary,
+    roots: &[LibraryRoot],
     hits: &[LibrarySearchTrack],
     query_terms: &[String],
 ) -> SearchRowBuckets {
-    let mut rows = SearchRowAccumulator::new(prepared.roots.clone());
+    let mut rows = SearchRowAccumulator::new(roots.to_vec());
     for hit in hits {
-        rows.push_hit(prepared, hit, query_terms);
+        rows.push_hit(hit, query_terms);
     }
     rows.finish()
 }
 
 fn finalize_search_rows(
-    prepared: &PreparedSearchLibrary,
+    album_inventory: &HashMap<String, AlbumInventoryAcc>,
     limits: &SearchResultLimits,
     album_cover_paths: &HashMap<String, String>,
     artist_groups: SearchGroupMap,
@@ -3852,7 +3813,7 @@ fn finalize_search_rows(
         .into_iter()
         .filter_map(|(album_key, (score, fallback_title, root_label))| {
             let stats = album_hit_stats.get(&album_key)?;
-            let inventory = prepared.album_inventory.get(&album_key);
+            let inventory = album_inventory.get(&album_key);
             Some(BridgeSearchResultRow {
                 row_type: BridgeSearchResultRowType::Album,
                 score,
@@ -3907,7 +3868,7 @@ fn finalize_search_rows(
 
 fn build_search_results_frame(
     query: &SearchWorkerQuery,
-    prepared: &PreparedSearchLibrary,
+    prepared_cache: &mut SearchWorkerPreparedCache,
     query_rx: &Receiver<SearchWorkerQuery>,
 ) -> SearchBuildOutcome {
     let seq = query.seq;
@@ -3920,33 +3881,35 @@ fn build_search_results_frame(
         return empty_search_results_frame(seq);
     }
     let limits = search_result_limits(query_text);
-    let hits = match resolve_search_hits(query_text, prepared, query_rx, limits.fallback) {
-        SearchBuildOutcome::Frame(frame) => frame
-            .rows
-            .into_iter()
-            .map(|row| LibrarySearchTrack {
-                path: PathBuf::from(row.track_path),
-                score: row.score,
-                title: row.label,
-                artist: row.artist,
-                album: row.album,
-                genre: row.genre,
-                year: row.year,
-                track_no: row.track_number,
-                duration_secs: row.length_seconds,
-            })
-            .collect::<Vec<_>>(),
-        SearchBuildOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
+    let library = query.library.as_ref();
+    if library.roots.is_empty() {
+        return empty_search_results_frame(seq);
+    }
+    if search_fts_enabled() {
+        if let Ok(hits) = search_tracks_fts(query_text, limits.fallback) {
+            if !hits.is_empty() {
+                let rows = build_search_rows_from_hits(library, &hits, &query_terms, &limits);
+                return SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, rows });
+            }
+        }
+    }
+
+    let prepared = prepared_cache.prepared_for(&query.library);
+    let hits = match search_tracks_fallback_prepared(
+        query_text,
+        prepared.as_ref(),
+        limits.fallback,
+        query_rx,
+    ) {
+        SearchFallbackOutcome::Hits(rows) => rows,
+        SearchFallbackOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
     };
     if hits.is_empty() {
         return empty_search_results_frame(seq);
     }
-    if prepared.roots.is_empty() {
-        return empty_search_results_frame(seq);
-    }
-    let buckets = populate_search_rows(prepared, &hits, &query_terms);
+    let buckets = populate_search_rows(&library.roots, &hits, &query_terms);
     let rows = finalize_search_rows(
-        prepared,
+        &prepared.album_inventory,
         &limits,
         &buckets.album_cover_paths,
         buckets.artist_groups,
@@ -3987,12 +3950,8 @@ struct PreparedSearchRoot {
     root_label: String,
 }
 
-fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
-    let roots = library.roots.clone();
-    if roots.is_empty() {
-        return PreparedSearchLibrary::default();
-    }
-    let roots_by_path = roots
+fn roots_by_path_for_search(roots: &[LibraryRoot]) -> HashMap<PathBuf, PreparedSearchRoot> {
+    roots
         .iter()
         .map(|root| {
             (
@@ -4004,11 +3963,96 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
                 },
             )
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<HashMap<_, _>>()
+}
+
+fn derive_hit_context(
+    hit: &LibrarySearchTrack,
+    roots: &[LibraryRoot],
+    roots_by_path: &HashMap<PathBuf, PreparedSearchRoot>,
+) -> Option<TreePathContext> {
+    roots_by_path
+        .get(&hit.root_path)
+        .and_then(|root| derive_tree_path_context_for_root(&hit.path, root, &hit.artist))
+        .or_else(|| derive_tree_path_context(&hit.path, roots, &hit.artist))
+}
+
+fn accumulate_album_inventory_for_hits(
+    library: &LibrarySnapshot,
+    roots_by_path: &HashMap<PathBuf, PreparedSearchRoot>,
+    album_keys: &HashSet<String>,
+) -> HashMap<String, AlbumInventoryAcc> {
+    if album_keys.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut album_inventory: HashMap<String, AlbumInventoryAcc> =
+        HashMap::with_capacity(album_keys.len());
+    for track in &library.tracks {
+        let artist = track.artist.trim().to_string();
+        let Some(context) = roots_by_path
+            .get(&track.root_path)
+            .and_then(|root| derive_tree_path_context_for_root(&track.path, root, &artist))
+        else {
+            continue;
+        };
+        let Some(album_key) = context.album_key else {
+            continue;
+        };
+        if !album_keys.contains(&album_key) {
+            continue;
+        }
+        let include_in_main_album =
+            context.is_main_level_album_track || context.is_disc_section_album_track;
+        if !include_in_main_album {
+            continue;
+        }
+
+        let inventory = album_inventory.entry(album_key).or_default();
+        inventory.main_track_count = inventory.main_track_count.saturating_add(1);
+        if let Some(duration) = track.duration_secs {
+            if duration.is_finite() && duration >= 0.0 {
+                inventory.main_total_length += duration;
+                inventory.has_main_duration = true;
+            }
+        }
+    }
+
+    album_inventory
+}
+
+fn build_search_rows_from_hits(
+    library: &LibrarySnapshot,
+    hits: &[LibrarySearchTrack],
+    query_terms: &[String],
+    limits: &SearchResultLimits,
+) -> Vec<BridgeSearchResultRow> {
+    let buckets = populate_search_rows(&library.roots, hits, query_terms);
+    let album_keys = buckets.album_groups.keys().cloned().collect::<HashSet<_>>();
+    let album_inventory = accumulate_album_inventory_for_hits(
+        library,
+        &roots_by_path_for_search(&library.roots),
+        &album_keys,
+    );
+    finalize_search_rows(
+        &album_inventory,
+        limits,
+        &buckets.album_cover_paths,
+        buckets.artist_groups,
+        buckets.album_groups,
+        &buckets.album_hit_stats,
+        buckets.track_rows,
+    )
+}
+
+fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
+    let roots = library.roots.clone();
+    if roots.is_empty() {
+        return PreparedSearchLibrary::default();
+    }
+    let roots_by_path = roots_by_path_for_search(&roots);
 
     let mut tracks = Vec::with_capacity(library.tracks.len());
-    let mut context_by_path: HashMap<String, TreePathContext> =
-        HashMap::with_capacity(library.tracks.len());
     let mut album_inventory: HashMap<String, AlbumInventoryAcc> = HashMap::new();
 
     for track in &library.tracks {
@@ -4042,16 +4086,17 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
                     }
                 }
             }
-            context_by_path.insert(path_string.clone(), context);
         }
 
         tracks.push(PreparedSearchTrack {
             path: track.path.clone(),
+            root_path: track.root_path.clone(),
             path_string,
             path_lower,
             title,
             artist,
             album,
+            cover_path: track.cover_path.clone(),
             genre,
             year: track.year,
             track_no: track.track_no,
@@ -4065,9 +4110,7 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
     }
 
     PreparedSearchLibrary {
-        roots,
         tracks,
-        context_by_path,
         album_inventory,
     }
 }
@@ -4191,9 +4234,11 @@ fn search_tracks_fallback_prepared(
         let track = &prepared.tracks[rank.track_index];
         out.push(LibrarySearchTrack {
             path: track.path.clone(),
+            root_path: track.root_path.clone(),
             title: track.title.clone(),
             artist: track.artist.clone(),
             album: track.album.clone(),
+            cover_path: track.cover_path.clone(),
             genre: track.genre.clone(),
             year: track.year,
             track_no: track.track_no,
@@ -4264,75 +4309,6 @@ fn choose_most_common_genre(counts: &HashMap<String, usize>) -> String {
         };
     }
     best.map_or_else(String::new, |(genre, _)| genre.to_string())
-}
-
-fn find_cover_path_for_album(album_path: &PathBuf) -> Option<String> {
-    fn image_candidates(dir: &Path) -> Vec<String> {
-        let Ok(read_dir) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut candidates = Vec::new();
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
-                continue;
-            };
-            let ext = ext.to_ascii_lowercase();
-            if ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "webp" || ext == "bmp" {
-                candidates.push(path.to_string_lossy().to_string());
-            }
-        }
-        candidates.sort_unstable();
-        candidates
-    }
-
-    let direct = image_candidates(album_path);
-    if let Some(path) = direct.into_iter().next() {
-        return Some(path);
-    }
-
-    let Ok(read_dir) = std::fs::read_dir(album_path) else {
-        return None;
-    };
-    let mut section_dirs = Vec::new();
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            section_dirs.push(path);
-        }
-    }
-    section_dirs.sort_by(|a, b| {
-        a.file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or_default()
-            .cmp(b.file_name().and_then(|v| v.to_str()).unwrap_or_default())
-    });
-    for section_dir in section_dirs {
-        let section_candidates = image_candidates(&section_dir);
-        if let Some(path) = section_candidates.into_iter().next() {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-fn cached_album_cover_path(
-    album_key: &str,
-    album_path: Option<&PathBuf>,
-    cache: &mut HashMap<String, String>,
-) -> String {
-    if let Some(existing) = cache.get(album_key) {
-        return existing.clone();
-    }
-    let resolved = album_path
-        .and_then(find_cover_path_for_album)
-        .unwrap_or_default();
-    cache.insert(album_key.to_string(), resolved.clone());
-    resolved
 }
 
 fn is_main_album_disc_section(section_name: &str) -> bool {
@@ -4415,7 +4391,6 @@ fn derive_tree_path_context_for_root(
             album_folder: None,
             album_key: None,
             section_key: None,
-            album_path: None,
             track_key,
             is_main_level_album_track: false,
             is_disc_section_album_track: false,
@@ -4442,7 +4417,6 @@ fn derive_tree_path_context_for_root(
         album_folder: Some(album_folder.clone()),
         album_key: Some(album_key),
         section_key,
-        album_path: Some(root.path.join(&artist_name).join(album_folder)),
         track_key,
         is_main_level_album_track,
         is_disc_section_album_track,
@@ -5564,11 +5538,11 @@ mod tests {
 
     #[test]
     fn album_search_rows_include_album_cover_path() {
+        let _guard = test_guard();
+        std::env::set_var("FERROUS_SEARCH_DISABLE_FTS", "1");
         let root = test_dir("search-album-cover");
         let album_dir = root.join("Artist").join("Album");
-        fs::create_dir_all(&album_dir).expect("mkdir album dir");
         let cover = album_dir.join("cover.jpg");
-        write_stub(&cover, b"not-a-real-jpeg");
         let track = album_dir.join("01 - Song.flac");
 
         let library = LibrarySnapshot {
@@ -5579,7 +5553,7 @@ mod tests {
                 title: "Song".to_string(),
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
-                cover_path: String::new(),
+                cover_path: cover.to_string_lossy().to_string(),
                 genre: "Rock".to_string(),
                 year: Some(2020),
                 track_no: Some(1),
@@ -5588,15 +5562,15 @@ mod tests {
             search_revision: 1,
             ..LibrarySnapshot::default()
         };
-        let prepared = prepare_search_library(&library);
         let (_tx, rx) = unbounded::<SearchWorkerQuery>();
+        let mut prepared_cache = SearchWorkerPreparedCache::default();
         let outcome = build_search_results_frame(
             &SearchWorkerQuery {
                 seq: 1,
                 query: "album".to_string(),
                 library: Arc::new(library),
             },
-            &prepared,
+            &mut prepared_cache,
             &rx,
         );
 
@@ -5610,8 +5584,7 @@ mod tests {
             .find(|row| row.row_type == BridgeSearchResultRowType::Album)
             .expect("album row present");
         assert_eq!(album_row.cover_path, cover.to_string_lossy());
-
-        let _ = fs::remove_dir_all(root);
+        std::env::remove_var("FERROUS_SEARCH_DISABLE_FTS");
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {
