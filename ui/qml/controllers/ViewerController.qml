@@ -30,9 +30,12 @@ QtObject {
 
     function refreshAlbumArtFileInfo() {
         const infoSource = root.albumArtViewerInfoSource || ""
-        root.albumArtViewerFileInfo = infoSource.length > 0
-            ? (root.uiBridge.imageFileDetails(infoSource) || ({}))
-            : ({})
+        if (infoSource.length <= 0) {
+            root.albumArtViewerFileInfo = ({})
+            return
+        }
+        root.uiBridge.requestImageFileDetails(infoSource)
+        root.albumArtViewerFileInfo = root.uiBridge.cachedImageFileDetails(infoSource) || ({})
     }
 
     function albumArtInfoOverlayText() {
@@ -146,6 +149,18 @@ QtObject {
             } else {
                 root.albumArtViewerFileInfo = ({})
             }
+        }
+    }
+
+    property var imageDetailsConnection: Connections {
+        target: root.uiBridge
+
+        function onImageFileDetailsChanged(path) {
+            const infoSource = root.albumArtViewerInfoSource || ""
+            if (!root.albumArtViewerOpen || infoSource.length <= 0 || path !== infoSource) {
+                return
+            }
+            root.albumArtViewerFileInfo = root.uiBridge.cachedImageFileDetails(infoSource) || ({})
         }
     }
 }

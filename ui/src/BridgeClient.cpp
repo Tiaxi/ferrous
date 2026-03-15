@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QBuffer>
+#include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
@@ -28,12 +29,12 @@
 #include <QMetaObject>
 #include <QMimeDatabase>
 #include <QNetworkReply>
+#include <QPointer>
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QSet>
 #include <QStandardPaths>
 #include <QTemporaryDir>
-#include <QThread>
 #include <QTextStream>
 #include <QUrl>
 #include <QUrlQuery>
@@ -176,6 +177,30 @@ QString searchCoverUrlFast(const QString &path) {
     coverUrl.setFragment(
         QStringLiteral("v=%1").arg(info.lastModified().toMSecsSinceEpoch()));
     return coverUrl.toString(QUrl::FullyEncoded);
+}
+
+QString cacheOnlyLocalFileUrl(const QString &path) {
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) {
+        return {};
+    }
+    if (trimmed.startsWith(QStringLiteral("qrc:/")) || trimmed.startsWith(QStringLiteral(":/"))) {
+        return trimmed;
+    }
+    if (trimmed.startsWith(QStringLiteral("file://"))) {
+        return trimmed;
+    }
+
+    const QUrl url(trimmed);
+    if (url.isValid() && !url.scheme().isEmpty() && !url.isLocalFile()) {
+        return trimmed;
+    }
+
+    const QString localPath = normalizeLocalPathArg(trimmed);
+    if (localPath.isEmpty()) {
+        return {};
+    }
+    return QUrl::fromLocalFile(localPath).toString(QUrl::FullyEncoded);
 }
 
 QString normalizedItunesMatchKey(const QString &value) {
@@ -328,6 +353,169 @@ int readEnvMillis(const char *key, int fallback) {
     }
     return std::clamp(value, 8, 1000);
 }
+
+QVariantMap readImageFileDetails(const QString &path) {
+    QVariantMap out;
+
+    const QString localPath = normalizeLocalPathArg(path);
+    if (localPath.isEmpty()) {
+        return out;
+    }
+
+    const QFileInfo info(localPath);
+    if (!info.exists() || !info.isFile()) {
+        return out;
+    }
+
+    const QString resolvedPath = info.canonicalFilePath().isEmpty()
+        ? info.absoluteFilePath()
+        : info.canonicalFilePath();
+    out.insert(QStringLiteral("path"), resolvedPath);
+    out.insert(QStringLiteral("fileName"), info.fileName());
+
+    const qint64 sizeBytes = info.size();
+    if (sizeBytes >= 0) {
+        out.insert(QStringLiteral("fileSizeBytes"), sizeBytes);
+        out.insert(QStringLiteral("fileSizeText"), formatBinaryFileSize(sizeBytes));
+    }
+
+    const QString suffix = info.suffix().trimmed().toUpper();
+    if (!suffix.isEmpty()) {
+        out.insert(QStringLiteral("extension"), suffix);
+    }
+
+    const QMimeDatabase mimeDb;
+    const auto mimeType = mimeDb.mimeTypeForFile(info, QMimeDatabase::MatchDefault);
+    const QString mimeName = mimeType.name().trimmed();
+    if (!mimeName.isEmpty() && mimeName != QStringLiteral("application/octet-stream")) {
+        out.insert(QStringLiteral("mimeType"), mimeName);
+    }
+
+    QString fileType = mimeType.comment().trimmed();
+    QImageReader reader(resolvedPath);
+    const QSize imageSize = reader.size();
+    if (imageSize.isValid()) {
+        out.insert(QStringLiteral("width"), imageSize.width());
+        out.insert(QStringLiteral("height"), imageSize.height());
+        out.insert(
+            QStringLiteral("resolutionText"),
+            QStringLiteral("%1 x %2").arg(imageSize.width()).arg(imageSize.height()));
+    }
+
+    const QString format = QString::fromLatin1(reader.format()).trimmed().toUpper();
+    if (!format.isEmpty()) {
+        out.insert(QStringLiteral("format"), format);
+    }
+
+    if (fileType.isEmpty()) {
+        if (!format.isEmpty()) {
+            fileType = QStringLiteral("%1 image").arg(format);
+        } else if (!suffix.isEmpty()) {
+            fileType = QStringLiteral("%1 image").arg(suffix);
+        }
+    }
+    if (!fileType.isEmpty()) {
+        out.insert(QStringLiteral("fileType"), fileType);
+    }
+
+    return out;
+}
+
+} // namespace
+
+BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAssetPayload(
+    const QByteArray &payload,
+    const QString &tempDirPath,
+    quint64 generation,
+    int candidateIndex,
+    int assetUrlIndex)
+{
+    BridgeClient::ItunesArtworkAssetJobResult result;
+    result.generation = generation;
+    result.candidateIndex = candidateIndex;
+    result.assetUrlIndex = assetUrlIndex;
+    result.usedFallback = assetUrlIndex > 0;
+
+    if (payload.isEmpty()) {
+        result.errorMessage = QStringLiteral("Failed to load high-resolution artwork.");
+        return result;
+    }
+    if (tempDirPath.trimmed().isEmpty()) {
+        result.errorMessage = QStringLiteral("Failed to prepare temporary artwork cache.");
+        return result;
+    }
+
+    QBuffer buffer;
+    buffer.setData(payload);
+    buffer.open(QIODevice::ReadOnly);
+    QImageReader reader(&buffer);
+    reader.setAutoTransform(true);
+    const QByteArray format = reader.format().trimmed().toLower();
+    const QString sourceExtension = imageFormatExtension(format);
+    const auto sourceTransform = reader.transformation();
+    if (sourceExtension != QStringLiteral("png")
+        && sourceExtension != QStringLiteral("jpg")
+        && sourceExtension != QStringLiteral("tif")) {
+        result.errorMessage = QStringLiteral("Unsupported artwork format returned by iTunes.");
+        return result;
+    }
+
+    const QImage image = reader.read();
+    if (image.isNull()) {
+        result.errorMessage = QStringLiteral("Failed to decode downloaded artwork.");
+        return result;
+    }
+
+    const QString baseName = QStringLiteral("candidate-%1-%2")
+        .arg(generation)
+        .arg(candidateIndex, 3, 10, QChar('0'));
+    const QString originalPath = QDir(tempDirPath).filePath(
+        baseName + QStringLiteral("-orig.") + sourceExtension);
+    QFile originalFile(originalPath);
+    if (!originalFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        || originalFile.write(payload) != payload.size()) {
+        result.errorMessage = QStringLiteral("Failed to cache downloaded artwork.");
+        return result;
+    }
+    originalFile.close();
+
+    const int side = std::min(image.width(), image.height());
+    const int x = std::max(0, (image.width() - side) / 2);
+    const int y = std::max(0, (image.height() - side) / 2);
+    const bool needsCrop = image.width() != image.height();
+    const QImage normalized = !needsCrop
+        ? image
+        : image.copy(x, y, side, side);
+    const QString normalizedExtension = sourceExtension == QStringLiteral("png")
+        ? QStringLiteral("png")
+        : QStringLiteral("jpg");
+    const bool needsTransformBake = sourceTransform != QImageIOHandler::TransformationNone;
+    const bool canReuseOriginalAsset =
+        !needsCrop
+        && !needsTransformBake
+        && sourceExtension == normalizedExtension;
+
+    QString normalizedPath = originalPath;
+    if (!canReuseOriginalAsset) {
+        normalizedPath = QDir(tempDirPath).filePath(
+            baseName + QStringLiteral("-normalized.") + normalizedExtension);
+        const bool saved = normalizedExtension == QStringLiteral("jpg")
+            ? normalized.save(normalizedPath, "JPG", 95)
+            : normalized.save(normalizedPath, "PNG");
+        if (!saved) {
+            result.errorMessage = QStringLiteral("Failed to normalize downloaded artwork.");
+            return result;
+        }
+    }
+
+    result.success = true;
+    result.normalizedPath = normalizedPath;
+    result.downloadPath = originalPath;
+    result.imageDetails = readImageFileDetails(normalizedPath);
+    return result;
+}
+
+namespace {
 
 QString findAlbumCoverPath(const QStringList &trackPaths) {
     static const QSet<QString> kImageExts{
@@ -604,7 +792,7 @@ BridgeClient::BridgeClient(QObject *parent)
     m_profileUiEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
 #endif
-    m_fileBrowserName = detectFileBrowserName();
+    m_fileBrowserName = detectFileBrowserNameHeuristic();
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
     reloadDiagnosticsFromDisk();
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("BridgeClient started"));
@@ -690,6 +878,7 @@ BridgeClient::BridgeClient(QObject *parent)
 
     startSearchApplyWorker();
     startCoverLookupWorker();
+    startFileBrowserNameDetection();
     startInProcessBridge();
 }
 
@@ -707,6 +896,35 @@ BridgeClient::~BridgeClient() {
         ferrous_ffi_bridge_destroy(m_ffiBridge);
         m_ffiBridge = nullptr;
     }
+}
+
+void BridgeClient::startFileBrowserNameDetection() {
+    const QPointer<BridgeClient> self(this);
+    std::thread([self]() {
+        const QString detected = BridgeClient::detectFileBrowserName();
+        QCoreApplication *app = QCoreApplication::instance();
+        if (app == nullptr) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            app,
+            [self, detected]() {
+                if (!self) {
+                    return;
+                }
+                self->applyDetectedFileBrowserName(detected);
+            },
+            Qt::QueuedConnection);
+    }).detach();
+}
+
+void BridgeClient::applyDetectedFileBrowserName(const QString &name) {
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty() || m_fileBrowserName == trimmed) {
+        return;
+    }
+    m_fileBrowserName = trimmed;
+    scheduleSnapshotChanged();
 }
 
 bool BridgeClient::startInProcessBridge() {
@@ -1000,14 +1218,27 @@ void BridgeClient::startItunesArtworkAssetDownload(
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
+    if (!ensureItunesArtworkTempDir()) {
+        row.insert(QStringLiteral("assetLoading"), false);
+        row.insert(QStringLiteral("assetReady"), false);
+        row.insert(
+            QStringLiteral("assetError"),
+            QStringLiteral("Failed to prepare temporary artwork cache."));
+        row.insert(
+            QStringLiteral("detailStatusText"),
+            QStringLiteral("High-resolution artwork could not be loaded."));
+        updateItunesArtworkResult(candidateIndex, row);
+        return;
+    }
 
     const quint64 generation = m_itunesArtworkGeneration;
+    const QString tempDirPath = m_itunesArtworkTempDir ? m_itunesArtworkTempDir->path() : QString();
     QNetworkRequest request{QUrl(trimmedUrl)};
     request.setTransferTimeout(30000);
     auto *reply = m_itunesArtworkNetwork.get(request);
     m_itunesArtworkReplies.insert(reply);
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, generation, candidateIndex, assetUrlIndex]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, generation, candidateIndex, assetUrlIndex, tempDirPath]() {
         m_itunesArtworkReplies.remove(reply);
         const bool stale = generation != m_itunesArtworkGeneration;
         const auto error = reply->error();
@@ -1023,7 +1254,6 @@ void BridgeClient::startItunesArtworkAssetDownload(
             return;
         }
 
-        const bool usedFallback = assetUrlIndex > 0;
         auto failCandidate = [this, candidateIndex, assetUrlIndex, row](const QString &message) mutable {
             if (candidateIndex >= 0 && candidateIndex < m_itunesArtworkCandidates.size()) {
                 const QStringList assetUrls = m_itunesArtworkCandidates[candidateIndex].assetUrls;
@@ -1048,93 +1278,77 @@ void BridgeClient::startItunesArtworkAssetDownload(
                     : QStringLiteral("Failed to load high-resolution artwork: %1").arg(errorText));
             return;
         }
-        if (!ensureItunesArtworkTempDir()) {
-            failCandidate(QStringLiteral("Failed to prepare temporary artwork cache."));
-            return;
-        }
 
-        QBuffer buffer;
-        buffer.setData(payload);
-        buffer.open(QIODevice::ReadOnly);
-        QImageReader reader(&buffer);
-        reader.setAutoTransform(true);
-        const QByteArray format = reader.format().trimmed().toLower();
-        const QString sourceExtension = imageFormatExtension(format);
-        const auto sourceTransform = reader.transformation();
-        if (sourceExtension != QStringLiteral("png")
-            && sourceExtension != QStringLiteral("jpg")
-            && sourceExtension != QStringLiteral("tif")) {
-            failCandidate(QStringLiteral("Unsupported artwork format returned by iTunes."));
-            return;
-        }
+        const QPointer<BridgeClient> self(this);
+        std::thread([self, payload, tempDirPath, generation, candidateIndex, assetUrlIndex]() {
+            BridgeClient::ItunesArtworkAssetJobResult result = BridgeClient::processItunesArtworkAssetPayload(
+                payload,
+                tempDirPath,
+                generation,
+                candidateIndex,
+                assetUrlIndex);
+            QCoreApplication *app = QCoreApplication::instance();
+            if (app == nullptr) {
+                return;
+            }
+            QMetaObject::invokeMethod(
+                app,
+                [self, result = std::move(result)]() mutable {
+                    if (!self) {
+                        return;
+                    }
+                    self->applyItunesArtworkAssetJobResult(std::move(result));
+                },
+                Qt::QueuedConnection);
+        }).detach();
+    });
+}
 
-        const QImage image = reader.read();
-        if (image.isNull()) {
-            failCandidate(QStringLiteral("Failed to decode downloaded artwork."));
-            return;
-        }
+void BridgeClient::applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult result) {
+    if (result.generation != m_itunesArtworkGeneration) {
+        return;
+    }
+    QVariantMap row = itunesArtworkResultAt(result.candidateIndex);
+    if (row.isEmpty()) {
+        return;
+    }
 
-        const QString baseName = QStringLiteral("candidate-%1-%2")
-            .arg(generation)
-            .arg(candidateIndex, 3, 10, QChar('0'));
-        const QString originalPath = m_itunesArtworkTempDir->filePath(
-            baseName + QStringLiteral("-orig.") + sourceExtension);
-        QFile originalFile(originalPath);
-        if (!originalFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
-            || originalFile.write(payload) != payload.size()) {
-            failCandidate(QStringLiteral("Failed to cache downloaded artwork."));
-            return;
-        }
-        originalFile.close();
-
-        const int side = std::min(image.width(), image.height());
-        const int x = std::max(0, (image.width() - side) / 2);
-        const int y = std::max(0, (image.height() - side) / 2);
-        const bool needsCrop = image.width() != image.height();
-        const QImage normalized = !needsCrop
-            ? image
-            : image.copy(x, y, side, side);
-        const QString normalizedExtension = sourceExtension == QStringLiteral("png")
-            ? QStringLiteral("png")
-            : QStringLiteral("jpg");
-        const bool needsTransformBake = sourceTransform != QImageIOHandler::TransformationNone;
-        const bool canReuseOriginalAsset =
-            !needsCrop
-            && !needsTransformBake
-            && sourceExtension == normalizedExtension;
-        QString normalizedPath = originalPath;
-        if (!canReuseOriginalAsset) {
-            normalizedPath = m_itunesArtworkTempDir->filePath(
-                baseName + QStringLiteral("-normalized.") + normalizedExtension);
-            const bool saved = normalizedExtension == QStringLiteral("jpg")
-                ? normalized.save(normalizedPath, "JPG", 95)
-                : normalized.save(normalizedPath, "PNG");
-            if (!saved) {
-                failCandidate(QStringLiteral("Failed to normalize downloaded artwork."));
+    if (!result.success) {
+        if (result.candidateIndex >= 0 && result.candidateIndex < m_itunesArtworkCandidates.size()) {
+            const QStringList assetUrls = m_itunesArtworkCandidates[result.candidateIndex].assetUrls;
+            if (result.assetUrlIndex + 1 < assetUrls.size()) {
+                startItunesArtworkAssetDownload(result.candidateIndex, result.assetUrlIndex + 1);
                 return;
             }
         }
-
-        row.insert(QStringLiteral("previewSource"), searchCoverUrlFast(normalizedPath));
-        row.insert(QStringLiteral("normalizedPath"), normalizedPath);
-        row.insert(QStringLiteral("normalizedUrl"), searchCoverUrlFast(normalizedPath));
-        row.insert(QStringLiteral("downloadPath"), originalPath);
-        row.insert(QStringLiteral("usedFallback"), usedFallback);
-        row.insert(QStringLiteral("assetReady"), true);
         row.insert(QStringLiteral("assetLoading"), false);
-        row.insert(QStringLiteral("assetError"), QString());
+        row.insert(QStringLiteral("assetReady"), false);
+        row.insert(QStringLiteral("assetError"), result.errorMessage);
         row.insert(
             QStringLiteral("detailStatusText"),
-            usedFallback
-                ? QStringLiteral("Loaded the high-resolution fallback artwork.")
-                : QString());
+            QStringLiteral("High-resolution artwork could not be loaded."));
+        updateItunesArtworkResult(result.candidateIndex, row);
+        return;
+    }
 
-        const QVariantMap info = imageFileDetails(normalizedPath);
-        for (auto it = info.constBegin(); it != info.constEnd(); ++it) {
-            row.insert(it.key(), it.value());
-        }
-        updateItunesArtworkResult(candidateIndex, row);
-    });
+    cacheImageFileDetails(result.normalizedPath, result.imageDetails);
+    row.insert(QStringLiteral("previewSource"), cacheOnlyLocalFileUrl(result.normalizedPath));
+    row.insert(QStringLiteral("normalizedPath"), result.normalizedPath);
+    row.insert(QStringLiteral("normalizedUrl"), cacheOnlyLocalFileUrl(result.normalizedPath));
+    row.insert(QStringLiteral("downloadPath"), result.downloadPath);
+    row.insert(QStringLiteral("usedFallback"), result.usedFallback);
+    row.insert(QStringLiteral("assetReady"), true);
+    row.insert(QStringLiteral("assetLoading"), false);
+    row.insert(QStringLiteral("assetError"), QString());
+    row.insert(
+        QStringLiteral("detailStatusText"),
+        result.usedFallback
+            ? QStringLiteral("Loaded the high-resolution fallback artwork.")
+            : QString());
+    for (auto it = result.imageDetails.constBegin(); it != result.imageDetails.constEnd(); ++it) {
+        row.insert(it.key(), it.value());
+    }
+    updateItunesArtworkResult(result.candidateIndex, row);
 }
 
 void BridgeClient::updateItunesArtworkResult(int index, const QVariantMap &row) {
@@ -2280,51 +2494,21 @@ QString BridgeClient::libraryAlbumCoverAt(int index) const {
 }
 
 QString BridgeClient::libraryThumbnailSource(const QString &path) const {
-    if (path.isEmpty()) {
+    const QString normalizedPath = normalizeLocalPathArg(path);
+    if (normalizedPath.isEmpty()) {
         return {};
     }
 
-    if (path.startsWith(QStringLiteral("qrc:/")) || path.startsWith(QStringLiteral(":/"))) {
-        return path;
-    }
-
-    QUrl url(path);
-    QString localPath;
-    if (url.isValid() && url.isLocalFile()) {
-        localPath = url.toLocalFile();
-    } else if (path.startsWith(QStringLiteral("file://"))) {
-        localPath = QUrl(path).toLocalFile();
-        url = QUrl(path);
-    } else {
-        localPath = path;
-        url = QUrl::fromLocalFile(path);
-    }
-
-    const QFileInfo info(localPath);
-    if (!info.exists()) {
-        return path;
-    }
-
-    const QString canonicalPath = info.canonicalFilePath().isEmpty()
-        ? info.absoluteFilePath()
-        : info.canonicalFilePath();
-    const qint64 mtimeMs = info.lastModified().toMSecsSinceEpoch();
-    const QString cacheKey = canonicalPath
-        + QStringLiteral("|")
-        + QString::number(mtimeMs);
-    if (const auto it = m_libraryThumbnailSourceCache.constFind(cacheKey);
+    if (const auto it = m_libraryThumbnailSourceCache.constFind(normalizedPath);
         it != m_libraryThumbnailSourceCache.constEnd()) {
         return it.value();
     }
 
-    QUrl coverUrl = QUrl::fromLocalFile(canonicalPath);
-    coverUrl.setFragment(QStringLiteral("v=%1").arg(mtimeMs));
-
-    const QString result = coverUrl.toString(QUrl::FullyEncoded);
-    m_libraryThumbnailSourceCache.insert(cacheKey, result);
+    const QString result = cacheOnlyLocalFileUrl(normalizedPath);
+    m_libraryThumbnailSourceCache.insert(normalizedPath, result);
     if (m_libraryThumbnailSourceCache.size() > 4096) {
         m_libraryThumbnailSourceCache.clear();
-        m_libraryThumbnailSourceCache.insert(cacheKey, result);
+        m_libraryThumbnailSourceCache.insert(normalizedPath, result);
     }
     return result;
 }
@@ -2766,6 +2950,82 @@ QVariantMap BridgeClient::itunesArtworkResultAt(int index) const {
     return m_itunesArtworkResults[index].toMap();
 }
 
+void BridgeClient::requestImageFileDetails(const QString &path) {
+    const QString normalizedPath = normalizeLocalPathArg(path);
+    if (normalizedPath.isEmpty()) {
+        return;
+    }
+    if (m_imageFileDetailsCache.contains(normalizedPath)
+        || m_pendingImageFileDetailsPaths.contains(normalizedPath)) {
+        return;
+    }
+
+    m_pendingImageFileDetailsPaths.insert(normalizedPath);
+    const QPointer<BridgeClient> self(this);
+    std::thread([self, normalizedPath]() {
+        QVariantMap details = readImageFileDetails(normalizedPath);
+        QCoreApplication *app = QCoreApplication::instance();
+        if (app == nullptr) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            app,
+            [self, normalizedPath, details = std::move(details)]() mutable {
+                if (!self) {
+                    return;
+                }
+                self->applyImageFileDetailsResult(normalizedPath, std::move(details));
+            },
+            Qt::QueuedConnection);
+    }).detach();
+}
+
+QVariantMap BridgeClient::cachedImageFileDetails(const QString &path) const {
+    const QString normalizedPath = normalizeLocalPathArg(path);
+    if (normalizedPath.isEmpty()) {
+        return {};
+    }
+    const auto it = m_imageFileDetailsCache.constFind(normalizedPath);
+    if (it == m_imageFileDetailsCache.constEnd()) {
+        return {};
+    }
+    return it.value();
+}
+
+void BridgeClient::applyImageFileDetailsResult(const QString &requestedPath, QVariantMap details) {
+    m_pendingImageFileDetailsPaths.remove(requestedPath);
+    cacheImageFileDetails(requestedPath, details);
+    emit imageFileDetailsChanged(requestedPath);
+
+    const QString resolvedPath = details.value(QStringLiteral("path")).toString().trimmed();
+    if (!resolvedPath.isEmpty() && resolvedPath != requestedPath) {
+        emit imageFileDetailsChanged(resolvedPath);
+    }
+}
+
+void BridgeClient::cacheImageFileDetails(const QString &requestedPath, const QVariantMap &details) {
+    const QString normalizedRequestPath = normalizeLocalPathArg(requestedPath);
+    if (!normalizedRequestPath.isEmpty()) {
+        m_imageFileDetailsCache.insert(normalizedRequestPath, details);
+    }
+
+    const QString resolvedPath = details.value(QStringLiteral("path")).toString().trimmed();
+    if (!resolvedPath.isEmpty()) {
+        m_imageFileDetailsCache.insert(resolvedPath, details);
+    }
+
+    if (m_imageFileDetailsCache.size() > 4096) {
+        QHash<QString, QVariantMap> retained;
+        if (!normalizedRequestPath.isEmpty()) {
+            retained.insert(normalizedRequestPath, details);
+        }
+        if (!resolvedPath.isEmpty()) {
+            retained.insert(resolvedPath, details);
+        }
+        m_imageFileDetailsCache = std::move(retained);
+    }
+}
+
 void BridgeClient::prepareItunesArtworkSuggestion(int index) {
     if (index < 0 || index >= m_itunesArtworkCandidates.size()) {
         return;
@@ -2874,70 +3134,7 @@ QByteArray BridgeClient::renameEditedFiles(const QByteArray &payload) {
 }
 
 QVariantMap BridgeClient::imageFileDetails(const QString &path) const {
-    QVariantMap out;
-
-    const QString localPath = normalizeLocalPathArg(path);
-    if (localPath.isEmpty()) {
-        return out;
-    }
-
-    const QFileInfo info(localPath);
-    if (!info.exists() || !info.isFile()) {
-        return out;
-    }
-
-    const QString resolvedPath = info.canonicalFilePath().isEmpty()
-        ? info.absoluteFilePath()
-        : info.canonicalFilePath();
-    out.insert(QStringLiteral("path"), resolvedPath);
-    out.insert(QStringLiteral("fileName"), info.fileName());
-
-    const qint64 sizeBytes = info.size();
-    if (sizeBytes >= 0) {
-        out.insert(QStringLiteral("fileSizeBytes"), sizeBytes);
-        out.insert(QStringLiteral("fileSizeText"), formatBinaryFileSize(sizeBytes));
-    }
-
-    const QString suffix = info.suffix().trimmed().toUpper();
-    if (!suffix.isEmpty()) {
-        out.insert(QStringLiteral("extension"), suffix);
-    }
-
-    const QMimeDatabase mimeDb;
-    const auto mimeType = mimeDb.mimeTypeForFile(info, QMimeDatabase::MatchDefault);
-    const QString mimeName = mimeType.name().trimmed();
-    if (!mimeName.isEmpty() && mimeName != QStringLiteral("application/octet-stream")) {
-        out.insert(QStringLiteral("mimeType"), mimeName);
-    }
-
-    QString fileType = mimeType.comment().trimmed();
-    QImageReader reader(resolvedPath);
-    const QSize imageSize = reader.size();
-    if (imageSize.isValid()) {
-        out.insert(QStringLiteral("width"), imageSize.width());
-        out.insert(QStringLiteral("height"), imageSize.height());
-        out.insert(
-            QStringLiteral("resolutionText"),
-            QStringLiteral("%1 x %2").arg(imageSize.width()).arg(imageSize.height()));
-    }
-
-    const QString format = QString::fromLatin1(reader.format()).trimmed().toUpper();
-    if (!format.isEmpty()) {
-        out.insert(QStringLiteral("format"), format);
-    }
-
-    if (fileType.isEmpty()) {
-        if (!format.isEmpty()) {
-            fileType = QStringLiteral("%1 image").arg(format);
-        } else if (!suffix.isEmpty()) {
-            fileType = QStringLiteral("%1 image").arg(suffix);
-        }
-    }
-    if (!fileType.isEmpty()) {
-        out.insert(QStringLiteral("fileType"), fileType);
-    }
-
-    return out;
+    return readImageFileDetails(path);
 }
 
 void BridgeClient::scanRoot(const QString &path) {
@@ -3639,15 +3836,26 @@ void BridgeClient::shutdownBridgeGracefully() {
     }
 
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
+}
 
-    QElapsedTimer timer;
-    timer.start();
-    while (m_connected && timer.elapsed() < 1500) {
-        pollInProcessBridge();
-        if (m_connected) {
-            QThread::msleep(10);
-        }
+QString BridgeClient::detectFileBrowserNameHeuristic() {
+    const QString desktop = qEnvironmentVariable("XDG_CURRENT_DESKTOP").toLower();
+    if (desktop.contains(QStringLiteral("kde"))) {
+        return QStringLiteral("Dolphin");
     }
+    if (desktop.contains(QStringLiteral("gnome"))) {
+        return QStringLiteral("Files");
+    }
+    if (desktop.contains(QStringLiteral("xfce"))) {
+        return QStringLiteral("Thunar");
+    }
+    if (desktop.contains(QStringLiteral("cinnamon"))) {
+        return QStringLiteral("Nemo");
+    }
+    if (desktop.contains(QStringLiteral("lxqt")) || desktop.contains(QStringLiteral("lxde"))) {
+        return QStringLiteral("PCManFM");
+    }
+    return QStringLiteral("File Manager");
 }
 
 QString BridgeClient::detectFileBrowserName() {
@@ -3702,13 +3910,7 @@ QString BridgeClient::detectFileBrowserName() {
             return detected;
         }
     }
-
-    const QString desktop = qEnvironmentVariable("XDG_CURRENT_DESKTOP").toLower();
-    if (desktop.contains(QStringLiteral("kde"))) {
-        return QStringLiteral("Dolphin");
-    }
-
-    return QStringLiteral("File Manager");
+    return detectFileBrowserNameHeuristic();
 }
 
 bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFolder) const {

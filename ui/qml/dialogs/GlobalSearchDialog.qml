@@ -156,15 +156,6 @@ Dialog {
                     policy: ScrollBar.AsNeeded
                 }
 
-                MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.NoButton
-                    preventStealing: true
-                    onWheel: function(wheel) {
-                        root.controller.stepResultsView(wheel)
-                    }
-                }
-
                 Keys.onPressed: function(event) {
                     if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
                         root.controller.focusQueryField(!root.controller.ignoreRefocusFind)

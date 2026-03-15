@@ -38,9 +38,12 @@ Dialog {
     function refreshCurrentArtworkInfo() {
         root.currentArtworkSource = root.uiBridge.currentTrackCoverPath || ""
         const infoSource = PathUtils.pathFromAnyUrl(root.currentArtworkSource)
-        root.currentArtworkInfo = infoSource.length > 0
-            ? (root.uiBridge.imageFileDetails(infoSource) || ({}))
-            : ({})
+        if (infoSource.length <= 0) {
+            root.currentArtworkInfo = ({})
+            return
+        }
+        root.uiBridge.requestImageFileDetails(infoSource)
+        root.currentArtworkInfo = root.uiBridge.cachedImageFileDetails(infoSource) || ({})
     }
 
     function suggestionRowAt(index) {
@@ -132,6 +135,14 @@ Dialog {
             if (root.visible) {
                 root.refreshCurrentArtworkInfo()
             }
+        }
+
+        function onImageFileDetailsChanged(path) {
+            const infoSource = PathUtils.pathFromAnyUrl(root.currentArtworkSource || "")
+            if (!root.visible || infoSource.length <= 0 || path !== infoSource) {
+                return
+            }
+            root.currentArtworkInfo = root.uiBridge.cachedImageFileDetails(infoSource) || ({})
         }
     }
 

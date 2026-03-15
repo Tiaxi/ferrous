@@ -50,6 +50,7 @@ public:
     Q_INVOKABLE int indexForSelectionKey(const QString &selectionKey) const;
     Q_INVOKABLE int sourceIndexForRow(int row) const;
     Q_INVOKABLE QString selectionKeyForRow(int row) const;
+    Q_INVOKABLE int findArtistRowByPrefix(const QString &prefix, int startRow) const;
     Q_INVOKABLE QVariantMap rowDataForRow(int row) const;
 
 signals:

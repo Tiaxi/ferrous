@@ -746,20 +746,11 @@ QtObject {
         if (prefix.length === 0) {
             return false
         }
-        const total = root.libraryModel.count
-        if (total <= 0) {
-            return false
-        }
-        for (let i = 0; i < total; ++i) {
-            const rowMap = root.libraryModel.rowDataForRow(i)
-            if ((rowMap.rowType || "") !== "artist") {
-                continue
-            }
-            const name = (rowMap.artist || "").toLowerCase()
-            if (name.startsWith(prefix)) {
-                root.selectIndex(i)
-                return true
-            }
+        const startRow = Math.max(0, root.currentSelectionIndex() + 1)
+        const matchIndex = root.libraryModel.findArtistRowByPrefix(prefix, startRow)
+        if (matchIndex >= 0) {
+            root.selectIndex(matchIndex)
+            return true
         }
         return false
     }

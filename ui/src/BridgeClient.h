@@ -292,6 +292,8 @@ public:
     Q_INVOKABLE void openInFileBrowser(const QString &path);
     Q_INVOKABLE void openContainingFolder(const QString &path);
     Q_INVOKABLE void refreshEditedPaths(const QStringList &paths);
+    Q_INVOKABLE void requestImageFileDetails(const QString &path);
+    Q_INVOKABLE QVariantMap cachedImageFileDetails(const QString &path) const;
     Q_INVOKABLE QVariantMap imageFileDetails(const QString &path) const;
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
@@ -309,6 +311,7 @@ signals:
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();
+    void imageFileDetailsChanged(const QString &path);
     void diagnosticsChanged();
     void connectedChanged();
     void bridgeError(const QString &message);
@@ -357,6 +360,18 @@ private:
         int apiOrder{0};
     };
 
+    struct ItunesArtworkAssetJobResult {
+        quint64 generation{0};
+        int candidateIndex{-1};
+        int assetUrlIndex{0};
+        bool usedFallback{false};
+        bool success{false};
+        QString errorMessage;
+        QString normalizedPath;
+        QString downloadPath;
+        QVariantMap imageDetails;
+    };
+
     bool startInProcessBridge();
     void startSearchApplyWorker();
     void stopSearchApplyWorker();
@@ -376,12 +391,23 @@ private:
     QString coverUrlForPath(const QString &path) const;
     void bumpCoverRefreshNonce(const QString &path);
     void cancelItunesArtworkRequests();
+    static ItunesArtworkAssetJobResult processItunesArtworkAssetPayload(
+        const QByteArray &payload,
+        const QString &tempDirPath,
+        quint64 generation,
+        int candidateIndex,
+        int assetUrlIndex);
     void startItunesArtworkAssetDownload(
         int candidateIndex,
         int assetUrlIndex = 0);
+    void applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult result);
     void resetItunesArtworkTempDir();
     bool ensureItunesArtworkTempDir();
     void updateItunesArtworkResult(int index, const QVariantMap &row);
+    void startFileBrowserNameDetection();
+    void applyDetectedFileBrowserName(const QString &name);
+    void applyImageFileDetailsResult(const QString &requestedPath, QVariantMap details);
+    void cacheImageFileDetails(const QString &requestedPath, const QVariantMap &details);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
@@ -397,6 +423,7 @@ private:
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
     void shutdownBridgeGracefully();
+    static QString detectFileBrowserNameHeuristic();
     static QString detectFileBrowserName();
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     void sendBinaryCommand(const QByteArray &payload);
@@ -509,6 +536,8 @@ private:
     QNetworkAccessManager m_itunesArtworkNetwork;
     QSet<QNetworkReply *> m_itunesArtworkReplies;
     std::unique_ptr<QTemporaryDir> m_itunesArtworkTempDir;
+    QHash<QString, QVariantMap> m_imageFileDetailsCache;
+    QSet<QString> m_pendingImageFileDetailsPaths;
     QString m_diagnosticsText;
     QString m_diagnosticsLogPath;
     QStringList m_diagnosticsLines;

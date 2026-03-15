@@ -421,6 +421,27 @@ QString LibraryTreeModel::selectionKeyForRow(int row) const {
     return m_rows[static_cast<size_t>(row)].selectionKey;
 }
 
+int LibraryTreeModel::findArtistRowByPrefix(const QString &prefix, int startRow) const {
+    const QString loweredPrefix = toLower(prefix.trimmed());
+    if (loweredPrefix.isEmpty() || m_rows.isEmpty()) {
+        return -1;
+    }
+
+    const int rowCount = static_cast<int>(m_rows.size());
+    const int normalizedStart = std::clamp(startRow, 0, rowCount);
+    for (int offset = 0; offset < rowCount; ++offset) {
+        const int row = (normalizedStart + offset) % rowCount;
+        const FlatRow &item = m_rows[static_cast<size_t>(row)];
+        if (item.rowType != QStringLiteral("artist")) {
+            continue;
+        }
+        if (toLower(item.artist).startsWith(loweredPrefix)) {
+            return row;
+        }
+    }
+    return -1;
+}
+
 QVariantMap LibraryTreeModel::rowDataForRow(int row) const {
     QVariantMap out;
     if (row < 0 || row >= static_cast<int>(m_rows.size())) {

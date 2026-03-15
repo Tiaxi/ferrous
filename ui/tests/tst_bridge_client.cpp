@@ -35,6 +35,7 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void spectrogramDeltaSkipsMetadataOnlyChannels();
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
+    void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
@@ -128,6 +129,33 @@ void BridgeClientTest::stoppedTrackChangeClearsPendingSpectrogramDelta() {
     QCOMPARE(client.m_currentTrackPath, QStringLiteral("/music/new-track.flac"));
     QCOMPARE(client.m_spectrogramChannels.size(), 0);
     QCOMPARE(client.m_spectrogramReset, false);
+}
+
+void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString sourcePath = tempDir.filePath(QStringLiteral("cover.png"));
+    QImage image(128, 96, QImage::Format_RGB32);
+    image.fill(Qt::green);
+    QVERIFY(image.save(sourcePath, "PNG"));
+
+    QSignalSpy detailsSpy(&client, SIGNAL(imageFileDetailsChanged(QString)));
+    QVERIFY(client.cachedImageFileDetails(sourcePath).isEmpty());
+
+    client.requestImageFileDetails(sourcePath);
+
+    QTRY_VERIFY_WITH_TIMEOUT(detailsSpy.count() > 0, 3000);
+
+    const QVariantMap result = client.cachedImageFileDetails(sourcePath);
+    QCOMPARE(result.value(QStringLiteral("fileName")).toString(), QStringLiteral("cover.png"));
+    QCOMPARE(result.value(QStringLiteral("width")).toInt(), 128);
+    QCOMPARE(result.value(QStringLiteral("height")).toInt(), 96);
+    QCOMPARE(result.value(QStringLiteral("format")).toString(), QStringLiteral("PNG"));
+    QCOMPARE(result.value(QStringLiteral("path")).toString(), QFileInfo(sourcePath).canonicalFilePath());
 }
 
 void BridgeClientTest::itunesRectangularArtworkRowUsesNormalizedFileDetails() {

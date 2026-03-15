@@ -241,6 +241,7 @@ Kirigami.ApplicationWindow {
         signal libraryTreeFrameReceived(int version, var treeBytes)
         signal globalSearchResultsChanged()
         signal itunesArtworkChanged()
+        signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
         signal bridgeError(string message)
         function play() {}
@@ -298,6 +299,8 @@ Kirigami.ApplicationWindow {
         function applyItunesArtworkSuggestion(index) {}
         function openInFileBrowser(path) {}
         function openContainingFolder(path) {}
+        function requestImageFileDetails(path) {}
+        function cachedImageFileDetails(path) { return ({}) }
         function imageFileDetails(path) { return ({}) }
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}

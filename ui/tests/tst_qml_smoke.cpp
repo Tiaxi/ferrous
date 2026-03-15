@@ -358,6 +358,7 @@ private slots:
     void rootRowsStartExpandedByDefault();
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
+    void artistPrefixSearchUsesModelLookup();
     void spectrogramItemRendersNonBackgroundPixels();
     void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
     void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
@@ -503,6 +504,7 @@ Item {
         property int sampleRateHz: 48000
         signal diagnosticsChanged()
         signal itunesArtworkChanged()
+        signal imageFileDetailsChanged(string path)
         signal snapshotChanged()
         function setVolume(value) {}
         function setLibrarySortMode(mode) {}
@@ -525,6 +527,8 @@ Item {
         function setGlobalSearchQuery(query) {}
         function searchCurrentTrackArtworkSuggestions() {}
         function clearItunesArtworkSuggestions() {}
+        function requestImageFileDetails(path) {}
+        function cachedImageFileDetails(path) { return ({}) }
         function imageFileDetails(path) { return ({}) }
         function itunesArtworkResultAt(index) { return ({}) }
         function prepareItunesArtworkSuggestion(index) {}
@@ -957,6 +961,16 @@ void QmlSmokeTest::lazyArtistRowRequestsBackendExpansion() {
     QCOMPARE(args.value(0).toString(), QStringLiteral("artist|/music|Artist A"));
     QCOMPARE(args.value(1).toBool(), true);
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
+}
+
+void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
+    LibraryTreeModel model;
+    model.setLibraryTreeFromBinary(multiRootBinary());
+
+    QTRY_COMPARE(model.rowCount(), 4);
+    QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist b"), 0), 3);
+    QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist a"), 2), 1);
+    QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
 }
 
 void QmlSmokeTest::spectrogramItemRendersNonBackgroundPixels() {

@@ -38,6 +38,20 @@ This should reduce idle UI-thread load, remove avoidable input latency, and impr
 
 ### Phase 1: Remove current GUI-thread blockers
 
+Progress update (2026-03-15):
+
+- Completed: `BridgeClient` now starts with a cheap file-browser heuristic, resolves the final name on a background worker, and no longer blocks shutdown with a GUI-thread sleep loop.
+- Completed: iTunes artwork post-download processing now runs off the GUI thread; the reply handler only validates the reply, copies the payload, and dispatches background normalization work.
+- Completed: async cached image metadata API added to `BridgeClient`:
+  - `requestImageFileDetails(path)`
+  - `cachedImageFileDetails(path)`
+  - `imageFileDetailsChanged(path)`
+- Completed: `ViewerController` and `ItunesArtworkDialog` now request metadata asynchronously and refresh from cache on `imageFileDetailsChanged(path)`.
+- Completed: global search no longer overrides wheel scrolling with QML-side row accumulation; it now relies on native `ListView` scrolling while keeping keyboard selection visibility via `positionViewAtIndex()`.
+- Completed: library type-ahead matching moved into `LibraryTreeModel` via `findArtistRowByPrefix(prefix, startRow)`, removing the QML-side full-model scan.
+- Completed: library thumbnail source resolution now uses a cache-only helper path and no longer performs canonical-path and `mtime` filesystem work in delegate bindings.
+- Validation: `./scripts/run-tests.sh --ui-only` passed after the Phase 1 changes.
+
 #### Bridge client startup and shutdown
 
 - Stop calling `detectFileBrowserName()` synchronously in the `BridgeClient` constructor.
