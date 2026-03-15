@@ -14,14 +14,12 @@ Rectangle {
     required property int playlistIndicatorColumnWidth
     required property int playlistOrderColumnWidth
     required property var playlistOrderText
-    required property var openTagEditorForPlaylistRow
+    required property var libraryController
     required property var stepScrollView
     required property var clearPlaylistAction
     required property int popupTransitionMs
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
-    required property var rowsForLibraryAction
-    required property var appendLibraryRows
     required property var droppedExternalPaths
     required property var submitExternalImport
 
@@ -297,7 +295,7 @@ Rectangle {
                     MenuItem {
                         text: "Edit Tags"
                         enabled: playlistContextMenu.rowIndex >= 0
-                        onTriggered: root.openTagEditorForPlaylistRow(playlistContextMenu.rowIndex)
+                        onTriggered: root.controller.openTagEditorForRow(playlistContextMenu.rowIndex)
                     }
 
                     MenuItem {
@@ -453,9 +451,9 @@ Rectangle {
                         openPath: src.openPathResolved || "",
                         playPaths: src.playPathsResolved || []
                     }
-                    const rows = root.rowsForLibraryAction(rowMap)
+                    const rows = root.libraryController.rowsForAction(rowMap)
                     if (rows.length > 0) {
-                        root.appendLibraryRows(rows)
+                        root.libraryController.appendRows(rows)
                         queueReorderDragActive = false
                         queueDropInsertIndex = -1
                         drop.acceptProposedAction()

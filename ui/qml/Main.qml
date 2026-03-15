@@ -101,6 +101,8 @@ Kirigami.ApplicationWindow {
     Controllers.QueueController {
         id: queueController
         uiBridge: root.uiBridge
+        tagEditorApi: root.tagEditorApi
+        openTagEditorDialog: function() { tagEditorDialog.open() }
     }
 
     Controllers.PlaybackController {
@@ -115,8 +117,8 @@ Kirigami.ApplicationWindow {
         uiBridge: root.uiBridge
         libraryModel: root.libraryTreeModel
         tryCaptureGlobalSearchPrefill: globalSearchController.tryCapturePrefill
-        rowsForAction: root.rowsForLibraryAction
-        playRows: root.playLibraryRows
+        tagEditorApi: root.tagEditorApi
+        openTagEditorDialog: function() { tagEditorDialog.open() }
     }
 
     Controllers.ViewerController {
@@ -125,15 +127,6 @@ Kirigami.ApplicationWindow {
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
     }
 
-    readonly property string selectedLibrarySelectionKey: libraryController.selectedSelectionKey
-    readonly property int selectedLibrarySourceIndex: libraryController.selectedSourceIndex
-    readonly property string selectedLibraryRowType: libraryController.selectedRowType
-    readonly property string selectedLibraryArtist: libraryController.selectedArtist
-    readonly property string selectedLibraryAlbum: libraryController.selectedAlbum
-    readonly property string selectedLibraryTrackPath: libraryController.selectedTrackPath
-    readonly property string selectedLibraryOpenPath: libraryController.selectedOpenPath
-    readonly property var selectedLibraryPlayPaths: libraryController.selectedPlayPaths
-    readonly property var selectedLibrarySelectionKeys: libraryController.selectedSelectionKeys
     readonly property var libraryViewRef: libraryController.view
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
@@ -142,6 +135,10 @@ Kirigami.ApplicationWindow {
             currentPlaybackState,
             stoppedTrackPath,
             currentTrackPath)
+    }
+
+    function canOpenTagEditorForLibrary(rowMap) {
+        return libraryController.canOpenTagEditorForRow(rowMap)
     }
 
     QtObject {
@@ -399,269 +396,6 @@ Kirigami.ApplicationWindow {
         onTriggered: root.transientBridgeError = ""
     }
 
-    function moveSelected(delta) {
-        const from = uiBridge.selectedQueueIndex
-        if (from < 0 || uiBridge.queueLength <= 0) {
-            return
-        }
-        const to = Math.max(0, Math.min(uiBridge.queueLength - 1, from + delta))
-        if (to !== from) {
-            uiBridge.moveQueue(from, to)
-        }
-    }
-
-    function isActionableLibraryRow(rowMap) {
-        if (!rowMap) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        if (rowType === "track") {
-            return (rowMap.trackPath || "").length > 0
-        }
-        if (rowType === "album") {
-            return (rowMap.artist || "").length > 0 && (rowMap.name || "").length > 0
-        }
-        if (rowType === "artist") {
-            return (rowMap.artist || "").length > 0
-        }
-        const paths = rowMap.playPaths || []
-        return paths.length > 0
-    }
-
-    function appendLibraryRow(rowMap) {
-        if (!isActionableLibraryRow(rowMap)) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        if (rowType === "track") {
-            uiBridge.appendTrack(rowMap.trackPath || "")
-            return true
-        }
-        if (rowType === "album") {
-            const albumPaths = rowMap.playPaths || []
-            if (albumPaths.length > 0) {
-                uiBridge.appendPaths(albumPaths)
-            } else {
-                uiBridge.appendAlbumByKey(
-                    rowMap.artist || "",
-                    rowMap.selectionKey || rowMap.name || "")
-            }
-            return true
-        }
-        if (rowType === "artist") {
-            uiBridge.appendArtistByName(rowMap.selectionKey || rowMap.artist || "")
-            return true
-        }
-        uiBridge.appendPaths(rowMap.playPaths || [])
-        return true
-    }
-
-    function replaceWithLibraryRow(rowMap) {
-        if (!isActionableLibraryRow(rowMap)) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        if (rowType === "track") {
-            uiBridge.playTrack(rowMap.trackPath || "")
-            return true
-        }
-        if (rowType === "album") {
-            const albumPaths = rowMap.playPaths || []
-            if (albumPaths.length > 0) {
-                uiBridge.replaceWithPaths(albumPaths)
-            } else {
-                uiBridge.replaceAlbumByKey(
-                    rowMap.artist || "",
-                    rowMap.selectionKey || rowMap.name || "")
-            }
-            return true
-        }
-        if (rowType === "artist") {
-            uiBridge.replaceArtistByName(rowMap.selectionKey || rowMap.artist || "")
-            return true
-        }
-        uiBridge.replaceWithPaths(rowMap.playPaths || [])
-        return true
-    }
-
-    function selectedLibraryRowsSorted() {
-        const rows = []
-        for (let i = 0; i < selectedLibrarySelectionKeys.length; ++i) {
-            const key = selectedLibrarySelectionKeys[i] || ""
-            if (key.length === 0) {
-                continue
-            }
-            const rowIndex = libraryModel.indexForSelectionKey(key)
-            if (rowIndex < 0) {
-                continue
-            }
-            const rowMap = libraryModel.rowDataForRow(rowIndex)
-            if (isActionableLibraryRow(rowMap)) {
-                rows.push({ index: rowIndex, row: rowMap })
-            }
-        }
-        rows.sort(function(a, b) { return a.index - b.index })
-        return rows
-    }
-
-    function rowsForLibraryAction(rowMap) {
-        if (rowMap
-                && rowMap.selectionKey
-                && isLibrarySelectionKeySelected(rowMap.selectionKey)
-                && selectedLibrarySelectionKeys.length > 1) {
-            const selectedRows = selectedLibraryRowsSorted()
-            if (selectedRows.length > 0) {
-                return selectedRows.map(function(entry) { return entry.row })
-            }
-        }
-        return rowMap ? [rowMap] : []
-    }
-
-    function canPlayLibrarySelection() {
-        if (selectedLibrarySelectionKeys.length > 0) {
-            return selectedLibraryRowsSorted().length > 0
-        }
-        return isActionableLibraryRow({
-            rowType: selectedLibraryRowType,
-            artist: selectedLibraryArtist,
-            name: selectedLibraryAlbum,
-            sourceIndex: selectedLibrarySourceIndex,
-            trackPath: selectedLibraryTrackPath,
-            playPaths: selectedLibraryPlayPaths
-        })
-    }
-
-    function playLibraryRows(rows) {
-        if (!rows || rows.length === 0) {
-            return
-        }
-        if (!replaceWithLibraryRow(rows[0])) {
-            return
-        }
-        for (let i = 1; i < rows.length; ++i) {
-            appendLibraryRow(rows[i])
-        }
-    }
-
-    function appendLibraryRows(rows) {
-        if (!rows || rows.length === 0) {
-            return
-        }
-        for (let i = 0; i < rows.length; ++i) {
-            appendLibraryRow(rows[i])
-        }
-    }
-
-    function playLibrarySelection() {
-        const rows = selectedLibraryRowsSorted().map(function(entry) { return entry.row })
-        if (rows.length > 0) {
-            playLibraryRows(rows)
-            return
-        }
-        playLibraryRows([{
-            rowType: selectedLibraryRowType,
-            artist: selectedLibraryArtist,
-            name: selectedLibraryAlbum,
-            sourceIndex: selectedLibrarySourceIndex,
-            trackPath: selectedLibraryTrackPath,
-            playPaths: selectedLibraryPlayPaths
-        }])
-    }
-
-    function appendLibrarySelection() {
-        const rows = selectedLibraryRowsSorted().map(function(entry) { return entry.row })
-        if (rows.length > 0) {
-            appendLibraryRows(rows)
-            return
-        }
-        appendLibraryRows([{
-            rowType: selectedLibraryRowType,
-            artist: selectedLibraryArtist,
-            name: selectedLibraryAlbum,
-            sourceIndex: selectedLibrarySourceIndex,
-            trackPath: selectedLibraryTrackPath,
-            playPaths: selectedLibraryPlayPaths
-        }])
-    }
-
-    function openTagEditorForPlaylistRow(rowIndex) {
-        if (rowIndex < 0) {
-            return
-        }
-        let indices = [rowIndex]
-        if (queueController.isIndexSelected(rowIndex) && queueController.selectedIndices.length > 1) {
-            indices = queueController.selectedIndices.slice().sort(function(a, b) { return a - b })
-        }
-        const selections = []
-        for (let i = 0; i < indices.length; ++i) {
-            const path = uiBridge.queuePathAt(indices[i])
-            if (path && path.length > 0) {
-                selections.push({ path: path })
-            }
-        }
-        if (selections.length > 0 && tagEditorApi.openSelection(selections)) {
-            tagEditorDialog.open()
-        }
-    }
-
-    function canOpenTagEditorForLibrary(rowMap) {
-        if (!rowMap) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        if (rowType === "track") {
-            return (rowMap.trackPath || "").length > 0
-        }
-        if (rowType === "album" || rowType === "section") {
-            return (rowMap.selectionKey || "").length > 0
-        }
-        return false
-    }
-
-    function openTagEditorForLibrary(rowMap) {
-        const rows = root.rowsForLibraryAction(rowMap)
-        const selections = []
-        for (let i = 0; i < rows.length; ++i) {
-            const row = rows[i]
-            if (!root.canOpenTagEditorForLibrary(row)) {
-                continue
-            }
-            selections.push({
-                path: row.trackPath || "",
-                rowType: row.rowType || "",
-                key: row.selectionKey || "",
-                artist: row.artist || "",
-                name: row.name || "",
-                trackPath: row.trackPath || ""
-            })
-        }
-        if (selections.length > 0 && tagEditorApi.openSelection(selections)) {
-            tagEditorDialog.open()
-        }
-    }
-
-    function canPlayAllLibraryTracks() {
-        return uiBridge.libraryTrackCount > 0
-    }
-
-    function playAllLibraryTracks() {
-        if (!canPlayAllLibraryTracks()) {
-            return
-        }
-        uiBridge.replaceAllLibraryTracks()
-    }
-
-    function appendAllLibraryTracks() {
-        if (!canPlayAllLibraryTracks()) {
-            return
-        }
-        uiBridge.appendAllLibraryTracks()
-    }
-
-    function isLibrarySelectionKeySelected(key) {
-        return libraryController.isSelectionKeySelected(key)
-    }
-
     function stepScrollView(view, wheel, rowHeight, rowsPerStep) {
         if (!view || !wheel) {
             return
@@ -836,26 +570,26 @@ Kirigami.ApplicationWindow {
     Action {
         id: playLibrarySelectionAction
         text: "Play Library Selection"
-        enabled: root.canPlayLibrarySelection()
-        onTriggered: root.playLibrarySelection()
+        enabled: libraryController.canPlaySelection()
+        onTriggered: libraryController.playSelection()
     }
     Action {
         id: appendLibrarySelectionAction
         text: "Queue Library Selection"
-        enabled: root.canPlayLibrarySelection()
-        onTriggered: root.appendLibrarySelection()
+        enabled: libraryController.canPlaySelection()
+        onTriggered: libraryController.appendSelection()
     }
     Action {
         id: playAllLibraryTracksAction
         text: "Play All Library Tracks"
-        enabled: root.canPlayAllLibraryTracks()
-        onTriggered: root.playAllLibraryTracks()
+        enabled: libraryController.canPlayAllTracks()
+        onTriggered: libraryController.playAllTracks()
     }
     Action {
         id: appendAllLibraryTracksAction
         text: "Queue All Library Tracks"
-        enabled: root.canPlayAllLibraryTracks()
-        onTriggered: root.appendAllLibraryTracks()
+        enabled: libraryController.canPlayAllTracks()
+        onTriggered: libraryController.appendAllTracks()
     }
     Action {
         id: replaceFromItunesAction
@@ -997,13 +731,13 @@ Kirigami.ApplicationWindow {
         id: moveTrackUpAction
         text: "Move Track Up"
         shortcut: "Ctrl+Shift+Up"
-        onTriggered: root.moveSelected(-1)
+        onTriggered: queueController.moveSelected(-1)
     }
     Action {
         id: moveTrackDownAction
         text: "Move Track Down"
         shortcut: "Ctrl+Shift+Down"
-        onTriggered: root.moveSelected(1)
+        onTriggered: queueController.moveSelected(1)
     }
 
     Shortcut {
@@ -1285,12 +1019,6 @@ Kirigami.ApplicationWindow {
                 snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                 snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
                 stepScrollView: root.stepScrollView
-                rowsForLibraryAction: root.rowsForLibraryAction
-                playLibraryRows: root.playLibraryRows
-                appendLibraryRows: root.appendLibraryRows
-                isActionableLibraryRow: root.isActionableLibraryRow
-                canOpenTagEditorForLibrary: root.canOpenTagEditorForLibrary
-                openTagEditorForLibrary: root.openTagEditorForLibrary
                 playAllLibraryTracksAction: playAllLibraryTracksAction
                 appendAllLibraryTracksAction: appendAllLibraryTracksAction
             }
@@ -1307,14 +1035,12 @@ Kirigami.ApplicationWindow {
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: FormatUtils.playlistOrderText
-                    openTagEditorForPlaylistRow: root.openTagEditorForPlaylistRow
+                    libraryController: libraryController
                     stepScrollView: root.stepScrollView
                     clearPlaylistAction: clearPlaylistAction
                     popupTransitionMs: root.uiPopupTransitionMs
                     snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                     snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
-                    rowsForLibraryAction: root.rowsForLibraryAction
-                    appendLibraryRows: root.appendLibraryRows
                     droppedExternalPaths: PathUtils.droppedExternalPaths
                     submitExternalImport: root.submitExternalImport
                 }

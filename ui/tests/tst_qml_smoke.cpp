@@ -535,6 +535,8 @@ Item {
     Controllers.QueueController {
         id: queueController
         uiBridge: bridge
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
     }
 
     Controllers.PlaybackController {
@@ -549,8 +551,8 @@ Item {
         uiBridge: bridge
         libraryModel: sidebarModel
         tryCaptureGlobalSearchPrefill: function(event) { return false }
-        rowsForAction: function(rowMap) { return rowMap ? [rowMap] : [] }
-        playRows: function(rows) {}
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
     }
 
     Controllers.ViewerController {
@@ -759,12 +761,6 @@ Item {
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        rowsForLibraryAction: function(rowMap) { return [] }
-        playLibraryRows: function(rows) {}
-        appendLibraryRows: function(rows) {}
-        isActionableLibraryRow: function(rowMap) { return false }
-        canOpenTagEditorForLibrary: function(rowMap) { return false }
-        openTagEditorForLibrary: function(rowMap) {}
         playAllLibraryTracksAction: playAllLibraryTracksAction
         appendAllLibraryTracksAction: appendAllLibraryTracksAction
     }
@@ -782,14 +778,12 @@ Item {
         playlistIndicatorColumnWidth: 22
         playlistOrderColumnWidth: 34
         playlistOrderText: function(index) { return String(index + 1) }
-        openTagEditorForPlaylistRow: function(index) {}
+        libraryController: libraryController
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
         clearPlaylistAction: clearPlaylistAction
         popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
-        rowsForLibraryAction: function(rowMap) { return [] }
-        appendLibraryRows: function(rows) {}
         droppedExternalPaths: function(drop) { return [] }
         submitExternalImport: function(paths, replaceQueue) { return false }
     }

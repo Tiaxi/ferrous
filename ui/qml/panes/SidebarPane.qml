@@ -20,12 +20,6 @@ Rectangle {
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property var stepScrollView
-    required property var rowsForLibraryAction
-    required property var playLibraryRows
-    required property var appendLibraryRows
-    required property var isActionableLibraryRow
-    required property var canOpenTagEditorForLibrary
-    required property var openTagEditorForLibrary
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
 
@@ -58,12 +52,6 @@ Rectangle {
             snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
             popupTransitionMs: root.popupTransitionMs
             stepScrollView: root.stepScrollView
-            rowsForLibraryAction: root.rowsForLibraryAction
-            playLibraryRows: root.playLibraryRows
-            appendLibraryRows: root.appendLibraryRows
-            isActionableLibraryRow: root.isActionableLibraryRow
-            canOpenTagEditorForLibrary: root.canOpenTagEditorForLibrary
-            openTagEditorForLibrary: root.openTagEditorForLibrary
             playAllLibraryTracksAction: root.playAllLibraryTracksAction
             appendAllLibraryTracksAction: root.appendAllLibraryTracksAction
         }

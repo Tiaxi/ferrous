@@ -16,12 +16,6 @@ Rectangle {
     required property real snappyScrollMaxFlickVelocity
     required property int popupTransitionMs
     required property var stepScrollView
-    required property var rowsForLibraryAction
-    required property var playLibraryRows
-    required property var appendLibraryRows
-    required property var isActionableLibraryRow
-    required property var canOpenTagEditorForLibrary
-    required property var openTagEditorForLibrary
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
 
@@ -271,9 +265,9 @@ Rectangle {
                             root.controller.toggleNode(key)
                             return
                         }
-                        const rows = root.rowsForLibraryAction(rowMap)
+                        const rows = root.controller.rowsForAction(rowMap)
                         if (rows.length > 0) {
-                            root.playLibraryRows(rows)
+                            root.controller.playRows(rows)
                         }
                     }
                 }
@@ -286,31 +280,31 @@ Rectangle {
 
                     MenuItem {
                         text: "Play"
-                        enabled: root.isActionableLibraryRow(libraryContextMenu.rowMap)
+                        enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
                         onTriggered: {
-                            const rows = root.rowsForLibraryAction(libraryContextMenu.rowMap)
+                            const rows = root.controller.rowsForAction(libraryContextMenu.rowMap)
                             if (rows.length > 0) {
-                                root.playLibraryRows(rows)
+                                root.controller.playRows(rows)
                             }
                         }
                     }
 
                     MenuItem {
                         text: "Queue"
-                        enabled: root.isActionableLibraryRow(libraryContextMenu.rowMap)
+                        enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
                         onTriggered: {
-                            const rows = root.rowsForLibraryAction(libraryContextMenu.rowMap)
+                            const rows = root.controller.rowsForAction(libraryContextMenu.rowMap)
                             if (rows.length > 0) {
-                                root.appendLibraryRows(rows)
+                                root.controller.appendRows(rows)
                             }
                         }
                     }
 
                     MenuItem {
                         text: "Edit Tags"
-                        visible: root.canOpenTagEditorForLibrary(libraryContextMenu.rowMap)
-                        enabled: root.canOpenTagEditorForLibrary(libraryContextMenu.rowMap)
-                        onTriggered: root.openTagEditorForLibrary(libraryContextMenu.rowMap)
+                        visible: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
+                        enabled: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
+                        onTriggered: root.controller.openTagEditorForRow(libraryContextMenu.rowMap)
                     }
 
                     MenuSeparator {}

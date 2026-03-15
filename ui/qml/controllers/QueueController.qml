@@ -4,6 +4,8 @@ QtObject {
     id: root
 
     required property var uiBridge
+    required property var tagEditorApi
+    required property var openTagEditorDialog
 
     property var view: null
     property var selectedIndices: []
@@ -229,6 +231,37 @@ QtObject {
         const base = current >= 0 ? current : 0
         const nextIdx = Math.max(0, Math.min(root.uiBridge.queueLength - 1, base + delta))
         root.setSingleSelection(nextIdx)
+    }
+
+    function moveSelected(delta) {
+        const from = root.uiBridge.selectedQueueIndex
+        if (from < 0 || root.uiBridge.queueLength <= 0) {
+            return
+        }
+        const to = Math.max(0, Math.min(root.uiBridge.queueLength - 1, from + delta))
+        if (to !== from) {
+            root.uiBridge.moveQueue(from, to)
+        }
+    }
+
+    function openTagEditorForRow(rowIndex) {
+        if (rowIndex < 0) {
+            return
+        }
+        let indices = [rowIndex]
+        if (root.isIndexSelected(rowIndex) && root.selectedIndices.length > 1) {
+            indices = root.selectedIndices.slice().sort(function(a, b) { return a - b })
+        }
+        const selections = []
+        for (let i = 0; i < indices.length; ++i) {
+            const path = root.uiBridge.queuePathAt(indices[i])
+            if (path && path.length > 0) {
+                selections.push({ path: path })
+            }
+        }
+        if (selections.length > 0 && root.tagEditorApi.openSelection(selections)) {
+            root.openTagEditorDialog()
+        }
     }
 
     function firstSelectedIndex() {

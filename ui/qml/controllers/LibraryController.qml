@@ -6,8 +6,8 @@ QtObject {
     required property var uiBridge
     required property var libraryModel
     required property var tryCaptureGlobalSearchPrefill
-    required property var rowsForAction
-    required property var playRows
+    required property var tagEditorApi
+    required property var openTagEditorDialog
 
     property string selectedSelectionKey: ""
     property int selectedSourceIndex: -1
@@ -62,6 +62,223 @@ QtObject {
 
     function isSelectionKeySelected(key) {
         return key.length > 0 && root.selectedSelectionKeys.indexOf(key) >= 0
+    }
+
+    function isActionableRow(rowMap) {
+        if (!rowMap) {
+            return false
+        }
+        const rowType = rowMap.rowType || ""
+        if (rowType === "track") {
+            return (rowMap.trackPath || "").length > 0
+        }
+        if (rowType === "album") {
+            return (rowMap.artist || "").length > 0 && (rowMap.name || "").length > 0
+        }
+        if (rowType === "artist") {
+            return (rowMap.artist || "").length > 0
+        }
+        const paths = rowMap.playPaths || []
+        return paths.length > 0
+    }
+
+    function appendRow(rowMap) {
+        if (!root.isActionableRow(rowMap)) {
+            return false
+        }
+        const rowType = rowMap.rowType || ""
+        if (rowType === "track") {
+            root.uiBridge.appendTrack(rowMap.trackPath || "")
+            return true
+        }
+        if (rowType === "album") {
+            const albumPaths = rowMap.playPaths || []
+            if (albumPaths.length > 0) {
+                root.uiBridge.appendPaths(albumPaths)
+            } else {
+                root.uiBridge.appendAlbumByKey(
+                    rowMap.artist || "",
+                    rowMap.selectionKey || rowMap.name || "")
+            }
+            return true
+        }
+        if (rowType === "artist") {
+            root.uiBridge.appendArtistByName(rowMap.selectionKey || rowMap.artist || "")
+            return true
+        }
+        root.uiBridge.appendPaths(rowMap.playPaths || [])
+        return true
+    }
+
+    function replaceWithRow(rowMap) {
+        if (!root.isActionableRow(rowMap)) {
+            return false
+        }
+        const rowType = rowMap.rowType || ""
+        if (rowType === "track") {
+            root.uiBridge.playTrack(rowMap.trackPath || "")
+            return true
+        }
+        if (rowType === "album") {
+            const albumPaths = rowMap.playPaths || []
+            if (albumPaths.length > 0) {
+                root.uiBridge.replaceWithPaths(albumPaths)
+            } else {
+                root.uiBridge.replaceAlbumByKey(
+                    rowMap.artist || "",
+                    rowMap.selectionKey || rowMap.name || "")
+            }
+            return true
+        }
+        if (rowType === "artist") {
+            root.uiBridge.replaceArtistByName(rowMap.selectionKey || rowMap.artist || "")
+            return true
+        }
+        root.uiBridge.replaceWithPaths(rowMap.playPaths || [])
+        return true
+    }
+
+    function selectedRowsSorted() {
+        const rows = []
+        for (let i = 0; i < root.selectedSelectionKeys.length; ++i) {
+            const key = root.selectedSelectionKeys[i] || ""
+            if (key.length === 0) {
+                continue
+            }
+            const rowIndex = root.libraryModel.indexForSelectionKey(key)
+            if (rowIndex < 0) {
+                continue
+            }
+            const rowMap = root.libraryModel.rowDataForRow(rowIndex)
+            if (root.isActionableRow(rowMap)) {
+                rows.push({ index: rowIndex, row: rowMap })
+            }
+        }
+        rows.sort(function(a, b) { return a.index - b.index })
+        return rows
+    }
+
+    function currentSelectionRow() {
+        return {
+            rowType: root.selectedRowType,
+            artist: root.selectedArtist,
+            name: root.selectedAlbum,
+            sourceIndex: root.selectedSourceIndex,
+            trackPath: root.selectedTrackPath,
+            openPath: root.selectedOpenPath,
+            playPaths: root.selectedPlayPaths
+        }
+    }
+
+    function rowsForAction(rowMap) {
+        if (rowMap
+                && rowMap.selectionKey
+                && root.isSelectionKeySelected(rowMap.selectionKey)
+                && root.selectedSelectionKeys.length > 1) {
+            const selectedRows = root.selectedRowsSorted()
+            if (selectedRows.length > 0) {
+                return selectedRows.map(function(entry) { return entry.row })
+            }
+        }
+        return rowMap ? [rowMap] : []
+    }
+
+    function canPlaySelection() {
+        if (root.selectedSelectionKeys.length > 0) {
+            return root.selectedRowsSorted().length > 0
+        }
+        return root.isActionableRow(root.currentSelectionRow())
+    }
+
+    function playRows(rows) {
+        if (!rows || rows.length === 0) {
+            return
+        }
+        if (!root.replaceWithRow(rows[0])) {
+            return
+        }
+        for (let i = 1; i < rows.length; ++i) {
+            root.appendRow(rows[i])
+        }
+    }
+
+    function appendRows(rows) {
+        if (!rows || rows.length === 0) {
+            return
+        }
+        for (let i = 0; i < rows.length; ++i) {
+            root.appendRow(rows[i])
+        }
+    }
+
+    function playSelection() {
+        const rows = root.selectedRowsSorted().map(function(entry) { return entry.row })
+        if (rows.length > 0) {
+            root.playRows(rows)
+            return
+        }
+        root.playRows([root.currentSelectionRow()])
+    }
+
+    function appendSelection() {
+        const rows = root.selectedRowsSorted().map(function(entry) { return entry.row })
+        if (rows.length > 0) {
+            root.appendRows(rows)
+            return
+        }
+        root.appendRows([root.currentSelectionRow()])
+    }
+
+    function canOpenTagEditorForRow(rowMap) {
+        if (!rowMap) {
+            return false
+        }
+        const rowType = rowMap.rowType || ""
+        if (rowType === "track") {
+            return (rowMap.trackPath || "").length > 0
+        }
+        if (rowType === "album" || rowType === "section") {
+            return (rowMap.selectionKey || "").length > 0
+        }
+        return false
+    }
+
+    function openTagEditorForRow(rowMap) {
+        const rows = root.rowsForAction(rowMap)
+        const selections = []
+        for (let i = 0; i < rows.length; ++i) {
+            const row = rows[i]
+            if (!root.canOpenTagEditorForRow(row)) {
+                continue
+            }
+            selections.push({
+                path: row.trackPath || "",
+                rowType: row.rowType || "",
+                key: row.selectionKey || "",
+                artist: row.artist || "",
+                name: row.name || "",
+                trackPath: row.trackPath || ""
+            })
+        }
+        if (selections.length > 0 && root.tagEditorApi.openSelection(selections)) {
+            root.openTagEditorDialog()
+        }
+    }
+
+    function canPlayAllTracks() {
+        return root.uiBridge.libraryTrackCount > 0
+    }
+
+    function playAllTracks() {
+        if (root.canPlayAllTracks()) {
+            root.uiBridge.replaceAllLibraryTracks()
+        }
+    }
+
+    function appendAllTracks() {
+        if (root.canPlayAllTracks()) {
+            root.uiBridge.appendAllLibraryTracks()
+        }
     }
 
     function clearPrimarySelection() {
