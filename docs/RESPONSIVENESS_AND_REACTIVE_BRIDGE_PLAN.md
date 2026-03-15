@@ -123,6 +123,18 @@ Progress update (2026-03-15):
 
 ### Phase 2: Wake-driven bridge delivery
 
+Progress update (2026-03-15):
+
+- Completed: `FerrousFfiBridge` now owns a relay thread that blocks on bridge events, coalesces them off the Qt thread, and fills the existing pending FFI queues without relying on GUI-side polling.
+- Completed: the FFI bridge now exposes a non-blocking wake pipe through:
+  - `ferrous_ffi_bridge_wakeup_fd`
+  - `ferrous_ffi_bridge_ack_wakeup`
+- Completed: `BridgeClient` now consumes bridge readiness via `QSocketNotifier` instead of calling `ferrous_ffi_bridge_poll()` on a repeating timer.
+- Completed: notifier activation now acknowledges the wake fd, drains pending work through the existing bounded apply path, and uses a `0 ms` single-shot continuation only when one drain run saturates its budget or per-category caps.
+- Completed: direct command sends no longer force an immediate Qt poll; wake-driven delivery now propagates command results back to the UI.
+- Completed: added wake-pipe coverage for readability, coalescing, and `ack_wakeup()` behavior, and updated `BridgeClient` tests to assert notifier installation and continuation scheduling behavior.
+- Validation: `cargo fmt` and `./scripts/run-tests.sh` passed after the Phase 2 changes.
+
 #### FFI bridge changes
 
 - Keep the Rust bridge runtime on its existing thread.

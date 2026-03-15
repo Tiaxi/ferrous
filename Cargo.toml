@@ -9,6 +9,7 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 anyhow = "1"
 crossbeam-channel = "0.5"
+libc = "0.2"
 gstreamer = { version = "0.25", optional = true }
 gstreamer-app = { version = "0.25", optional = true }
 gstreamer-audio = { version = "0.25", optional = true }

@@ -17,6 +17,12 @@ namespace {
 
 void isolateBridgeClient(BridgeClient &client) {
     client.m_bridgePollTimer.stop();
+    if (client.m_bridgeWakeNotifier != nullptr) {
+        client.m_bridgeWakeNotifier->setEnabled(false);
+        delete client.m_bridgeWakeNotifier;
+        client.m_bridgeWakeNotifier = nullptr;
+    }
+    client.m_bridgeWakeFd = -1;
     client.shutdownBridgeGracefully();
     if (client.m_ffiBridge != nullptr) {
         ferrous_ffi_bridge_destroy(client.m_ffiBridge);
@@ -35,8 +41,8 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void spectrogramDeltaSkipsMetadataOnlyChannels();
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
-    void adaptiveBridgePollUsesExpectedTiers();
-    void scheduleBridgePollPrefersSoonerRearm();
+    void inProcessBridgeInstallsWakeNotifier();
+    void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
@@ -133,48 +139,31 @@ void BridgeClientTest::stoppedTrackChangeClearsPendingSpectrogramDelta() {
     QCOMPARE(client.m_spectrogramReset, false);
 }
 
-void BridgeClientTest::adaptiveBridgePollUsesExpectedTiers() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-
-    client.m_bridgePollBusyMs = 8;
-    client.m_bridgePollPausedMs = 33;
-    client.m_bridgePollIdleMs = 160;
-
-    client.m_playbackState = QStringLiteral("Playing");
-    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 8);
-
-    client.m_playbackState = QStringLiteral("Stopped");
-    client.m_pendingSeek = true;
-    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 8);
-
-    client.m_pendingSeek = false;
-    client.m_pendingGlobalSearchQuery = QStringLiteral("beatles");
-    client.m_lastGlobalSearchQuerySent = QStringLiteral("bea");
-    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 8);
-
-    client.m_pendingGlobalSearchQuery.clear();
-    client.m_lastGlobalSearchQuerySent.clear();
-    client.m_playbackState = QStringLiteral("Paused");
-    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 33);
-
-    client.m_playbackState = QStringLiteral("Stopped");
-    client.m_currentTrackPath.clear();
-    client.m_queueLength = 0;
-    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 160);
-}
-
-void BridgeClientTest::scheduleBridgePollPrefersSoonerRearm() {
+void BridgeClientTest::inProcessBridgeInstallsWakeNotifier() {
     BridgeClient client;
     QVERIFY(client.m_ffiBridge != nullptr);
+    QVERIFY(client.m_bridgeWakeFd >= 0);
+    QVERIFY(client.m_bridgeWakeNotifier != nullptr);
+    QVERIFY(client.m_bridgeWakeNotifier->isEnabled());
+
+    isolateBridgeClient(client);
+}
+
+void BridgeClientTest::scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm() {
+    BridgeClient client;
+    QVERIFY(client.m_ffiBridge != nullptr);
+    QVERIFY(client.m_bridgeWakeNotifier != nullptr);
 
     client.m_bridgePollTimer.stop();
+    client.m_bridgeWakeNotifier->setEnabled(true);
     client.scheduleBridgePoll(160);
     QVERIFY(client.m_bridgePollTimer.isActive());
     QCOMPARE(client.m_bridgePollTimer.interval(), 160);
+    QVERIFY(!client.m_bridgeWakeNotifier->isEnabled());
 
     client.scheduleBridgePoll(0);
     QCOMPARE(client.m_bridgePollTimer.interval(), 0);
+    QVERIFY(!client.m_bridgeWakeNotifier->isEnabled());
 
     isolateBridgeClient(client);
 }

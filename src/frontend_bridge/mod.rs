@@ -650,6 +650,10 @@ impl FrontendBridgeHandle {
     pub fn try_recv(&self) -> Option<BridgeEvent> {
         self.rx.try_recv().ok()
     }
+
+    pub(crate) fn into_parts(self) -> (Sender<BridgeCommand>, Receiver<BridgeEvent>) {
+        (self.tx, self.rx)
+    }
 }
 
 struct BridgeLoopRuntime {

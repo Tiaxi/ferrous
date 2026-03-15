@@ -33,6 +33,7 @@
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QSet>
+#include <QSocketNotifier>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -352,15 +353,6 @@ int readEnvMillis(const char *key, int fallback) {
         return fallback;
     }
     return std::clamp(value, 8, 1000);
-}
-
-int readEnvMillisClamped(const char *key, int fallback, int minValue, int maxValue) {
-    bool ok = false;
-    const int value = qEnvironmentVariableIntValue(key, &ok);
-    if (!ok) {
-        return fallback;
-    }
-    return std::clamp(value, minValue, maxValue);
 }
 
 QVariantMap readImageFileDetails(const QString &path) {
@@ -846,10 +838,12 @@ BridgeClient::BridgeClient(QObject *parent)
         this,
         &BridgeClient::dispatchPendingSearchApplyFrame);
 
-    m_bridgePollBusyMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_BUSY_MS", 8, 1, 1000);
-    m_bridgePollPausedMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_PAUSED_MS", 33, 1, 1000);
-    m_bridgePollIdleMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_IDLE_MS", 160, 1, 2000);
-    m_bridgePollBudgetMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_BUDGET_MS", 5, 1, 100);
+    {
+        bool ok = false;
+        const int configuredBudgetMs =
+            qEnvironmentVariableIntValue("FERROUS_UI_BRIDGE_POLL_BUDGET_MS", &ok);
+        m_bridgePollBudgetMs = ok ? std::clamp(configuredBudgetMs, 1, 100) : 5;
+    }
     m_bridgePollTimer.setSingleShot(true);
     m_bridgePollTimer.setTimerType(Qt::PreciseTimer);
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
@@ -898,6 +892,12 @@ BridgeClient::BridgeClient(QObject *parent)
 
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
+    if (m_bridgeWakeNotifier != nullptr) {
+        m_bridgeWakeNotifier->setEnabled(false);
+        delete m_bridgeWakeNotifier;
+        m_bridgeWakeNotifier = nullptr;
+    }
+    m_bridgeWakeFd = -1;
     m_uiStallWatchdogTimer.stop();
     m_globalSearchDebounceTimer.stop();
     m_searchApplyDispatchTimer.stop();
@@ -942,6 +942,13 @@ void BridgeClient::applyDetectedFileBrowserName(const QString &name) {
 }
 
 bool BridgeClient::startInProcessBridge() {
+    if (m_bridgeWakeNotifier != nullptr) {
+        m_bridgeWakeNotifier->setEnabled(false);
+        delete m_bridgeWakeNotifier;
+        m_bridgeWakeNotifier = nullptr;
+    }
+    m_bridgeWakeFd = -1;
+
     m_ffiBridge = ferrous_ffi_bridge_create();
     if (m_ffiBridge == nullptr) {
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("failed to create in-process bridge"));
@@ -949,7 +956,31 @@ bool BridgeClient::startInProcessBridge() {
         return false;
     }
 
-    scheduleBridgePoll(0);
+    m_bridgeWakeFd = ferrous_ffi_bridge_wakeup_fd(m_ffiBridge);
+    if (m_bridgeWakeFd >= 0) {
+        m_bridgeWakeNotifier = new QSocketNotifier(
+            QSocketDescriptor(m_bridgeWakeFd),
+            QSocketNotifier::Read,
+            this);
+        connect(
+            m_bridgeWakeNotifier,
+            &QSocketNotifier::activated,
+            this,
+            [this](QSocketDescriptor, QSocketNotifier::Type) {
+                if (m_ffiBridge == nullptr || m_bridgeWakeNotifier == nullptr) {
+                    return;
+                }
+                m_bridgeWakeNotifier->setEnabled(false);
+                ferrous_ffi_bridge_ack_wakeup(m_ffiBridge);
+                pollInProcessBridge();
+            });
+        m_bridgeWakeNotifier->setEnabled(true);
+    } else {
+        logDiagnostic(
+            QStringLiteral("bridge"),
+            QStringLiteral("wake fd unavailable; using continuation timer only"));
+        scheduleBridgePoll(0);
+    }
     if (!m_connected) {
         m_connected = true;
         emit connectedChanged();
@@ -1489,6 +1520,9 @@ void BridgeClient::scheduleBridgePoll(int delayMs) {
         return;
     }
     const int clampedDelay = std::max(0, delayMs);
+    if (m_bridgeWakeNotifier != nullptr) {
+        m_bridgeWakeNotifier->setEnabled(false);
+    }
     if (m_bridgePollTimer.isActive()) {
         const int remaining = m_bridgePollTimer.remainingTime();
         if (remaining >= 0 && remaining <= clampedDelay) {
@@ -1496,48 +1530,6 @@ void BridgeClient::scheduleBridgePoll(int delayMs) {
         }
     }
     m_bridgePollTimer.start(clampedDelay);
-}
-
-bool BridgeClient::hasPendingSearchWork() const {
-    if (m_globalSearchDebounceTimer.isActive() || m_searchApplyDispatchTimer.isActive()) {
-        return true;
-    }
-    if (!m_pendingGlobalSearchQuery.trimmed().isEmpty()
-        && m_pendingGlobalSearchQuery != m_lastGlobalSearchQuerySent) {
-        return true;
-    }
-    if (!m_globalSearchSentAtMs.isEmpty()) {
-        return true;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(m_searchApplyMutex);
-        if (m_searchPendingInputFrame.has_value()) {
-            return true;
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_searchOutputMutex);
-        if (m_searchPendingOutputFrame.has_value()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-int BridgeClient::bridgePollDelayMsForCurrentState() const {
-    if (m_pendingSeek
-        || hasPendingSearchWork()
-        || m_libraryScanInProgress
-        || m_playbackState == QStringLiteral("Playing")) {
-        return m_bridgePollBusyMs;
-    }
-    if (m_playbackState == QStringLiteral("Paused")
-        || !m_currentTrackPath.isEmpty()
-        || m_queueLength > 0) {
-        return m_bridgePollPausedMs;
-    }
-    return m_bridgePollIdleMs;
 }
 
 BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetMs) {
@@ -1856,15 +1848,6 @@ void BridgeClient::pollInProcessBridge() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     QElapsedTimer pollTimer;
     pollTimer.start();
-    double ffiPollMs = 0.0;
-#endif
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    QElapsedTimer ffiPollTimer;
-    ffiPollTimer.start();
-#endif
-    const bool ffiPendingQueues = ferrous_ffi_bridge_poll(m_ffiBridge, 64);
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    ffiPollMs = static_cast<double>(ffiPollTimer.nsecsElapsed()) / 1'000'000.0;
 #endif
 
     m_pollPlaybackChanged = false;
@@ -1878,11 +1861,14 @@ void BridgeClient::pollInProcessBridge() {
         scheduleSnapshotChanged();
     }
 
-    if (m_connected) {
-        const int nextDelayMs = run.shouldContinueImmediately()
-            ? 0
-            : bridgePollDelayMsForCurrentState();
-        scheduleBridgePoll(nextDelayMs);
+    if (m_ffiBridge != nullptr) {
+        if (run.shouldContinueImmediately()) {
+            scheduleBridgePoll(0);
+        } else if (m_bridgeWakeNotifier != nullptr) {
+            m_bridgeWakeNotifier->setEnabled(true);
+        } else if (m_connected) {
+            scheduleBridgePoll(16);
+        }
     }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -1890,23 +1876,22 @@ void BridgeClient::pollInProcessBridge() {
         const double pollMs = static_cast<double>(pollTimer.nsecsElapsed()) / 1'000'000.0;
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         const bool saturated = run.shouldContinueImmediately();
-        if ((pollMs >= 6.0 || saturated || ffiPendingQueues)
+        if ((pollMs >= 6.0 || saturated)
             && shouldEmitUiProfileLog(nowMs, &m_lastBridgePollProfileLogMs, 200)) {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("ui-prof"),
                 QStringLiteral(
-                    "bridge_poll ms=%1 ffi_poll=%2 analysis_frames=%3 analysis_kb=%4 tree_frames=%5 search_frames=%6 events=%7 pending_queues=%8 budget_exhausted=%9 saturated=%10 next_delay_ms=%11")
+                    "bridge_poll ms=%1 analysis_frames=%2 analysis_kb=%3 tree_frames=%4 search_frames=%5 events=%6 budget_exhausted=%7 saturated=%8 wake_notifier=%9 timer_active=%10")
                     .arg(pollMs, 0, 'f', 2)
-                    .arg(ffiPollMs, 0, 'f', 2)
                     .arg(run.processedAnalysisFrames)
                     .arg(static_cast<double>(run.processedAnalysisBytes) / 1024.0, 0, 'f', 1)
                     .arg(run.processedTreeFrames)
                     .arg(run.processedSearchFrames)
                     .arg(run.processedEvents)
-                    .arg(ffiPendingQueues ? 1 : 0)
                     .arg(run.budgetExhausted ? 1 : 0)
                     .arg(saturated ? 1 : 0)
-                    .arg(run.shouldContinueImmediately() ? 0 : bridgePollDelayMsForCurrentState()));
+                    .arg(m_bridgeWakeNotifier != nullptr ? 1 : 0)
+                    .arg(m_bridgePollTimer.isActive() ? 1 : 0));
         }
     }
 #endif
@@ -4029,7 +4014,6 @@ void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
         return;
     }
-    scheduleBridgePoll(0);
 }
 
 void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path) {

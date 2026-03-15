@@ -27,6 +27,7 @@
 
 struct FerrousFfiBridge;
 class QNetworkReply;
+class QSocketNotifier;
 class QTemporaryDir;
 
 struct QueueRowData {
@@ -437,8 +438,6 @@ private:
     void applyImageFileDetailsResult(const QString &requestedPath, QVariantMap details);
     void cacheImageFileDetails(const QString &requestedPath, const QVariantMap &details);
     void scheduleBridgePoll(int delayMs);
-    int bridgePollDelayMsForCurrentState() const;
-    bool hasPendingSearchWork() const;
     BridgePollRunResult drainBridgeQueues(qint64 budgetMs);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
@@ -465,10 +464,9 @@ private:
     static QString formatDurationCompact(double seconds);
 
     FerrousFfiBridge *m_ffiBridge{nullptr};
+    QSocketNotifier *m_bridgeWakeNotifier{nullptr};
+    int m_bridgeWakeFd{-1};
     QTimer m_bridgePollTimer;
-    int m_bridgePollBusyMs{8};
-    int m_bridgePollPausedMs{33};
-    int m_bridgePollIdleMs{160};
     int m_bridgePollBudgetMs{5};
     QString m_playbackState{"Stopped"};
     QString m_positionText{"00:00"};

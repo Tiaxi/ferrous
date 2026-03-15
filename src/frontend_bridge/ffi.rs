@@ -2,8 +2,13 @@ use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::ffi::c_uchar;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::fd::RawFd;
 
 use super::{
     BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
@@ -24,6 +29,7 @@ const MAX_PENDING_BINARY_EVENTS: usize = 12;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
 const MAX_PENDING_LIBRARY_TREES: usize = 1;
 const MAX_PENDING_SEARCH_RESULTS: usize = 2;
+const RELAY_RECV_TIMEOUT: Duration = Duration::from_millis(250);
 
 const SNAPSHOT_MAGIC: u32 = 0xFE55_0001;
 const SECTION_PLAYBACK: u16 = 1 << 0;
@@ -35,6 +41,21 @@ const SECTION_SETTINGS: u16 = 1 << 5;
 const SECTION_ERROR: u16 = 1 << 6;
 const SECTION_STOPPED: u16 = 1 << 7;
 const SECTION_LASTFM: u16 = 1 << 8;
+
+#[cfg(unix)]
+fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
+    let mut fds = [0; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+    if rc != 0 {
+        return None;
+    }
+    Some((fds[0], fds[1]))
+}
+
+#[cfg(not(unix))]
+fn create_nonblocking_pipe() -> Option<(i32, i32)> {
+    None
+}
 
 #[derive(Default)]
 struct AnalysisDelta {
@@ -102,7 +123,7 @@ struct SearchResultsFrame {
 }
 
 struct FfiRuntime {
-    bridge: FrontendBridgeHandle,
+    command_tx: crossbeam_channel::Sender<BridgeCommand>,
     analysis_state: AnalysisEmitState,
     queue_section_cache: QueueSectionCache,
     pending_binary_events: VecDeque<Vec<u8>>,
@@ -110,14 +131,20 @@ struct FfiRuntime {
     pending_library_trees: VecDeque<LibraryTreeFrame>,
     pending_search_results: VecDeque<SearchResultsFrame>,
     next_tree_version: u32,
+    wake_read_fd: i32,
+    wake_write_fd: i32,
+    wake_signaled: bool,
     stopped: bool,
 }
 
 impl FfiRuntime {
-    fn new() -> Self {
-        let bridge = FrontendBridgeHandle::spawn();
-        let runtime = Self {
-            bridge,
+    fn new(
+        command_tx: crossbeam_channel::Sender<BridgeCommand>,
+        wake_read_fd: i32,
+        wake_write_fd: i32,
+    ) -> Self {
+        Self {
+            command_tx,
             analysis_state: AnalysisEmitState::default(),
             queue_section_cache: QueueSectionCache::default(),
             pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
@@ -125,33 +152,133 @@ impl FfiRuntime {
             pending_library_trees: VecDeque::with_capacity(MAX_PENDING_LIBRARY_TREES),
             pending_search_results: VecDeque::with_capacity(MAX_PENDING_SEARCH_RESULTS),
             next_tree_version: 1,
+            wake_read_fd,
+            wake_write_fd,
+            wake_signaled: false,
             stopped: false,
-        };
-        runtime.bridge.command(BridgeCommand::RequestSnapshot);
-        runtime
+        }
+    }
+
+    fn has_pending_queues(&self) -> bool {
+        !self.pending_binary_events.is_empty()
+            || !self.pending_analysis_frames.is_empty()
+            || !self.pending_library_trees.is_empty()
+            || !self.pending_search_results.is_empty()
+    }
+
+    #[cfg(unix)]
+    fn signal_wakeup_if_needed(&mut self) {
+        if self.wake_signaled || !self.has_pending_queues() || self.wake_write_fd < 0 {
+            return;
+        }
+
+        let byte = [1u8; 1];
+        loop {
+            let written =
+                unsafe { libc::write(self.wake_write_fd, byte.as_ptr().cast(), byte.len()) };
+            if written == 1 {
+                self.wake_signaled = true;
+                return;
+            }
+            if written >= 0 {
+                self.wake_signaled = true;
+                return;
+            }
+            let err = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default();
+            if err == libc::EINTR {
+                continue;
+            }
+            if err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+                self.wake_signaled = true;
+            }
+            return;
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn signal_wakeup_if_needed(&mut self) {}
+
+    #[cfg(unix)]
+    fn ack_wakeup(&mut self) {
+        if self.wake_read_fd < 0 {
+            return;
+        }
+
+        let mut buffer = [0u8; 64];
+        loop {
+            let read =
+                unsafe { libc::read(self.wake_read_fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if read > 0 {
+                continue;
+            }
+            if read == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default();
+            if err == libc::EINTR {
+                continue;
+            }
+            if err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+                break;
+            }
+            break;
+        }
+
+        self.wake_signaled = false;
+        self.signal_wakeup_if_needed();
+    }
+
+    #[cfg(not(unix))]
+    fn ack_wakeup(&mut self) {}
+
+    fn close_wakeup_pipe(&mut self) {
+        #[cfg(unix)]
+        {
+            if self.wake_read_fd >= 0 {
+                unsafe { libc::close(self.wake_read_fd) };
+                self.wake_read_fd = -1;
+            }
+            if self.wake_write_fd >= 0 {
+                unsafe { libc::close(self.wake_write_fd) };
+                self.wake_write_fd = -1;
+            }
+        }
     }
 
     fn push_binary_event(&mut self, payload: Vec<u8>) {
         if payload.is_empty() {
             return;
         }
+        let was_empty = !self.has_pending_queues();
         while self.pending_binary_events.len() >= MAX_PENDING_BINARY_EVENTS {
             self.pending_binary_events.pop_front();
         }
         self.pending_binary_events.push_back(payload);
+        if was_empty {
+            self.signal_wakeup_if_needed();
+        }
     }
 
     fn push_analysis_frame(&mut self, frame: Vec<u8>) {
         if frame.is_empty() {
             return;
         }
+        let was_empty = !self.has_pending_queues();
         while self.pending_analysis_frames.len() >= MAX_PENDING_ANALYSIS_FRAMES {
             self.pending_analysis_frames.pop_front();
         }
         self.pending_analysis_frames.push_back(frame);
+        if was_empty {
+            self.signal_wakeup_if_needed();
+        }
     }
 
     fn push_library_tree_frame(&mut self, bytes: Vec<u8>) {
+        let was_empty = !self.has_pending_queues();
         let mut payload = bytes;
         if payload.is_empty() {
             payload.extend_from_slice(&0u32.to_le_bytes());
@@ -166,28 +293,38 @@ impl FfiRuntime {
             self.pending_library_trees.pop_front();
         }
         self.pending_library_trees.push_back(frame);
+        if was_empty {
+            self.signal_wakeup_if_needed();
+        }
     }
 
     fn push_search_results_frame(&mut self, seq: u32, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
+        let was_empty = !self.has_pending_queues();
         // Search result frames are superseded by newer seq values.
         // Keep latest-only to avoid backlogging stale UI apply work.
         self.pending_search_results.clear();
         self.pending_search_results
             .push_back(SearchResultsFrame { seq, bytes });
+        if was_empty {
+            self.signal_wakeup_if_needed();
+        }
     }
 
     fn send_binary_command(&mut self, payload: &[u8]) -> Result<(), String> {
         let cmd = parse_binary_command(payload)?;
         if let Some(cmd) = cmd {
-            self.bridge.command(cmd);
+            let _ = self.command_tx.send(cmd);
         }
         Ok(())
     }
 
-    fn poll(&mut self, max_events: usize) {
+    fn process_bridge_events<I>(&mut self, events: I)
+    where
+        I: IntoIterator<Item = BridgeEvent>,
+    {
         if self.stopped {
             return;
         }
@@ -195,11 +332,7 @@ impl FfiRuntime {
         let mut latest_snapshot: Option<BridgeSnapshot> = None;
         let mut latest_queue_snapshot: Option<BridgeSnapshot> = None;
         let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
-        for _ in 0..max_events.max(1) {
-            let event = self.bridge.try_recv();
-            let Some(event) = event else {
-                break;
-            };
+        for event in events {
             match event {
                 BridgeEvent::Snapshot(snapshot) => {
                     if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
@@ -316,15 +449,69 @@ fn merge_queue_snapshot(
     latest_snapshot
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Receiver<BridgeEvent>) {
+    loop {
+        if shared.stop_requested.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let first_event = match event_rx.recv_timeout(RELAY_RECV_TIMEOUT) {
+            Ok(event) => event,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
+        let mut events = vec![first_event];
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        let Ok(mut runtime) = shared.runtime.lock() else {
+            break;
+        };
+        runtime.process_bridge_events(events);
+        if runtime.stopped {
+            shared.stop_requested.store(true, Ordering::Relaxed);
+            break;
+        }
+    }
+}
+
+#[repr(C)]
+struct FfiShared {
+    runtime: Mutex<FfiRuntime>,
+    stop_requested: AtomicBool,
+}
+
 #[repr(C)]
 pub struct FerrousFfiBridge {
-    runtime: Mutex<FfiRuntime>,
+    shared: Arc<FfiShared>,
+    relay_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[no_mangle]
 pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
+    let bridge = FrontendBridgeHandle::spawn();
+    let (command_tx, event_rx) = bridge.into_parts();
+    let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().unwrap_or((-1, -1));
+    let shared = Arc::new(FfiShared {
+        runtime: Mutex::new(FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd)),
+        stop_requested: AtomicBool::new(false),
+    });
+    if let Ok(runtime) = shared.runtime.lock() {
+        let _ = runtime.command_tx.send(BridgeCommand::RequestSnapshot);
+    }
+
+    let relay_shared = Arc::clone(&shared);
+    let relay_thread = thread::Builder::new()
+        .name("ferrous-ffi-relay".to_string())
+        .spawn(move || run_ffi_relay_loop(relay_shared, event_rx))
+        .ok();
+
     Box::into_raw(Box::new(FerrousFfiBridge {
-        runtime: Mutex::new(FfiRuntime::new()),
+        shared,
+        relay_thread: Mutex::new(relay_thread),
     }))
 }
 
@@ -337,7 +524,23 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridg
     if handle.is_null() {
         return;
     }
-    drop(Box::from_raw(handle));
+    let bridge = Box::from_raw(handle);
+    let shared = Arc::clone(&bridge.shared);
+    shared.stop_requested.store(true, Ordering::Relaxed);
+    if let Ok(runtime) = shared.runtime.lock() {
+        let _ = runtime.command_tx.send(BridgeCommand::Shutdown);
+    }
+    if let Ok(mut relay_thread) = bridge.relay_thread.lock() {
+        if let Some(join_handle) = relay_thread.take() {
+            let _ = join_handle.join();
+        }
+    }
+    {
+        let runtime_lock = shared.runtime.lock();
+        if let Ok(mut runtime) = runtime_lock {
+            runtime.close_wakeup_pipe();
+        }
+    }
 }
 
 #[no_mangle]
@@ -354,7 +557,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_send_binary(
         return false;
     }
     let bridge = &*handle;
-    let Ok(mut runtime) = bridge.runtime.lock() else {
+    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
         return false;
     };
     let payload = std::slice::from_raw_parts(cmd_ptr, cmd_len);
@@ -375,18 +578,45 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
     handle: *mut FerrousFfiBridge,
     max_events: u32,
 ) -> bool {
+    let _ = max_events;
     if handle.is_null() {
         return false;
     }
     let bridge = &*handle;
-    let Ok(mut runtime) = bridge.runtime.lock() else {
+    let Ok(runtime) = bridge.shared.runtime.lock() else {
         return false;
     };
-    runtime.poll(usize_from_u32(max_events));
-    !runtime.pending_binary_events.is_empty()
-        || !runtime.pending_analysis_frames.is_empty()
-        || !runtime.pending_library_trees.is_empty()
-        || !runtime.pending_search_results.is_empty()
+    runtime.has_pending_queues()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+pub unsafe extern "C" fn ferrous_ffi_bridge_wakeup_fd(handle: *mut FerrousFfiBridge) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+    let bridge = &*handle;
+    let Ok(runtime) = bridge.shared.runtime.lock() else {
+        return -1;
+    };
+    runtime.wake_read_fd
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+pub unsafe extern "C" fn ferrous_ffi_bridge_ack_wakeup(handle: *mut FerrousFfiBridge) {
+    if handle.is_null() {
+        return;
+    }
+    let bridge = &*handle;
+    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
+        return;
+    };
+    runtime.ack_wakeup();
 }
 
 #[no_mangle]
@@ -405,7 +635,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_binary_event(
         return std::ptr::null_mut();
     }
     let bridge = &*handle;
-    let Ok(mut runtime) = bridge.runtime.lock() else {
+    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
         return std::ptr::null_mut();
     };
     let Some(bytes) = runtime.pop_binary_event() else {
@@ -449,7 +679,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_analysis_frame(
         return std::ptr::null_mut();
     }
     let bridge = &*handle;
-    let Ok(mut runtime) = bridge.runtime.lock() else {
+    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
         return std::ptr::null_mut();
     };
     let Some(frame) = runtime.pop_analysis_frame() else {
@@ -497,7 +727,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_library_tree(
         return std::ptr::null_mut();
     }
     let bridge = &*handle;
-    let Ok(mut runtime) = bridge.runtime.lock() else {
+    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
         return std::ptr::null_mut();
     };
     let Some(frame) = runtime.pop_library_tree_frame() else {
@@ -548,7 +778,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_search_results(
         return std::ptr::null_mut();
     }
     let bridge = &*handle;
-    let Ok(mut runtime) = bridge.runtime.lock() else {
+    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
         return std::ptr::null_mut();
     };
     let Some(frame) = runtime.pop_search_results_frame() else {
@@ -597,10 +827,10 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_refresh_edited_paths(
         return false;
     };
     let bridge = &*handle;
-    let Ok(runtime) = bridge.runtime.lock() else {
+    let Ok(runtime) = bridge.shared.runtime.lock() else {
         return false;
     };
-    runtime.bridge.command(BridgeCommand::Library(
+    let _ = runtime.command_tx.send(BridgeCommand::Library(
         BridgeLibraryCommand::RefreshEditedPaths(paths),
     ));
     true
@@ -699,8 +929,8 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_rename_edited_files(
         .collect::<Vec<_>>();
     if !rename_pairs.is_empty() {
         let bridge = &*handle;
-        if let Ok(runtime) = bridge.runtime.lock() {
-            runtime.bridge.command(BridgeCommand::Library(
+        if let Ok(runtime) = bridge.shared.runtime.lock() {
+            let _ = runtime.command_tx.send(BridgeCommand::Library(
                 BridgeLibraryCommand::RefreshRenamedPaths(rename_pairs),
             ));
         }
@@ -2512,6 +2742,170 @@ mod tests {
             }
         }
         None
+    }
+
+    #[cfg(unix)]
+    fn test_runtime_with_wake_pipe() -> FfiRuntime {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().expect("wake pipe");
+        FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd)
+    }
+
+    #[cfg(unix)]
+    fn wake_fd_is_readable(fd: i32, timeout: Duration) -> bool {
+        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            let rc = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+            if rc > 0 {
+                return (poll_fd.revents & libc::POLLIN) != 0;
+            }
+            if rc == 0 {
+                return false;
+            }
+            let err = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default();
+            if err == libc::EINTR {
+                continue;
+            }
+            return false;
+        }
+    }
+
+    #[cfg(unix)]
+    fn drain_wakeup_fd(fd: i32) -> usize {
+        let mut total = 0usize;
+        let mut buffer = [0u8; 64];
+        loop {
+            let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if read > 0 {
+                total += read as usize;
+                continue;
+            }
+            if read == 0 {
+                return total;
+            }
+            let err = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default();
+            if err == libc::EINTR {
+                continue;
+            }
+            if err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+                return total;
+            }
+            return total;
+        }
+    }
+
+    #[cfg(unix)]
+    fn drain_runtime_queues(runtime: &mut FfiRuntime) {
+        while runtime.pop_analysis_frame().is_some() {}
+        while runtime.pop_library_tree_frame().is_some() {}
+        while runtime.pop_search_results_frame().is_some() {}
+        while runtime.pop_binary_event().is_some() {}
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wake_pipe_becomes_readable_when_work_is_queued() {
+        let mut runtime = test_runtime_with_wake_pipe();
+
+        runtime.process_bridge_events(vec![BridgeEvent::Snapshot(Box::new(sample_snapshot()))]);
+        assert!(wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(50)
+        ));
+        drain_runtime_queues(&mut runtime);
+        runtime.ack_wakeup();
+        assert!(!wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(0)
+        ));
+
+        runtime.push_search_results_frame(7, vec![1, 2, 3]);
+        assert!(wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(50)
+        ));
+        drain_runtime_queues(&mut runtime);
+        runtime.ack_wakeup();
+        assert!(!wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(0)
+        ));
+
+        runtime.process_bridge_events(vec![BridgeEvent::Error("bad command".to_string())]);
+        assert!(wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(50)
+        ));
+        drain_runtime_queues(&mut runtime);
+        runtime.ack_wakeup();
+        assert!(!wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(0)
+        ));
+
+        let mut stopped_runtime = test_runtime_with_wake_pipe();
+        stopped_runtime.process_bridge_events(vec![BridgeEvent::Stopped]);
+        assert!(wake_fd_is_readable(
+            stopped_runtime.wake_read_fd,
+            Duration::from_millis(50)
+        ));
+        drain_runtime_queues(&mut stopped_runtime);
+        stopped_runtime.ack_wakeup();
+        assert!(!wake_fd_is_readable(
+            stopped_runtime.wake_read_fd,
+            Duration::from_millis(0)
+        ));
+
+        runtime.close_wakeup_pipe();
+        stopped_runtime.close_wakeup_pipe();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wake_pipe_coalesces_repeated_queue_signals() {
+        let mut runtime = test_runtime_with_wake_pipe();
+
+        runtime.push_binary_event(vec![1]);
+        runtime.push_binary_event(vec![2]);
+        runtime.push_search_results_frame(9, vec![3, 4, 5]);
+
+        assert!(wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(50)
+        ));
+        assert_eq!(drain_wakeup_fd(runtime.wake_read_fd), 1);
+
+        runtime.close_wakeup_pipe();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ack_wakeup_clears_readiness_after_drain() {
+        let mut runtime = test_runtime_with_wake_pipe();
+
+        runtime.process_bridge_events(vec![BridgeEvent::Error("oops".to_string())]);
+        assert!(wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(50)
+        ));
+
+        drain_runtime_queues(&mut runtime);
+        runtime.ack_wakeup();
+
+        assert!(!wake_fd_is_readable(
+            runtime.wake_read_fd,
+            Duration::from_millis(0)
+        ));
+        runtime.close_wakeup_pipe();
     }
 
     #[test]

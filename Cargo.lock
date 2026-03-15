@@ -276,6 +276,7 @@ dependencies = [
  "gstreamer-pbutils",
  "image",
  "keyring",
+ "libc",
  "lofty",
  "md5",
  "parking_lot",
