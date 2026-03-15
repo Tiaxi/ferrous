@@ -436,10 +436,10 @@ bool MprisController::ensureObjectRegistered() {
 void MprisController::updateRegistration() {
     QDBusConnection sessionBus = QDBusConnection::sessionBus();
     if (!m_enabled) {
-        if (m_serviceRegistered) {
+        if (m_serviceRegistered && sessionBus.isConnected()) {
             sessionBus.unregisterService(QString::fromUtf8(kMprisService));
-            m_serviceRegistered = false;
         }
+        m_serviceRegistered = false;
         m_hasPublishedPlayerState = false;
         return;
     }
