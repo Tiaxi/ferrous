@@ -17,6 +17,7 @@ Baseline commit series:
 
 Current post-refactor golden baseline:
 
+- `73b2d38` `Lock spectrogram profiling baseline`
 - wake-driven bridge delivery and reactive snapshot emission remain enabled
 - the QML spectrogram handoff stays on the deferred packed-batch flush path
 - frame-cadenced `SpectrogramItem` draining and wrapped fragment composition remain in place
