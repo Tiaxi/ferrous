@@ -35,6 +35,8 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void spectrogramDeltaSkipsMetadataOnlyChannels();
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
+    void adaptiveBridgePollUsesExpectedTiers();
+    void scheduleBridgePollPrefersSoonerRearm();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
@@ -129,6 +131,52 @@ void BridgeClientTest::stoppedTrackChangeClearsPendingSpectrogramDelta() {
     QCOMPARE(client.m_currentTrackPath, QStringLiteral("/music/new-track.flac"));
     QCOMPARE(client.m_spectrogramChannels.size(), 0);
     QCOMPARE(client.m_spectrogramReset, false);
+}
+
+void BridgeClientTest::adaptiveBridgePollUsesExpectedTiers() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_bridgePollBusyMs = 8;
+    client.m_bridgePollPausedMs = 33;
+    client.m_bridgePollIdleMs = 160;
+
+    client.m_playbackState = QStringLiteral("Playing");
+    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 8);
+
+    client.m_playbackState = QStringLiteral("Stopped");
+    client.m_pendingSeek = true;
+    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 8);
+
+    client.m_pendingSeek = false;
+    client.m_pendingGlobalSearchQuery = QStringLiteral("beatles");
+    client.m_lastGlobalSearchQuerySent = QStringLiteral("bea");
+    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 8);
+
+    client.m_pendingGlobalSearchQuery.clear();
+    client.m_lastGlobalSearchQuerySent.clear();
+    client.m_playbackState = QStringLiteral("Paused");
+    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 33);
+
+    client.m_playbackState = QStringLiteral("Stopped");
+    client.m_currentTrackPath.clear();
+    client.m_queueLength = 0;
+    QCOMPARE(client.bridgePollDelayMsForCurrentState(), 160);
+}
+
+void BridgeClientTest::scheduleBridgePollPrefersSoonerRearm() {
+    BridgeClient client;
+    QVERIFY(client.m_ffiBridge != nullptr);
+
+    client.m_bridgePollTimer.stop();
+    client.scheduleBridgePoll(160);
+    QVERIFY(client.m_bridgePollTimer.isActive());
+    QCOMPARE(client.m_bridgePollTimer.interval(), 160);
+
+    client.scheduleBridgePoll(0);
+    QCOMPARE(client.m_bridgePollTimer.interval(), 0);
+
+    isolateBridgeClient(client);
 }
 
 void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {

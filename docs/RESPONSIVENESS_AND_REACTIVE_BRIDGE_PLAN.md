@@ -98,6 +98,18 @@ Progress update (2026-03-15):
 
 ### Phase 1.5: Adaptive polling as an interim step
 
+Progress update (2026-03-15):
+
+- Completed: the permanent repeating 16 ms Qt bridge timer has been replaced with a single-shot adaptive scheduler in `BridgeClient`.
+- Completed: the current default poll tiers are now:
+  - `0 ms` immediate re-arm when one drain run exhausts its wall-clock budget or saturates a per-category cap
+  - `8 ms` while playback is active, a seek is pending, library scan work is active, or global-search work is in flight
+  - `33 ms` while paused or when stopped with active track or queue context
+  - `160 ms` while idle/stopped without active work
+- Completed: `pollInProcessBridge()` now drains within both per-category caps and a wall-clock budget, then reschedules from the post-drain state instead of relying on a fixed repeating tick.
+- Completed: bridge command sends now request an immediate single-shot poll so user actions do not wait for the idle tier.
+- Validation: `./scripts/run-tests.sh --ui-only` passed after the Phase 1.5 changes.
+
 - Replace the permanent repeating 16 ms Qt timer with a single-shot adaptive scheduler.
 - Use these default poll tiers:
   - `0 ms` immediate re-arm when the previous drain saturated its work budget or FFI still has pending queues

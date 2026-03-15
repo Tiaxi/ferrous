@@ -372,6 +372,34 @@ private:
         QVariantMap imageDetails;
     };
 
+    struct BridgePollRunResult {
+        int processedAnalysisFrames{0};
+        int processedTreeFrames{0};
+        int processedSearchFrames{0};
+        int processedEvents{0};
+        qsizetype processedAnalysisBytes{0};
+        bool analysisCapSaturated{false};
+        bool treeCapSaturated{false};
+        bool searchCapSaturated{false};
+        bool eventCapSaturated{false};
+        bool budgetExhausted{false};
+
+        bool anyWorkProcessed() const {
+            return processedAnalysisFrames > 0
+                || processedTreeFrames > 0
+                || processedSearchFrames > 0
+                || processedEvents > 0;
+        }
+
+        bool shouldContinueImmediately() const {
+            return budgetExhausted
+                || analysisCapSaturated
+                || treeCapSaturated
+                || searchCapSaturated
+                || eventCapSaturated;
+        }
+    };
+
     bool startInProcessBridge();
     void startSearchApplyWorker();
     void stopSearchApplyWorker();
@@ -408,6 +436,10 @@ private:
     void applyDetectedFileBrowserName(const QString &name);
     void applyImageFileDetailsResult(const QString &requestedPath, QVariantMap details);
     void cacheImageFileDetails(const QString &requestedPath, const QVariantMap &details);
+    void scheduleBridgePoll(int delayMs);
+    int bridgePollDelayMsForCurrentState() const;
+    bool hasPendingSearchWork() const;
+    BridgePollRunResult drainBridgeQueues(qint64 budgetMs);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
@@ -434,6 +466,10 @@ private:
 
     FerrousFfiBridge *m_ffiBridge{nullptr};
     QTimer m_bridgePollTimer;
+    int m_bridgePollBusyMs{8};
+    int m_bridgePollPausedMs{33};
+    int m_bridgePollIdleMs{160};
+    int m_bridgePollBudgetMs{5};
     QString m_playbackState{"Stopped"};
     QString m_positionText{"00:00"};
     QString m_durationText{"00:00"};
@@ -562,12 +598,12 @@ private:
     QTimer m_searchApplyDispatchTimer;
     int m_searchApplyDispatchMs{12};
     std::thread m_searchApplyThread;
-    std::mutex m_searchApplyMutex;
+    mutable std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;
     bool m_searchApplyStop{false};
     std::optional<SearchWorkerInputFrame> m_searchPendingInputFrame;
     quint64 m_searchInputCoalescedDrops{0};
-    std::mutex m_searchOutputMutex;
+    mutable std::mutex m_searchOutputMutex;
     std::optional<SearchWorkerOutputFrame> m_searchPendingOutputFrame;
     quint64 m_searchOutputCoalescedDrops{0};
     std::thread m_coverLookupThread;

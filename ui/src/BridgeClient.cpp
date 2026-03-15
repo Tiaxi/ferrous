@@ -354,6 +354,15 @@ int readEnvMillis(const char *key, int fallback) {
     return std::clamp(value, 8, 1000);
 }
 
+int readEnvMillisClamped(const char *key, int fallback, int minValue, int maxValue) {
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue(key, &ok);
+    if (!ok) {
+        return fallback;
+    }
+    return std::clamp(value, minValue, maxValue);
+}
+
 QVariantMap readImageFileDetails(const QString &path) {
     QVariantMap out;
 
@@ -837,7 +846,12 @@ BridgeClient::BridgeClient(QObject *parent)
         this,
         &BridgeClient::dispatchPendingSearchApplyFrame);
 
-    m_bridgePollTimer.setInterval(readEnvMillis("FERROUS_UI_BRIDGE_POLL_MS", 16));
+    m_bridgePollBusyMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_BUSY_MS", 8, 1, 1000);
+    m_bridgePollPausedMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_PAUSED_MS", 33, 1, 1000);
+    m_bridgePollIdleMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_IDLE_MS", 160, 1, 2000);
+    m_bridgePollBudgetMs = readEnvMillisClamped("FERROUS_UI_BRIDGE_POLL_BUDGET_MS", 5, 1, 100);
+    m_bridgePollTimer.setSingleShot(true);
+    m_bridgePollTimer.setTimerType(Qt::PreciseTimer);
     connect(&m_bridgePollTimer, &QTimer::timeout, this, &BridgeClient::pollInProcessBridge);
 
     if (m_profileUiEnabled) {
@@ -935,7 +949,7 @@ bool BridgeClient::startInProcessBridge() {
         return false;
     }
 
-    m_bridgePollTimer.start();
+    scheduleBridgePoll(0);
     if (!m_connected) {
         m_connected = true;
         emit connectedChanged();
@@ -1470,6 +1484,179 @@ int BridgeClient::searchApplyDispatchDelayMs() const {
     return std::clamp(delayMs, m_searchApplyDispatchMs, 220);
 }
 
+void BridgeClient::scheduleBridgePoll(int delayMs) {
+    if (m_ffiBridge == nullptr) {
+        return;
+    }
+    const int clampedDelay = std::max(0, delayMs);
+    if (m_bridgePollTimer.isActive()) {
+        const int remaining = m_bridgePollTimer.remainingTime();
+        if (remaining >= 0 && remaining <= clampedDelay) {
+            return;
+        }
+    }
+    m_bridgePollTimer.start(clampedDelay);
+}
+
+bool BridgeClient::hasPendingSearchWork() const {
+    if (m_globalSearchDebounceTimer.isActive() || m_searchApplyDispatchTimer.isActive()) {
+        return true;
+    }
+    if (!m_pendingGlobalSearchQuery.trimmed().isEmpty()
+        && m_pendingGlobalSearchQuery != m_lastGlobalSearchQuerySent) {
+        return true;
+    }
+    if (!m_globalSearchSentAtMs.isEmpty()) {
+        return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_searchApplyMutex);
+        if (m_searchPendingInputFrame.has_value()) {
+            return true;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_searchOutputMutex);
+        if (m_searchPendingOutputFrame.has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int BridgeClient::bridgePollDelayMsForCurrentState() const {
+    if (m_pendingSeek
+        || hasPendingSearchWork()
+        || m_libraryScanInProgress
+        || m_playbackState == QStringLiteral("Playing")) {
+        return m_bridgePollBusyMs;
+    }
+    if (m_playbackState == QStringLiteral("Paused")
+        || !m_currentTrackPath.isEmpty()
+        || m_queueLength > 0) {
+        return m_bridgePollPausedMs;
+    }
+    return m_bridgePollIdleMs;
+}
+
+BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetMs) {
+    BridgePollRunResult result;
+    const qint64 clampedBudgetMs = std::max<qint64>(1, budgetMs);
+    QElapsedTimer budgetTimer;
+    budgetTimer.start();
+
+    const auto budgetAvailable = [&]() {
+        return budgetTimer.elapsed() < clampedBudgetMs;
+    };
+    const auto markBudgetExhaustedIfNeeded = [&]() {
+        if (!budgetAvailable()) {
+            result.budgetExhausted = true;
+            return true;
+        }
+        return false;
+    };
+
+    constexpr int kMaxAnalysisFramesPerPass = 8;
+    while (result.processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
+        if (markBudgetExhaustedIfNeeded()) {
+            break;
+        }
+        std::size_t len = 0;
+        std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
+        if (framePtr == nullptr || len == 0) {
+            break;
+        }
+        result.processedAnalysisFrames++;
+        const QByteArray chunk(
+            reinterpret_cast<const char *>(framePtr),
+            static_cast<qsizetype>(len));
+        result.processedAnalysisBytes += chunk.size();
+        ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
+        processAnalysisBytes(chunk);
+    }
+    result.analysisCapSaturated = result.processedAnalysisFrames >= kMaxAnalysisFramesPerPass;
+
+    constexpr int kMaxTreeFramesPerPass = 4;
+    while (!result.budgetExhausted && result.processedTreeFrames < kMaxTreeFramesPerPass) {
+        if (markBudgetExhaustedIfNeeded()) {
+            break;
+        }
+        std::size_t len = 0;
+        std::uint32_t version = 0;
+        std::uint8_t *treePtr = ferrous_ffi_bridge_pop_library_tree(m_ffiBridge, &len, &version);
+        if (treePtr == nullptr || len == 0) {
+            break;
+        }
+        result.processedTreeFrames++;
+        const QByteArray treeBytes(
+            reinterpret_cast<const char *>(treePtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_library_tree(treePtr, len);
+        const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(version);
+        applyLibraryTreeFrame(versionInt, treeBytes);
+    }
+    result.treeCapSaturated = result.processedTreeFrames >= kMaxTreeFramesPerPass;
+
+    constexpr int kMaxSearchFramesPerPass = 4;
+    while (!result.budgetExhausted && result.processedSearchFrames < kMaxSearchFramesPerPass) {
+        if (markBudgetExhaustedIfNeeded()) {
+            break;
+        }
+        QElapsedTimer popTimer;
+        popTimer.start();
+        std::size_t len = 0;
+        std::uint32_t seq = 0;
+        std::uint8_t *searchPtr = ferrous_ffi_bridge_pop_search_results(
+            m_ffiBridge,
+            &len,
+            &seq);
+        if (searchPtr == nullptr || len == 0) {
+            break;
+        }
+        result.processedSearchFrames++;
+        const QByteArray payload(
+            reinterpret_cast<const char *>(searchPtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_search_results(searchPtr, len);
+        enqueueSearchFrame(seq, payload, popTimer.elapsed());
+    }
+    result.searchCapSaturated = result.processedSearchFrames >= kMaxSearchFramesPerPass;
+
+    constexpr int kMaxEventsPerPass = 3;
+    while (!result.budgetExhausted && result.processedEvents < kMaxEventsPerPass) {
+        if (markBudgetExhaustedIfNeeded()) {
+            break;
+        }
+        std::size_t len = 0;
+        std::uint8_t *packetPtr = ferrous_ffi_bridge_pop_binary_event(m_ffiBridge, &len);
+        if (packetPtr == nullptr || len == 0) {
+            break;
+        }
+        result.processedEvents++;
+        const QByteArray packet(
+            reinterpret_cast<const char *>(packetPtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_binary_event(packetPtr, len);
+
+        BinaryBridgeCodec::DecodedSnapshot decoded;
+        QString decodeError;
+        if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
+            logDiagnostic(
+                QStringLiteral("bridge"),
+                QStringLiteral("snapshot decode error: %1").arg(decodeError));
+            emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
+            continue;
+        }
+        processBinarySnapshot(decoded);
+    }
+    result.eventCapSaturated = result.processedEvents >= kMaxEventsPerPass;
+
+    return result;
+}
+
 void BridgeClient::searchApplyWorkerLoop() {
     for (;;) {
         SearchWorkerInputFrame input;
@@ -1670,141 +1857,19 @@ void BridgeClient::pollInProcessBridge() {
     QElapsedTimer pollTimer;
     pollTimer.start();
     double ffiPollMs = 0.0;
-    double analysisProcessMs = 0.0;
-    double treeProcessMs = 0.0;
-    double searchQueueMs = 0.0;
-    double eventDecodeMs = 0.0;
-    double eventApplyMs = 0.0;
 #endif
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     QElapsedTimer ffiPollTimer;
     ffiPollTimer.start();
 #endif
-    ferrous_ffi_bridge_poll(m_ffiBridge, 64);
+    const bool ffiPendingQueues = ferrous_ffi_bridge_poll(m_ffiBridge, 64);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     ffiPollMs = static_cast<double>(ffiPollTimer.nsecsElapsed()) / 1'000'000.0;
 #endif
 
     m_pollPlaybackChanged = false;
     m_pollSnapshotChanged = false;
-    int processedAnalysisFrames = 0;
-    qsizetype processedAnalysisBytes = 0;
-    constexpr int kMaxAnalysisFramesPerPass = 8;
-    while (processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
-        std::size_t len = 0;
-        std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
-        if (framePtr == nullptr || len == 0) {
-            break;
-        }
-        processedAnalysisFrames++;
-        const QByteArray chunk(
-            reinterpret_cast<const char *>(framePtr),
-            static_cast<qsizetype>(len));
-        processedAnalysisBytes += chunk.size();
-        ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        QElapsedTimer analysisProcessTimer;
-        analysisProcessTimer.start();
-#endif
-        processAnalysisBytes(chunk);
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        analysisProcessMs += static_cast<double>(analysisProcessTimer.nsecsElapsed()) / 1'000'000.0;
-#endif
-    }
-
-    int processedTreeFrames = 0;
-    constexpr int kMaxTreeFramesPerPass = 4;
-    while (processedTreeFrames < kMaxTreeFramesPerPass) {
-        std::size_t len = 0;
-        std::uint32_t version = 0;
-        std::uint8_t *treePtr = ferrous_ffi_bridge_pop_library_tree(m_ffiBridge, &len, &version);
-        if (treePtr == nullptr || len == 0) {
-            break;
-        }
-        processedTreeFrames++;
-        const QByteArray treeBytes(
-            reinterpret_cast<const char *>(treePtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_library_tree(treePtr, len);
-        const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
-            ? std::numeric_limits<int>::max()
-            : static_cast<int>(version);
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        QElapsedTimer treeProcessTimer;
-        treeProcessTimer.start();
-#endif
-        applyLibraryTreeFrame(versionInt, treeBytes);
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        treeProcessMs += static_cast<double>(treeProcessTimer.nsecsElapsed()) / 1'000'000.0;
-#endif
-    }
-
-    int processedSearchFrames = 0;
-    constexpr int kMaxSearchFramesPerPass = 4;
-    while (processedSearchFrames < kMaxSearchFramesPerPass) {
-        QElapsedTimer popTimer;
-        popTimer.start();
-        std::size_t len = 0;
-        std::uint32_t seq = 0;
-        std::uint8_t *searchPtr = ferrous_ffi_bridge_pop_search_results(
-            m_ffiBridge,
-            &len,
-            &seq);
-        if (searchPtr == nullptr || len == 0) {
-            break;
-        }
-        processedSearchFrames++;
-        const QByteArray payload(
-            reinterpret_cast<const char *>(searchPtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_search_results(searchPtr, len);
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        QElapsedTimer searchQueueTimer;
-        searchQueueTimer.start();
-#endif
-        enqueueSearchFrame(seq, payload, popTimer.elapsed());
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        searchQueueMs += static_cast<double>(searchQueueTimer.nsecsElapsed()) / 1'000'000.0;
-#endif
-    }
-
-    int processedEvents = 0;
-    constexpr int kMaxEventsPerPass = 3;
-    while (processedEvents < kMaxEventsPerPass) {
-        std::size_t len = 0;
-        std::uint8_t *packetPtr = ferrous_ffi_bridge_pop_binary_event(m_ffiBridge, &len);
-        if (packetPtr == nullptr || len == 0) {
-            break;
-        }
-        processedEvents++;
-        const QByteArray packet(
-            reinterpret_cast<const char *>(packetPtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_binary_event(packetPtr, len);
-
-        BinaryBridgeCodec::DecodedSnapshot decoded;
-        QString decodeError;
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        QElapsedTimer eventDecodeTimer;
-        eventDecodeTimer.start();
-#endif
-        if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
-            logDiagnostic(
-                QStringLiteral("bridge"),
-                QStringLiteral("snapshot decode error: %1").arg(decodeError));
-            emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
-            continue;
-        }
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        eventDecodeMs += static_cast<double>(eventDecodeTimer.nsecsElapsed()) / 1'000'000.0;
-        QElapsedTimer eventApplyTimer;
-        eventApplyTimer.start();
-#endif
-        processBinarySnapshot(decoded);
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        eventApplyMs += static_cast<double>(eventApplyTimer.nsecsElapsed()) / 1'000'000.0;
-#endif
-    }
+    const BridgePollRunResult run = drainBridgeQueues(m_bridgePollBudgetMs);
 
     if (m_pollPlaybackChanged) {
         schedulePlaybackChanged();
@@ -1813,30 +1878,35 @@ void BridgeClient::pollInProcessBridge() {
         scheduleSnapshotChanged();
     }
 
+    if (m_connected) {
+        const int nextDelayMs = run.shouldContinueImmediately()
+            ? 0
+            : bridgePollDelayMsForCurrentState();
+        scheduleBridgePoll(nextDelayMs);
+    }
+
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
         const double pollMs = static_cast<double>(pollTimer.nsecsElapsed()) / 1'000'000.0;
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-        const bool saturated = processedAnalysisFrames >= kMaxAnalysisFramesPerPass;
-        if ((pollMs >= 6.0 || saturated)
+        const bool saturated = run.shouldContinueImmediately();
+        if ((pollMs >= 6.0 || saturated || ffiPendingQueues)
             && shouldEmitUiProfileLog(nowMs, &m_lastBridgePollProfileLogMs, 200)) {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("ui-prof"),
                 QStringLiteral(
-                    "bridge_poll ms=%1 ffi_poll=%2 analysis_ms=%3 analysis_frames=%4 analysis_kb=%5 tree_ms=%6 tree_frames=%7 search_ms=%8 search_frames=%9 event_decode_ms=%10 event_apply_ms=%11 events=%12 saturated=%13")
+                    "bridge_poll ms=%1 ffi_poll=%2 analysis_frames=%3 analysis_kb=%4 tree_frames=%5 search_frames=%6 events=%7 pending_queues=%8 budget_exhausted=%9 saturated=%10 next_delay_ms=%11")
                     .arg(pollMs, 0, 'f', 2)
                     .arg(ffiPollMs, 0, 'f', 2)
-                    .arg(analysisProcessMs, 0, 'f', 2)
-                    .arg(processedAnalysisFrames)
-                    .arg(static_cast<double>(processedAnalysisBytes) / 1024.0, 0, 'f', 1)
-                    .arg(treeProcessMs, 0, 'f', 2)
-                    .arg(processedTreeFrames)
-                    .arg(searchQueueMs, 0, 'f', 2)
-                    .arg(processedSearchFrames)
-                    .arg(eventDecodeMs, 0, 'f', 2)
-                    .arg(eventApplyMs, 0, 'f', 2)
-                    .arg(processedEvents)
-                    .arg(saturated ? 1 : 0));
+                    .arg(run.processedAnalysisFrames)
+                    .arg(static_cast<double>(run.processedAnalysisBytes) / 1024.0, 0, 'f', 1)
+                    .arg(run.processedTreeFrames)
+                    .arg(run.processedSearchFrames)
+                    .arg(run.processedEvents)
+                    .arg(ffiPendingQueues ? 1 : 0)
+                    .arg(run.budgetExhausted ? 1 : 0)
+                    .arg(saturated ? 1 : 0)
+                    .arg(run.shouldContinueImmediately() ? 0 : bridgePollDelayMsForCurrentState()));
         }
     }
 #endif
@@ -3957,7 +4027,9 @@ void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
             QStringLiteral("bridge"),
             QStringLiteral("failed to send command bytes=%1").arg(payload.size()));
         emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
+        return;
     }
+    scheduleBridgePoll(0);
 }
 
 void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path) {
