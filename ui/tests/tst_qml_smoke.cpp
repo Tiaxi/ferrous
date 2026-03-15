@@ -303,6 +303,22 @@ QString takeCapturedMessagesText() {
     return text;
 }
 
+QObject *findObjectByStringProperty(QObject *root, const char *propertyName, const QString &expectedValue) {
+    if (!root) {
+        return nullptr;
+    }
+    if (root->property(propertyName).toString() == expectedValue) {
+        return root;
+    }
+    const QObjectList children = root->children();
+    for (QObject *child : children) {
+        if (QObject *match = findObjectByStringProperty(child, propertyName, expectedValue)) {
+            return match;
+        }
+    }
+    return nullptr;
+}
+
 QObject *createQmlObjectFromSource(
     QQmlEngine &engine,
     const QByteArray &qmlSource,
@@ -388,6 +404,12 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QObject *libraryView = qvariant_cast<QObject *>(root->property("libraryViewRef"));
     QVERIFY2(libraryView != nullptr, "Main.qml did not publish the library view ref");
     QCOMPARE(qvariant_cast<QObject *>(libraryView->property("model")), static_cast<QObject *>(&libraryModel));
+
+    bool invoked = QMetaObject::invokeMethod(root, "openItunesArtworkDialog");
+    QVERIFY(invoked);
+    QObject *itunesDialog = findObjectByStringProperty(root, "title", QStringLiteral("Replace From iTunes"));
+    QVERIFY2(itunesDialog != nullptr, "Could not find iTunes artwork dialog instance");
+    QTRY_VERIFY(itunesDialog->property("visible").toBool());
 }
 
 void QmlSmokeTest::loadsExtractedQmlSlicesWithFallbackProps() {

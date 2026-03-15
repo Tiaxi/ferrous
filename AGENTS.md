@@ -15,6 +15,11 @@
 - Use `--no-configure` / `--no-build` only when reusing a known-good UI build directory.
 - Use `--coverage` only when a coverage gate is intentionally part of the task.
 
+## Root Cause Rule
+- When investigating bugs, regressions, or broken behavior, do not guess at likely fixes and stop at the first plausible explanation.
+- Inspect the relevant code paths and data flow until there is a concrete, defensible root cause for the observed behavior.
+- Only then implement the fix. If multiple plausible causes remain, keep investigating or explicitly state the remaining uncertainty instead of presenting a blind guess as the answer.
+
 ## Commit Policy
 - Autonomous commits are allowed in this repository.
 - Commit when all of the following are true:

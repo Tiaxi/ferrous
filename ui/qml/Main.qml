@@ -69,6 +69,7 @@ Kirigami.ApplicationWindow {
         : null
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
     readonly property var uiPalette: uiPaletteObject
+    readonly property var overlayHost: Overlay.overlay
     readonly property bool themeIsDark: uiPalette.themeIsDark
     readonly property color uiPaneColor: uiPalette.uiPaneColor
     readonly property color uiSurfaceColor: uiPalette.uiSurfaceColor
@@ -139,6 +140,13 @@ Kirigami.ApplicationWindow {
 
     function canOpenTagEditorForLibrary(rowMap) {
         return libraryController.canOpenTagEditorForRow(rowMap)
+    }
+
+    function openItunesArtworkDialog() {
+        viewerController.openItunesArtworkDialog(
+            itunesArtworkDialog,
+            albumArtViewerShell.windowHost,
+            root.overlayHost)
     }
 
     QtObject {
@@ -595,10 +603,7 @@ Kirigami.ApplicationWindow {
         id: replaceFromItunesAction
         text: "Replace From iTunes..."
         enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
-        onTriggered: viewerController.openItunesArtworkDialog(
-            itunesArtworkDialog,
-            albumArtViewerShell.windowHost,
-            Overlay.overlay)
+        onTriggered: root.openItunesArtworkDialog()
     }
     Action {
         id: preferencesAction

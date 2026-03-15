@@ -116,11 +116,14 @@ QtObject {
     }
 
     function openItunesArtworkDialog(dialog, wholeScreenParent, overlayParent) {
-        dialog.parent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
+        const targetParent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
             ? wholeScreenParent
             : overlayParent
-        root.uiBridge.searchCurrentTrackArtworkSuggestions()
-        dialog.open()
+        Qt.callLater(function() {
+            dialog.parent = targetParent
+            root.uiBridge.searchCurrentTrackArtworkSuggestions()
+            dialog.open()
+        })
     }
 
     function handleSnapshotChanged() {
