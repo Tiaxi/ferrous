@@ -32,7 +32,10 @@ The current implementation depends on these rules:
 - Seek does not hard-reset spectrogram history in `src/frontend_bridge/mod.rs`.
 - Analysis reset does not drain queued fresh PCM in `src/analysis/mod.rs`; stale PCM is filtered by track token instead.
 - Only the first post-reset spectrogram burst is seeded into history immediately.
+- If a reset burst is delivered in multiple UI chunks, only the first chunk may trigger a visual reset, but every chunk that belongs to that burst must still be seeded into history.
 - Steady-state row appends remain animation-driven and must not synchronously absorb large batches into history on the UI thread.
+- Live row draining must stay frame-cadenced; do not chain immediate queued drain passes that can consume multiple recovery chunks inside one catch-up window.
+- Wrapped scene-graph composition must allocate visible fragment nodes independently of source tile ids; the ring-buffer wrap can require the same source tile to appear at both screen edges in one frame.
 - Scroll cadence uses the backend visual hop cadence (`sampleRate / 1024`) rather than burst-size-derived startup estimates.
 - Stopped track switches must clear any pending bridge-side spectrogram delta before the next track resumes.
 - The stopped-track-switch reset must be enforced on the immediate `playbackChanged` path, not only the delayed `snapshotChanged` path, because quick stop-switch-play sequences can outrun the snapshot coalescing timer.

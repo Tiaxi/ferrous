@@ -13,6 +13,8 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 
+#include <algorithm>
+
 #include "../src/LibraryTreeModel.h"
 #define private public
 #include "../src/SpectrogramItem.h"
@@ -364,6 +366,9 @@ private slots:
     void spectrogramSurfaceDefersPackedDeltaFlush();
     void spectrogramItemRendersNonBackgroundPixels();
     void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
+    void spectrogramItemSurvivesRepeatedIncrementalTextureReplacement();
+    void spectrogramWrappedHistoryStaysContinuousAcrossTileBoundary();
+    void spectrogramChunkedResetBurstSeedsHistoryAcrossChunks();
     void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
     void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
     void spectrogramQueuedDrainConsumesReadyRows();
@@ -1074,6 +1079,117 @@ void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
         "Delayed spectrogram append only rendered a narrow strip");
 }
 
+void QmlSmokeTest::spectrogramItemSurvivesRepeatedIncrementalTextureReplacement() {
+    QQuickWindow window;
+    window.resize(320, 180);
+
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setWidth(320);
+    item->setHeight(180);
+    item->setSampleRateHz(48000);
+
+    constexpr int initialRows = 320;
+    constexpr int burstRows = 96;
+    constexpr int binsPerRow = 128;
+
+    auto makePackedRows = [](int rowCount, int bins, int seed) {
+        QByteArray packedRows;
+        packedRows.resize(rowCount * bins);
+        for (int row = 0; row < rowCount; ++row) {
+            for (int bin = 0; bin < bins; ++bin) {
+                packedRows[row * bins + bin] = static_cast<char>((seed + row * 17 + bin * 5) % 256);
+            }
+        }
+        return packedRows;
+    };
+
+    item->appendPackedRows(makePackedRows(initialRows, binsPerRow, 11), initialRows, binsPerRow);
+
+    window.show();
+    QTest::qWait(80);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 80);
+
+    for (int burst = 0; burst < 6; ++burst) {
+        item->appendPackedRows(makePackedRows(burstRows, binsPerRow, 40 + burst * 13), burstRows, binsPerRow);
+        QTest::qWait(80);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 80);
+        const QImage frame = window.grabWindow();
+        QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed during incremental replacement");
+    }
+}
+
+void QmlSmokeTest::spectrogramWrappedHistoryStaysContinuousAcrossTileBoundary() {
+    QQuickWindow window;
+    window.resize(320, 180);
+
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setWidth(320);
+    item->setHeight(180);
+    item->setSampleRateHz(48000);
+
+    constexpr int rowCount = 323;
+    constexpr int binsPerRow = 96;
+    QByteArray packedRows;
+    packedRows.resize(rowCount * binsPerRow);
+    std::fill(packedRows.begin(), packedRows.end(), static_cast<char>(255));
+    item->appendPackedRows(packedRows, rowCount, binsPerRow);
+
+    window.show();
+    QTest::qWait(100);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    const QImage frame = window.grabWindow();
+    QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed for wrapped history continuity");
+
+    const QColor background(0x0b, 0x0b, 0x0f);
+    int maxBackgroundRun = 0;
+    int currentBackgroundRun = 0;
+    for (int x = 0; x < frame.width(); ++x) {
+        int nonBackgroundPixels = 0;
+        for (int y = 0; y < frame.height(); ++y) {
+            if (frame.pixelColor(x, y) != background) {
+                ++nonBackgroundPixels;
+            }
+        }
+        if (nonBackgroundPixels < frame.height() / 4) {
+            currentBackgroundRun += 1;
+            maxBackgroundRun = std::max(maxBackgroundRun, currentBackgroundRun);
+        } else {
+            currentBackgroundRun = 0;
+        }
+    }
+
+    QVERIFY2(
+        maxBackgroundRun <= 1,
+        qPrintable(QStringLiteral("Wrapped spectrogram history had a background gap of %1 columns")
+                       .arg(maxBackgroundRun)));
+}
+
+void QmlSmokeTest::spectrogramChunkedResetBurstSeedsHistoryAcrossChunks() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setSampleRateHz(48000);
+
+    constexpr int rowsPerChunk = 4;
+    constexpr int binsPerRow = 32;
+    QByteArray firstChunk;
+    firstChunk.resize(rowsPerChunk * binsPerRow);
+    QByteArray secondChunk;
+    secondChunk.resize(rowsPerChunk * binsPerRow);
+    for (int row = 0; row < rowsPerChunk; ++row) {
+        for (int bin = 0; bin < binsPerRow; ++bin) {
+            firstChunk[row * binsPerRow + bin] = static_cast<char>((row * 11 + bin * 3) % 256);
+            secondChunk[row * binsPerRow + bin] = static_cast<char>((50 + row * 7 + bin * 5) % 256);
+        }
+    }
+
+    item.appendPackedRows(firstChunk, rowsPerChunk, binsPerRow, true);
+    item.appendPackedRows(secondChunk, rowsPerChunk, binsPerRow, true);
+
+    QCOMPARE(item.m_columns.size(), static_cast<size_t>(6));
+    QCOMPARE(item.m_pendingColumns.size(), static_cast<size_t>(2));
+}
+
 void QmlSmokeTest::spectrogramSurfaceDefersPackedDeltaFlush() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
 
@@ -1121,7 +1237,8 @@ Item {
     const bool invoked = QMetaObject::invokeMethod(
         surface,
         "appendPackedDelta",
-        Q_ARG(QVariant, QVariant::fromValue(QVariantList{channel})));
+        Q_ARG(QVariant, QVariant::fromValue(QVariantList{channel})),
+        Q_ARG(QVariant, false));
     QVERIFY(invoked);
 
     QVERIFY(surface->property("pendingPackedFlushScheduled").toBool());
@@ -1225,9 +1342,9 @@ void QmlSmokeTest::spectrogramQueuedDrainConsumesReadyRows() {
     item.schedulePendingDrain();
     QTRY_VERIFY_WITH_TIMEOUT(!item.m_pendingDrainScheduled, 1000);
 
-    QCOMPARE(item.m_columns.size(), columnsBefore + 3);
-    QCOMPARE(item.m_pendingColumns.size(), pendingBefore - 3);
-    QCOMPARE(item.m_pendingPhase, 0.0);
+    QCOMPARE(item.m_columns.size(), columnsBefore + 2);
+    QCOMPARE(item.m_pendingColumns.size(), pendingBefore - 2);
+    QCOMPARE(item.m_pendingPhase, 1.0);
 }
 
 void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {

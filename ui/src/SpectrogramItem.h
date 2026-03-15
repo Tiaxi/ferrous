@@ -44,7 +44,11 @@ public:
     Q_INVOKABLE void reset();
     Q_INVOKABLE void halt();
     Q_INVOKABLE void appendRows(const QVariantList &rows);
-    Q_INVOKABLE void appendPackedRows(const QByteArray &packedRows, int rowCount, int binsPerRow);
+    Q_INVOKABLE void appendPackedRows(
+        const QByteArray &packedRows,
+        int rowCount,
+        int binsPerRow,
+        bool seedHistoryBurst = false);
 
 signals:
     void dbRangeChanged();
@@ -75,6 +79,7 @@ private:
     bool consumePendingColumnsLocked(int requested);
     void absorbPendingHistoryLocked(int retainPending);
     bool advanceAnimationLocked(double elapsedSeconds, bool *drainReady);
+    int maxDrainColumnsPerPassLocked() const;
     int readyPendingColumnsLocked() const;
     void schedulePendingDrain();
     void drainPendingColumns();

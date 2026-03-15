@@ -66,7 +66,9 @@ Item {
             return
         }
 
-        const channels = root.pendingPackedBatches[0]
+        const batch = root.pendingPackedBatches[0]
+        const channels = batch ? batch.channels : null
+        const seedHistory = batch ? batch.seedHistory === true : false
         if (!channels || channels.length === 0) {
             root.pendingPackedBatches.shift()
             if (root.pendingPackedBatches.length > 0) {
@@ -97,7 +99,11 @@ Item {
                 continue
             }
             if ((channel.rows || 0) > 0 && (channel.bins || 0) > 0) {
-                pane.spectrogramItem.appendPackedRows(channel.data, channel.rows, channel.bins)
+                pane.spectrogramItem.appendPackedRows(
+                            channel.data,
+                            channel.rows,
+                            channel.bins,
+                            seedHistory)
             }
         }
 
@@ -131,11 +137,14 @@ Item {
         }
     }
 
-    function appendPackedDelta(channels) {
+    function appendPackedDelta(channels, seedHistory) {
         if (!channels || channels.length === 0) {
             return
         }
-        root.pendingPackedBatches.push(channels)
+        root.pendingPackedBatches.push({
+            channels: channels,
+            seedHistory: seedHistory === true
+        })
         schedulePendingPackedFlush()
     }
 

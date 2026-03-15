@@ -1168,7 +1168,7 @@ Kirigami.ApplicationWindow {
                 spectrogramSurface.resetForCurrentMode(true)
             }
             if (root.visualFeedsEnabled && delta.channels && delta.channels.length > 0) {
-                spectrogramSurface.appendPackedDelta(delta.channels)
+                spectrogramSurface.appendPackedDelta(delta.channels, delta.seedHistory === true)
             }
         }
         function onSnapshotChanged() {

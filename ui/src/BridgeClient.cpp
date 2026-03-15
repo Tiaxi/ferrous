@@ -3261,7 +3261,12 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked(int maxRowsPerChannel) 
     }
     out.insert(QStringLiteral("channels"), channels);
     const bool reset = m_spectrogramReset && !channels.isEmpty();
+    const bool seedHistory = m_spectrogramSeedBurstRowsRemaining > 0 && !channels.isEmpty();
     out.insert(QStringLiteral("reset"), reset);
+    out.insert(QStringLiteral("seedHistory"), seedHistory);
+    if (seedHistory) {
+        m_spectrogramSeedBurstRowsRemaining = std::max(0, m_spectrogramSeedBurstRowsRemaining - rowsToTake);
+    }
     if (reset) {
         m_spectrogramReset = false;
     }
@@ -3292,6 +3297,7 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked(int maxRowsPerChannel) 
 void BridgeClient::clearSpectrogramDeltaState() {
     m_spectrogramChannels.clear();
     m_spectrogramReset = false;
+    m_spectrogramSeedBurstRowsRemaining = 0;
 }
 
 void BridgeClient::requestSnapshot() {
@@ -3754,6 +3760,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
                 m_spectrogramChannels.clear();
                 changed = true;
             }
+            m_spectrogramSeedBurstRowsRemaining = 0;
         }
 
         if ((flags & kAnalysisFlagWaveform) != 0) {
@@ -3828,6 +3835,11 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
                         return channel.packedRowsCount > 0;
                     });
                 if (hasPendingRows) {
+                    if (spectrogramReset) {
+                        m_spectrogramSeedBurstRowsRemaining = std::max(
+                            m_spectrogramSeedBurstRowsRemaining,
+                            static_cast<int>(rowCount));
+                    }
                     changed = true;
                 }
             }

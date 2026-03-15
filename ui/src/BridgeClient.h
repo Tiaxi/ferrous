@@ -498,6 +498,7 @@ private:
     bool m_waveformComplete{false};
     QVector<SpectrogramChannelDelta> m_spectrogramChannels;
     bool m_spectrogramReset{false};
+    int m_spectrogramSeedBurstRowsRemaining{0};
     int m_sampleRateHz{48000};
     int m_fftSize{8192};
     int m_spectrogramViewMode{0};
