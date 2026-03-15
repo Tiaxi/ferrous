@@ -155,6 +155,21 @@ Progress update (2026-03-15):
 
 ### Phase 3: Reactive snapshots with a coarse heartbeat
 
+Progress update (2026-03-15):
+
+- Completed: the bridge loop in `src/frontend_bridge/mod.rs` no longer treats snapshots as a fixed-rate default stream; it now wakes directly on commands, playback, metadata, library, search, queue-detail, album-art, and Last.fm events.
+- Completed: snapshot emission is now urgency-based:
+  - immediate for command-driven state changes, playback state/track changes, metadata changes, library progress/state changes, settings/Last.fm changes, queue-detail refreshes, and deferred tree rebuild completions
+  - heartbeat-gated for continuous playback-position and analysis-progress updates
+- Completed: the default heartbeat tiers now match the plan intent:
+  - `100 ms` while playing
+  - `333 ms` while paused with an active track
+  - no stopped/idle snapshot heartbeat
+- Completed: playback polling is no longer treated as an idle bridge ticker; it now polls at `40 ms` while playing, `333 ms` while paused with an active track, and not at all while stopped.
+- Completed: pending snapshot/search retries, queue-detail revalidation, deferred tree rebuilds, and settings/session persistence now participate in the wake scheduler instead of depending on a permanent default tick.
+- Completed: added deterministic Phase 3 tests covering immediate metadata snapshots from event wakes and coarse heartbeat gating for playback-position updates.
+- Validation: `cargo fmt` and `./scripts/run-tests.sh` passed after the Phase 3 changes.
+
 - In `src/frontend_bridge/mod.rs`, stop treating snapshots as a fixed-rate default update stream.
 - Emit snapshots immediately for:
   - user commands

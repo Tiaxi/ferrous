@@ -681,10 +681,11 @@ struct BridgeLoopRuntime {
     last_saved_session: Option<SessionSnapshot>,
     playing_poll_interval: Duration,
     last_playing_poll: Instant,
-    idle_poll_interval: Duration,
-    last_idle_poll: Instant,
+    paused_poll_interval: Duration,
+    last_paused_poll: Instant,
     diagnostics: BridgeLoopDiagnostics,
-    snapshot_interval: Duration,
+    playing_snapshot_interval: Duration,
+    paused_snapshot_interval: Duration,
     last_snapshot_emit: Instant,
     snapshot_plan: BridgeSnapshotPlan,
     queue_detail_revalidate_interval: Duration,
@@ -699,7 +700,8 @@ struct BridgeLoopRuntime {
 struct BridgeLoopFlags {
     running: bool,
     settings_dirty: bool,
-    snapshot_dirty: bool,
+    session_dirty: bool,
+    pending_snapshot: SnapshotUrgency,
 }
 
 struct BridgeLoopDiagnostics {
@@ -714,7 +716,36 @@ struct BridgeSnapshotPlan {
     include_queue_in_next_snapshot: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+enum SnapshotUrgency {
+    #[default]
+    None,
+    Heartbeat,
+    Immediate,
+}
+
+impl SnapshotUrgency {
+    fn is_pending(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+enum BridgeLoopWake {
+    Command(BridgeCommand),
+    Playback(PlaybackEvent),
+    Analysis(AnalysisEvent),
+    Metadata(MetadataEvent),
+    Library(LibraryEvent),
+    SearchResults(BridgeSearchResultsFrame),
+    ExternalQueueDetails(ExternalQueueDetailsEvent),
+    ApplyAlbumArt(ApplyAlbumArtEvent),
+    LastFm(LastFmEvent),
+    Tick,
+    Shutdown,
+}
+
 impl BridgeLoopRuntime {
+    #[allow(clippy::too_many_lines)]
     fn new(options: BridgeRuntimeOptions) -> Self {
         let (analysis, analysis_rx) = AnalysisEngine::new();
         let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
@@ -756,11 +787,23 @@ impl BridgeLoopRuntime {
                 .and_then(|raw| raw.parse::<u64>().ok())
                 .map_or(40, |value| value.clamp(8, 500)),
         );
-        let snapshot_interval = Duration::from_millis(
-            std::env::var("FERROUS_BRIDGE_SNAPSHOT_MS")
+        let paused_poll_interval = Duration::from_millis(
+            std::env::var("FERROUS_PLAYBACK_PAUSED_POLL_MS")
                 .ok()
                 .and_then(|raw| raw.parse::<u64>().ok())
-                .map_or(16, |value| value.clamp(8, 1000)),
+                .map_or(333, |value| value.clamp(125, 1000)),
+        );
+        let playing_snapshot_interval = Duration::from_millis(
+            std::env::var("FERROUS_BRIDGE_PLAYING_HEARTBEAT_MS")
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .map_or(100, |value| value.clamp(33, 1000)),
+        );
+        let paused_snapshot_interval = Duration::from_millis(
+            std::env::var("FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS")
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .map_or(333, |value| value.clamp(125, 1000)),
         );
         Self {
             analysis,
@@ -784,7 +827,8 @@ impl BridgeLoopRuntime {
             flags: BridgeLoopFlags {
                 running: true,
                 settings_dirty: false,
-                snapshot_dirty: false,
+                session_dirty: false,
+                pending_snapshot: SnapshotUrgency::None,
             },
             last_settings_save: Instant::now(),
             last_session_save: Instant::now(),
@@ -793,8 +837,10 @@ impl BridgeLoopRuntime {
             last_playing_poll: Instant::now()
                 .checked_sub(playing_poll_interval)
                 .unwrap_or_else(Instant::now),
-            idle_poll_interval: Duration::from_millis(250),
-            last_idle_poll: Instant::now(),
+            paused_poll_interval,
+            last_paused_poll: Instant::now()
+                .checked_sub(paused_poll_interval)
+                .unwrap_or_else(Instant::now),
             diagnostics: BridgeLoopDiagnostics {
                 profile_enabled: cfg!(feature = "profiling-logs")
                     && std::env::var_os("FERROUS_PROFILE").is_some(),
@@ -802,7 +848,8 @@ impl BridgeLoopRuntime {
                 prof_snapshots_sent: 0,
                 prof_snapshots_dropped: 0,
             },
-            snapshot_interval,
+            playing_snapshot_interval,
+            paused_snapshot_interval,
             last_snapshot_emit: Instant::now(),
             snapshot_plan: BridgeSnapshotPlan {
                 include_tree_in_next_snapshot: true,
@@ -821,8 +868,8 @@ impl BridgeLoopRuntime {
     fn run(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) {
         self.emit_initial_snapshot(event_tx);
         while self.flags.running {
-            self.handle_select(cmd_rx, event_tx);
-            self.process_updates(event_tx);
+            let wake = self.wait_for_wake(cmd_rx);
+            self.handle_wake(wake, event_tx);
             self.maybe_log_profile();
             self.maybe_persist();
         }
@@ -830,32 +877,154 @@ impl BridgeLoopRuntime {
     }
 
     fn emit_initial_snapshot(&mut self, event_tx: &Sender<BridgeEvent>) {
-        self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
-    }
-
-    fn handle_select(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) {
-        let poll_deadline = self.next_playback_poll_delay();
-        select! {
-            recv(cmd_rx) -> msg => {
-                match msg {
-                    Ok(cmd) => self.handle_command(cmd, event_tx),
-                    Err(_) => self.flags.running = false,
-                }
-            }
-            recv(after(poll_deadline)) -> _ => self.poll_playback_if_due(),
+        if !self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot) {
+            self.flags.pending_snapshot = SnapshotUrgency::Immediate;
         }
     }
 
-    fn next_playback_poll_delay(&self) -> Duration {
-        let (last_poll, poll_interval) = if self.state.playback.state == PlaybackState::Playing {
-            (self.last_playing_poll, self.playing_poll_interval)
-        } else {
-            (self.last_idle_poll, self.idle_poll_interval)
-        };
-        poll_interval.saturating_sub(last_poll.elapsed())
+    fn wait_for_wake(&mut self, cmd_rx: &Receiver<BridgeCommand>) -> BridgeLoopWake {
+        let wake_delay = self.next_wake_delay();
+        select! {
+            recv(cmd_rx) -> msg => {
+                match msg {
+                    Ok(cmd) => BridgeLoopWake::Command(cmd),
+                    Err(_) => BridgeLoopWake::Shutdown,
+                }
+            }
+            recv(&self.playback_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Playback),
+            recv(&self.analysis_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Analysis),
+            recv(&self.metadata_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Metadata),
+            recv(&self.library_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Library),
+            recv(&self.search_results_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::SearchResults),
+            recv(&self.external_queue_details_event_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::ExternalQueueDetails),
+            recv(&self.apply_album_art_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::ApplyAlbumArt),
+            recv(&self.lastfm_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::LastFm),
+            recv(after(wake_delay)) -> _ => BridgeLoopWake::Tick,
+        }
     }
 
-    fn handle_command(&mut self, cmd: BridgeCommand, event_tx: &Sender<BridgeEvent>) {
+    fn next_playback_poll_delay(&self) -> Option<Duration> {
+        if self.state.playback.state == PlaybackState::Playing {
+            return Some(
+                self.playing_poll_interval
+                    .saturating_sub(self.last_playing_poll.elapsed()),
+            );
+        }
+        if self.state.playback.state == PlaybackState::Paused
+            && self.state.playback.current.is_some()
+        {
+            return Some(
+                self.paused_poll_interval
+                    .saturating_sub(self.last_paused_poll.elapsed()),
+            );
+        }
+        None
+    }
+
+    fn next_snapshot_emit_delay(&self) -> Option<Duration> {
+        match self.flags.pending_snapshot {
+            SnapshotUrgency::None => None,
+            SnapshotUrgency::Immediate => Some(Duration::from_millis(8)),
+            SnapshotUrgency::Heartbeat => self
+                .snapshot_heartbeat_interval()
+                .map(|interval| interval.saturating_sub(self.last_snapshot_emit.elapsed())),
+        }
+    }
+
+    fn snapshot_heartbeat_interval(&self) -> Option<Duration> {
+        match self.state.playback.state {
+            PlaybackState::Playing => Some(self.playing_snapshot_interval),
+            PlaybackState::Paused if self.state.playback.current.is_some() => {
+                Some(self.paused_snapshot_interval)
+            }
+            _ => None,
+        }
+    }
+
+    fn next_wake_delay(&self) -> Duration {
+        let mut delay = Duration::from_secs(24 * 60 * 60);
+        for candidate in [
+            self.next_playback_poll_delay(),
+            self.next_snapshot_emit_delay(),
+            self.next_pending_search_retry_delay(),
+            self.next_queue_detail_revalidate_delay(),
+            self.next_deferred_tree_rebuild_delay(),
+            self.next_settings_save_delay(),
+            self.next_session_save_delay(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            delay = delay.min(candidate);
+        }
+        delay
+    }
+
+    fn next_pending_search_retry_delay(&self) -> Option<Duration> {
+        self.state
+            .pending_search_results
+            .as_ref()
+            .map(|_| Duration::from_millis(8))
+    }
+
+    fn next_queue_detail_revalidate_delay(&self) -> Option<Duration> {
+        if self.state.queue.is_empty() && self.state.pending_queue_detail_fingerprints.is_empty() {
+            return None;
+        }
+        Some(
+            self.queue_detail_revalidate_interval
+                .saturating_sub(self.last_queue_detail_revalidate.elapsed()),
+        )
+    }
+
+    fn next_deferred_tree_rebuild_delay(&self) -> Option<Duration> {
+        self.deferred_tree_rebuild_at
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    fn next_settings_save_delay(&self) -> Option<Duration> {
+        self.flags
+            .settings_dirty
+            .then(|| Duration::from_secs(2).saturating_sub(self.last_settings_save.elapsed()))
+    }
+
+    fn next_session_save_delay(&self) -> Option<Duration> {
+        self.flags
+            .session_dirty
+            .then(|| Duration::from_secs(2).saturating_sub(self.last_session_save.elapsed()))
+    }
+
+    fn handle_wake(&mut self, wake: BridgeLoopWake, event_tx: &Sender<BridgeEvent>) {
+        let mut urgency = match wake {
+            BridgeLoopWake::Command(cmd) => self.handle_command(cmd, event_tx),
+            BridgeLoopWake::Playback(event) => self.handle_playback_event(event),
+            BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event),
+            BridgeLoopWake::Metadata(event) => self.handle_metadata_event(event),
+            BridgeLoopWake::Library(event) => self.handle_library_event(event),
+            BridgeLoopWake::SearchResults(frame) => self.handle_search_results(frame),
+            BridgeLoopWake::ExternalQueueDetails(event) => {
+                self.handle_external_queue_detail_event(event)
+            }
+            BridgeLoopWake::ApplyAlbumArt(event) => {
+                self.handle_apply_album_art_event(event, event_tx)
+            }
+            BridgeLoopWake::LastFm(event) => self.handle_lastfm_event(event),
+            BridgeLoopWake::Tick => SnapshotUrgency::None,
+            BridgeLoopWake::Shutdown => {
+                self.flags.running = false;
+                SnapshotUrgency::None
+            }
+        };
+        urgency = urgency.max(self.drain_pending_updates(event_tx));
+        self.note_snapshot_urgency(urgency);
+        self.maybe_emit_pending_snapshot(event_tx);
+    }
+
+    fn handle_command(
+        &mut self,
+        cmd: BridgeCommand,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
         let rebuild_tree =
             command_requires_tree_rebuild(&cmd, self.state.settings.library_sort_mode);
         let deferred_tree_rebuild = command_tree_rebuild_delay(&cmd);
@@ -875,25 +1044,103 @@ impl BridgeLoopRuntime {
             settings_dirty: &mut self.flags.settings_dirty,
         };
         let changed = handle_bridge_command(cmd, &mut self.state, &mut command_context);
+        let mut urgency = SnapshotUrgency::None;
         if rebuild_tree {
             self.state.rebuild_pre_built_tree();
             self.snapshot_plan.include_tree_in_next_snapshot = true;
+            urgency = SnapshotUrgency::Immediate;
         } else if changed {
             if let Some(delay) = deferred_tree_rebuild {
                 self.deferred_tree_rebuild_at = Some(Instant::now() + delay);
             }
         }
         if changed {
-            self.flags.snapshot_dirty = true;
+            self.flags.session_dirty = true;
+            urgency = SnapshotUrgency::Immediate;
             if refresh_queue_snapshot {
                 self.snapshot_plan.include_queue_in_next_snapshot = true;
             }
         }
         if force_snapshot && self.flags.running {
             let include_queue = self.snapshot_plan.include_queue_in_next_snapshot || force_snapshot;
-            self.emit_snapshot(event_tx, include_queue);
-            self.last_snapshot_emit = Instant::now();
+            if !self.emit_snapshot(event_tx, include_queue) {
+                urgency = urgency.max(SnapshotUrgency::Immediate);
+            }
         }
+        urgency
+    }
+
+    fn handle_playback_event(&mut self, event: PlaybackEvent) -> SnapshotUrgency {
+        let urgency =
+            process_playback_event(event, &self.analysis, &self.metadata, &mut self.state);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+        }
+        urgency
+    }
+
+    fn handle_analysis_event(&mut self, event: AnalysisEvent) -> SnapshotUrgency {
+        let urgency = process_analysis_event(event, &mut self.state);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+        }
+        urgency
+    }
+
+    fn handle_metadata_event(&mut self, event: MetadataEvent) -> SnapshotUrgency {
+        let urgency = process_metadata_event(event, &mut self.state);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+        }
+        urgency
+    }
+
+    fn handle_library_event(&mut self, event: LibraryEvent) -> SnapshotUrgency {
+        let urgency =
+            process_library_event(event, &self.external_queue_details_tx, &mut self.state);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+        }
+        urgency
+    }
+
+    fn handle_search_results(&mut self, frame: BridgeSearchResultsFrame) -> SnapshotUrgency {
+        process_search_results(frame, &mut self.state);
+        SnapshotUrgency::None
+    }
+
+    fn handle_external_queue_detail_event(
+        &mut self,
+        event: ExternalQueueDetailsEvent,
+    ) -> SnapshotUrgency {
+        let urgency = process_external_queue_detail_event(event, &mut self.state);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+            self.snapshot_plan.include_queue_in_next_snapshot = true;
+        }
+        urgency
+    }
+
+    fn handle_apply_album_art_event(
+        &mut self,
+        event: ApplyAlbumArtEvent,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        let urgency =
+            process_apply_album_art_event(event, &self.metadata, event_tx, &mut self.state);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+            self.deferred_tree_rebuild_at = Some(Instant::now() + Duration::from_millis(150));
+        }
+        urgency
+    }
+
+    fn handle_lastfm_event(&mut self, event: LastFmEvent) -> SnapshotUrgency {
+        let urgency = process_lastfm_event(event, &mut self.state, &mut self.flags.settings_dirty);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+        }
+        urgency
     }
 
     fn poll_playback_if_due(&mut self) {
@@ -904,73 +1151,77 @@ impl BridgeLoopRuntime {
             }
             return;
         }
-        if self.last_idle_poll.elapsed() >= self.idle_poll_interval {
-            self.playback.command(PlaybackCommand::Poll);
-            self.last_idle_poll = Instant::now();
-        }
-    }
-
-    fn process_updates(&mut self, event_tx: &Sender<BridgeEvent>) {
-        let changed = self.pump_bridge_events(event_tx);
-        if changed {
-            self.flags.snapshot_dirty = true;
-        }
-        self.maybe_rebuild_tree_after_deferred_update();
-        if self.flags.snapshot_dirty && self.last_snapshot_emit.elapsed() >= self.snapshot_interval
+        if self.state.playback.state == PlaybackState::Paused
+            && self.state.playback.current.is_some()
+            && self.last_paused_poll.elapsed() >= self.paused_poll_interval
         {
-            self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
-            self.last_snapshot_emit = Instant::now();
+            self.playback.command(PlaybackCommand::Poll);
+            self.last_paused_poll = Instant::now();
         }
-        let _ =
-            flush_pending_search_results_event(event_tx, &mut self.state.pending_search_results);
     }
 
-    fn pump_bridge_events(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
-        let playback_changed = pump_playback_events(
+    fn drain_pending_updates(&mut self, event_tx: &Sender<BridgeEvent>) -> SnapshotUrgency {
+        self.poll_playback_if_due();
+        let mut urgency = self.pump_bridge_events(event_tx);
+        self.maybe_rebuild_tree_after_deferred_update();
+        if !flush_pending_search_results_event(event_tx, &mut self.state.pending_search_results)
+            && self.state.pending_search_results.is_some()
+        {
+            urgency = urgency.max(SnapshotUrgency::Immediate);
+        }
+        urgency
+    }
+
+    fn pump_bridge_events(&mut self, event_tx: &Sender<BridgeEvent>) -> SnapshotUrgency {
+        let mut urgency = drain_playback_events(
             &self.playback_rx,
             &self.analysis,
             &self.metadata,
             &mut self.state,
         );
-        let analysis_changed = pump_analysis_events(&self.analysis_rx, &mut self.state);
-        let metadata_changed = pump_metadata_events(&self.metadata_rx, &mut self.state);
-        let library_changed = pump_library_events(
+        let analysis_urgency = drain_analysis_events(&self.analysis_rx, &mut self.state);
+        let metadata_urgency = drain_metadata_events(&self.metadata_rx, &mut self.state);
+        let library_urgency = drain_library_events(
             &self.library_rx,
             &self.external_queue_details_tx,
             &mut self.state,
         );
-        let apply_album_art_changed = pump_apply_album_art_events(
+        let apply_album_art_urgency = drain_apply_album_art_events(
             &self.apply_album_art_rx,
             &self.metadata,
             event_tx,
             &mut self.state,
         );
-        let external_queue_details_changed = pump_external_queue_detail_events(
+        let external_queue_details_urgency = drain_external_queue_detail_events(
             &self.external_queue_details_event_rx,
             &mut self.state,
         );
-        let lastfm_changed = pump_lastfm_events(
+        let lastfm_urgency = drain_lastfm_events(
             &self.lastfm_rx,
             &mut self.state,
             &mut self.flags.settings_dirty,
         );
-        let _ = pump_search_results(&self.search_results_rx, &mut self.state);
+        drain_search_results(&self.search_results_rx, &mut self.state);
         tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
         self.revalidate_queue_details();
-        if apply_album_art_changed {
+        if apply_album_art_urgency.is_pending() {
             self.deferred_tree_rebuild_at = Some(Instant::now() + Duration::from_millis(150));
         }
-        self.handle_library_refresh(library_changed);
-        if external_queue_details_changed {
+        self.handle_library_refresh(library_urgency);
+        if external_queue_details_urgency.is_pending() {
             self.snapshot_plan.include_queue_in_next_snapshot = true;
         }
-        playback_changed
-            || analysis_changed
-            || metadata_changed
-            || library_changed
-            || apply_album_art_changed
-            || external_queue_details_changed
-            || lastfm_changed
+        urgency = urgency
+            .max(analysis_urgency)
+            .max(metadata_urgency)
+            .max(library_urgency)
+            .max(apply_album_art_urgency)
+            .max(external_queue_details_urgency)
+            .max(lastfm_urgency);
+        if urgency.is_pending() {
+            self.flags.session_dirty = true;
+        }
+        urgency
     }
 
     fn revalidate_queue_details(&mut self) {
@@ -979,13 +1230,14 @@ impl BridgeLoopRuntime {
         }
         if sync_queue_details(&mut self.state, &self.external_queue_details_tx) {
             self.snapshot_plan.include_queue_in_next_snapshot = true;
-            self.flags.snapshot_dirty = true;
+            self.note_snapshot_urgency(SnapshotUrgency::Immediate);
+            self.flags.session_dirty = true;
         }
         self.last_queue_detail_revalidate = Instant::now();
     }
 
-    fn handle_library_refresh(&mut self, library_changed: bool) {
-        if !library_changed {
+    fn handle_library_refresh(&mut self, library_urgency: SnapshotUrgency) {
+        if !library_urgency.is_pending() {
             return;
         }
         self.deferred_tree_rebuild_at = None;
@@ -1006,6 +1258,7 @@ impl BridgeLoopRuntime {
         if should_emit_tree {
             self.state.rebuild_pre_built_tree();
             self.snapshot_plan.include_tree_in_next_snapshot = true;
+            self.note_snapshot_urgency(SnapshotUrgency::Immediate);
         }
     }
 
@@ -1019,10 +1272,33 @@ impl BridgeLoopRuntime {
         self.deferred_tree_rebuild_at = None;
         self.state.rebuild_pre_built_tree();
         self.snapshot_plan.include_tree_in_next_snapshot = true;
-        self.flags.snapshot_dirty = true;
+        self.note_snapshot_urgency(SnapshotUrgency::Immediate);
     }
 
-    fn emit_snapshot(&mut self, event_tx: &Sender<BridgeEvent>, include_queue: bool) {
+    fn note_snapshot_urgency(&mut self, urgency: SnapshotUrgency) {
+        self.flags.pending_snapshot = self.flags.pending_snapshot.max(urgency);
+    }
+
+    fn maybe_emit_pending_snapshot(&mut self, event_tx: &Sender<BridgeEvent>) {
+        match self.flags.pending_snapshot {
+            SnapshotUrgency::None => {}
+            SnapshotUrgency::Immediate => {
+                let _ =
+                    self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+            }
+            SnapshotUrgency::Heartbeat => {
+                let Some(interval) = self.snapshot_heartbeat_interval() else {
+                    return;
+                };
+                if self.last_snapshot_emit.elapsed() >= interval {
+                    let _ = self
+                        .emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+                }
+            }
+        }
+    }
+
+    fn emit_snapshot(&mut self, event_tx: &Sender<BridgeEvent>, include_queue: bool) -> bool {
         if send_snapshot_event(
             event_tx,
             &self.state,
@@ -1034,14 +1310,18 @@ impl BridgeLoopRuntime {
                 self.last_tree_emit_at = Some(Instant::now());
                 self.last_tree_emit_track_count = self.state.library.tracks.len();
             }
+            self.last_snapshot_emit = Instant::now();
             self.snapshot_plan.include_tree_in_next_snapshot = false;
             if include_queue {
                 self.snapshot_plan.include_queue_in_next_snapshot = false;
             }
-            self.flags.snapshot_dirty = false;
+            self.flags.pending_snapshot = SnapshotUrgency::None;
+            true
         } else {
             self.diagnostics.prof_snapshots_dropped += 1;
-            self.flags.snapshot_dirty = true;
+            self.flags.pending_snapshot =
+                self.flags.pending_snapshot.max(SnapshotUrgency::Immediate);
+            false
         }
     }
 
@@ -1090,7 +1370,7 @@ impl BridgeLoopRuntime {
             self.flags.settings_dirty = false;
             self.last_settings_save = Instant::now();
         }
-        if self.last_session_save.elapsed() < Duration::from_secs(2) {
+        if !self.flags.session_dirty || self.last_session_save.elapsed() < Duration::from_secs(2) {
             return;
         }
         let session = session_snapshot_for_state(&self.state);
@@ -1098,6 +1378,7 @@ impl BridgeLoopRuntime {
             save_session_snapshot(&session);
             self.last_saved_session = Some(session);
         }
+        self.flags.session_dirty = false;
         self.last_session_save = Instant::now();
     }
 
@@ -2800,40 +3081,62 @@ fn queue_paths(
     }
 }
 
+fn process_apply_album_art_event(
+    event: ApplyAlbumArtEvent,
+    metadata: &MetadataService,
+    event_tx: &Sender<BridgeEvent>,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    if let Some(error) = event.error.as_ref() {
+        let _ = try_send_event(event_tx, BridgeEvent::Error(error.clone()));
+        if event.indexed_by_path.is_empty() {
+            return SnapshotUrgency::None;
+        }
+    }
+
+    update_library_cover_paths(state, &event.indexed_by_path);
+    update_queue_cover_paths(state, &event.indexed_by_path);
+
+    if let Some(current_path) = state.playback.current.as_ref() {
+        if let Some(indexed) = event.indexed_by_path.get(current_path) {
+            let next_cover_path =
+                (!indexed.cover_path.is_empty()).then(|| indexed.cover_path.clone());
+            if state.metadata.cover_art_path != next_cover_path {
+                state.metadata.cover_art_path = next_cover_path;
+            }
+        }
+    }
+
+    metadata.request(event.track_path);
+    SnapshotUrgency::Immediate
+}
+
+fn drain_apply_album_art_events(
+    apply_album_art_rx: &Receiver<ApplyAlbumArtEvent>,
+    metadata: &MetadataService,
+    event_tx: &Sender<BridgeEvent>,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    let mut urgency = SnapshotUrgency::None;
+
+    while let Ok(event) = apply_album_art_rx.try_recv() {
+        urgency = urgency.max(process_apply_album_art_event(
+            event, metadata, event_tx, state,
+        ));
+    }
+
+    urgency
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 fn pump_apply_album_art_events(
     apply_album_art_rx: &Receiver<ApplyAlbumArtEvent>,
     metadata: &MetadataService,
     event_tx: &Sender<BridgeEvent>,
     state: &mut BridgeState,
 ) -> bool {
-    let mut changed = false;
-
-    while let Ok(event) = apply_album_art_rx.try_recv() {
-        if let Some(error) = event.error.as_ref() {
-            let _ = try_send_event(event_tx, BridgeEvent::Error(error.clone()));
-            if event.indexed_by_path.is_empty() {
-                continue;
-            }
-        }
-
-        update_library_cover_paths(state, &event.indexed_by_path);
-        update_queue_cover_paths(state, &event.indexed_by_path);
-
-        if let Some(current_path) = state.playback.current.as_ref() {
-            if let Some(indexed) = event.indexed_by_path.get(current_path) {
-                let next_cover_path =
-                    (!indexed.cover_path.is_empty()).then(|| indexed.cover_path.clone());
-                if state.metadata.cover_art_path != next_cover_path {
-                    state.metadata.cover_art_path = next_cover_path;
-                }
-            }
-        }
-
-        metadata.request(event.track_path);
-        changed = true;
-    }
-
-    changed
+    drain_apply_album_art_events(apply_album_art_rx, metadata, event_tx, state).is_pending()
 }
 
 fn update_library_cover_paths(
@@ -3634,20 +3937,19 @@ fn build_search_results_frame(
     SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, rows })
 }
 
-fn pump_search_results(
-    search_rx: &Receiver<BridgeSearchResultsFrame>,
-    state: &mut BridgeState,
-) -> bool {
+fn process_search_results(frame: BridgeSearchResultsFrame, state: &mut BridgeState) {
+    state.pending_search_results = Some(frame);
+}
+
+fn drain_search_results(search_rx: &Receiver<BridgeSearchResultsFrame>, state: &mut BridgeState) {
     let mut latest = None;
     while let Ok(frame) = search_rx.try_recv() {
         latest = Some(frame);
     }
 
     if let Some(frame) = latest {
-        state.pending_search_results = Some(frame);
-        return true;
+        process_search_results(frame, state);
     }
-    false
 }
 
 fn poll_latest_search_query(query_rx: &Receiver<SearchWorkerQuery>) -> Option<SearchWorkerQuery> {
@@ -4141,6 +4443,112 @@ fn derive_tree_path_context(
     derive_tree_path_context_for_root(path, &prepared, fallback_artist)
 }
 
+fn playback_snapshot_urgency(
+    previous: &PlaybackSnapshot,
+    next: &PlaybackSnapshot,
+) -> SnapshotUrgency {
+    if previous.state != next.state
+        || previous.current != next.current
+        || previous.current_queue_index != next.current_queue_index
+        || (previous.volume - next.volume).abs() > f32::EPSILON
+        || previous.repeat_mode != next.repeat_mode
+        || previous.shuffle_enabled != next.shuffle_enabled
+        || previous.duration != next.duration
+    {
+        return SnapshotUrgency::Immediate;
+    }
+    if previous.position != next.position
+        || previous.current_bitrate_kbps != next.current_bitrate_kbps
+    {
+        return SnapshotUrgency::Heartbeat;
+    }
+    SnapshotUrgency::None
+}
+
+fn process_playback_event(
+    event: PlaybackEvent,
+    analysis: &AnalysisEngine,
+    metadata: &MetadataService,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    match event {
+        PlaybackEvent::Snapshot(snapshot) => {
+            let next_state = snapshot.state;
+            let mut urgency = SnapshotUrgency::None;
+            if state.playback != snapshot {
+                urgency = playback_snapshot_urgency(&state.playback, &snapshot);
+                state.playback = snapshot;
+            }
+            if next_state == PlaybackState::Stopped {
+                if !state.analysis.waveform_peaks.is_empty() {
+                    state.analysis.waveform_peaks.clear();
+                    state.analysis.waveform_coverage_seconds = 0.0;
+                    state.analysis.waveform_complete = false;
+                    urgency = SnapshotUrgency::Immediate;
+                }
+                return urgency;
+            }
+            if let Some(pending) = state.pending_waveform_track.take() {
+                if state.playback.current.as_ref() == Some(&pending.path) {
+                    analysis.command(AnalysisCommand::SetTrack {
+                        path: pending.path,
+                        reset_spectrogram: pending.reset_spectrogram,
+                        track_token: pending.track_token,
+                    });
+                }
+            }
+            urgency
+        }
+        PlaybackEvent::TrackChanged {
+            path,
+            queue_index,
+            kind,
+            track_token,
+        } => {
+            state.playback.current_queue_index = Some(queue_index);
+            state.analysis.waveform_peaks.clear();
+            state.analysis.waveform_coverage_seconds = 0.0;
+            state.analysis.waveform_complete = false;
+            metadata.request(path.clone());
+            let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
+            if state.playback.state == PlaybackState::Stopped {
+                state.pending_waveform_track = Some(PendingWaveformTrack {
+                    path,
+                    reset_spectrogram,
+                    track_token,
+                });
+            } else {
+                state.pending_waveform_track = None;
+                analysis.command(AnalysisCommand::SetTrack {
+                    path,
+                    reset_spectrogram,
+                    track_token,
+                });
+            }
+            SnapshotUrgency::Immediate
+        }
+        PlaybackEvent::Seeked => SnapshotUrgency::Heartbeat,
+    }
+}
+
+fn drain_playback_events(
+    playback_rx: &Receiver<PlaybackEvent>,
+    analysis: &AnalysisEngine,
+    metadata: &MetadataService,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    let mut urgency = SnapshotUrgency::None;
+    for _ in 0..192 {
+        let Ok(event) = playback_rx.try_recv() else {
+            break;
+        };
+        urgency = urgency.max(process_playback_event(event, analysis, metadata, state));
+    }
+    urgency
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 fn pump_playback_events(
     playback_rx: &Receiver<PlaybackEvent>,
     analysis: &AnalysisEngine,
@@ -4152,135 +4560,128 @@ fn pump_playback_events(
         let Ok(event) = playback_rx.try_recv() else {
             break;
         };
-        match event {
-            PlaybackEvent::Snapshot(snapshot) => {
-                let next_state = snapshot.state;
-                if state.playback != snapshot {
-                    state.playback = snapshot;
-                    changed = true;
-                }
-                if next_state == PlaybackState::Stopped {
-                    if !state.analysis.waveform_peaks.is_empty() {
-                        state.analysis.waveform_peaks.clear();
-                        state.analysis.waveform_coverage_seconds = 0.0;
-                        state.analysis.waveform_complete = false;
-                        changed = true;
-                    }
-                    continue;
-                }
-                if let Some(pending) = state.pending_waveform_track.take() {
-                    if state.playback.current.as_ref() == Some(&pending.path) {
-                        analysis.command(AnalysisCommand::SetTrack {
-                            path: pending.path,
-                            reset_spectrogram: pending.reset_spectrogram,
-                            track_token: pending.track_token,
-                        });
-                    }
-                }
-            }
-            PlaybackEvent::TrackChanged {
-                path,
-                queue_index,
-                kind,
-                track_token,
-            } => {
-                state.playback.current_queue_index = Some(queue_index);
-                state.analysis.waveform_peaks.clear();
-                state.analysis.waveform_coverage_seconds = 0.0;
-                state.analysis.waveform_complete = false;
-                metadata.request(path.clone());
-                let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
-                if state.playback.state == PlaybackState::Stopped {
-                    state.pending_waveform_track = Some(PendingWaveformTrack {
-                        path,
-                        reset_spectrogram,
-                        track_token,
-                    });
-                } else {
-                    state.pending_waveform_track = None;
-                    analysis.command(AnalysisCommand::SetTrack {
-                        path,
-                        reset_spectrogram,
-                        track_token,
-                    });
-                }
-                changed = true;
-            }
-            PlaybackEvent::Seeked => {}
-        }
+        let event_changed = !matches!(event, PlaybackEvent::Seeked);
+        let _ = process_playback_event(event, analysis, metadata, state);
+        changed |= event_changed;
     }
     changed
 }
 
-fn pump_analysis_events(analysis_rx: &Receiver<AnalysisEvent>, state: &mut BridgeState) -> bool {
-    let mut changed = false;
+fn process_analysis_event(event: AnalysisEvent, state: &mut BridgeState) -> SnapshotUrgency {
+    match event {
+        AnalysisEvent::Snapshot(snapshot) => {
+            if snapshot.spectrogram_seq == 0 && snapshot.spectrogram_channels.is_empty() {
+                state.analysis.spectrogram_channels.clear();
+            } else if !snapshot.spectrogram_channels.is_empty() {
+                state.analysis.spectrogram_channels = snapshot.spectrogram_channels;
+            }
+            state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
+            state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
+            state.analysis.spectrogram_view_mode = snapshot.spectrogram_view_mode;
+            state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
+            state.analysis.waveform_complete = snapshot.waveform_complete;
+            if !snapshot.waveform_peaks.is_empty() {
+                state.analysis.waveform_peaks = snapshot.waveform_peaks;
+            }
+            SnapshotUrgency::Heartbeat
+        }
+    }
+}
+
+fn drain_analysis_events(
+    analysis_rx: &Receiver<AnalysisEvent>,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    let mut urgency = SnapshotUrgency::None;
     for _ in 0..8 {
         let Ok(event) = analysis_rx.try_recv() else {
             break;
         };
-        match event {
-            AnalysisEvent::Snapshot(snapshot) => {
-                if snapshot.spectrogram_seq == 0 && snapshot.spectrogram_channels.is_empty() {
-                    state.analysis.spectrogram_channels.clear();
-                } else if !snapshot.spectrogram_channels.is_empty() {
-                    state.analysis.spectrogram_channels = snapshot.spectrogram_channels;
-                }
-                state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
-                state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
-                state.analysis.spectrogram_view_mode = snapshot.spectrogram_view_mode;
-                state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
-                state.analysis.waveform_complete = snapshot.waveform_complete;
-                if !snapshot.waveform_peaks.is_empty() {
-                    state.analysis.waveform_peaks = snapshot.waveform_peaks;
-                }
-                changed = true;
-            }
-        }
+        urgency = urgency.max(process_analysis_event(event, state));
     }
-    changed
+    urgency
 }
 
-fn pump_metadata_events(metadata_rx: &Receiver<MetadataEvent>, state: &mut BridgeState) -> bool {
-    let mut changed = false;
+#[cfg(test)]
+#[allow(dead_code)]
+fn pump_analysis_events(analysis_rx: &Receiver<AnalysisEvent>, state: &mut BridgeState) -> bool {
+    drain_analysis_events(analysis_rx, state).is_pending()
+}
+
+fn process_metadata_event(event: MetadataEvent, state: &mut BridgeState) -> SnapshotUrgency {
+    match event {
+        MetadataEvent::Loaded(metadata) => {
+            state.metadata = metadata;
+            SnapshotUrgency::Immediate
+        }
+    }
+}
+
+fn drain_metadata_events(
+    metadata_rx: &Receiver<MetadataEvent>,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    let mut urgency = SnapshotUrgency::None;
     for _ in 0..4 {
         let Ok(event) = metadata_rx.try_recv() else {
             break;
         };
-        match event {
-            MetadataEvent::Loaded(metadata) => {
-                state.metadata = metadata;
-                changed = true;
-            }
-        }
+        urgency = urgency.max(process_metadata_event(event, state));
     }
-    changed
+    urgency
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
+fn pump_metadata_events(metadata_rx: &Receiver<MetadataEvent>, state: &mut BridgeState) -> bool {
+    drain_metadata_events(metadata_rx, state).is_pending()
+}
+
+fn process_lastfm_event(
+    event: LastFmEvent,
+    state: &mut BridgeState,
+    settings_dirty: &mut bool,
+) -> SnapshotUrgency {
+    match event {
+        LastFmEvent::State(runtime) => {
+            let mut urgency = SnapshotUrgency::None;
+            if state.lastfm != runtime {
+                state.lastfm = runtime.clone();
+                urgency = SnapshotUrgency::Immediate;
+            }
+            if state.settings.integrations.lastfm_username != runtime.username {
+                state.settings.integrations.lastfm_username = runtime.username;
+                *settings_dirty = true;
+                urgency = SnapshotUrgency::Immediate;
+            }
+            urgency
+        }
+    }
+}
+
+fn drain_lastfm_events(
+    lastfm_rx: &Receiver<LastFmEvent>,
+    state: &mut BridgeState,
+    settings_dirty: &mut bool,
+) -> SnapshotUrgency {
+    let mut urgency = SnapshotUrgency::None;
+    for _ in 0..8 {
+        let Ok(event) = lastfm_rx.try_recv() else {
+            break;
+        };
+        urgency = urgency.max(process_lastfm_event(event, state, settings_dirty));
+    }
+    urgency
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 fn pump_lastfm_events(
     lastfm_rx: &Receiver<LastFmEvent>,
     state: &mut BridgeState,
     settings_dirty: &mut bool,
 ) -> bool {
-    let mut changed = false;
-    for _ in 0..8 {
-        let Ok(event) = lastfm_rx.try_recv() else {
-            break;
-        };
-        match event {
-            LastFmEvent::State(runtime) => {
-                if state.lastfm != runtime {
-                    state.lastfm = runtime.clone();
-                    changed = true;
-                }
-                if state.settings.integrations.lastfm_username != runtime.username {
-                    state.settings.integrations.lastfm_username = runtime.username;
-                    *settings_dirty = true;
-                    changed = true;
-                }
-            }
-        }
-    }
-    changed
+    drain_lastfm_events(lastfm_rx, state, settings_dirty).is_pending()
 }
 
 fn tick_lastfm_playback(
@@ -4536,36 +4937,55 @@ fn unix_timestamp_now() -> i64 {
         .unwrap_or(0)
 }
 
+fn process_library_event(
+    event: LibraryEvent,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    match event {
+        LibraryEvent::Snapshot(snapshot) => {
+            let (artist_count, album_count) = library_tree::compute_artist_album_counts(&snapshot);
+            state.library = Arc::new(snapshot);
+            state.library_artist_count = artist_count;
+            state.library_album_count = album_count;
+            if !state.queue.is_empty() {
+                let _ = sync_queue_details(state, external_queue_details_tx);
+            }
+            SnapshotUrgency::Immediate
+        }
+    }
+}
+
+fn drain_library_events(
+    library_rx: &Receiver<LibraryEvent>,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    let mut urgency = SnapshotUrgency::None;
+    while let Ok(event) = library_rx.try_recv() {
+        urgency = urgency.max(process_library_event(
+            event,
+            external_queue_details_tx,
+            state,
+        ));
+    }
+    urgency
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 fn pump_library_events(
     library_rx: &Receiver<LibraryEvent>,
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     state: &mut BridgeState,
 ) -> bool {
-    let mut latest_snapshot: Option<LibrarySnapshot> = None;
-    while let Ok(event) = library_rx.try_recv() {
-        match event {
-            LibraryEvent::Snapshot(snapshot) => {
-                latest_snapshot = Some(snapshot);
-            }
-        }
-    }
-    if let Some(snapshot) = latest_snapshot {
-        let (artist_count, album_count) = library_tree::compute_artist_album_counts(&snapshot);
-        state.library = Arc::new(snapshot);
-        state.library_artist_count = artist_count;
-        state.library_album_count = album_count;
-        if !state.queue.is_empty() {
-            let _ = sync_queue_details(state, external_queue_details_tx);
-        }
-        return true;
-    }
-    false
+    drain_library_events(library_rx, external_queue_details_tx, state).is_pending()
 }
 
-fn pump_external_queue_detail_events(
-    queue_detail_rx: &Receiver<ExternalQueueDetailsEvent>,
+fn process_external_queue_detail_event(
+    event: ExternalQueueDetailsEvent,
     state: &mut BridgeState,
-) -> bool {
+) -> SnapshotUrgency {
     let library_paths: HashSet<&Path> = state
         .library
         .tracks
@@ -4573,49 +4993,70 @@ fn pump_external_queue_detail_events(
         .map(|track| track.path.as_path())
         .collect();
     let queue_paths: HashSet<&Path> = state.queue.iter().map(PathBuf::as_path).collect();
-    let mut changed = false;
 
-    while let Ok(event) = queue_detail_rx.try_recv() {
-        let pending = state
-            .pending_queue_detail_fingerprints
-            .get(&event.path)
-            .copied();
-        if pending != Some(event.fingerprint) {
-            continue;
-        }
-        state.pending_queue_detail_fingerprints.remove(&event.path);
+    let pending = state
+        .pending_queue_detail_fingerprints
+        .get(&event.path)
+        .copied();
+    if pending != Some(event.fingerprint) {
+        return SnapshotUrgency::None;
+    }
+    state.pending_queue_detail_fingerprints.remove(&event.path);
 
-        if !queue_paths.contains(event.path.as_path())
-            || library_paths.contains(event.path.as_path())
-            || !event.path.is_file()
-            || !is_supported_audio(&event.path)
-            || track_file_fingerprint(&event.path) != Some(event.fingerprint)
-        {
-            changed |= state.queue_details.remove(&event.path).is_some();
-            state.queue_detail_fingerprints.remove(&event.path);
-            continue;
-        }
-
-        state
-            .queue_detail_fingerprints
-            .insert(event.path.clone(), event.fingerprint);
-        let needs_update = state.queue_details.get(&event.path).is_none_or(|existing| {
-            existing.title != event.indexed.title
-                || existing.artist != event.indexed.artist
-                || existing.album != event.indexed.album
-                || existing.cover_path != event.indexed.cover_path
-                || existing.genre != event.indexed.genre
-                || existing.year != event.indexed.year
-                || existing.track_no != event.indexed.track_no
-                || existing.duration_secs != event.indexed.duration_secs
-        });
-        if needs_update {
-            state.queue_details.insert(event.path, event.indexed);
-            changed = true;
-        }
+    if !queue_paths.contains(event.path.as_path())
+        || library_paths.contains(event.path.as_path())
+        || !event.path.is_file()
+        || !is_supported_audio(&event.path)
+        || track_file_fingerprint(&event.path) != Some(event.fingerprint)
+    {
+        let removed = state.queue_details.remove(&event.path).is_some();
+        state.queue_detail_fingerprints.remove(&event.path);
+        return if removed {
+            SnapshotUrgency::Immediate
+        } else {
+            SnapshotUrgency::None
+        };
     }
 
-    changed
+    state
+        .queue_detail_fingerprints
+        .insert(event.path.clone(), event.fingerprint);
+    let needs_update = state.queue_details.get(&event.path).is_none_or(|existing| {
+        existing.title != event.indexed.title
+            || existing.artist != event.indexed.artist
+            || existing.album != event.indexed.album
+            || existing.cover_path != event.indexed.cover_path
+            || existing.genre != event.indexed.genre
+            || existing.year != event.indexed.year
+            || existing.track_no != event.indexed.track_no
+            || existing.duration_secs != event.indexed.duration_secs
+    });
+    if needs_update {
+        state.queue_details.insert(event.path, event.indexed);
+        SnapshotUrgency::Immediate
+    } else {
+        SnapshotUrgency::None
+    }
+}
+
+fn drain_external_queue_detail_events(
+    queue_detail_rx: &Receiver<ExternalQueueDetailsEvent>,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    let mut urgency = SnapshotUrgency::None;
+    while let Ok(event) = queue_detail_rx.try_recv() {
+        urgency = urgency.max(process_external_queue_detail_event(event, state));
+    }
+    urgency
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn pump_external_queue_detail_events(
+    queue_detail_rx: &Receiver<ExternalQueueDetailsEvent>,
+    state: &mut BridgeState,
+) -> bool {
+    drain_external_queue_detail_events(queue_detail_rx, state).is_pending()
 }
 
 fn config_base_path() -> Option<PathBuf> {
@@ -6185,6 +6626,73 @@ mod tests {
         assert!(cleared.selected_queue_index.is_none());
 
         bridge.command(BridgeCommand::Shutdown);
+    }
+
+    #[test]
+    fn metadata_event_emits_snapshot_immediately_while_stopped() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let _ = runtime.drain_pending_updates(&event_tx);
+        runtime.flags.pending_snapshot = SnapshotUrgency::None;
+        while event_rx.try_recv().is_ok() {}
+        let track = p("/tmp/ferrous_reactive_stopped_metadata.flac");
+        runtime.state.playback.current = Some(track.clone());
+        runtime.state.playback.state = PlaybackState::Stopped;
+
+        runtime.handle_wake(
+            BridgeLoopWake::Metadata(MetadataEvent::Loaded(TrackMetadata {
+                source_path: Some(track.to_string_lossy().to_string()),
+                title: "ferrous_reactive_stopped_metadata".to_string(),
+                ..TrackMetadata::default()
+            })),
+            &event_tx,
+        );
+
+        let snapshot = match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(BridgeEvent::Snapshot(snapshot)) => *snapshot,
+            other => panic!("expected immediate snapshot, got {other:?}"),
+        };
+        assert_eq!(snapshot.playback.state, PlaybackState::Stopped);
+        assert_eq!(snapshot.playback.current.as_ref(), Some(&track));
+        assert_eq!(snapshot.metadata.title, "ferrous_reactive_stopped_metadata");
+    }
+
+    #[test]
+    fn playing_position_updates_wait_for_coarse_heartbeat() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let _ = runtime.drain_pending_updates(&event_tx);
+        runtime.flags.pending_snapshot = SnapshotUrgency::None;
+        while event_rx.try_recv().is_ok() {}
+        let track = p("/tmp/ferrous_playing_heartbeat.flac");
+        runtime.state.playback.current = Some(track.clone());
+        runtime.state.playback.state = PlaybackState::Playing;
+        runtime.last_playing_poll = Instant::now();
+        runtime.last_snapshot_emit = Instant::now();
+
+        let mut playback_snapshot = runtime.state.playback.clone();
+        playback_snapshot.position = Duration::from_secs(1);
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::Snapshot(playback_snapshot)),
+            &event_tx,
+        );
+
+        assert!(event_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert_eq!(runtime.state.playback.state, PlaybackState::Playing);
+        assert_eq!(runtime.state.playback.current.as_ref(), Some(&track));
+        assert_eq!(runtime.state.playback.position, Duration::from_secs(1));
+
+        runtime.last_snapshot_emit = Instant::now()
+            .checked_sub(runtime.playing_snapshot_interval)
+            .unwrap_or_else(Instant::now);
+        runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+
+        match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(BridgeEvent::Snapshot(_)) => {}
+            other => panic!("expected heartbeat snapshot, got {other:?}"),
+        }
     }
 
     #[test]
