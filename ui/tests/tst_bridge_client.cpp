@@ -442,7 +442,15 @@ void BridgeClientTest::mprisPublishesPlaybackStateOnPlaybackSignal() {
 
     QCOMPARE(controller.m_lastPlayerState.playbackStatus, QStringLiteral("Playing"));
     QCOMPARE(controller.m_lastPlayerState.canPause, true);
+
+    // Reset injected D-Bus state before destruction. The destructor calls
+    // unregisterService() when m_serviceRegistered is true, which is a blocking
+    // D-Bus roundtrip. In the RPM %check environment this crashes inside libdbus
+    // (uninitialised pending-call slot mutex) because no real registration happened.
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
 }
+
 
 void BridgeClientTest::mprisCanPauseOnlyWhilePlaying() {
     BridgeClient client;
