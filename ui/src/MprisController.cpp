@@ -15,6 +15,7 @@
 #include <QDBusObjectPath>
 #include <QFileInfo>
 #include <QUrl>
+#include <QTimer>
 #include <QVariant>
 
 namespace {
@@ -165,7 +166,9 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
         });
     }
 
-    setEnabled(m_bridge != nullptr ? m_bridge->systemMediaControlsEnabled() : true);
+    QTimer::singleShot(0, this, [this]() {
+        setEnabled(m_bridge != nullptr ? m_bridge->systemMediaControlsEnabled() : true);
+    });
 }
 
 MprisController::~MprisController() {
