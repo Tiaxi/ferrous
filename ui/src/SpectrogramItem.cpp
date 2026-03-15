@@ -1,6 +1,9 @@
 #include "SpectrogramItem.h"
 
+#include "SpectrogramSeekTrace.h"
+
 #include <QFontMetrics>
+#include <QDateTime>
 #include <QMutexLocker>
 #include <QPainter>
 #include <QQuickWindow>
@@ -21,6 +24,11 @@ constexpr double kReferenceHopSamples = 1024.0;
 constexpr int kMaxPendingColumns = 512;
 constexpr int kLivePendingColumns = 2;
 constexpr int kMaxTileFragments = 96;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+constexpr qint64 kSeekTraceWindowMs = 1800;
+constexpr qint64 kSmoothnessWindowMs = 2000;
+constexpr qint64 kSmoothnessIdleMs = 450;
+#endif
 const QColor kBackgroundColor(0x0b, 0x0b, 0x0f);
 const QColor kOverlayColor(190, 190, 200, 150);
 constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
@@ -71,6 +79,26 @@ bool shouldLogProfileSpike(
     }
     *lastLog = now;
     return true;
+}
+
+bool seekTraceLooksIncident(
+    int gapFrames,
+    int stallClusters,
+    int regressionCount) {
+    return gapFrames >= 3 || stallClusters >= 2 || regressionCount > 0;
+}
+
+bool smoothnessLooksIncident(
+    int gapFrames,
+    int severeGapFrames,
+    int stallClusters,
+    int regressionCount,
+    int paintSpikeCount) {
+    return gapFrames >= 4
+        || severeGapFrames >= 2
+        || stallClusters >= 2
+        || regressionCount > 0
+        || paintSpikeCount >= 2;
 }
 #endif
 
@@ -252,11 +280,15 @@ void SpectrogramItem::setMaxColumns(int value) {
 
 void SpectrogramItem::reset() {
     QMutexLocker lock(&m_stateMutex);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    resetSmoothnessProfileLocked();
+    resetSeekProfileLocked();
+    m_lastIncomingRowsAtMs = 0;
+#endif
     m_columns.clear();
     m_pendingColumns.clear();
     m_pendingPhase = 0.0;
     m_seedHistoryOnNextAppend = true;
-    m_pendingDrainScheduled = false;
     m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
     m_binsPerColumn = 0;
@@ -267,9 +299,13 @@ void SpectrogramItem::reset() {
 
 void SpectrogramItem::halt() {
     QMutexLocker lock(&m_stateMutex);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    resetSmoothnessProfileLocked();
+    resetSeekProfileLocked();
+    m_lastIncomingRowsAtMs = 0;
+#endif
     m_pendingColumns.clear();
     m_pendingPhase = 0.0;
-    m_pendingDrainScheduled = false;
     m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
     update();
@@ -653,6 +689,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     if (m_profileEnabled) {
         const auto paintEnd = std::chrono::steady_clock::now();
         const double paintMs = std::chrono::duration<double, std::milli>(paintEnd - paintStart).count();
+        {
+            QMutexLocker paintLock(&m_stateMutex);
+            noteSmoothnessPaintLocked(paintMs);
+        }
         m_profilePaints += 1;
         m_profilePaintMs += paintMs;
         if (paintMs >= 4.0 && shouldLogProfileSpike(&m_profileLastPaintSpike, paintEnd)) {
@@ -978,24 +1018,7 @@ void SpectrogramItem::absorbPendingHistoryLocked(int retainPending) {
     m_seedHistoryOnNextAppend = false;
 }
 
-int SpectrogramItem::readyPendingColumnsLocked() const {
-    if (m_pendingColumns.empty()) {
-        return 0;
-    }
-    return std::min(
-        static_cast<int>(std::floor(m_pendingPhase)),
-        static_cast<int>(m_pendingColumns.size()));
-}
-
-int SpectrogramItem::maxDrainColumnsPerPassLocked() const {
-    const double rowsPerSecond = targetRowsPerSecondLocked();
-    if (!std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
-        return 1;
-    }
-    return std::clamp(static_cast<int>(std::ceil(rowsPerSecond / 30.0)), 1, 4);
-}
-
-bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds, bool *drainReady) {
+bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     double dt = elapsedSeconds;
     if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.25) {
         const double fallbackFps = m_fpsValue > 0 ? static_cast<double>(m_fpsValue) : 60.0;
@@ -1013,6 +1036,22 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds, bool *drainR
 
     const double prevPhase = m_pendingPhase;
     m_pendingPhase += rowsPerSecond * dt;
+    const int backlog = static_cast<int>(m_pendingColumns.size());
+
+    bool consumed = false;
+    const int ready = std::min(
+        static_cast<int>(std::floor(m_pendingPhase)),
+        backlog);
+    if (ready > 0) {
+        consumed = consumePendingColumnsLocked(ready);
+        if (consumed) {
+            m_pendingPhase = std::max(0.0, m_pendingPhase - static_cast<double>(ready));
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            noteSmoothnessProfileDrainLocked(ready);
+            noteSeekProfileDrainLocked(ready);
+#endif
+        }
+    }
 
     if (m_pendingColumns.empty()) {
         const double idleSeconds = m_lastRowAppendTime.time_since_epoch().count() == 0
@@ -1024,57 +1063,15 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds, bool *drainR
             m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
         }
     }
-
-    if (drainReady != nullptr) {
-        *drainReady = readyPendingColumnsLocked() > 0;
-    }
     const bool phaseChanged = std::abs(m_pendingPhase - prevPhase) > 0.0001;
-    return phaseChanged;
-}
-
-void SpectrogramItem::schedulePendingDrain() {
-    bool shouldSchedule = false;
-    {
-        QMutexLocker lock(&m_stateMutex);
-        if (!m_pendingDrainScheduled && readyPendingColumnsLocked() > 0) {
-            m_pendingDrainScheduled = true;
-            shouldSchedule = true;
-        }
-    }
-    if (!shouldSchedule) {
-        return;
-    }
-
-    QMetaObject::invokeMethod(
-        this,
-        [this]() {
-            drainPendingColumns();
-        },
-        Qt::QueuedConnection);
-}
-
-void SpectrogramItem::drainPendingColumns() {
-    bool consumed = false;
-    {
-        QMutexLocker lock(&m_stateMutex);
-        m_pendingDrainScheduled = false;
-        const int ready = readyPendingColumnsLocked();
-        const int consume = std::min(ready, maxDrainColumnsPerPassLocked());
-        if (consume > 0) {
-            consumed = consumePendingColumnsLocked(consume);
-            if (consumed) {
-                m_pendingPhase = std::max(0.0, m_pendingPhase - static_cast<double>(consume));
-            }
-        }
-    }
-
-    if (consumed) {
-        update();
-    }
+    return consumed || phaseChanged;
 }
 
 void SpectrogramItem::noteIncomingRowsLocked() {
     m_lastRowAppendTime = std::chrono::steady_clock::now();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    m_lastIncomingRowsAtMs = QDateTime::currentMSecsSinceEpoch();
+#endif
 }
 
 double SpectrogramItem::targetRowsPerSecondLocked() const {
@@ -1167,10 +1164,10 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
 void SpectrogramItem::handleWindowAfterAnimating() {
     using Clock = std::chrono::steady_clock;
     const auto now = Clock::now();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 
     bool advanced = false;
     bool pending = false;
-    bool drainReady = false;
     double elapsed = 0.0;
     QMutexLocker lock(&m_stateMutex);
     if (m_animationTickInitialized) {
@@ -1185,9 +1182,15 @@ void SpectrogramItem::handleWindowAfterAnimating() {
         updateFpsEstimateLocked();
         changed = m_fpsValue != prev;
     }
-    advanced = advanceAnimationLocked(elapsed, &drainReady);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    maybeStartSmoothnessProfileLocked(nowMs);
+    maybeStartSeekProfileLocked(nowMs);
+#endif
+    advanced = advanceAnimationLocked(elapsed);
     pending = !m_pendingColumns.empty();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    noteSmoothnessProfileFrameLocked(nowMs, elapsed, pending, advanced);
+    noteSeekProfileFrameLocked(nowMs, elapsed, pending, advanced);
     if (m_profileEnabled
         && elapsed >= 0.025
         && shouldLogProfileSpike(&m_profileLastFrameGapSpike, now)) {
@@ -1202,13 +1205,456 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     }
 #endif
     lock.unlock();
-    if (drainReady) {
-        schedulePendingDrain();
-    }
     if (changed || advanced || pending) {
         update();
     }
 }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+void SpectrogramItem::resetSmoothnessProfileLocked() {
+    m_smoothnessProfile = SmoothnessProfileState{};
+}
+
+void SpectrogramItem::maybeStartSmoothnessProfileLocked(qint64 nowMs) {
+    if (!m_profileEnabled) {
+        return;
+    }
+
+    const bool streamActive = !m_pendingColumns.empty()
+        || (m_lastIncomingRowsAtMs > 0 && (nowMs - m_lastIncomingRowsAtMs) <= kSmoothnessIdleMs);
+
+    if (m_smoothnessProfile.active) {
+        if ((nowMs - m_smoothnessProfile.startedAtMs) >= kSmoothnessWindowMs) {
+            finalizeSmoothnessProfileLocked(nowMs, "rolling");
+        } else if (!streamActive && (nowMs - m_smoothnessProfile.lastFrameAtMs) >= kSmoothnessIdleMs) {
+            finalizeSmoothnessProfileLocked(nowMs, "idle");
+        }
+    }
+
+    if (!m_smoothnessProfile.active && streamActive) {
+        resetSmoothnessProfileLocked();
+        m_smoothnessProfile.active = true;
+        m_smoothnessProfile.startedAtMs = nowMs;
+        m_smoothnessProfile.lastFrameAtMs = nowMs;
+    }
+}
+
+void SpectrogramItem::noteSmoothnessProfileFrameLocked(
+    qint64 nowMs,
+    double elapsedSeconds,
+    bool pending,
+    bool advanced) {
+    if (!m_smoothnessProfile.active) {
+        return;
+    }
+
+    const int pendingRows = static_cast<int>(m_pendingColumns.size());
+    m_smoothnessProfile.framesObserved += 1;
+    m_smoothnessProfile.lastFrameAtMs = nowMs;
+    m_smoothnessProfile.maxPendingRows = std::max(m_smoothnessProfile.maxPendingRows, pendingRows);
+    if (pending) {
+        m_smoothnessProfile.pendingFrames += 1;
+    } else {
+        m_smoothnessProfile.inStallCluster = false;
+    }
+
+    const int canvasWidth = m_canvas.width() > 0 ? m_canvas.width()
+        : std::max(1, static_cast<int>(std::floor(width())));
+    const double headUnits = static_cast<double>(m_canvasWriteX) + m_pendingPhase;
+    double unwrappedHeadUnits = headUnits;
+    if (m_smoothnessProfile.lastHeadValid && canvasWidth > 1) {
+        if ((m_smoothnessProfile.lastHeadUnits - unwrappedHeadUnits)
+            > (static_cast<double>(canvasWidth) * 0.5)) {
+            unwrappedHeadUnits += static_cast<double>(canvasWidth);
+        }
+        const double delta = unwrappedHeadUnits - m_smoothnessProfile.lastHeadUnits;
+        if (pending) {
+            if (delta > 0.05) {
+                m_smoothnessProfile.sawForwardMotion = true;
+                m_smoothnessProfile.inStallCluster = false;
+            } else if (m_smoothnessProfile.sawForwardMotion) {
+                m_smoothnessProfile.stallFrames += 1;
+                if (!m_smoothnessProfile.inStallCluster) {
+                    m_smoothnessProfile.stallClusters += 1;
+                    m_smoothnessProfile.inStallCluster = true;
+                }
+            }
+        }
+        if (delta < -0.05) {
+            m_smoothnessProfile.regressionCount += 1;
+        }
+    }
+    m_smoothnessProfile.lastHeadUnits = unwrappedHeadUnits;
+    m_smoothnessProfile.lastHeadValid = true;
+
+    const double elapsedMs = elapsedSeconds * 1000.0;
+    if (elapsedMs >= 25.0) {
+        m_smoothnessProfile.gapFrames += 1;
+        m_smoothnessProfile.maxGapMs = std::max(m_smoothnessProfile.maxGapMs, elapsedMs);
+        if (pending) {
+            m_smoothnessProfile.pendingGapFrames += 1;
+        }
+    }
+    if (elapsedMs >= 40.0) {
+        m_smoothnessProfile.severeGapFrames += 1;
+    }
+
+    if (!m_smoothnessProfile.incidentReported
+        && smoothnessLooksIncident(
+            m_smoothnessProfile.gapFrames,
+            m_smoothnessProfile.severeGapFrames,
+            m_smoothnessProfile.stallClusters,
+            m_smoothnessProfile.regressionCount,
+            m_smoothnessProfile.paintSpikeCount)) {
+        const double rowsPerSecond = targetRowsPerSecondLocked();
+        m_smoothnessProfile.incidentDetected = true;
+        m_smoothnessProfile.incidentReported = true;
+        std::fprintf(
+            stderr,
+            "[ui-spectrogram] smoothness_hitch_detected sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d paint_spikes=%d max_gap_ms=%.3f advanced=%d\n",
+            m_sampleRateHz,
+            rowsPerSecond,
+            m_smoothnessProfile.framesObserved,
+            m_smoothnessProfile.pendingFrames,
+            m_smoothnessProfile.gapFrames,
+            m_smoothnessProfile.severeGapFrames,
+            m_smoothnessProfile.pendingGapFrames,
+            m_smoothnessProfile.stallClusters,
+            m_smoothnessProfile.regressionCount,
+            m_smoothnessProfile.maxPendingRows,
+            m_smoothnessProfile.drainPasses,
+            m_smoothnessProfile.drainedColumns,
+            m_smoothnessProfile.paintSpikeCount,
+            m_smoothnessProfile.maxGapMs,
+            advanced ? 1 : 0);
+    }
+}
+
+void SpectrogramItem::noteSmoothnessProfileDrainLocked(int consumed) {
+    if (!m_smoothnessProfile.active || consumed <= 0) {
+        return;
+    }
+    m_smoothnessProfile.drainPasses += 1;
+    m_smoothnessProfile.drainedColumns += consumed;
+}
+
+void SpectrogramItem::noteSmoothnessPaintLocked(double paintMs) {
+    if (!m_smoothnessProfile.active) {
+        return;
+    }
+    m_smoothnessProfile.paintSamples += 1;
+    m_smoothnessProfile.paintMsTotal += paintMs;
+    m_smoothnessProfile.maxPaintMs = std::max(m_smoothnessProfile.maxPaintMs, paintMs);
+    if (paintMs >= 4.0) {
+        m_smoothnessProfile.paintSpikeCount += 1;
+    }
+}
+
+void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *reason) {
+    if (!m_smoothnessProfile.active) {
+        return;
+    }
+    const double rowsPerSecond = targetRowsPerSecondLocked();
+
+    m_smoothnessProfile.incidentDetected = m_smoothnessProfile.incidentDetected
+        || smoothnessLooksIncident(
+            m_smoothnessProfile.gapFrames,
+            m_smoothnessProfile.severeGapFrames,
+            m_smoothnessProfile.stallClusters,
+            m_smoothnessProfile.regressionCount,
+            m_smoothnessProfile.paintSpikeCount);
+
+    QVariantMap summary;
+    summary.insert(QStringLiteral("active"), false);
+    summary.insert(QStringLiteral("startedAtMs"), m_smoothnessProfile.startedAtMs);
+    summary.insert(QStringLiteral("finishedAtMs"), nowMs);
+    summary.insert(QStringLiteral("reason"), QString::fromUtf8(reason));
+    summary.insert(QStringLiteral("sampleRateHz"), m_sampleRateHz);
+    summary.insert(QStringLiteral("rowsPerSecond"), rowsPerSecond);
+    summary.insert(QStringLiteral("framesObserved"), m_smoothnessProfile.framesObserved);
+    summary.insert(QStringLiteral("pendingFrames"), m_smoothnessProfile.pendingFrames);
+    summary.insert(QStringLiteral("stallFrames"), m_smoothnessProfile.stallFrames);
+    summary.insert(QStringLiteral("stallClusters"), m_smoothnessProfile.stallClusters);
+    summary.insert(QStringLiteral("gapFrames"), m_smoothnessProfile.gapFrames);
+    summary.insert(QStringLiteral("severeGapFrames"), m_smoothnessProfile.severeGapFrames);
+    summary.insert(QStringLiteral("pendingGapFrames"), m_smoothnessProfile.pendingGapFrames);
+    summary.insert(QStringLiteral("maxGapMs"), m_smoothnessProfile.maxGapMs);
+    summary.insert(QStringLiteral("regressionCount"), m_smoothnessProfile.regressionCount);
+    summary.insert(QStringLiteral("drainPasses"), m_smoothnessProfile.drainPasses);
+    summary.insert(QStringLiteral("drainedColumns"), m_smoothnessProfile.drainedColumns);
+    summary.insert(QStringLiteral("maxPendingRows"), m_smoothnessProfile.maxPendingRows);
+    summary.insert(QStringLiteral("paintSpikeCount"), m_smoothnessProfile.paintSpikeCount);
+    summary.insert(QStringLiteral("maxPaintMs"), m_smoothnessProfile.maxPaintMs);
+    summary.insert(
+        QStringLiteral("avgPaintMs"),
+        m_smoothnessProfile.paintSamples > 0
+            ? (m_smoothnessProfile.paintMsTotal / static_cast<double>(m_smoothnessProfile.paintSamples))
+            : 0.0);
+    summary.insert(QStringLiteral("incidentDetected"), m_smoothnessProfile.incidentDetected);
+    m_smoothnessProfile.lastSummary = summary;
+
+    std::fprintf(
+        stderr,
+        "[ui-spectrogram] smoothness_window reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d paint_spikes=%d max_gap_ms=%.3f max_paint_ms=%.3f avg_paint_ms=%.3f incident=%d\n",
+        reason,
+        m_sampleRateHz,
+        rowsPerSecond,
+        m_smoothnessProfile.framesObserved,
+        m_smoothnessProfile.pendingFrames,
+        m_smoothnessProfile.gapFrames,
+        m_smoothnessProfile.severeGapFrames,
+        m_smoothnessProfile.pendingGapFrames,
+        m_smoothnessProfile.stallClusters,
+        m_smoothnessProfile.regressionCount,
+        m_smoothnessProfile.drainPasses,
+        m_smoothnessProfile.drainedColumns,
+        m_smoothnessProfile.maxPendingRows,
+        m_smoothnessProfile.paintSpikeCount,
+        m_smoothnessProfile.maxGapMs,
+        m_smoothnessProfile.maxPaintMs,
+        m_smoothnessProfile.paintSamples > 0
+            ? (m_smoothnessProfile.paintMsTotal / static_cast<double>(m_smoothnessProfile.paintSamples))
+            : 0.0,
+        m_smoothnessProfile.incidentDetected ? 1 : 0);
+
+    const QVariantMap lastSummary = m_smoothnessProfile.lastSummary;
+    resetSmoothnessProfileLocked();
+    m_smoothnessProfile.lastSummary = lastSummary;
+}
+
+QVariantMap SpectrogramItem::debugSmoothnessProfileStateLocked() const {
+    if (m_smoothnessProfile.active) {
+        QVariantMap state;
+        state.insert(QStringLiteral("active"), true);
+        state.insert(QStringLiteral("startedAtMs"), m_smoothnessProfile.startedAtMs);
+        state.insert(QStringLiteral("sampleRateHz"), m_sampleRateHz);
+        state.insert(QStringLiteral("rowsPerSecond"), targetRowsPerSecondLocked());
+        state.insert(QStringLiteral("framesObserved"), m_smoothnessProfile.framesObserved);
+        state.insert(QStringLiteral("pendingFrames"), m_smoothnessProfile.pendingFrames);
+        state.insert(QStringLiteral("stallFrames"), m_smoothnessProfile.stallFrames);
+        state.insert(QStringLiteral("stallClusters"), m_smoothnessProfile.stallClusters);
+        state.insert(QStringLiteral("gapFrames"), m_smoothnessProfile.gapFrames);
+        state.insert(QStringLiteral("severeGapFrames"), m_smoothnessProfile.severeGapFrames);
+        state.insert(QStringLiteral("pendingGapFrames"), m_smoothnessProfile.pendingGapFrames);
+        state.insert(QStringLiteral("maxGapMs"), m_smoothnessProfile.maxGapMs);
+        state.insert(QStringLiteral("regressionCount"), m_smoothnessProfile.regressionCount);
+        state.insert(QStringLiteral("drainPasses"), m_smoothnessProfile.drainPasses);
+        state.insert(QStringLiteral("drainedColumns"), m_smoothnessProfile.drainedColumns);
+        state.insert(QStringLiteral("maxPendingRows"), m_smoothnessProfile.maxPendingRows);
+        state.insert(QStringLiteral("paintSpikeCount"), m_smoothnessProfile.paintSpikeCount);
+        state.insert(QStringLiteral("maxPaintMs"), m_smoothnessProfile.maxPaintMs);
+        state.insert(
+            QStringLiteral("avgPaintMs"),
+            m_smoothnessProfile.paintSamples > 0
+                ? (m_smoothnessProfile.paintMsTotal / static_cast<double>(m_smoothnessProfile.paintSamples))
+                : 0.0);
+        state.insert(QStringLiteral("incidentDetected"), m_smoothnessProfile.incidentDetected);
+        return state;
+    }
+    return m_smoothnessProfile.lastSummary;
+}
+
+void SpectrogramItem::resetSeekProfileLocked() {
+    m_seekProfile = SeekProfileState{};
+}
+
+void SpectrogramItem::maybeStartSeekProfileLocked(qint64 nowMs) {
+    if (!m_profileEnabled) {
+        return;
+    }
+
+    if (m_seekProfile.active && !SpectrogramSeekTrace::isActive(nowMs)) {
+        finalizeSeekProfileLocked(nowMs, "expired");
+    }
+
+    const quint64 generation = SpectrogramSeekTrace::currentGeneration();
+    if (generation == 0 || generation == m_seekProfile.generation || !SpectrogramSeekTrace::isActive(nowMs)) {
+        return;
+    }
+
+    if (m_seekProfile.active) {
+        finalizeSeekProfileLocked(nowMs, "superseded");
+    }
+
+    resetSeekProfileLocked();
+    m_seekProfile.active = true;
+    m_seekProfile.generation = generation;
+    m_seekProfile.startedAtMs = SpectrogramSeekTrace::startedAtMs();
+    m_seekProfile.targetSeconds = SpectrogramSeekTrace::targetSeconds();
+}
+
+void SpectrogramItem::noteSeekProfileFrameLocked(
+    qint64 nowMs,
+    double elapsedSeconds,
+    bool pending,
+    bool advanced) {
+    if (!m_seekProfile.active) {
+        return;
+    }
+
+    const int pendingRows = static_cast<int>(m_pendingColumns.size());
+    m_seekProfile.framesObserved += 1;
+    m_seekProfile.lastFrameAtMs = nowMs;
+    m_seekProfile.maxPendingRows = std::max(m_seekProfile.maxPendingRows, pendingRows);
+    if (pending) {
+        m_seekProfile.pendingFrames += 1;
+    } else {
+        m_seekProfile.inStallCluster = false;
+    }
+
+    const int canvasWidth = m_canvas.width() > 0 ? m_canvas.width() : std::max(1, static_cast<int>(std::floor(width())));
+    const double headUnits = static_cast<double>(m_canvasWriteX) + m_pendingPhase;
+    double unwrappedHeadUnits = headUnits;
+    if (m_seekProfile.lastHeadValid && canvasWidth > 1) {
+        if ((m_seekProfile.lastHeadUnits - unwrappedHeadUnits) > (static_cast<double>(canvasWidth) * 0.5)) {
+            unwrappedHeadUnits += static_cast<double>(canvasWidth);
+        }
+        const double delta = unwrappedHeadUnits - m_seekProfile.lastHeadUnits;
+        if (pending) {
+            if (delta > 0.05) {
+                m_seekProfile.sawForwardMotion = true;
+                m_seekProfile.inStallCluster = false;
+            } else if (m_seekProfile.sawForwardMotion) {
+                m_seekProfile.stallFrames += 1;
+                if (!m_seekProfile.inStallCluster) {
+                    m_seekProfile.stallClusters += 1;
+                    m_seekProfile.inStallCluster = true;
+                }
+            }
+        }
+        if (delta < -0.05) {
+            m_seekProfile.regressionCount += 1;
+        }
+    }
+    m_seekProfile.lastHeadUnits = unwrappedHeadUnits;
+    m_seekProfile.lastHeadValid = true;
+
+    const double elapsedMs = elapsedSeconds * 1000.0;
+    if (pending && elapsedMs >= 25.0) {
+        m_seekProfile.gapFrames += 1;
+        m_seekProfile.maxGapMs = std::max(m_seekProfile.maxGapMs, elapsedMs);
+    }
+
+    if (!m_seekProfile.incidentReported
+        && seekTraceLooksIncident(
+            m_seekProfile.gapFrames,
+            m_seekProfile.stallClusters,
+            m_seekProfile.regressionCount)) {
+        const double rowsPerSecond = targetRowsPerSecondLocked();
+        m_seekProfile.incidentDetected = true;
+        m_seekProfile.incidentReported = true;
+        std::fprintf(
+            stderr,
+            "[ui-spectrogram] seek_hitch_detected gen=%llu target_s=%.3f sample_rate_hz=%d rows_per_second=%.3f gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d advanced=%d\n",
+            static_cast<unsigned long long>(m_seekProfile.generation),
+            m_seekProfile.targetSeconds,
+            m_sampleRateHz,
+            rowsPerSecond,
+            m_seekProfile.gapFrames,
+            m_seekProfile.stallClusters,
+            m_seekProfile.regressionCount,
+            m_seekProfile.maxPendingRows,
+            m_seekProfile.drainPasses,
+            m_seekProfile.drainedColumns,
+            advanced ? 1 : 0);
+    }
+
+    const qint64 seekAgeMs = nowMs - m_seekProfile.startedAtMs;
+    if (seekAgeMs >= kSeekTraceWindowMs || (!pending && seekAgeMs >= 150 && m_seekProfile.framesObserved >= 4)) {
+        finalizeSeekProfileLocked(nowMs, pending ? "expired" : "settled");
+    }
+}
+
+void SpectrogramItem::noteSeekProfileDrainLocked(int consumed) {
+    if (!m_seekProfile.active || consumed <= 0) {
+        return;
+    }
+    m_seekProfile.drainPasses += 1;
+    m_seekProfile.drainedColumns += consumed;
+}
+
+void SpectrogramItem::finalizeSeekProfileLocked(qint64 nowMs, const char *reason) {
+    if (!m_seekProfile.active) {
+        return;
+    }
+    const double rowsPerSecond = targetRowsPerSecondLocked();
+
+    m_seekProfile.incidentDetected = m_seekProfile.incidentDetected
+        || seekTraceLooksIncident(
+            m_seekProfile.gapFrames,
+            m_seekProfile.stallClusters,
+            m_seekProfile.regressionCount);
+
+    QVariantMap summary;
+    summary.insert(QStringLiteral("active"), false);
+    summary.insert(QStringLiteral("generation"), QVariant::fromValue(m_seekProfile.generation));
+    summary.insert(QStringLiteral("targetSeconds"), m_seekProfile.targetSeconds);
+    summary.insert(QStringLiteral("startedAtMs"), m_seekProfile.startedAtMs);
+    summary.insert(QStringLiteral("finishedAtMs"), nowMs);
+    summary.insert(QStringLiteral("reason"), QString::fromUtf8(reason));
+    summary.insert(QStringLiteral("sampleRateHz"), m_sampleRateHz);
+    summary.insert(QStringLiteral("rowsPerSecond"), rowsPerSecond);
+    summary.insert(QStringLiteral("framesObserved"), m_seekProfile.framesObserved);
+    summary.insert(QStringLiteral("pendingFrames"), m_seekProfile.pendingFrames);
+    summary.insert(QStringLiteral("stallFrames"), m_seekProfile.stallFrames);
+    summary.insert(QStringLiteral("stallClusters"), m_seekProfile.stallClusters);
+    summary.insert(QStringLiteral("gapFrames"), m_seekProfile.gapFrames);
+    summary.insert(QStringLiteral("maxGapMs"), m_seekProfile.maxGapMs);
+    summary.insert(QStringLiteral("regressionCount"), m_seekProfile.regressionCount);
+    summary.insert(QStringLiteral("drainPasses"), m_seekProfile.drainPasses);
+    summary.insert(QStringLiteral("drainedColumns"), m_seekProfile.drainedColumns);
+    summary.insert(QStringLiteral("maxPendingRows"), m_seekProfile.maxPendingRows);
+    summary.insert(QStringLiteral("incidentDetected"), m_seekProfile.incidentDetected);
+    m_seekProfile.lastSummary = summary;
+
+    std::fprintf(
+        stderr,
+        "[ui-spectrogram] seek_hitch_window gen=%llu target_s=%.3f reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d incident=%d\n",
+        static_cast<unsigned long long>(m_seekProfile.generation),
+        m_seekProfile.targetSeconds,
+        reason,
+        m_sampleRateHz,
+        rowsPerSecond,
+        m_seekProfile.framesObserved,
+        m_seekProfile.pendingFrames,
+        m_seekProfile.gapFrames,
+        m_seekProfile.stallClusters,
+        m_seekProfile.regressionCount,
+        m_seekProfile.drainPasses,
+        m_seekProfile.drainedColumns,
+        m_seekProfile.maxPendingRows,
+        m_seekProfile.incidentDetected ? 1 : 0);
+
+    const QVariantMap lastSummary = m_seekProfile.lastSummary;
+    resetSeekProfileLocked();
+    m_seekProfile.lastSummary = lastSummary;
+}
+
+QVariantMap SpectrogramItem::debugSeekProfileStateLocked() const {
+    if (m_seekProfile.active) {
+        QVariantMap state;
+        state.insert(QStringLiteral("active"), true);
+        state.insert(QStringLiteral("generation"), QVariant::fromValue(m_seekProfile.generation));
+        state.insert(QStringLiteral("targetSeconds"), m_seekProfile.targetSeconds);
+        state.insert(QStringLiteral("startedAtMs"), m_seekProfile.startedAtMs);
+        state.insert(QStringLiteral("sampleRateHz"), m_sampleRateHz);
+        state.insert(QStringLiteral("rowsPerSecond"), targetRowsPerSecondLocked());
+        state.insert(QStringLiteral("framesObserved"), m_seekProfile.framesObserved);
+        state.insert(QStringLiteral("pendingFrames"), m_seekProfile.pendingFrames);
+        state.insert(QStringLiteral("stallFrames"), m_seekProfile.stallFrames);
+        state.insert(QStringLiteral("stallClusters"), m_seekProfile.stallClusters);
+        state.insert(QStringLiteral("gapFrames"), m_seekProfile.gapFrames);
+        state.insert(QStringLiteral("maxGapMs"), m_seekProfile.maxGapMs);
+        state.insert(QStringLiteral("regressionCount"), m_seekProfile.regressionCount);
+        state.insert(QStringLiteral("drainPasses"), m_seekProfile.drainPasses);
+        state.insert(QStringLiteral("drainedColumns"), m_seekProfile.drainedColumns);
+        state.insert(QStringLiteral("maxPendingRows"), m_seekProfile.maxPendingRows);
+        state.insert(QStringLiteral("incidentDetected"), m_seekProfile.incidentDetected);
+        return state;
+    }
+    return m_seekProfile.lastSummary;
+}
+#endif
 
 void SpectrogramItem::updateFpsEstimateLocked() {
     using Clock = std::chrono::steady_clock;

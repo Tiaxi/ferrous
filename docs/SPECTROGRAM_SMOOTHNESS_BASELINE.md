@@ -15,6 +15,14 @@ Baseline commit series:
 - `cd6c59b` `Reset spectrogram on stopped track switches`
 - `e1fddb2` `Reset spectrogram on resume after stopped track switch`
 
+Current post-refactor golden baseline:
+
+- wake-driven bridge delivery and reactive snapshot emission remain enabled
+- the QML spectrogram handoff stays on the deferred packed-batch flush path
+- frame-cadenced `SpectrogramItem` draining and wrapped fragment composition remain in place
+- profiling-only hitch/smoothness instrumentation is available behind `FERROUS_ENABLE_PROFILE_LOGS`, but production builds compile it out entirely
+- `~/.local/share/ferrous/diagnostics.log` is the canonical diagnostics path on Linux
+
 Observed behavior to preserve:
 
 - normal widget playback scrolls smoothly with no visible hitching
@@ -49,8 +57,10 @@ Minimum acceptance bar before merging:
 - widget smoothness unchanged during steady playback
 - no startup hitch or seek catch-up sequence
 - fullscreen smoothness unchanged
+- profiling builds still emit the seek/smoothness guardrail markers when `./scripts/run-ui.sh --profile-logs` is used
 - `./scripts/run-tests.sh --ui-only` passes
 - `ui/tests/tst_qml_smoke.cpp` spectrogram burst-handling tests still pass
+- `ui/tests/tst_qml_smoke.cpp` diagnostics path and profiling tests still pass
 - `ui/tests/tst_bridge_client.cpp` stopped-track-switch delta clearing test still passes
 - `ui/tests/tst_qml_smoke.cpp` stopped-track-switch resume predicate test still passes
 

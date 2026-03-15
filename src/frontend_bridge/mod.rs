@@ -684,6 +684,7 @@ struct BridgeLoopRuntime {
     paused_poll_interval: Duration,
     last_paused_poll: Instant,
     diagnostics: BridgeLoopDiagnostics,
+    analysis_snapshot_interval: Duration,
     playing_snapshot_interval: Duration,
     paused_snapshot_interval: Duration,
     last_snapshot_emit: Instant,
@@ -721,6 +722,7 @@ enum SnapshotUrgency {
     #[default]
     None,
     Heartbeat,
+    Analysis,
     Immediate,
 }
 
@@ -799,6 +801,12 @@ impl BridgeLoopRuntime {
                 .and_then(|raw| raw.parse::<u64>().ok())
                 .map_or(100, |value| value.clamp(33, 1000)),
         );
+        let analysis_snapshot_interval = Duration::from_millis(
+            std::env::var("FERROUS_BRIDGE_ANALYSIS_SNAPSHOT_MS")
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .map_or(16, |value| value.clamp(8, 1000)),
+        );
         let paused_snapshot_interval = Duration::from_millis(
             std::env::var("FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS")
                 .ok()
@@ -848,6 +856,7 @@ impl BridgeLoopRuntime {
                 prof_snapshots_sent: 0,
                 prof_snapshots_dropped: 0,
             },
+            analysis_snapshot_interval,
             playing_snapshot_interval,
             paused_snapshot_interval,
             last_snapshot_emit: Instant::now(),
@@ -925,6 +934,10 @@ impl BridgeLoopRuntime {
         match self.flags.pending_snapshot {
             SnapshotUrgency::None => None,
             SnapshotUrgency::Immediate => Some(Duration::from_millis(8)),
+            SnapshotUrgency::Analysis => Some(
+                self.analysis_snapshot_interval
+                    .saturating_sub(self.last_snapshot_emit.elapsed()),
+            ),
             SnapshotUrgency::Heartbeat => self
                 .snapshot_heartbeat_interval()
                 .map(|interval| interval.saturating_sub(self.last_snapshot_emit.elapsed())),
@@ -1286,6 +1299,12 @@ impl BridgeLoopRuntime {
             SnapshotUrgency::Immediate => {
                 let _ =
                     self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+            }
+            SnapshotUrgency::Analysis => {
+                if self.last_snapshot_emit.elapsed() >= self.analysis_snapshot_interval {
+                    let _ = self
+                        .emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+                }
             }
             SnapshotUrgency::Heartbeat => {
                 let Some(interval) = self.snapshot_heartbeat_interval() else {
@@ -4584,7 +4603,7 @@ fn process_analysis_event(event: AnalysisEvent, state: &mut BridgeState) -> Snap
             if !snapshot.waveform_peaks.is_empty() {
                 state.analysis.waveform_peaks = snapshot.waveform_peaks;
             }
-            SnapshotUrgency::Heartbeat
+            SnapshotUrgency::Analysis
         }
     }
 }

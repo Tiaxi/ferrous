@@ -2,6 +2,7 @@
 
 #include "DiagnosticsLog.h"
 #include "FerrousBridgeFfi.h"
+#include "SpectrogramSeekTrace.h"
 
 #include <algorithm>
 #include <cmath>
@@ -123,6 +124,13 @@ QString rootSearchLabel(const QString &path, const QString &name) {
     const QString base = info.fileName().trimmed();
     return base.isEmpty() ? path : base;
 }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+QString playbackLogPathField(const QString &path) {
+    const QString trimmed = path.trimmed();
+    return trimmed.isEmpty() ? QStringLiteral("<none>") : trimmed;
+}
+#endif
 
 QString formatBinaryFileSize(qint64 sizeBytes) {
     if (sizeBytes < 0) {
@@ -1130,6 +1138,24 @@ void BridgeClient::cacheTrackCoverForPath(const QString &trackPath, const QStrin
     }
 }
 
+void BridgeClient::rebuildQueuePathFirstIndex() {
+    m_queuePathFirstIndex.clear();
+    m_queuePathFirstIndex.reserve(m_queuePaths.size());
+    for (int index = 0; index < m_queuePaths.size(); ++index) {
+        const QString &path = m_queuePaths.at(index);
+        if (!path.isEmpty() && !m_queuePathFirstIndex.contains(path)) {
+            m_queuePathFirstIndex.insert(path, index);
+        }
+    }
+}
+
+int BridgeClient::queuePathFirstIndex(const QString &path) const {
+    if (path.isEmpty()) {
+        return -1;
+    }
+    return m_queuePathFirstIndex.value(path, -1);
+}
+
 QString BridgeClient::coverUrlForPath(const QString &path) const {
     const QString localPath = normalizeLocalPathArg(path);
     QString baseUrl;
@@ -1413,9 +1439,11 @@ bool BridgeClient::ensureItunesArtworkTempDir() {
         return true;
     }
 
-    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
     if (baseDir.trimmed().isEmpty()) {
         baseDir = QDir::tempPath();
+    } else {
+        baseDir = QDir(baseDir).filePath(QStringLiteral("ferrous"));
     }
     QDir().mkpath(baseDir);
 
@@ -2206,27 +2234,101 @@ bool BridgeClient::connected() const {
 }
 
 void BridgeClient::play() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=play state=%1 current_path=%2 playing_index=%3 selected_index=%4")
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdPlay));
 }
 
 void BridgeClient::pause() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=pause state=%1 current_path=%2 playing_index=%3 selected_index=%4")
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdPause));
 }
 
 void BridgeClient::stop() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=stop state=%1 current_path=%2 playing_index=%3 selected_index=%4")
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdStop));
 }
 
 void BridgeClient::next() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=next state=%1 current_path=%2 playing_index=%3 selected_index=%4")
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdNext));
 }
 
 void BridgeClient::previous() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=previous state=%1 current_path=%2 playing_index=%3 selected_index=%4")
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdPrevious));
 }
 
 void BridgeClient::seek(double seconds) {
     const double target = std::max(0.0, seconds);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    SpectrogramSeekTrace::noteSeekIssued(target);
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=seek target_s=%1 state=%2 current_path=%3 playing_index=%4 selected_index=%5")
+                .arg(target, 0, 'f', 3)
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     m_pendingSeek = true;
     m_pendingSeekTargetSeconds = target;
     m_pendingSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + 900;
@@ -2376,6 +2478,19 @@ void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=play_at index=%1 state=%2 current_path=%3 playing_index=%4 selected_index=%5")
+                .arg(index)
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     m_pendingQueueSelection = index;
     m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
@@ -2440,6 +2555,19 @@ void BridgeClient::playTrack(const QString &path) {
     if (normalized.isEmpty()) {
         return;
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        FERROUS_PROFILE_LOG_DIAGNOSTIC(
+            QStringLiteral("ui-prof"),
+            QStringLiteral(
+                "playback_command action=play_track target_path=%1 state=%2 current_path=%3 playing_index=%4 selected_index=%5")
+                .arg(playbackLogPathField(normalized))
+                .arg(m_playbackState)
+                .arg(playbackLogPathField(m_currentTrackPath))
+                .arg(m_playingQueueIndex)
+                .arg(m_selectedQueueIndex));
+    }
+#endif
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
         BinaryBridgeCodec::CmdPlayTrack,
         normalized));
@@ -3279,6 +3407,20 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked(int maxRowsPerChannel) 
     if (m_profileUiEnabled) {
         const double deltaMs = static_cast<double>(deltaTimer.nsecsElapsed()) / 1'000'000.0;
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (SpectrogramSeekTrace::isActive(nowMs)
+            && shouldEmitUiProfileLog(nowMs, &m_lastSpectrogramDeltaProfileLogMs, 120)) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("ui-prof"),
+                QStringLiteral(
+                    "seek_spectrogram_delta gen=%1 rows=%2 channels=%3 reset=%4 seed=%5 remaining=%6 kb=%7")
+                    .arg(SpectrogramSeekTrace::currentGeneration())
+                    .arg(totalRows)
+                    .arg(channels.size())
+                    .arg(reset ? 1 : 0)
+                    .arg(seedHistory ? 1 : 0)
+                    .arg(hasRemainingRows ? 1 : 0)
+                    .arg(static_cast<double>(totalBytes) / 1024.0, 0, 'f', 1));
+        }
         if ((deltaMs >= 2.0 || totalRows >= 48)
             && shouldEmitUiProfileLog(nowMs, &m_lastSpectrogramDeltaProfileLogMs, 200)) {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
@@ -4183,6 +4325,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     bool playbackSignalChanged = false;
     bool snapshotSignalChanged = false;
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
+    const QString previousPlaybackState = m_playbackState;
+    const QString previousTrackPath = m_currentTrackPath;
+    const int previousPlayingIndex = m_playingQueueIndex;
 
     if (snapshot.queue.present && !m_loggedStartupQueuePresent) {
         logDiagnostic(
@@ -4317,11 +4462,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
         if (m_queuePaths != paths) {
             m_queuePaths = paths;
+            rebuildQueuePathFirstIndex();
             m_queueVersion = m_queueVersion < std::numeric_limits<int>::max()
                 ? (m_queueVersion + 1)
                 : 1;
             changed = true;
             snapshotSignalChanged = true;
+        } else if (m_queuePathFirstIndex.isEmpty() && !m_queuePaths.isEmpty()) {
+            rebuildQueuePathFirstIndex();
         }
     }
 
@@ -4350,13 +4498,43 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
-        playing = m_queuePaths.indexOf(currentPath);
+        playing = queuePathFirstIndex(currentPath);
     }
     if (m_playingQueueIndex != playing) {
         m_playingQueueIndex = playing;
         changed = true;
         snapshotSignalChanged = true;
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profileUiEnabled) {
+        if (previousPlaybackState != m_playbackState) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("ui-prof"),
+                QStringLiteral(
+                    "playback_state_change from=%1 to=%2 current_path=%3 previous_path=%4 playing_index=%5 selected_index=%6 queue_length=%7")
+                    .arg(previousPlaybackState)
+                    .arg(m_playbackState)
+                    .arg(playbackLogPathField(m_currentTrackPath))
+                    .arg(playbackLogPathField(previousTrackPath))
+                    .arg(m_playingQueueIndex)
+                    .arg(m_selectedQueueIndex)
+                    .arg(m_queueLength));
+        }
+        if (currentPathChanged) {
+            FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                QStringLiteral("ui-prof"),
+                QStringLiteral(
+                    "playback_track_change from=%1 to=%2 state=%3 previous_playing_index=%4 playing_index=%5 selected_index=%6 queue_length=%7")
+                    .arg(playbackLogPathField(previousTrackPath))
+                    .arg(playbackLogPathField(m_currentTrackPath))
+                    .arg(m_playbackState)
+                    .arg(previousPlayingIndex)
+                    .arg(m_playingQueueIndex)
+                    .arg(m_selectedQueueIndex)
+                    .arg(m_queueLength));
+        }
+    }
+#endif
 
     QString nextTrackTitle = m_currentTrackTitle;
     QString nextTrackArtist = m_currentTrackArtist;
@@ -4386,7 +4564,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!currentPath.isEmpty()) {
         int detailIndex = playing;
         if (detailIndex < 0 && !m_queuePaths.isEmpty()) {
-            detailIndex = m_queuePaths.indexOf(currentPath);
+            detailIndex = queuePathFirstIndex(currentPath);
         }
 
         if (snapshot.queue.present

@@ -417,6 +417,8 @@ private:
     void coverLookupWorkerLoop();
     void applyTrackCoverLookupResult(const QString &trackPath, const QString &coverUrl);
     void cacheTrackCoverForPath(const QString &trackPath, const QString &coverUrl);
+    void rebuildQueuePathFirstIndex();
+    int queuePathFirstIndex(const QString &path) const;
     QString coverUrlForPath(const QString &path) const;
     void bumpCoverRefreshNonce(const QString &path);
     void cancelItunesArtworkRequests();
@@ -479,6 +481,7 @@ private:
     QString m_queueDurationText{"00:00"};
     QueueRowsModel m_queueRowsModel;
     QStringList m_queuePaths;
+    QHash<QString, int> m_queuePathFirstIndex;
     int m_selectedQueueIndex{-1};
     int m_playingQueueIndex{-1};
     QString m_currentTrackPath;

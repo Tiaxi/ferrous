@@ -170,6 +170,7 @@ if(UNIX AND NOT APPLE AND NOT MSVC)
 endif()
 
 if(FERROUS_ENABLE_PROFILE_LOGS)
+    target_sources(ferrous PRIVATE src/SpectrogramSeekTrace.cpp)
     target_compile_definitions(ferrous PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
 endif()
 
@@ -216,6 +217,7 @@ if(BUILD_TESTING)
     )
     ferrous_enable_strict_warnings(ferrous_qml_smoke_tests)
     if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_sources(ferrous_qml_smoke_tests PRIVATE src/SpectrogramSeekTrace.cpp)
         target_compile_definitions(ferrous_qml_smoke_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
     endif()
     set_target_properties(ferrous_qml_smoke_tests PROPERTIES
@@ -280,6 +282,7 @@ if(BUILD_TESTING)
     )
     ferrous_enable_strict_warnings(ferrous_bridge_client_tests)
     if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_sources(ferrous_bridge_client_tests PRIVATE src/SpectrogramSeekTrace.cpp)
         target_compile_definitions(ferrous_bridge_client_tests PRIVATE
             FERROUS_ENABLE_PROFILE_LOGS=1
         )

@@ -73,9 +73,11 @@ std::mutex &logMutex() {
 } // namespace
 
 QString defaultLogPath() {
-    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
     if (baseDir.isEmpty()) {
         baseDir = QDir::tempPath();
+    } else {
+        baseDir = QDir(baseDir).filePath(QStringLiteral("ferrous"));
     }
     if (baseDir.isEmpty()) {
         return {};
@@ -116,4 +118,3 @@ bool appendLine(const QString &logPath, const QString &line) {
 }
 
 } // namespace DiagnosticsLog
-

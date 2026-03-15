@@ -78,11 +78,7 @@ private:
     void markAllTilesDirtyLocked();
     bool consumePendingColumnsLocked(int requested);
     void absorbPendingHistoryLocked(int retainPending);
-    bool advanceAnimationLocked(double elapsedSeconds, bool *drainReady);
-    int maxDrainColumnsPerPassLocked() const;
-    int readyPendingColumnsLocked() const;
-    void schedulePendingDrain();
-    void drainPendingColumns();
+    bool advanceAnimationLocked(double elapsedSeconds);
     void noteIncomingRowsLocked();
     double targetRowsPerSecondLocked() const;
     void updateOverlayImageLocked();
@@ -90,6 +86,21 @@ private:
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
     void updateFpsEstimateLocked();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    void resetSeekProfileLocked();
+    void maybeStartSeekProfileLocked(qint64 nowMs);
+    void noteSeekProfileFrameLocked(qint64 nowMs, double elapsedSeconds, bool pending, bool advanced);
+    void noteSeekProfileDrainLocked(int consumed);
+    void finalizeSeekProfileLocked(qint64 nowMs, const char *reason);
+    QVariantMap debugSeekProfileStateLocked() const;
+    void resetSmoothnessProfileLocked();
+    void maybeStartSmoothnessProfileLocked(qint64 nowMs);
+    void noteSmoothnessProfileFrameLocked(qint64 nowMs, double elapsedSeconds, bool pending, bool advanced);
+    void noteSmoothnessProfileDrainLocked(int consumed);
+    void noteSmoothnessPaintLocked(double paintMs);
+    void finalizeSmoothnessProfileLocked(qint64 nowMs, const char *reason);
+    QVariantMap debugSmoothnessProfileStateLocked() const;
+#endif
 
     double m_dbRange{90.0};
     bool m_logScale{false};
@@ -113,7 +124,6 @@ private:
     std::vector<unsigned char> m_dirtyTiles;
     double m_pendingPhase{0.0};
     bool m_seedHistoryOnNextAppend{true};
-    bool m_pendingDrainScheduled{false};
     std::chrono::steady_clock::time_point m_lastRowAppendTime{};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};
@@ -134,4 +144,63 @@ private:
     quint64 m_sceneGraphGeneration{0};
     QMetaObject::Connection m_animationTickConnection;
     mutable QMutex m_stateMutex;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    struct SmoothnessProfileState {
+        bool active{false};
+        bool incidentDetected{false};
+        bool incidentReported{false};
+        bool sawForwardMotion{false};
+        bool inStallCluster{false};
+        qint64 startedAtMs{0};
+        qint64 lastFrameAtMs{0};
+        double lastHeadUnits{0.0};
+        bool lastHeadValid{false};
+        int framesObserved{0};
+        int pendingFrames{0};
+        int stallFrames{0};
+        int stallClusters{0};
+        int gapFrames{0};
+        int severeGapFrames{0};
+        int pendingGapFrames{0};
+        double maxGapMs{0.0};
+        int regressionCount{0};
+        int drainPasses{0};
+        int drainedColumns{0};
+        int maxPendingRows{0};
+        int paintSpikeCount{0};
+        double maxPaintMs{0.0};
+        double paintMsTotal{0.0};
+        int paintSamples{0};
+        QVariantMap lastSummary;
+    };
+
+    struct SeekProfileState {
+        bool active{false};
+        bool incidentDetected{false};
+        bool incidentReported{false};
+        bool sawForwardMotion{false};
+        bool inStallCluster{false};
+        quint64 generation{0};
+        qint64 startedAtMs{0};
+        qint64 lastFrameAtMs{0};
+        double targetSeconds{0.0};
+        double lastHeadUnits{0.0};
+        bool lastHeadValid{false};
+        int framesObserved{0};
+        int pendingFrames{0};
+        int stallFrames{0};
+        int stallClusters{0};
+        int gapFrames{0};
+        double maxGapMs{0.0};
+        int regressionCount{0};
+        int drainPasses{0};
+        int drainedColumns{0};
+        int maxPendingRows{0};
+        QVariantMap lastSummary;
+    };
+
+    qint64 m_lastIncomingRowsAtMs{0};
+    SmoothnessProfileState m_smoothnessProfile;
+    SeekProfileState m_seekProfile;
+#endif
 };

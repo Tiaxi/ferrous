@@ -67,7 +67,7 @@ Kirigami.ApplicationWindow {
     readonly property var libraryTreeModel: (typeof libraryModel !== "undefined" && libraryModel)
         ? libraryModel
         : null
-    readonly property int spectrogramDeltaRowsPerTurn: 12
+    readonly property int spectrogramDeltaRowsPerTurn: -1
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
     readonly property var uiPalette: uiPaletteObject
     readonly property var overlayHost: Overlay.overlay

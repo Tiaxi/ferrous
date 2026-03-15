@@ -39,6 +39,7 @@ class BridgeClientTest : public QObject {
 private slots:
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void queueSnapshotKeepsRawCoverPathsInRows();
+    void queuePathFallbackUsesCachedFirstIndex();
     void spectrogramDeltaSkipsMetadataOnlyChannels();
     void spectrogramDeltaDrainsInBoundedChunksAndResetsOnce();
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
@@ -96,6 +97,66 @@ void BridgeClientTest::queueSnapshotKeepsRawCoverPathsInRows() {
     QCOMPARE(
         rows->data(rows->index(0, 0), QueueRowsModel::CoverPathRole).toString(),
         QStringLiteral("/music/Artist A/Album A/cover.jpg"));
+}
+
+void BridgeClientTest::queuePathFallbackUsesCachedFirstIndex() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    const QString duplicatePath = QStringLiteral("/music/Artist/Album/duplicate.flac");
+
+    BinaryBridgeCodec::DecodedSnapshot queueSnapshot;
+    queueSnapshot.queue.present = true;
+    queueSnapshot.queue.len = 3;
+    queueSnapshot.queue.selectedIndex = 0;
+    queueSnapshot.queue.totalDurationSeconds = 540.0;
+    queueSnapshot.queue.unknownDurationCount = 0;
+    queueSnapshot.queue.tracks.push_back(BinaryBridgeCodec::DecodedQueueTrack{
+        QStringLiteral("Duplicate First"),
+        QStringLiteral("Artist"),
+        QStringLiteral("Album"),
+        QStringLiteral(),
+        QStringLiteral("Electronic"),
+        2024,
+        1,
+        180.0f,
+        duplicatePath,
+    });
+    queueSnapshot.queue.tracks.push_back(BinaryBridgeCodec::DecodedQueueTrack{
+        QStringLiteral("Middle"),
+        QStringLiteral("Artist"),
+        QStringLiteral("Album"),
+        QStringLiteral(),
+        QStringLiteral("Electronic"),
+        2024,
+        2,
+        180.0f,
+        QStringLiteral("/music/Artist/Album/middle.flac"),
+    });
+    queueSnapshot.queue.tracks.push_back(BinaryBridgeCodec::DecodedQueueTrack{
+        QStringLiteral("Duplicate Second"),
+        QStringLiteral("Artist"),
+        QStringLiteral("Album"),
+        QStringLiteral(),
+        QStringLiteral("Electronic"),
+        2024,
+        3,
+        180.0f,
+        duplicatePath,
+    });
+
+    QVERIFY(client.processBinarySnapshot(queueSnapshot));
+    QCOMPARE(client.m_queuePathFirstIndex.value(duplicatePath, -1), 0);
+
+    BinaryBridgeCodec::DecodedSnapshot playbackSnapshot;
+    playbackSnapshot.playback.present = true;
+    playbackSnapshot.playback.state = 1;
+    playbackSnapshot.playback.currentQueueIndex = -1;
+    playbackSnapshot.playback.currentPath = duplicatePath;
+
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot));
+    QCOMPARE(client.m_playingQueueIndex, 0);
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("Duplicate First"));
 }
 
 void BridgeClientTest::spectrogramDeltaSkipsMetadataOnlyChannels() {

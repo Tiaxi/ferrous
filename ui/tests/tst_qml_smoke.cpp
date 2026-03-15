@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QImage>
 #include <QPainter>
@@ -15,7 +16,9 @@
 
 #include <algorithm>
 
+#include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
+#include "../src/SpectrogramSeekTrace.h"
 #define private public
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformItem.h"
@@ -373,6 +376,9 @@ private slots:
     void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
     void spectrogramQueuedDrainConsumesReadyRows();
     void spectrogramHaltDropsPendingMotion();
+    void diagnosticsLogUsesLowercaseAppDir();
+    void spectrogramSeekProfileFlagsStalledPostSeekWindow();
+    void spectrogramSmoothnessProfileFlagsGapHeavyWindow();
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
@@ -1339,12 +1345,12 @@ void QmlSmokeTest::spectrogramQueuedDrainConsumesReadyRows() {
     QVERIFY(pendingBefore >= static_cast<size_t>(extraRows));
 
     item.m_pendingPhase = 3.0;
-    item.schedulePendingDrain();
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_pendingDrainScheduled, 1000);
+    QVERIFY(item.advanceAnimationLocked(0.0));
 
-    QCOMPARE(item.m_columns.size(), columnsBefore + 2);
-    QCOMPARE(item.m_pendingColumns.size(), pendingBefore - 2);
-    QCOMPARE(item.m_pendingPhase, 1.0);
+    QCOMPARE(item.m_columns.size(), columnsBefore + 3);
+    QCOMPARE(item.m_pendingColumns.size(), pendingBefore - 3);
+    QVERIFY(item.m_pendingPhase >= 0.0);
+    QVERIFY(item.m_pendingPhase < 1.0);
 }
 
 void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {
@@ -1379,6 +1385,108 @@ void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {
 
     QVERIFY(item.m_pendingColumns.empty());
     QCOMPARE(item.m_pendingPhase, 0.0);
+}
+
+void QmlSmokeTest::diagnosticsLogUsesLowercaseAppDir() {
+    const QString logPath = DiagnosticsLog::defaultLogPath();
+    QVERIFY(!logPath.isEmpty());
+
+    const QString genericDataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    if (genericDataDir.isEmpty()) {
+        QVERIFY(logPath.endsWith(QStringLiteral("/diagnostics.log"))
+            || logPath.endsWith(QStringLiteral("\\diagnostics.log")));
+        return;
+    }
+
+    const QFileInfo info(logPath);
+    QCOMPARE(info.fileName(), QStringLiteral("diagnostics.log"));
+    QCOMPARE(info.dir().dirName(), QStringLiteral("ferrous"));
+    QVERIFY(!logPath.contains(QStringLiteral("/Ferrous/")));
+    QVERIFY(!logPath.contains(QStringLiteral("\\Ferrous\\")));
+}
+
+void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    qputenv("FERROUS_PROFILE_UI", "1");
+    SpectrogramSeekTrace::noteSeekIssued(12.5);
+
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    QVariantMap state;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_profileEnabled = true;
+        item.m_canvasWriteX = 96;
+        item.m_pendingPhase = 0.25;
+        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
+        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
+        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
+        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
+
+        const qint64 startedAtMs = SpectrogramSeekTrace::startedAtMs();
+        QVERIFY(startedAtMs > 0);
+        item.maybeStartSeekProfileLocked(startedAtMs);
+        QVERIFY(item.m_seekProfile.active);
+
+        item.noteSeekProfileFrameLocked(startedAtMs + 30, 0.030, true, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 60, 0.031, true, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 90, 0.029, true, false);
+        item.finalizeSeekProfileLocked(startedAtMs + 120, "test");
+        state = item.debugSeekProfileStateLocked();
+    }
+
+    qunsetenv("FERROUS_PROFILE_UI");
+    QVERIFY(!state.isEmpty());
+    QCOMPARE(state.value("reason").toString(), QStringLiteral("test"));
+    QVERIFY(state.value("incidentDetected").toBool());
+    QCOMPARE(state.value("gapFrames").toInt(), 3);
+    QCOMPARE(state.value("maxPendingRows").toInt(), 4);
+#else
+    QSKIP("Seek hitch profiling instrumentation is compiled out");
+#endif
+}
+
+void QmlSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    qputenv("FERROUS_PROFILE_UI", "1");
+
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    QVariantMap state;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_profileEnabled = true;
+        item.m_canvasWriteX = 48;
+        item.m_pendingPhase = 0.5;
+        item.m_lastIncomingRowsAtMs = QDateTime::currentMSecsSinceEpoch();
+        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
+        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
+        item.maybeStartSmoothnessProfileLocked(item.m_lastIncomingRowsAtMs);
+        QVERIFY(item.m_smoothnessProfile.active);
+
+        item.noteSmoothnessPaintLocked(4.5);
+        item.noteSmoothnessPaintLocked(5.0);
+        item.noteSmoothnessProfileFrameLocked(item.m_lastIncomingRowsAtMs + 30, 0.030, true, false);
+        item.noteSmoothnessProfileFrameLocked(item.m_lastIncomingRowsAtMs + 62, 0.032, true, false);
+        item.noteSmoothnessProfileFrameLocked(item.m_lastIncomingRowsAtMs + 95, 0.033, true, false);
+        item.noteSmoothnessProfileFrameLocked(item.m_lastIncomingRowsAtMs + 128, 0.034, true, false);
+        item.finalizeSmoothnessProfileLocked(item.m_lastIncomingRowsAtMs + 180, "test");
+        state = item.debugSmoothnessProfileStateLocked();
+    }
+
+    qunsetenv("FERROUS_PROFILE_UI");
+    QVERIFY(!state.isEmpty());
+    QCOMPARE(state.value("reason").toString(), QStringLiteral("test"));
+    QVERIFY(state.value("incidentDetected").toBool());
+    QCOMPARE(state.value("gapFrames").toInt(), 4);
+    QCOMPARE(state.value("paintSpikeCount").toInt(), 2);
+#else
+    QSKIP("Smoothness profiling instrumentation is compiled out");
+#endif
 }
 
 void QmlSmokeTest::waveformProgressInvalidatesOnlyTailSpan() {
