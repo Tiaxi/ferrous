@@ -19,6 +19,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QImageIOHandler>
 #include <QImageReader>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1059,6 +1060,7 @@ void BridgeClient::startItunesArtworkAssetDownload(
         reader.setAutoTransform(true);
         const QByteArray format = reader.format().trimmed().toLower();
         const QString sourceExtension = imageFormatExtension(format);
+        const auto sourceTransform = reader.transformation();
         if (sourceExtension != QStringLiteral("png")
             && sourceExtension != QStringLiteral("jpg")
             && sourceExtension != QStringLiteral("tif")) {
@@ -1088,20 +1090,29 @@ void BridgeClient::startItunesArtworkAssetDownload(
         const int side = std::min(image.width(), image.height());
         const int x = std::max(0, (image.width() - side) / 2);
         const int y = std::max(0, (image.height() - side) / 2);
-        const QImage normalized = image.width() == image.height()
+        const bool needsCrop = image.width() != image.height();
+        const QImage normalized = !needsCrop
             ? image
             : image.copy(x, y, side, side);
         const QString normalizedExtension = sourceExtension == QStringLiteral("png")
             ? QStringLiteral("png")
             : QStringLiteral("jpg");
-        const QString normalizedPath = m_itunesArtworkTempDir->filePath(
-            baseName + QStringLiteral("-normalized.") + normalizedExtension);
-        const bool saved = normalizedExtension == QStringLiteral("jpg")
-            ? normalized.save(normalizedPath, "JPG", 95)
-            : normalized.save(normalizedPath, "PNG");
-        if (!saved) {
-            failCandidate(QStringLiteral("Failed to normalize downloaded artwork."));
-            return;
+        const bool needsTransformBake = sourceTransform != QImageIOHandler::TransformationNone;
+        const bool canReuseOriginalAsset =
+            !needsCrop
+            && !needsTransformBake
+            && sourceExtension == normalizedExtension;
+        QString normalizedPath = originalPath;
+        if (!canReuseOriginalAsset) {
+            normalizedPath = m_itunesArtworkTempDir->filePath(
+                baseName + QStringLiteral("-normalized.") + normalizedExtension);
+            const bool saved = normalizedExtension == QStringLiteral("jpg")
+                ? normalized.save(normalizedPath, "JPG", 95)
+                : normalized.save(normalizedPath, "PNG");
+            if (!saved) {
+                failCandidate(QStringLiteral("Failed to normalize downloaded artwork."));
+                return;
+            }
         }
 
         row.insert(QStringLiteral("previewSource"), searchCoverUrlFast(normalizedPath));
@@ -1118,7 +1129,7 @@ void BridgeClient::startItunesArtworkAssetDownload(
                 ? QStringLiteral("Loaded the high-resolution fallback artwork.")
                 : QString());
 
-        const QVariantMap info = imageFileDetails(originalPath);
+        const QVariantMap info = imageFileDetails(normalizedPath);
         for (auto it = info.constBegin(); it != info.constEnd(); ++it) {
             row.insert(it.key(), it.value());
         }

@@ -1,5 +1,9 @@
 #include <QApplication>
+#include <QFileInfo>
+#include <QImage>
 #include <QSignalSpy>
+#include <QTemporaryDir>
+#include <QUrl>
 #include <QtTest/QtTest>
 
 #define private public
@@ -31,6 +35,8 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void spectrogramDeltaSkipsMetadataOnlyChannels();
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
+    void itunesRectangularArtworkRowUsesNormalizedFileDetails();
+    void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
     void mprisCanPauseOnlyWhilePlaying();
 };
@@ -122,6 +128,106 @@ void BridgeClientTest::stoppedTrackChangeClearsPendingSpectrogramDelta() {
     QCOMPARE(client.m_currentTrackPath, QStringLiteral("/music/new-track.flac"));
     QCOMPARE(client.m_spectrogramChannels.size(), 0);
     QCOMPARE(client.m_spectrogramReset, false);
+}
+
+void BridgeClientTest::itunesRectangularArtworkRowUsesNormalizedFileDetails() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString sourcePath = tempDir.filePath(QStringLiteral("rect.jpg"));
+    QImage image(300, 200, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    QVERIFY(image.save(sourcePath, "JPG", 95));
+
+    BridgeClient::ItunesArtworkCandidate candidate;
+    candidate.albumTitle = QStringLiteral("Album");
+    candidate.artistName = QStringLiteral("Artist");
+    candidate.assetUrls = QStringList{QUrl::fromLocalFile(sourcePath).toString()};
+    client.m_itunesArtworkCandidates.push_back(candidate);
+
+    QVariantMap row;
+    row.insert(QStringLiteral("albumTitle"), candidate.albumTitle);
+    row.insert(QStringLiteral("artistName"), candidate.artistName);
+    row.insert(QStringLiteral("previewSource"), QString());
+    row.insert(QStringLiteral("normalizedPath"), QString());
+    row.insert(QStringLiteral("normalizedUrl"), QString());
+    row.insert(QStringLiteral("downloadPath"), QString());
+    row.insert(QStringLiteral("assetLoading"), false);
+    row.insert(QStringLiteral("assetReady"), false);
+    row.insert(QStringLiteral("assetError"), QString());
+    client.m_itunesArtworkResults.push_back(row);
+    client.m_itunesArtworkGeneration = 1;
+
+    QSignalSpy artworkSpy(&client, SIGNAL(itunesArtworkChanged()));
+    client.startItunesArtworkAssetDownload(0);
+
+    QTRY_VERIFY_WITH_TIMEOUT(artworkSpy.count() > 0, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(client.itunesArtworkResultAt(0).value(QStringLiteral("assetReady")).toBool(), 3000);
+
+    const QVariantMap result = client.itunesArtworkResultAt(0);
+    const QString normalizedPath = result.value(QStringLiteral("normalizedPath")).toString();
+    const QString downloadPath = result.value(QStringLiteral("downloadPath")).toString();
+    QVERIFY(!normalizedPath.isEmpty());
+    QVERIFY(!downloadPath.isEmpty());
+    QVERIFY(normalizedPath != downloadPath);
+
+    const QFileInfo normalizedInfo(normalizedPath);
+    const QFileInfo downloadInfo(downloadPath);
+    QVERIFY(normalizedInfo.exists());
+    QVERIFY(downloadInfo.exists());
+    QCOMPARE(result.value(QStringLiteral("fileName")).toString(), normalizedInfo.fileName());
+    QCOMPARE(result.value(QStringLiteral("fileSizeBytes")).toLongLong(), normalizedInfo.size());
+    QVERIFY(result.value(QStringLiteral("fileSizeBytes")).toLongLong() != downloadInfo.size());
+    QCOMPARE(result.value(QStringLiteral("path")).toString(), normalizedInfo.canonicalFilePath());
+}
+
+void BridgeClientTest::itunesSquareArtworkReuseSkipsRedundantNormalization() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString sourcePath = tempDir.filePath(QStringLiteral("square.jpg"));
+    QImage image(300, 300, QImage::Format_RGB32);
+    image.fill(Qt::blue);
+    QVERIFY(image.save(sourcePath, "JPG", 95));
+
+    BridgeClient::ItunesArtworkCandidate candidate;
+    candidate.albumTitle = QStringLiteral("Album");
+    candidate.artistName = QStringLiteral("Artist");
+    candidate.assetUrls = QStringList{QUrl::fromLocalFile(sourcePath).toString()};
+    client.m_itunesArtworkCandidates.push_back(candidate);
+
+    QVariantMap row;
+    row.insert(QStringLiteral("albumTitle"), candidate.albumTitle);
+    row.insert(QStringLiteral("artistName"), candidate.artistName);
+    row.insert(QStringLiteral("previewSource"), QString());
+    row.insert(QStringLiteral("normalizedPath"), QString());
+    row.insert(QStringLiteral("normalizedUrl"), QString());
+    row.insert(QStringLiteral("downloadPath"), QString());
+    row.insert(QStringLiteral("assetLoading"), false);
+    row.insert(QStringLiteral("assetReady"), false);
+    row.insert(QStringLiteral("assetError"), QString());
+    client.m_itunesArtworkResults.push_back(row);
+    client.m_itunesArtworkGeneration = 1;
+
+    QSignalSpy artworkSpy(&client, SIGNAL(itunesArtworkChanged()));
+    client.startItunesArtworkAssetDownload(0);
+
+    QTRY_VERIFY_WITH_TIMEOUT(artworkSpy.count() > 0, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(client.itunesArtworkResultAt(0).value(QStringLiteral("assetReady")).toBool(), 3000);
+
+    const QVariantMap result = client.itunesArtworkResultAt(0);
+    const QString normalizedPath = result.value(QStringLiteral("normalizedPath")).toString();
+    const QString downloadPath = result.value(QStringLiteral("downloadPath")).toString();
+    QVERIFY(!normalizedPath.isEmpty());
+    QVERIFY(!downloadPath.isEmpty());
+    QCOMPARE(normalizedPath, downloadPath);
+    QCOMPARE(result.value(QStringLiteral("fileSizeBytes")).toLongLong(), QFileInfo(normalizedPath).size());
 }
 
 void BridgeClientTest::mprisPublishesPlaybackStateOnPlaybackSignal() {
