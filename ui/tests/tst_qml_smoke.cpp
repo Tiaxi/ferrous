@@ -520,6 +520,31 @@ Item {
         function rowDataAt(index) { return null }
     }
 
+    QtObject {
+        id: tagEditorApi
+        property bool open: false
+        property bool loading: false
+        property bool saving: false
+        property bool dirty: false
+        property string statusText: ""
+        property string statusDetails: ""
+        property var tableModel: []
+        signal selectionChanged()
+        signal bulkSummaryChanged()
+        function close() {}
+        function reload() {}
+        function save() { return true }
+        function renameSelectedFiles() {}
+        function setSelectedRows(rows) {}
+        function loadedPaths() { return [] }
+        function bulkValue(field) { return "" }
+        function applyBulkFieldToRows(rows, field, value) {}
+        function applyEnglishTitleCase(field) {}
+        function applyFinnishCapitalize(field) {}
+        function applyGenreCapitalize() {}
+        function autoNumber(startingTrack, startingDisc, writeDiscNumbers, writeTotals, resetOnFolder, resetOnDiscChange) {}
+    }
+
     ListModel {
         id: sidebarModel
     }
@@ -618,6 +643,14 @@ Item {
         windowRoot: harness
         pathFromAnyUrl: function(url) { return "" }
         openAlbumArtViewerForSuggestion: function(row) {}
+    }
+
+    Dialogs.TagEditorDialog {
+        parent: harness
+        tagEditorApi: tagEditorApi
+        uiPalette: palette
+        windowRoot: harness
+        basenameFromPath: function(path) { return path }
     }
 
     Panes.StatusBar {

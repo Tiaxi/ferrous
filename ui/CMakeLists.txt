@@ -101,6 +101,10 @@ qt_add_qml_module(ferrous
         qml/dialogs/ItunesArtworkDialog.qml
         qml/dialogs/LibraryRootNameDialog.qml
         qml/dialogs/PreferencesDialog.qml
+        qml/dialogs/AutoNumberDialog.qml
+        qml/dialogs/TagEditorCloseConfirmDialog.qml
+        qml/dialogs/TagEditorDialog.qml
+        qml/dialogs/TagEditorStatusDetailsDialog.qml
         qml/panes/LibraryPane.qml
         qml/panes/QueuePane.qml
         qml/panes/SidebarPane.qml
