@@ -1,14 +1,14 @@
-# Main QML Refactor Follow-Up Plan
+# Main QML Refactor Follow-Up Status
 
 ## Summary
 
-Checkpoint `73408ac` (`Refactor QML shell into reusable modules`) completed the first structural split of [ui/qml/Main.qml](../ui/qml/Main.qml). The shared palette/utilities layer, low-coupling dialogs, transport/status chrome, and spectrogram shell are now extracted and validated.
+Checkpoint `73408ac` (`Refactor QML shell into reusable modules`) completed the first structural split of [ui/qml/Main.qml](../ui/qml/Main.qml). Since then, the remaining large feature slices have also been extracted: sidebar/queue pane adoption, global search, album-art and iTunes artwork flows, the tag editor subtree, and domain-scoped queue/library/global-search controllers.
 
-This document captures the remaining work needed to finish the original `Main.qml` decomposition so the composition root is mostly wiring and feature ownership is pushed into scoped QML files.
+This document now captures the current status of that refactor, what was completed, and the smaller cleanup-oriented follow-up work that still makes sense if we want [ui/qml/Main.qml](../ui/qml/Main.qml) to move closer to a pure composition root.
 
-## Current Checkpoint
+## Current Status
 
-The following pieces are already extracted and registered in [ui/CMakeLists.txt](../ui/CMakeLists.txt):
+The following pieces are extracted and registered in [ui/CMakeLists.txt](../ui/CMakeLists.txt):
 
 - Shared JS/helpers:
   - [ui/qml/logic/ColorUtils.js](../ui/qml/logic/ColorUtils.js)
@@ -37,89 +37,107 @@ The following pieces are already extracted and registered in [ui/CMakeLists.txt]
   - [ui/qml/panes/StatusBar.qml](../ui/qml/panes/StatusBar.qml)
   - [ui/qml/panes/TransportBar.qml](../ui/qml/panes/TransportBar.qml)
   - [ui/qml/panes/SpectrogramPane.qml](../ui/qml/panes/SpectrogramPane.qml)
-  - partial but not yet fully adopted: [ui/qml/panes/SidebarPane.qml](../ui/qml/panes/SidebarPane.qml), [ui/qml/panes/LibraryPane.qml](../ui/qml/panes/LibraryPane.qml), [ui/qml/panes/QueuePane.qml](../ui/qml/panes/QueuePane.qml)
+  - [ui/qml/panes/SidebarPane.qml](../ui/qml/panes/SidebarPane.qml)
+  - [ui/qml/panes/LibraryPane.qml](../ui/qml/panes/LibraryPane.qml)
+  - [ui/qml/panes/QueuePane.qml](../ui/qml/panes/QueuePane.qml)
+- Controllers:
+  - [ui/qml/controllers/GlobalSearchController.qml](../ui/qml/controllers/GlobalSearchController.qml)
+  - [ui/qml/controllers/LibraryController.qml](../ui/qml/controllers/LibraryController.qml)
+  - [ui/qml/controllers/QueueController.qml](../ui/qml/controllers/QueueController.qml)
+- Search and artwork flows:
+  - [ui/qml/dialogs/GlobalSearchDialog.qml](../ui/qml/dialogs/GlobalSearchDialog.qml)
+  - [ui/qml/viewers/AlbumArtSurface.qml](../ui/qml/viewers/AlbumArtSurface.qml)
+  - [ui/qml/viewers/AlbumArtViewerShell.qml](../ui/qml/viewers/AlbumArtViewerShell.qml)
+  - [ui/qml/dialogs/ItunesArtworkDialog.qml](../ui/qml/dialogs/ItunesArtworkDialog.qml)
 - Spectrogram viewer pieces:
   - [ui/qml/viewers/SpectrogramSurface.qml](../ui/qml/viewers/SpectrogramSurface.qml)
   - [ui/qml/viewers/SpectrogramViewerShell.qml](../ui/qml/viewers/SpectrogramViewerShell.qml)
+- Tag editor pieces:
+  - [ui/qml/dialogs/TagEditorDialog.qml](../ui/qml/dialogs/TagEditorDialog.qml)
+  - [ui/qml/dialogs/AutoNumberDialog.qml](../ui/qml/dialogs/AutoNumberDialog.qml)
+  - [ui/qml/dialogs/TagEditorCloseConfirmDialog.qml](../ui/qml/dialogs/TagEditorCloseConfirmDialog.qml)
+  - [ui/qml/dialogs/TagEditorStatusDetailsDialog.qml](../ui/qml/dialogs/TagEditorStatusDetailsDialog.qml)
 
-Validation at this checkpoint:
+Validation at the current checkpoint:
 
 - `./scripts/run-tests.sh --ui-only` passes.
-- [ui/qml/Main.qml](../ui/qml/Main.qml) was reduced from 8,343 lines to 6,520 lines.
+- The QML smoke harness now fails on runtime warnings instead of only checking for successful instantiation.
+- [ui/qml/Main.qml](../ui/qml/Main.qml) was reduced from 8,343 lines to roughly 2,100 lines.
 
-## Remaining Work
+## Completed Against The Original Follow-Up Plan
 
-### 1. Finish main shell extraction
+The following original plan items are complete:
 
-- Replace the remaining inline left-pane library block in [ui/qml/Main.qml](../ui/qml/Main.qml) with [ui/qml/panes/SidebarPane.qml](../ui/qml/panes/SidebarPane.qml).
-- Replace the remaining inline playlist block with [ui/qml/panes/QueuePane.qml](../ui/qml/panes/QueuePane.qml).
-- Keep direct object-id reach-through out of the extracted files; pass explicit callbacks, actions, and state accessors instead.
-- Ensure the pane files own their local menus, delegates, and repeated column/header presentation instead of reintroducing duplication in `Main.qml`.
+- Main shell extraction:
+  - [ui/qml/panes/SidebarPane.qml](../ui/qml/panes/SidebarPane.qml) and [ui/qml/panes/QueuePane.qml](../ui/qml/panes/QueuePane.qml) are adopted in [ui/qml/Main.qml](../ui/qml/Main.qml).
+- Global search extraction:
+  - `globalSearchDialog` now lives in [ui/qml/dialogs/GlobalSearchDialog.qml](../ui/qml/dialogs/GlobalSearchDialog.qml), backed by [ui/qml/controllers/GlobalSearchController.qml](../ui/qml/controllers/GlobalSearchController.qml).
+- Album-art and iTunes artwork extraction:
+  - album-art viewer shell/surface logic now lives in [ui/qml/viewers/AlbumArtViewerShell.qml](../ui/qml/viewers/AlbumArtViewerShell.qml) and [ui/qml/viewers/AlbumArtSurface.qml](../ui/qml/viewers/AlbumArtSurface.qml)
+  - iTunes artwork flow now lives in [ui/qml/dialogs/ItunesArtworkDialog.qml](../ui/qml/dialogs/ItunesArtworkDialog.qml)
+- Tag editor extraction:
+  - the tag-editor subtree now lives in [ui/qml/dialogs/TagEditorDialog.qml](../ui/qml/dialogs/TagEditorDialog.qml) and its child dialogs
+- Domain controllers:
+  - queue and library interaction state are extracted to [ui/qml/controllers/QueueController.qml](../ui/qml/controllers/QueueController.qml) and [ui/qml/controllers/LibraryController.qml](../ui/qml/controllers/LibraryController.qml)
+  - global-search interaction state is extracted to [ui/qml/controllers/GlobalSearchController.qml](../ui/qml/controllers/GlobalSearchController.qml)
 
-### 2. Extract global search
+## Remaining Cleanup Opportunities
 
-- Move the entire `globalSearchDialog` subtree out of [ui/qml/Main.qml](../ui/qml/Main.qml) into `ui/qml/dialogs/GlobalSearchDialog.qml`.
-- Keep the row delegate components and context menu in the dialog file because they are feature-local, not global primitives.
-- Preserve the current keyboard flow:
-  - query-field navigation
-  - results-list navigation
-  - `Ctrl+F` refocus
-  - `Tab`/`Backtab` handoff back to library
-  - Enter activation and right-click context actions
-- Keep the root-callable flow methods that tests or shortcuts still depend on, or migrate the tests at the same time.
+These items are not required to call the refactor successful, but they are the sensible remaining improvements if we want [ui/qml/Main.qml](../ui/qml/Main.qml) to be closer to the ideal end state.
 
-### 3. Extract album-art viewer and iTunes artwork workflow
+### 1. Extract playback state and transport smoothing into `PlaybackController.qml`
 
-- Move album-art fullscreen/windowed shell logic into:
-  - `ui/qml/viewers/AlbumArtSurface.qml`
-  - `ui/qml/viewers/AlbumArtViewerShell.qml`
-- Move the iTunes artwork replacement flow into:
-  - `ui/qml/dialogs/ItunesArtworkDialog.qml`
-- Preserve shared viewer behavior:
-  - popup vs whole-screen presentation
-  - close gestures and close button
-  - pan/zoom, wheel zoom, double-click zoom toggle
-  - info overlay and preload behavior
-- Keep `Main.qml` responsible only for source-of-truth state wiring unless a clear viewer controller is introduced in the same slice.
+- Move the remaining playback-oriented root state out of [ui/qml/Main.qml](../ui/qml/Main.qml):
+  - `displayedPositionSeconds`
+  - position smoothing fields
+  - mute/restore volume state
+  - playback-follow logic from the root `Connections` block
+- Candidate responsibilities:
+  - seek-position smoothing
+  - mute toggle / remembered volume
+  - transport-facing computed playback state
 
-### 4. Extract the tag editor subtree
+### 2. Extract viewer orchestration into `ViewerController.qml`
 
-- Move the remaining tag-editor dialogs out of [ui/qml/Main.qml](../ui/qml/Main.qml):
-  - `ui/qml/dialogs/TagEditorDialog.qml`
-  - `ui/qml/dialogs/AutoNumberDialog.qml`
-  - `ui/qml/dialogs/TagEditorCloseConfirmDialog.qml`
-  - `ui/qml/dialogs/TagEditorStatusDetailsDialog.qml`
-- Keep the tag editor’s local selection model, field metadata, shortcuts, and status handling inside the tag-editor subtree instead of leaving it on the root window.
-- Keep explicit inputs for:
-  - `tagEditorApi`
-  - palette/theme values
-  - `basenameFromPath` equivalent helper
-  - any open/close/save callbacks still owned by the root
+- Move the remaining album-art and spectrogram viewer state out of [ui/qml/Main.qml](../ui/qml/Main.qml):
+  - `albumArtViewerOpen`
+  - `albumArtInfoVisible`
+  - `albumArtViewerSource`
+  - `albumArtViewerInfoSource`
+  - `albumArtViewerFileInfo`
+  - `spectrogramViewerOpen`
+- Candidate responsibilities:
+  - open/close/toggle/info-overlay behavior
+  - whole-screen vs popup presentation sync
+  - current-track artwork info refresh and iTunes workflow coordination
 
-### 5. Introduce domain-scoped controllers where they reduce root coupling
+### 3. Finish helper deduplication by using the extracted JS modules
 
-- The next extractions should not continue to rely on hidden cross-file access to `playlistView`, `libraryAlbumView`, `globalSearchResultsView`, or viewer hosts.
-- Introduce QML `QtObject` controller files only where they materially reduce coupling:
-  - `PlaybackController.qml`
-  - `LibraryController.qml`
-  - `QueueController.qml`
-  - `GlobalSearchController.qml`
-  - `ViewerController.qml`
-- Move state and helper functions by behavior cluster, not by convenience. Avoid a single app-wide “god controller”.
-- If a helper still reaches into child ids, move it closer to the owning extracted feature instead of centralizing it on the root.
+- [ui/qml/Main.qml](../ui/qml/Main.qml) still duplicates helpers that already have dedicated homes:
+  - `mixColor` / `colorLuma` overlap with [ui/qml/logic/ColorUtils.js](../ui/qml/logic/ColorUtils.js)
+  - `basenameFromPath`, `formatSeekTime`, and sample-rate formatting overlap with [ui/qml/logic/FormatUtils.js](../ui/qml/logic/FormatUtils.js)
+  - URL/path/file-dialog/drop parsing overlaps with [ui/qml/logic/PathUtils.js](../ui/qml/logic/PathUtils.js)
+- Finish that cleanup so feature files and the root use the same helpers instead of carrying parallel implementations.
 
-## Recommended Order
+### 4. Optionally extract library and queue action semantics further
 
-1. Fully adopt `SidebarPane.qml` and `QueuePane.qml` so the main player shell is mostly composed from external files.
-2. Extract `GlobalSearchDialog.qml`.
-3. Extract `AlbumArtSurface.qml`, `AlbumArtViewerShell.qml`, and `ItunesArtworkDialog.qml`.
-4. Extract the full tag-editor subtree.
-5. Move the remaining root state/helpers into domain controllers where the current extraction still depends on child ids.
-6. Remove dead helpers and duplicate imports from [ui/qml/Main.qml](../ui/qml/Main.qml) after each step.
+- The current library/queue controllers cover selection and view-state behavior well.
+- What still remains on the root is mostly action semantics:
+  - play/append selected library rows
+  - open tag editor from queue/library selections
+  - queue reordering helpers
+- This is lower priority than playback/viewer extraction, but it remains a valid cleanup target if [ui/qml/Main.qml](../ui/qml/Main.qml) should be reduced further.
+
+## Recommended Order For Any Further Refactor Work
+
+1. Add `PlaybackController.qml`.
+2. Add `ViewerController.qml`.
+3. Deduplicate the remaining helper functions into the existing JS modules.
+4. Reassess whether the remaining library/queue action helpers are worth extracting.
 
 ## Validation Expectations
 
-Run `./scripts/run-tests.sh --ui-only` after each phase above.
+Run `./scripts/run-tests.sh --ui-only` after each follow-up slice.
 
 After each major slice, manually verify:
 
@@ -132,9 +150,11 @@ After each major slice, manually verify:
 
 ## Completion Criteria
 
-The refactor is complete when all of the following are true:
+The original large-structure refactor is complete. The stricter cleanup pass is complete when all of the following are true:
 
 - [ui/qml/Main.qml](../ui/qml/Main.qml) is primarily composition, global actions/shortcuts, fallback objects, and top-level backend synchronization.
 - Feature-local markup and behavior are owned by feature files under `dialogs/`, `panes/`, `viewers/`, and `controllers/`.
 - The root no longer depends on deep child-id manipulation for normal library, queue, search, and viewer interactions.
+- Playback and viewer state machines are no longer root-owned.
+- Duplicate helper logic has been removed from the root in favor of the shared JS modules.
 - The UI test entrypoint continues to pass with `./scripts/run-tests.sh --ui-only`.
