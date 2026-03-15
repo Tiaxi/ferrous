@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import FerrousUi 1.0
+import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 
 ToolBar {
@@ -14,7 +15,6 @@ ToolBar {
     required property var pauseAction
     required property var stopAction
     required property var nextAction
-    required property var mixColor
     required property bool themeIsDark
     required property bool volumeMuted
     required property real displayedPositionSeconds
@@ -182,7 +182,7 @@ ToolBar {
             icon.name: (root.volumeMuted || root.normalizedVolumeValue(root.uiBridge.volume) <= 0.0001)
                 ? "audio-volume-muted"
                 : "audio-volume-high"
-            icon.color: root.mixColor(
+            icon.color: ColorUtils.mixColor(
                 root.uiPalette.uiTextColor,
                 "#ffffff",
                 root.themeIsDark ? 0.16 : 0.04)

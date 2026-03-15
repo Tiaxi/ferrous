@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/PathUtils.js" as PathUtils
 
 Dialog {
     id: root
@@ -9,7 +10,6 @@ Dialog {
     required property var uiBridge
     required property var uiPalette
     required property var windowRoot
-    required property var pathFromAnyUrl
     required property var openAlbumArtViewerForSuggestion
 
     property int pendingPreviewIndex: -1
@@ -37,7 +37,7 @@ Dialog {
 
     function refreshCurrentArtworkInfo() {
         root.currentArtworkSource = root.uiBridge.currentTrackCoverPath || ""
-        const infoSource = root.pathFromAnyUrl(root.currentArtworkSource)
+        const infoSource = PathUtils.pathFromAnyUrl(root.currentArtworkSource)
         root.currentArtworkInfo = infoSource.length > 0
             ? (root.uiBridge.imageFileDetails(infoSource) || ({}))
             : ({})

@@ -537,6 +537,13 @@ Item {
         uiBridge: bridge
     }
 
+    Controllers.PlaybackController {
+        id: playbackController
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+
     Controllers.LibraryController {
         id: libraryController
         uiBridge: bridge
@@ -544,6 +551,12 @@ Item {
         tryCaptureGlobalSearchPrefill: function(event) { return false }
         rowsForAction: function(rowMap) { return rowMap ? [rowMap] : [] }
         playRows: function(rows) {}
+    }
+
+    Controllers.ViewerController {
+        id: viewerController
+        uiBridge: bridge
+        useWholeScreenViewerMode: false
     }
 
     QtObject {
@@ -650,7 +663,6 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: harness
-        pathFromAnyUrl: function(url) { return "" }
         openAlbumArtViewerForSuggestion: function(row) {}
     }
 
@@ -659,7 +671,6 @@ Item {
         tagEditorApi: tagEditorApi
         uiPalette: palette
         windowRoot: harness
-        basenameFromPath: function(path) { return path }
     }
 
     Panes.StatusBar {
@@ -668,7 +679,6 @@ Item {
         uiPalette: palette
         sections: [{ text: "Ready", emphasis: false, stretch: true }]
         channelStatusIconSource: function(key) { return "" }
-        mixColor: function(colorA, colorB, amount) { return colorA }
         themeIsDark: palette.themeIsDark
     }
 
@@ -682,14 +692,13 @@ Item {
         pauseAction: pauseAction
         stopAction: stopAction
         nextAction: nextAction
-        mixColor: function(colorA, colorB, amount) { return colorA }
         themeIsDark: palette.themeIsDark
-        volumeMuted: false
-        displayedPositionSeconds: 0
-        toggleMutedVolume: function() {}
-        setAppVolume: function(value) {}
-        normalizedVolumeValue: function(value) { return value || 0 }
-        seekCommitted: function(value) {}
+        volumeMuted: playbackController.volumeMuted
+        displayedPositionSeconds: playbackController.displayedPositionSeconds
+        toggleMutedVolume: playbackController.toggleMutedVolume
+        setAppVolume: playbackController.setAppVolume
+        normalizedVolumeValue: playbackController.normalizedVolumeValue
+        seekCommitted: playbackController.seekCommitted
     }
 
     Components.TrackMetadataCard {

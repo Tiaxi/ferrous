@@ -9,6 +9,8 @@ import org.kde.kirigami 2.20 as Kirigami
 import "components" as Components
 import "controllers" as Controllers
 import "dialogs" as Dialogs
+import "logic/FormatUtils.js" as FormatUtils
+import "logic/PathUtils.js" as PathUtils
 import "panes" as Panes
 import "viewers" as Viewers
 
@@ -21,26 +23,11 @@ Kirigami.ApplicationWindow {
     visible: true
     readonly property string appDisplayName: "Ferrous"
     title: {
-        const context = root.windowTitleContext()
+        const context = playbackController.windowTitleContext()
         return context.length > 0
             ? context + " \u2014 " + root.appDisplayName
             : root.appDisplayName
     }
-    property real displayedPositionSeconds: 0
-    property bool positionSmoothingPrimed: false
-    property real positionSmoothingAnchorSeconds: 0
-    property int positionSmoothingAnimationMs: 0
-    property real positionSmoothingLastMs: 0
-    property string positionSmoothingTrackPath: ""
-    property string stoppedSpectrogramTrackPath: ""
-    property string lastSpectrogramPlaybackState: ""
-    property int albumArtViewResetToken: 0
-    property bool albumArtViewerOpen: false
-    property bool albumArtInfoVisible: false
-    property var albumArtViewerFileInfo: ({})
-    property string albumArtViewerInfoSource: ""
-    property string albumArtViewerSource: ""
-    property bool albumArtViewerShowsCurrentTrack: true
     readonly property int albumArtViewerDecodeWidth: Math.max(
         1024,
         Math.ceil(Math.max(
@@ -53,15 +40,12 @@ Kirigami.ApplicationWindow {
             root.height,
             albumArtViewerShell.popupHeight,
             albumArtViewerShell.wholeScreenHeight)))
-    property bool spectrogramViewerOpen: false
     property string pendingFolderDialogContext: ""
     property string pendingFileDialogContext: ""
     property string pendingLibraryRootDialogMode: ""
     property string pendingLibraryRootPath: ""
     property string pendingLibraryRootName: ""
     property string transientBridgeError: ""
-    property real rememberedVolumeBeforeMute: 1.0
-    property bool volumeMuted: false
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -119,6 +103,13 @@ Kirigami.ApplicationWindow {
         uiBridge: root.uiBridge
     }
 
+    Controllers.PlaybackController {
+        id: playbackController
+        uiBridge: root.uiBridge
+        visualFeedsEnabled: root.visualFeedsEnabled
+        seekPressed: transportBar ? transportBar.seekPressed : false
+    }
+
     Controllers.LibraryController {
         id: libraryController
         uiBridge: root.uiBridge
@@ -126,6 +117,12 @@ Kirigami.ApplicationWindow {
         tryCaptureGlobalSearchPrefill: globalSearchController.tryCapturePrefill
         rowsForAction: root.rowsForLibraryAction
         playRows: root.playLibraryRows
+    }
+
+    Controllers.ViewerController {
+        id: viewerController
+        uiBridge: root.uiBridge
+        useWholeScreenViewerMode: root.useWholeScreenViewerMode
     }
 
     readonly property string selectedLibrarySelectionKey: libraryController.selectedSelectionKey
@@ -140,100 +137,11 @@ Kirigami.ApplicationWindow {
     readonly property var libraryViewRef: libraryController.view
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
-        const previousState = previousPlaybackState || ""
-        const currentState = currentPlaybackState || ""
-        const stoppedPath = stoppedTrackPath || ""
-        const currentPath = currentTrackPath || ""
-        return currentState === "Playing"
-            && previousState === "Stopped"
-            && stoppedPath.length > 0
-            && stoppedPath !== currentPath
-    }
-
-    function mixColor(colorA, colorB, amount) {
-        const t = Math.max(0, Math.min(1, amount))
-        return Qt.rgba(
-            (colorA.r * (1 - t)) + (colorB.r * t),
-            (colorA.g * (1 - t)) + (colorB.g * t),
-            (colorA.b * (1 - t)) + (colorB.b * t),
-            (colorA.a * (1 - t)) + (colorB.a * t))
-    }
-
-    function colorLuma(colorValue) {
-        return (0.2126 * colorValue.r) + (0.7152 * colorValue.g) + (0.0722 * colorValue.b)
-    }
-
-    function basenameFromPath(pathValue) {
-        const normalized = (pathValue || "").trim().replace(/\\/g, "/")
-        if (normalized.length === 0) {
-            return ""
-        }
-        const parts = normalized.split("/")
-        return parts.length > 0 ? parts[parts.length - 1] : normalized
-    }
-
-    function windowTitleContext() {
-        const playbackState = (uiBridge.playbackState || "").trim()
-        if (playbackState === "Stopped") {
-            return ""
-        }
-        const explicitTitle = (uiBridge.currentTrackTitle || "").trim()
-        if (explicitTitle.length > 0) {
-            return explicitTitle
-        }
-        const trackPath = (uiBridge.currentTrackPath || "").trim()
-        if (trackPath.length > 0) {
-            return root.basenameFromPath(trackPath)
-        }
-        return ""
-    }
-
-    function normalizedVolumeValue(value) {
-        const numericValue = Number(value)
-        if (!isFinite(numericValue)) {
-            return 0.0
-        }
-        return Math.max(0.0, Math.min(1.0, numericValue))
-    }
-
-    function syncMutedVolumeState() {
-        const currentVolume = normalizedVolumeValue(uiBridge.volume)
-        if (currentVolume > 0.0001) {
-            root.rememberedVolumeBeforeMute = currentVolume
-            root.volumeMuted = false
-        } else if (!root.volumeMuted && root.rememberedVolumeBeforeMute <= 0.0001) {
-            root.rememberedVolumeBeforeMute = 1.0
-        }
-    }
-
-    function setAppVolume(value) {
-        const nextVolume = normalizedVolumeValue(value)
-        if (nextVolume > 0.0001) {
-            root.rememberedVolumeBeforeMute = nextVolume
-            root.volumeMuted = false
-        } else if (!root.volumeMuted) {
-            const currentVolume = normalizedVolumeValue(uiBridge.volume)
-            if (currentVolume > 0.0001) {
-                root.rememberedVolumeBeforeMute = currentVolume
-            }
-        }
-        uiBridge.setVolume(nextVolume)
-    }
-
-    function toggleMutedVolume() {
-        const currentVolume = normalizedVolumeValue(uiBridge.volume)
-        if (root.volumeMuted || currentVolume <= 0.0001) {
-            const restoreVolume = root.rememberedVolumeBeforeMute > 0.0001
-                ? root.rememberedVolumeBeforeMute
-                : 1.0
-            root.volumeMuted = false
-            uiBridge.setVolume(restoreVolume)
-            return
-        }
-
-        root.rememberedVolumeBeforeMute = currentVolume
-        root.volumeMuted = true
-        uiBridge.setVolume(0.0)
+        return playbackController.shouldResetSpectrogramForStoppedTrackSwitch(
+            previousPlaybackState,
+            currentPlaybackState,
+            stoppedTrackPath,
+            currentTrackPath)
     }
 
     QtObject {
@@ -423,14 +331,6 @@ Kirigami.ApplicationWindow {
         function autoNumber(startingTrack, startingDisc, writeDiscNumbers, writeTotals, resetOnFolder, resetOnDiscChange) {}
     }
 
-    function togglePlayPause() {
-        if (uiBridge.playbackState === "Playing") {
-            uiBridge.pause()
-        } else {
-            uiBridge.play()
-        }
-    }
-
     function menuPopupWidth(items) {
         let maxPx = 0
         for (let i = 0; i < items.length; ++i) {
@@ -446,44 +346,9 @@ Kirigami.ApplicationWindow {
         return Math.max(140, Math.ceil(maxPx))
     }
 
-    function formatSeekTime(seconds) {
-        if (!isFinite(seconds) || seconds < 0) {
-            return "00:00"
-        }
-        const totalSeconds = Math.floor(seconds)
-        const hours = Math.floor(totalSeconds / 3600)
-        const minutes = Math.floor((totalSeconds % 3600) / 60)
-        const secs = totalSeconds % 60
-        if (hours > 0) {
-            return hours.toString()
-                + ":" + minutes.toString().padStart(2, "0")
-                + ":" + secs.toString().padStart(2, "0")
-        }
-        return minutes.toString().padStart(2, "0")
-            + ":" + secs.toString().padStart(2, "0")
-    }
-
-    function metadataTrackNumberText(trackNumber) {
-        if (trackNumber === undefined || trackNumber === null) {
-            return "--"
-        }
-        const value = Number(trackNumber)
-        if (!isFinite(value) || value <= 0) {
-            return "--"
-        }
-        return Math.floor(value).toString().padStart(2, "0")
-    }
-
-    function playlistOrderText(index) {
-        if (index === undefined || index === null || index < 0) {
-            return "--"
-        }
-        return String(index + 1)
-    }
-
     readonly property int playlistOrderColumnWidth: {
         const maxIndex = Math.max(0, uiBridge.queueLength - 1)
-        const widestOrderText = playlistOrderText(maxIndex)
+        const widestOrderText = FormatUtils.playlistOrderText(maxIndex)
         const valueWidth = playlistOrderFontMetrics.boundingRect(widestOrderText).width
         const headerWidth = playlistOrderFontMetrics.boundingRect("#").width
         return Math.max(28, Math.ceil(Math.max(valueWidth, headerWidth) + 10))
@@ -514,7 +379,7 @@ Kirigami.ApplicationWindow {
         if (index === undefined || index === null || index < 0) {
             return "--"
         }
-        return metadataTrackNumberText(uiBridge.queueTrackNumberAt(index))
+        return FormatUtils.metadataTrackNumberText(uiBridge.queueTrackNumberAt(index))
     }
 
     FontMetrics {
@@ -525,16 +390,6 @@ Kirigami.ApplicationWindow {
     FontMetrics {
         id: playlistOrderFontMetrics
         font: root.font
-    }
-
-    Behavior on displayedPositionSeconds {
-        enabled: root.positionSmoothingAnimationMs > 0
-            && !(transportBar && transportBar.seekPressed)
-            && root.visualFeedsEnabled
-        NumberAnimation {
-            duration: root.positionSmoothingAnimationMs
-            easing.type: Easing.Linear
-        }
     }
 
     Timer {
@@ -803,40 +658,6 @@ Kirigami.ApplicationWindow {
         uiBridge.appendAllLibraryTracks()
     }
 
-    function repeatModeText(mode) {
-        if (mode === 1) {
-            return "repeat-one"
-        }
-        if (mode === 2) {
-            return "repeat-all"
-        }
-        return "repeat-off"
-    }
-
-    function librarySelectionStatusText() {
-        if (selectedLibraryRowType === "root" && selectedLibraryAlbum.length > 0) {
-            return "root: " + selectedLibraryAlbum
-        }
-        if (selectedLibraryRowType === "artist" && selectedLibraryArtist.length > 0) {
-            return "artist: " + selectedLibraryArtist
-        }
-        if (selectedLibraryRowType === "album" && selectedLibraryAlbum.length > 0) {
-            return "album: " + selectedLibraryAlbum
-        }
-        if (selectedLibraryRowType === "section" && selectedLibraryAlbum.length > 0) {
-            return "section: " + selectedLibraryAlbum
-        }
-        if (selectedLibraryRowType === "track" && selectedLibraryTrackPath.length > 0) {
-            const parts = selectedLibraryTrackPath.split("/")
-            return "track: " + parts[parts.length - 1]
-        }
-        return "none"
-    }
-
-    function librarySelectionCount() {
-        return selectedLibrarySelectionKeys.length
-    }
-
     function isLibrarySelectionKeySelected(key) {
         return libraryController.isSelectionKeySelected(key)
     }
@@ -868,35 +689,6 @@ Kirigami.ApplicationWindow {
         const targetY = view.contentY + (direction * notches * stepPx)
         view.contentY = Math.max(0, Math.min(maxY, targetY))
         wheel.accepted = true
-    }
-
-    function formatSampleRateText(sampleRateHz) {
-        const rate = Number(sampleRateHz)
-        if (!isFinite(rate) || rate <= 0) {
-            return ""
-        }
-        const khz = rate / 1000.0
-        const roundedTenth = Math.round(khz * 10) / 10
-        const wholeKhz = Math.round(roundedTenth)
-        const valueText = Math.abs(roundedTenth - wholeKhz) < 0.05
-            ? wholeKhz.toString()
-            : roundedTenth.toFixed(1)
-        return valueText + " kHz"
-    }
-
-    function formatBitDepthSampleRateText(bitDepth, sampleRateHz) {
-        const bitValue = Number(bitDepth)
-        const sampleRateText = formatSampleRateText(sampleRateHz)
-        const bitText = isFinite(bitValue) && bitValue > 0
-            ? Math.floor(bitValue).toString() + " bit"
-            : ""
-        if (bitText.length > 0 && sampleRateText.length > 0) {
-            return bitText + "/" + sampleRateText
-        }
-        if (bitText.length > 0) {
-            return bitText
-        }
-        return sampleRateText
     }
 
     function playlistStatusSummary() {
@@ -935,7 +727,7 @@ Kirigami.ApplicationWindow {
             })
         }
 
-        const bitDepthSampleRateText = formatBitDepthSampleRateText(
+        const bitDepthSampleRateText = FormatUtils.formatBitDepthSampleRateText(
             uiBridge.currentTrackBitDepth,
             uiBridge.currentTrackSampleRateHz)
         if (bitDepthSampleRateText.length > 0) {
@@ -970,179 +762,8 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    function channelStatusIconCells(iconKey) {
-        switch (iconKey) {
-        case "mono":
-            return [{ x: 7, y: 2, w: 4, h: 3 }]
-        case "stereo":
-            return [{ x: 2, y: 2, w: 3, h: 3 }, { x: 13, y: 2, w: 3, h: 3 }]
-        case "4.0":
-            return [
-                { x: 2, y: 2, w: 3, h: 3 },
-                { x: 13, y: 2, w: 3, h: 3 },
-                { x: 2, y: 11, w: 3, h: 3 },
-                { x: 13, y: 11, w: 3, h: 3 }
-            ]
-        case "5.0":
-            return [
-                { x: 2, y: 2, w: 3, h: 3 },
-                { x: 7, y: 2, w: 4, h: 3 },
-                { x: 13, y: 2, w: 3, h: 3 },
-                { x: 2, y: 11, w: 3, h: 3 },
-                { x: 13, y: 11, w: 3, h: 3 }
-            ]
-        case "5.1":
-            return [
-                { x: 2, y: 2, w: 3, h: 3 },
-                { x: 7, y: 2, w: 4, h: 3 },
-                { x: 13, y: 2, w: 3, h: 3 },
-                { x: 2, y: 11, w: 3, h: 3 },
-                { x: 13, y: 11, w: 3, h: 3 },
-                { x: 8, y: 7, w: 2, h: 2, lfe: true }
-            ]
-        case "6.1":
-            return [
-                { x: 2, y: 2, w: 3, h: 3 },
-                { x: 7, y: 2, w: 4, h: 3 },
-                { x: 13, y: 2, w: 3, h: 3 },
-                { x: 1, y: 7, w: 3, h: 3 },
-                { x: 14, y: 7, w: 3, h: 3 },
-                { x: 7, y: 11, w: 4, h: 3 },
-                { x: 8, y: 7, w: 2, h: 2, lfe: true }
-            ]
-        case "7.1":
-            return [
-                { x: 2, y: 2, w: 3, h: 3 },
-                { x: 7, y: 2, w: 4, h: 3 },
-                { x: 13, y: 2, w: 3, h: 3 },
-                { x: 1, y: 7, w: 3, h: 3 },
-                { x: 14, y: 7, w: 3, h: 3 },
-                { x: 3, y: 11, w: 3, h: 3 },
-                { x: 12, y: 11, w: 3, h: 3 },
-                { x: 8, y: 7, w: 2, h: 2, lfe: true }
-            ]
-        default:
-            return []
-        }
-    }
-
     function openDiagnostics() {
         diagnosticsDialog.open()
-    }
-
-    function urlToLocalPath(urlValue) {
-        if (urlValue === undefined || urlValue === null) {
-            return ""
-        }
-        let value = ""
-        if (typeof urlValue === "string") {
-            value = urlValue
-        } else if (urlValue.toString) {
-            value = urlValue.toString()
-        } else {
-            value = String(urlValue)
-        }
-        if (value.length === 0 || value === "undefined" || value === "null") {
-            return ""
-        }
-        if (value.startsWith("QUrl(\"") && value.endsWith("\")")) {
-            value = value.substring(6, value.length - 2)
-        }
-        if (value.startsWith("file://")) {
-            return decodeURIComponent(value.substring(7))
-        }
-        return value
-    }
-
-    function pathFromAnyUrl(urlValue) {
-        const localPath = root.urlToLocalPath(urlValue)
-        const queryIndex = localPath.indexOf("?")
-        const fragmentIndex = localPath.indexOf("#")
-        let endIndex = localPath.length
-        if (queryIndex >= 0) {
-            endIndex = Math.min(endIndex, queryIndex)
-        }
-        if (fragmentIndex >= 0) {
-            endIndex = Math.min(endIndex, fragmentIndex)
-        }
-        return endIndex < localPath.length ? localPath.substring(0, endIndex) : localPath
-    }
-
-    function folderDialogPath(dialogObj) {
-        if (!dialogObj) {
-            return ""
-        }
-        const candidates = [dialogObj.folder, dialogObj.selectedFolder, dialogObj.currentFolder]
-        for (let i = 0; i < candidates.length; ++i) {
-            const path = root.urlToLocalPath(candidates[i])
-            if (path.length > 0) {
-                return path
-            }
-        }
-        return ""
-    }
-
-    function fileDialogPaths(dialogObj) {
-        if (!dialogObj) {
-            return []
-        }
-        const candidates = [
-            dialogObj.files,
-            dialogObj.selectedFiles,
-            dialogObj.currentFiles,
-            dialogObj.file,
-            dialogObj.selectedFile,
-            dialogObj.currentFile
-        ]
-        const paths = []
-        for (let i = 0; i < candidates.length; ++i) {
-            const candidate = candidates[i]
-            if (candidate === undefined || candidate === null) {
-                continue
-            }
-            if (candidate.length !== undefined && typeof candidate !== "string") {
-                for (let j = 0; j < candidate.length; ++j) {
-                    const path = root.urlToLocalPath(candidate[j])
-                    if (path.length > 0) {
-                        paths.push(path)
-                    }
-                }
-                if (paths.length > 0) {
-                    return paths
-                }
-                continue
-            }
-            const path = root.urlToLocalPath(candidate)
-            if (path.length > 0) {
-                paths.push(path)
-            }
-        }
-        return paths
-    }
-
-    function droppedExternalPaths(drop) {
-        const paths = []
-        if (drop && drop.hasUrls && drop.urls) {
-            for (let i = 0; i < drop.urls.length; ++i) {
-                const path = root.urlToLocalPath(drop.urls[i])
-                if (path.length > 0) {
-                    paths.push(path)
-                }
-            }
-        }
-        if (paths.length > 0) {
-            return paths
-        }
-        if (drop && drop.hasText && (drop.text || "").length > 0) {
-            const lines = (drop.text || "").split(/\r?\n/)
-            for (let i = 0; i < lines.length; ++i) {
-                const path = root.urlToLocalPath(lines[i])
-                if (path.length > 0) {
-                    paths.push(path)
-                }
-            }
-        }
-        return paths
     }
 
     function submitExternalImport(paths, replaceQueue) {
@@ -1155,55 +776,6 @@ Kirigami.ApplicationWindow {
             uiBridge.appendPaths(paths)
         }
         return true
-    }
-
-    function syncAlbumArtViewerPresentation() {
-        albumArtViewerShell.syncPresentation()
-    }
-
-    function syncSpectrogramViewerPresentation() {
-        spectrogramViewerShell.syncPresentation()
-    }
-
-    function closeAlbumArtViewer() {
-        albumArtViewerOpen = false
-    }
-
-    function closeSpectrogramViewer() {
-        spectrogramViewerOpen = false
-    }
-
-    function refreshAlbumArtFileInfo() {
-        const infoSource = root.albumArtViewerInfoSource || ""
-        albumArtViewerFileInfo = infoSource.length > 0
-            ? (uiBridge.imageFileDetails(infoSource) || ({}))
-            : ({})
-    }
-
-    function albumArtInfoOverlayText() {
-        const info = root.albumArtViewerFileInfo || ({})
-        const lines = []
-
-        if ((info.fileName || "").length > 0) {
-            lines.push("File: " + info.fileName)
-        }
-        if ((info.resolutionText || "").length > 0) {
-            lines.push("Resolution: " + info.resolutionText)
-        }
-        if ((info.fileSizeText || "").length > 0) {
-            lines.push("Size: " + info.fileSizeText)
-        }
-        if ((info.fileType || "").length > 0) {
-            lines.push("Type: " + info.fileType)
-        }
-        if ((info.mimeType || "").length > 0) {
-            lines.push("MIME: " + info.mimeType)
-        }
-        if ((info.path || "").length > 0) {
-            lines.push("Path: " + info.path)
-        }
-
-        return lines.join("\n")
     }
 
     function openExternalFiles() {
@@ -1237,80 +809,6 @@ Kirigami.ApplicationWindow {
         pendingLibraryRootDialogMode = ""
         pendingLibraryRootPath = ""
         pendingLibraryRootName = ""
-    }
-
-    function openAlbumArtViewer() {
-        if (!uiBridge.currentTrackCoverPath || uiBridge.currentTrackCoverPath.length === 0) {
-            return
-        }
-        albumArtViewerSource = uiBridge.currentTrackCoverPath || ""
-        albumArtViewerInfoSource = root.pathFromAnyUrl(albumArtViewerSource)
-        albumArtViewerShowsCurrentTrack = true
-        albumArtInfoVisible = false
-        albumArtViewResetToken += 1
-        albumArtViewerFileInfo = ({})
-        albumArtViewerOpen = true
-    }
-
-    function openAlbumArtViewerForSuggestion(rowMap) {
-        const previewSource = (rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || ""
-        if (previewSource.length === 0) {
-            return
-        }
-        albumArtViewerSource = previewSource
-        albumArtViewerInfoSource = (rowMap && (rowMap.normalizedPath || "")) || root.pathFromAnyUrl(previewSource)
-        albumArtViewerShowsCurrentTrack = false
-        albumArtInfoVisible = true
-        albumArtViewResetToken += 1
-        refreshAlbumArtFileInfo()
-        albumArtViewerOpen = true
-    }
-
-    function toggleAlbumArtInfoVisible() {
-        if (!root.albumArtViewerOpen) {
-            return
-        }
-        if (!root.albumArtInfoVisible) {
-            refreshAlbumArtFileInfo()
-        }
-        root.albumArtInfoVisible = !root.albumArtInfoVisible
-        albumArtViewerShell.focusFullscreen()
-    }
-
-    function currentTrackItunesArtworkDisabledReason() {
-        if ((uiBridge.currentTrackPath || "").trim().length === 0) {
-            return "No active track."
-        }
-        if ((uiBridge.currentTrackAlbum || "").trim().length === 0) {
-            return "Album metadata is missing."
-        }
-        if ((uiBridge.currentTrackArtist || "").trim().length === 0) {
-            return "Artist metadata is missing."
-        }
-        return ""
-    }
-
-    function openItunesArtworkDialog() {
-        itunesArtworkDialog.parent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
-            ? albumArtViewerShell.windowHost
-            : Overlay.overlay
-        uiBridge.searchCurrentTrackArtworkSuggestions()
-        itunesArtworkDialog.open()
-    }
-
-    function openSpectrogramViewer() {
-        spectrogramViewerOpen = true
-    }
-
-    onAlbumArtViewerOpenChanged: syncAlbumArtViewerPresentation()
-    onSpectrogramViewerOpenChanged: syncSpectrogramViewerPresentation()
-    onUseWholeScreenViewerModeChanged: {
-        if (albumArtViewerOpen) {
-            syncAlbumArtViewerPresentation()
-        }
-        if (spectrogramViewerOpen) {
-            syncSpectrogramViewerPresentation()
-        }
     }
 
     Action {
@@ -1362,8 +860,11 @@ Kirigami.ApplicationWindow {
     Action {
         id: replaceFromItunesAction
         text: "Replace From iTunes..."
-        enabled: root.currentTrackItunesArtworkDisabledReason().length === 0
-        onTriggered: root.openItunesArtworkDialog()
+        enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
+        onTriggered: viewerController.openItunesArtworkDialog(
+            itunesArtworkDialog,
+            albumArtViewerShell.windowHost,
+            Overlay.overlay)
     }
     Action {
         id: preferencesAction
@@ -1509,7 +1010,7 @@ Kirigami.ApplicationWindow {
         sequence: "Space"
         enabled: !(libraryViewRef && libraryViewRef.activeFocus)
             && !globalSearchController.dialogHasActiveInputFocus
-        onActivated: root.togglePlayPause()
+        onActivated: playbackController.togglePlayPause()
     }
     menuBar: MenuBar {
         Menu {
@@ -1708,7 +1209,7 @@ Kirigami.ApplicationWindow {
             "All Files (*)"
         ]
         onAccepted: {
-            const localPaths = root.fileDialogPaths(externalFileDialog)
+            const localPaths = PathUtils.fileDialogPaths(externalFileDialog)
             root.submitExternalImport(localPaths, pendingFileDialogContext === "open")
             pendingFileDialogContext = ""
         }
@@ -1721,7 +1222,7 @@ Kirigami.ApplicationWindow {
             ? "Add Folder"
             : "Select Music Folder to Scan"
         onAccepted: {
-            const localPath = root.folderDialogPath(scanFolderDialog)
+            const localPath = PathUtils.folderDialogPath(scanFolderDialog)
             if (localPath.length > 0) {
                 if (pendingFolderDialogContext === "append-external-folder") {
                     root.submitExternalImport([localPath], false)
@@ -1738,7 +1239,6 @@ Kirigami.ApplicationWindow {
         uiPalette: root.uiPalette
         sections: root.statusBarSections()
         channelStatusIconSource: root.channelStatusIconSource
-        mixColor: root.mixColor
         themeIsDark: root.themeIsDark
     }
 
@@ -1756,21 +1256,13 @@ Kirigami.ApplicationWindow {
             pauseAction: pauseAction
             stopAction: stopAction
             nextAction: nextAction
-            mixColor: root.mixColor
             themeIsDark: root.themeIsDark
-            volumeMuted: root.volumeMuted
-            displayedPositionSeconds: root.displayedPositionSeconds
-            toggleMutedVolume: root.toggleMutedVolume
-            setAppVolume: root.setAppVolume
-            normalizedVolumeValue: root.normalizedVolumeValue
-            seekCommitted: function(value) {
-                root.positionSmoothingAnimationMs = 0
-                root.displayedPositionSeconds = value
-                root.positionSmoothingPrimed = true
-                root.positionSmoothingAnchorSeconds = value
-                root.positionSmoothingLastMs = Date.now()
-                uiBridge.seek(value)
-            }
+            volumeMuted: playbackController.volumeMuted
+            displayedPositionSeconds: playbackController.displayedPositionSeconds
+            toggleMutedVolume: playbackController.toggleMutedVolume
+            setAppVolume: playbackController.setAppVolume
+            normalizedVolumeValue: playbackController.normalizedVolumeValue
+            seekCommitted: playbackController.seekCommitted
         }
 
         SplitView {
@@ -1786,8 +1278,8 @@ Kirigami.ApplicationWindow {
                 uiPalette: root.uiPalette
                 splitPreferredWidth: Math.max(300, root.width * 0.26)
                 replaceFromItunesAction: replaceFromItunesAction
-                currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
-                openAlbumArtViewer: root.openAlbumArtViewer
+                currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
+                openAlbumArtViewer: viewerController.openAlbumArtViewer
                 queueTrackNumberText: root.queueTrackNumberText
                 popupTransitionMs: root.uiPopupTransitionMs
                 snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
@@ -1814,7 +1306,7 @@ Kirigami.ApplicationWindow {
                     preferredHeight: root.height * 0.58
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
-                    playlistOrderText: root.playlistOrderText
+                    playlistOrderText: FormatUtils.playlistOrderText
                     openTagEditorForPlaylistRow: root.openTagEditorForPlaylistRow
                     stepScrollView: root.stepScrollView
                     clearPlaylistAction: clearPlaylistAction
@@ -1823,7 +1315,7 @@ Kirigami.ApplicationWindow {
                     snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
                     rowsForLibraryAction: root.rowsForLibraryAction
                     appendLibraryRows: root.appendLibraryRows
-                    droppedExternalPaths: root.droppedExternalPaths
+                    droppedExternalPaths: PathUtils.droppedExternalPaths
                     submitExternalImport: root.submitExternalImport
                 }
 
@@ -1832,7 +1324,7 @@ Kirigami.ApplicationWindow {
                     SplitView.fillWidth: true
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: 220
-                    openViewer: root.openSpectrogramViewer
+                    openViewer: viewerController.openSpectrogramViewer
                 }
             }
         }
@@ -1840,7 +1332,7 @@ Kirigami.ApplicationWindow {
 
     Viewers.SpectrogramSurface {
         id: spectrogramSurface
-        parent: root.spectrogramViewerOpen
+        parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
                 ? spectrogramViewerShell.windowHost
                 : spectrogramViewerShell.popupHost)
@@ -1853,11 +1345,11 @@ Kirigami.ApplicationWindow {
     Viewers.SpectrogramViewerShell {
         id: spectrogramViewerShell
         windowRoot: root
-        viewerOpen: root.spectrogramViewerOpen
+        viewerOpen: viewerController.spectrogramViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
         popupTransitionMs: root.uiPopupTransitionMs
         titleText: root.title
-        closeViewer: root.closeSpectrogramViewer
+        closeViewer: viewerController.closeSpectrogramViewer
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -1865,39 +1357,42 @@ Kirigami.ApplicationWindow {
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: root
-        pathFromAnyUrl: root.pathFromAnyUrl
-        openAlbumArtViewerForSuggestion: root.openAlbumArtViewerForSuggestion
+        openAlbumArtViewerForSuggestion: viewerController.openAlbumArtViewerForSuggestion
     }
 
     Viewers.AlbumArtViewerShell {
         id: albumArtViewerShell
         windowRoot: root
-        viewerOpen: root.albumArtViewerOpen
+        viewerOpen: viewerController.albumArtViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
         popupTransitionMs: root.uiPopupTransitionMs
         titleText: root.title
-        closeViewer: root.closeAlbumArtViewer
-        toggleInfoVisible: root.toggleAlbumArtInfoVisible
+        closeViewer: viewerController.closeAlbumArtViewer
+        toggleInfoVisible: function() {
+            viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
+        }
     }
 
     Viewers.AlbumArtSurface {
         id: albumArtSurface
-        parent: root.albumArtViewerOpen
+        parent: viewerController.albumArtViewerOpen
             ? (root.useWholeScreenViewerMode ? albumArtViewerShell.windowHost : albumArtViewerShell.popupHost)
             : albumArtMainHost
-        visible: root.albumArtViewerOpen
+        visible: viewerController.albumArtViewerOpen
         anchors.fill: parent
-        viewerOpen: root.albumArtViewerOpen
-        viewerSource: root.albumArtViewerSource
-        infoVisible: root.albumArtInfoVisible
-        initialViewToken: root.albumArtViewResetToken
+        viewerOpen: viewerController.albumArtViewerOpen
+        viewerSource: viewerController.albumArtViewerSource
+        infoVisible: viewerController.albumArtInfoVisible
+        initialViewToken: viewerController.albumArtViewResetToken
         viewerDecodeWidth: root.albumArtViewerDecodeWidth
         viewerDecodeHeight: root.albumArtViewerDecodeHeight
-        infoOverlayText: root.albumArtInfoOverlayText()
+        infoOverlayText: viewerController.albumArtInfoOverlayText()
         replaceFromItunesAction: replaceFromItunesAction
-        currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
-        closeViewer: root.closeAlbumArtViewer
-        toggleInfoVisible: root.toggleAlbumArtInfoVisible
+        currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
+        closeViewer: viewerController.closeAlbumArtViewer
+        toggleInfoVisible: function() {
+            viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
+        }
         focusFullscreen: albumArtViewerShell.focusFullscreen
     }
 
@@ -1912,7 +1407,7 @@ Kirigami.ApplicationWindow {
         asynchronous: true
         cache: true
         retainWhileLoading: true
-        source: !root.albumArtViewerOpen || root.albumArtViewerShowsCurrentTrack
+        source: !viewerController.albumArtViewerOpen || viewerController.albumArtViewerShowsCurrentTrack
             ? (uiBridge.currentTrackCoverPath || "")
             : ""
         sourceSize.width: root.albumArtViewerDecodeWidth
@@ -1940,94 +1435,16 @@ Kirigami.ApplicationWindow {
             }
         }
         function onSnapshotChanged() {
-            const stopped = (uiBridge.playbackState || "") === "Stopped"
-            const currentTrackPath = uiBridge.currentTrackPath || ""
-            if (stopped) {
-                const stoppedTrackChanged = root.stoppedSpectrogramTrackPath.length > 0
-                    && root.stoppedSpectrogramTrackPath !== currentTrackPath
-                if (stoppedTrackChanged) {
-                    spectrogramSurface.resetForCurrentMode(true)
-                } else {
-                    spectrogramSurface.haltForCurrentMode()
-                }
-                root.stoppedSpectrogramTrackPath = currentTrackPath
-            } else {
-                root.stoppedSpectrogramTrackPath = currentTrackPath
-            }
-            root.syncMutedVolumeState()
-            if (root.albumArtViewerOpen
-                    && root.albumArtViewerShowsCurrentTrack
-                    && root.albumArtViewerSource !== (uiBridge.currentTrackCoverPath || "")) {
-                root.albumArtViewerSource = uiBridge.currentTrackCoverPath || ""
-                root.albumArtViewerInfoSource = root.pathFromAnyUrl(root.albumArtViewerSource)
-                if (root.albumArtInfoVisible) {
-                    root.refreshAlbumArtFileInfo()
-                } else {
-                    root.albumArtViewerFileInfo = ({})
-                }
-            } else if (root.albumArtViewerOpen
-                    && root.albumArtViewerInfoSource
-                        !== root.pathFromAnyUrl(root.albumArtViewerSource || "")) {
-                root.albumArtViewerInfoSource = root.pathFromAnyUrl(root.albumArtViewerSource || "")
-                if (root.albumArtInfoVisible) {
-                    root.refreshAlbumArtFileInfo()
-                } else {
-                    root.albumArtViewerFileInfo = ({})
-                }
-            }
+            playbackController.handleSnapshotChanged(
+                function() { spectrogramSurface.haltForCurrentMode() },
+                function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
+            viewerController.handleSnapshotChanged()
             queueController.handleBridgeSnapshotUpdate()
         }
         function onPlaybackChanged() {
-            const playbackState = uiBridge.playbackState || ""
-            if (root.shouldResetSpectrogramForStoppedTrackSwitch(
-                        root.lastSpectrogramPlaybackState,
-                        playbackState,
-                        root.stoppedSpectrogramTrackPath,
-                        uiBridge.currentTrackPath || "")) {
-                spectrogramSurface.resetForCurrentMode(true)
-                root.stoppedSpectrogramTrackPath = uiBridge.currentTrackPath || ""
-            }
-            const incomingPosition = uiBridge.positionSeconds
-            const trackChanged = root.positionSmoothingTrackPath !== uiBridge.currentTrackPath
-            const nowMs = Date.now()
-            const duration = Math.max(uiBridge.durationSeconds, 0)
-            if (playbackState !== "Playing") {
-                if (playbackState === "Stopped") {
-                    spectrogramSurface.haltForCurrentMode()
-                }
-                root.positionSmoothingAnimationMs = 0
-                root.displayedPositionSeconds = incomingPosition
-                root.positionSmoothingPrimed = false
-                root.positionSmoothingAnchorSeconds = incomingPosition
-                root.positionSmoothingLastMs = nowMs
-                root.positionSmoothingTrackPath = uiBridge.currentTrackPath
-            } else if (!root.positionSmoothingPrimed || trackChanged) {
-                root.positionSmoothingAnimationMs = 0
-                root.displayedPositionSeconds = incomingPosition
-                root.positionSmoothingPrimed = true
-                root.positionSmoothingAnchorSeconds = incomingPosition
-                root.positionSmoothingLastMs = nowMs
-                root.positionSmoothingTrackPath = uiBridge.currentTrackPath
-            } else {
-                const cadenceMs = root.positionSmoothingLastMs > 0
-                    ? Math.max(120, Math.min(1200, nowMs - root.positionSmoothingLastMs))
-                    : 1000
-                const drift = incomingPosition - root.displayedPositionSeconds
-                if (Math.abs(drift) > 0.20) {
-                    root.positionSmoothingAnimationMs = 0
-                    root.displayedPositionSeconds = incomingPosition
-                } else {
-                    root.positionSmoothingAnimationMs = cadenceMs
-                    const predictedTarget = incomingPosition + (cadenceMs / 1000.0)
-                    root.displayedPositionSeconds = duration > 0
-                        ? Math.min(duration, Math.max(0.0, predictedTarget))
-                        : Math.max(0.0, predictedTarget)
-                }
-                root.positionSmoothingAnchorSeconds = incomingPosition
-                root.positionSmoothingLastMs = nowMs
-                root.positionSmoothingTrackPath = uiBridge.currentTrackPath
-            }
-            root.lastSpectrogramPlaybackState = playbackState
+            playbackController.handlePlaybackChanged(
+                function() { spectrogramSurface.haltForCurrentMode() },
+                function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
         }
         function onLibraryTreeFrameReceived(version, treeBytes) {
             libraryController.requestTreeApply(version, treeBytes || "")
@@ -2067,18 +1484,11 @@ Kirigami.ApplicationWindow {
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
         windowRoot: root
-        basenameFromPath: root.basenameFromPath
     }
 
     Component.onCompleted: {
         libraryController.requestTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
-        root.displayedPositionSeconds = uiBridge.positionSeconds
-        root.syncMutedVolumeState()
-        root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
-        root.positionSmoothingAnchorSeconds = uiBridge.positionSeconds
-        root.positionSmoothingAnimationMs = 0
-        root.positionSmoothingLastMs = Date.now()
-        root.positionSmoothingTrackPath = uiBridge.currentTrackPath
+        playbackController.initializeFromBridge()
         queueController.initializeFromBridge()
         libraryController.syncSelectionToVisibleRows()
         globalSearchController.syncSelectionAfterResultsChange()

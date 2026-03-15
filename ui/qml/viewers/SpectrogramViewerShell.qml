@@ -16,6 +16,13 @@ Item {
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
 
+    onViewerOpenChanged: Qt.callLater(root.syncPresentation)
+    onUseWholeScreenViewerModeChanged: {
+        if (root.viewerOpen) {
+            Qt.callLater(root.syncPresentation)
+        }
+    }
+
     function syncPresentation() {
         if (root.viewerOpen && !root.useWholeScreenViewerMode) {
             if (!spectrogramViewer.visible) {
@@ -28,6 +35,8 @@ Item {
             spectrogramFullscreenWindow.requestActivate()
         }
     }
+
+    Component.onCompleted: Qt.callLater(root.syncPresentation)
 
     Popup {
         id: spectrogramViewer

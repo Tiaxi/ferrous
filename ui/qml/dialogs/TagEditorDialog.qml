@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/FormatUtils.js" as FormatUtils
 import "." as Dialogs
 
 Dialog {
@@ -10,7 +11,6 @@ Dialog {
     required property var tagEditorApi
     required property var uiPalette
     required property var windowRoot
-    required property var basenameFromPath
 
     property var selectedRows: []
     property int selectionAnchor: -1
@@ -217,7 +217,7 @@ Dialog {
     function rowText(columnKey, rowData) {
         switch (columnKey) {
         case "fileName": return rowData.fileName || ""
-        case "directory": return root.basenameFromPath(rowData.directory || "")
+        case "directory": return FormatUtils.basenameFromPath(rowData.directory || "")
         case "formatKind": return rowData.formatKind || ""
         case "title": return rowData.title || ""
         case "artist": return rowData.artist || ""

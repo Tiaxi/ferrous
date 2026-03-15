@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/ColorUtils.js" as ColorUtils
 
 ToolBar {
     id: root
@@ -9,7 +10,6 @@ ToolBar {
     required property var uiPalette
     required property var sections
     required property var channelStatusIconSource
-    required property var mixColor
     required property bool themeIsDark
 
     implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
@@ -69,7 +69,7 @@ ToolBar {
                         elide: Text.ElideRight
                         color: modelData.kind === "error"
                             ? (modelData.emphasis
-                                ? root.mixColor(
+                                ? ColorUtils.mixColor(
                                     Kirigami.Theme.negativeTextColor,
                                     root.uiPalette.uiTextColor,
                                     root.themeIsDark ? 0.18 : 0.08)

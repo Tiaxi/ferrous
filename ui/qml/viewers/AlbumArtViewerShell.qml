@@ -22,6 +22,13 @@ Item {
     readonly property real wholeScreenHeight: albumArtFullscreenWindow.height
     readonly property bool wholeScreenVisible: albumArtFullscreenWindow.visibility === Window.FullScreen
 
+    onViewerOpenChanged: Qt.callLater(root.syncPresentation)
+    onUseWholeScreenViewerModeChanged: {
+        if (root.viewerOpen) {
+            Qt.callLater(root.syncPresentation)
+        }
+    }
+
     function syncPresentation() {
         if (root.viewerOpen && !root.useWholeScreenViewerMode) {
             if (!albumArtViewer.visible) {
@@ -41,6 +48,8 @@ Item {
             albumArtFullscreenFocusSink.forceActiveFocus()
         }
     }
+
+    Component.onCompleted: Qt.callLater(root.syncPresentation)
 
     Popup {
         id: albumArtViewer
