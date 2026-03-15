@@ -67,6 +67,7 @@ Kirigami.ApplicationWindow {
     readonly property var libraryTreeModel: (typeof libraryModel !== "undefined" && libraryModel)
         ? libraryModel
         : null
+    readonly property int spectrogramDeltaRowsPerTurn: 12
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
     readonly property var uiPalette: uiPaletteObject
     readonly property var overlayHost: Overlay.overlay
@@ -308,7 +309,9 @@ Kirigami.ApplicationWindow {
         function shutdown() {}
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
-        function takeSpectrogramRowsDeltaPacked() { return ({ channels: [] }) }
+        function takeSpectrogramRowsDeltaPacked(maxRowsPerChannel) {
+            return ({ channels: [], reset: false })
+        }
     }
 
     QtObject {
@@ -1153,12 +1156,12 @@ Kirigami.ApplicationWindow {
     Connections {
         target: uiBridge
         function applyAnalysisDelta() {
-            const delta = uiBridge.takeSpectrogramRowsDeltaPacked()
+            const delta = uiBridge.takeSpectrogramRowsDeltaPacked(root.spectrogramDeltaRowsPerTurn)
             if ((uiBridge.playbackState || "") === "Stopped") {
                 spectrogramSurface.haltForCurrentMode()
                 return
             }
-            if (uiBridge.spectrogramReset
+            if (delta.reset
                     && root.visualFeedsEnabled
                     && delta.channels
                     && delta.channels.length > 0) {

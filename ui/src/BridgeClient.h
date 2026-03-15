@@ -298,7 +298,7 @@ public:
     Q_INVOKABLE QVariantMap imageFileDetails(const QString &path) const;
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
-    Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked();
+    Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked(int maxRowsPerChannel = -1);
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
     Q_INVOKABLE void clearDiagnostics();

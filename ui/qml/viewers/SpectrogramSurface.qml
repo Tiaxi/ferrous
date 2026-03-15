@@ -136,7 +136,7 @@ Item {
             return
         }
         root.pendingPackedBatches.push(channels)
-        root.flushPendingPackedDeltas()
+        schedulePendingPackedFlush()
     }
 
     Component.onCompleted: resetForCurrentMode()

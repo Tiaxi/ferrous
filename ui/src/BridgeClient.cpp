@@ -3202,7 +3202,7 @@ void BridgeClient::scanDefaultMusicRoot() {
     scanRoot(music);
 }
 
-QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
+QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked(int maxRowsPerChannel) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     QElapsedTimer deltaTimer;
     deltaTimer.start();
@@ -3210,27 +3210,66 @@ QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked() {
     QVariantMap out;
     QVariantList channels;
     channels.reserve(m_spectrogramChannels.size());
+    const int clampedMaxRows = maxRowsPerChannel > 0 ? maxRowsPerChannel : std::numeric_limits<int>::max();
+    int rowsToTake = std::numeric_limits<int>::max();
+    for (const auto &channel : m_spectrogramChannels) {
+        if (channel.packedRowsCount <= 0 || channel.packedBins <= 0 || channel.packedRows.isEmpty()) {
+            continue;
+        }
+        rowsToTake = std::min(rowsToTake, channel.packedRowsCount);
+    }
+    if (rowsToTake == std::numeric_limits<int>::max()) {
+        rowsToTake = 0;
+    } else {
+        rowsToTake = std::min(rowsToTake, clampedMaxRows);
+    }
+
     int totalRows = 0;
     qsizetype totalBytes = 0;
+    bool hasRemainingRows = false;
     for (auto &channel : m_spectrogramChannels) {
         if (channel.packedRowsCount <= 0 || channel.packedBins <= 0 || channel.packedRows.isEmpty()) {
             channel.packedRows.clear();
             channel.packedRowsCount = 0;
             continue;
         }
+        const int takeRows = std::min(channel.packedRowsCount, rowsToTake);
+        if (takeRows <= 0) {
+            hasRemainingRows = hasRemainingRows || channel.packedRowsCount > 0;
+            continue;
+        }
+        const qsizetype takeBytes = static_cast<qsizetype>(takeRows)
+            * static_cast<qsizetype>(channel.packedBins);
         QVariantMap channelMap;
         channelMap.insert(QStringLiteral("label"), channel.label);
-        channelMap.insert(QStringLiteral("rows"), channel.packedRowsCount);
+        channelMap.insert(QStringLiteral("rows"), takeRows);
         channelMap.insert(QStringLiteral("bins"), channel.packedBins);
-        channelMap.insert(QStringLiteral("data"), channel.packedRows);
+        channelMap.insert(
+            QStringLiteral("data"),
+            channel.packedRows.left(static_cast<int>(takeBytes)));
         channels.push_back(channelMap);
-        totalRows += channel.packedRowsCount;
-        totalBytes += channel.packedRows.size();
-        channel.packedRows.clear();
-        channel.packedRowsCount = 0;
+        totalRows += takeRows;
+        totalBytes += takeBytes;
+        if (takeRows >= channel.packedRowsCount) {
+            channel.packedRows.clear();
+            channel.packedRowsCount = 0;
+        } else {
+            channel.packedRows.remove(0, takeBytes);
+            channel.packedRowsCount -= takeRows;
+            hasRemainingRows = true;
+        }
     }
     out.insert(QStringLiteral("channels"), channels);
-    m_spectrogramChannels.clear();
+    const bool reset = m_spectrogramReset && !channels.isEmpty();
+    out.insert(QStringLiteral("reset"), reset);
+    if (reset) {
+        m_spectrogramReset = false;
+    }
+    if (!hasRemainingRows) {
+        m_spectrogramChannels.clear();
+    } else {
+        scheduleAnalysisChanged();
+    }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
         const double deltaMs = static_cast<double>(deltaTimer.nsecsElapsed()) / 1'000'000.0;

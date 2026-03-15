@@ -359,6 +359,7 @@ private slots:
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
     void artistPrefixSearchUsesModelLookup();
+    void spectrogramSurfaceDefersPackedDeltaFlush();
     void spectrogramItemRendersNonBackgroundPixels();
     void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
     void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
@@ -1066,6 +1067,63 @@ void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
         "Spectrogram stayed nearly blank after delayed append");
     QVERIFY2(maxX >= 0 && (maxX - minX) > frame.width() / 3,
         "Delayed spectrogram append only rendered a narrow strip");
+}
+
+void QmlSmokeTest::spectrogramSurfaceDefersPackedDeltaFlush() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "viewers" as Viewers
+
+Item {
+    width: 420
+    height: 160
+
+    QtObject {
+        id: bridge
+        property int spectrogramViewMode: 0
+        property real dbRange: 90
+        property bool logScale: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+    }
+
+    Viewers.SpectrogramSurface {
+        id: surface
+        objectName: "surface"
+        anchors.fill: parent
+        uiBridge: bridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *surface = root->findChild<QObject *>(QStringLiteral("surface"));
+    QVERIFY(surface != nullptr);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
+    QVariantMap channel;
+    channel.insert(QStringLiteral("label"), QStringLiteral("L"));
+    channel.insert(QStringLiteral("rows"), 10);
+    channel.insert(QStringLiteral("bins"), 2);
+    channel.insert(QStringLiteral("data"), QByteArray::fromHex("0102030405060708090a0b0c0d0e0f1011121314"));
+
+    const bool invoked = QMetaObject::invokeMethod(
+        surface,
+        "appendPackedDelta",
+        Q_ARG(QVariant, QVariant::fromValue(QVariantList{channel})));
+    QVERIFY(invoked);
+
+    QVERIFY(surface->property("pendingPackedFlushScheduled").toBool());
+    QCOMPARE(surface->property("pendingPackedBatches").toList().size(), 1);
+
+    QTRY_VERIFY(surface->property("pendingPackedBatches").toList().isEmpty());
+    QVERIFY(!surface->property("pendingPackedFlushScheduled").toBool());
 }
 
 void QmlSmokeTest::spectrogramSeedsOnlyFirstResetBurstIntoHistory() {
