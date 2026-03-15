@@ -382,6 +382,12 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     const QUrl url = QUrl::fromLocalFile(qmlPath);
     engine.load(url);
     QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    QObject *root = engine.rootObjects().constFirst();
+    QVERIFY(root != nullptr);
+
+    QObject *libraryView = qvariant_cast<QObject *>(root->property("libraryViewRef"));
+    QVERIFY2(libraryView != nullptr, "Main.qml did not publish the library view ref");
+    QCOMPARE(qvariant_cast<QObject *>(libraryView->property("model")), static_cast<QObject *>(&libraryModel));
 }
 
 void QmlSmokeTest::loadsExtractedQmlSlicesWithFallbackProps() {
@@ -396,6 +402,7 @@ void QmlSmokeTest::loadsExtractedQmlSlicesWithFallbackProps() {
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import "components" as Components
 import "dialogs" as Dialogs
 import "panes" as Panes
@@ -406,6 +413,13 @@ Item {
     width: 1600
     height: 980
 
+    Window {
+        id: viewerWindowRoot
+        visible: false
+        width: harness.width
+        height: harness.height
+    }
+
     QtObject {
         id: bridge
         property bool connected: false
@@ -415,6 +429,10 @@ Item {
         property real positionSeconds: 0
         property real durationSeconds: 0
         property real volume: 0.5
+        property var queueRows: []
+        property int queueLength: queueRows.length
+        property int queueVersion: 0
+        property string queueDurationText: "00:00"
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
@@ -425,6 +443,9 @@ Item {
         property string currentTrackAlbum: ""
         property string currentTrackGenre: ""
         property var currentTrackYear: null
+        property var itunesArtworkResults: []
+        property bool itunesArtworkLoading: false
+        property string itunesArtworkStatusText: ""
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
         property int spectrogramViewMode: 0
@@ -433,8 +454,21 @@ Item {
         property bool logScale: false
         property bool showFps: false
         property int viewerFullscreenMode: 0
+        property int libraryArtistCount: 0
+        property int libraryAlbumCount: 0
+        property int libraryTrackCount: 0
+        property var globalSearchModel: []
+        property int globalSearchArtistCount: 0
+        property int globalSearchAlbumCount: 0
+        property int globalSearchTrackCount: 0
+        property bool libraryScanInProgress: false
+        property int libraryScanDiscovered: 0
+        property int libraryScanProcessed: 0
+        property real libraryScanFilesPerSecond: 0
+        property real libraryScanEtaSeconds: -1
         property int librarySortMode: 0
         property var libraryRootEntries: []
+        property string fileBrowserName: "File Manager"
         property bool lastFmScrobblingEnabled: false
         property bool lastFmBuildConfigured: false
         property string lastFmStatusText: ""
@@ -445,6 +479,8 @@ Item {
         property string diagnosticsLogPath: ""
         property int sampleRateHz: 48000
         signal diagnosticsChanged()
+        signal itunesArtworkChanged()
+        signal snapshotChanged()
         function setVolume(value) {}
         function setLibrarySortMode(mode) {}
         function rescanAllLibraryRoots() {}
@@ -463,8 +499,29 @@ Item {
         function disconnectLastFm() {}
         function setSystemMediaControlsEnabled(value) {}
         function openContainingFolder(path) {}
+        function setGlobalSearchQuery(query) {}
+        function searchCurrentTrackArtworkSuggestions() {}
+        function clearItunesArtworkSuggestions() {}
+        function imageFileDetails(path) { return ({}) }
+        function itunesArtworkResultAt(index) { return ({}) }
+        function prepareItunesArtworkSuggestion(index) {}
+        function applyItunesArtworkSuggestion(index) {}
         function reloadDiagnosticsFromDisk() {}
         function clearDiagnostics() {}
+        function libraryThumbnailSource(path) { return "" }
+        function queuePathAt(index) { return "" }
+        function playAt(index) {}
+        function removeAt(index) {}
+        function moveQueue(from, to) {}
+    }
+
+    QtObject {
+        id: globalSearchModelApi
+        function rowDataAt(index) { return null }
+    }
+
+    ListModel {
+        id: sidebarModel
     }
 
     Components.UiPalette {
@@ -477,6 +534,10 @@ Item {
     Action { id: pauseAction }
     Action { id: stopAction }
     Action { id: nextAction }
+    Action { id: clearPlaylistAction }
+    Action { id: replaceFromItunesAction }
+    Action { id: playAllLibraryTracksAction }
+    Action { id: appendAllLibraryTracksAction }
 
     Dialogs.PreferencesDialog {
         id: preferencesDialog
@@ -511,6 +572,52 @@ Item {
         pathValue: "/music"
         nameValue: "Music"
         onDismissed: function() {}
+    }
+
+    Dialogs.GlobalSearchDialog {
+        parent: harness
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: harness
+        popupTransitionMs: 0
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+        globalSearchModelApi: globalSearchModelApi
+        selectedDisplayIndex: -1
+        globalSearchShowsRootColumn: false
+        globalSearchIgnoreRefocusFind: false
+        globalSearchTrackNumberColumnWidth: 42
+        globalSearchCoverColumnWidth: 28
+        globalSearchArtistColumnWidth: 180
+        globalSearchAlbumColumnWidth: 220
+        globalSearchRootColumnWidth: 160
+        globalSearchYearColumnWidth: 54
+        globalSearchTrackGenreColumnWidth: 110
+        globalSearchAlbumCountColumnWidth: 44
+        globalSearchTrackLengthColumnWidth: 64
+        handleOpened: function(queryText) {}
+        handleClosed: function(closeDialog) {}
+        focusQueryField: function(selectAll) {}
+        stepResultsView: function(wheel) {}
+        nextSelectableIndex: function(startIndex, step, wrap) { return -1 }
+        selectDisplayIndex: function(index) { return false }
+        searchFirstSelectableIndex: function() { return -1 }
+        searchLastSelectableIndex: function() { return -1 }
+        moveSelectionByPage: function(direction) { return false }
+        activateSelection: function() {}
+        navigateSelectionToLibrary: function() {}
+        activateRow: function(row) {}
+        queueRow: function(row) {}
+        openRowInFileBrowser: function(row) {}
+    }
+
+    Dialogs.ItunesArtworkDialog {
+        parent: harness
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: harness
+        pathFromAnyUrl: function(url) { return "" }
+        openAlbumArtViewerForSuggestion: function(row) {}
     }
 
     Panes.StatusBar {
@@ -549,6 +656,104 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         queueTrackNumberText: function(index) { return "--" }
+    }
+
+    Viewers.AlbumArtViewerShell {
+        parent: harness
+        windowRoot: viewerWindowRoot
+        viewerOpen: false
+        useWholeScreenViewerMode: false
+        popupTransitionMs: 0
+        titleText: "Ferrous"
+        closeViewer: function() {}
+        toggleInfoVisible: function() {}
+    }
+
+    Viewers.AlbumArtSurface {
+        parent: harness
+        x: 1180
+        y: 20
+        width: 220
+        height: 220
+        viewerOpen: false
+        viewerSource: ""
+        infoVisible: false
+        initialViewToken: 0
+        viewerDecodeWidth: 1024
+        viewerDecodeHeight: 1024
+        infoOverlayText: ""
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        closeViewer: function() {}
+        toggleInfoVisible: function() {}
+        focusFullscreen: function() {}
+    }
+
+    Panes.SidebarPane {
+        parent: harness
+        x: 0
+        y: 180
+        width: 360
+        height: 520
+        uiBridge: bridge
+        libraryModel: sidebarModel
+        uiPalette: palette
+        splitPreferredWidth: width
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        openAlbumArtViewer: function() {}
+        queueTrackNumberText: function(index) { return "--" }
+        popupTransitionMs: 0
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+        pendingLibraryExpandFitKey: ""
+        applyPendingLibraryExpansionFit: function() {}
+        stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
+        handleLibraryKeyPress: function(event) {}
+        isLibrarySelectionKeySelected: function(key) { return false }
+        toggleLibraryNode: function(key) {}
+        handleLibraryRowSelection: function(index, rowMap, button, modifiers) {}
+        rowsForLibraryAction: function(rowMap) { return [] }
+        playLibraryRows: function(rows) {}
+        appendLibraryRows: function(rows) {}
+        isActionableLibraryRow: function(rowMap) { return false }
+        canOpenTagEditorForLibrary: function(rowMap) { return false }
+        openTagEditorForLibrary: function(rowMap) {}
+        isLibraryTreeLoading: function() { return false }
+        playAllLibraryTracksAction: playAllLibraryTracksAction
+        appendAllLibraryTracksAction: appendAllLibraryTracksAction
+    }
+
+    Panes.QueuePane {
+        parent: harness
+        x: 380
+        y: 180
+        width: 720
+        height: 320
+        uiBridge: bridge
+        uiPalette: palette
+        preferredHeight: height
+        playlistIndicatorColumnWidth: 22
+        playlistOrderColumnWidth: 34
+        playlistOrderText: function(index) { return String(index + 1) }
+        isQueueIndexSelected: function(index) { return false }
+        handleQueueRowSelection: function(index, button, modifiers) {}
+        openTagEditorForPlaylistRow: function(index) {}
+        requestPlaylistViewportRestoreWindow: function(durationMs) {}
+        removeSelectedQueueTrack: function() {}
+        stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
+        handlePlaylistKeyPress: function(event) {}
+        clearPlaylistAction: clearPlaylistAction
+        popupTransitionMs: 0
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+        selectedQueueIndices: []
+        rowsForLibraryAction: function(rowMap) { return [] }
+        appendLibraryRows: function(rows) {}
+        droppedExternalPaths: function(drop) { return [] }
+        submitExternalImport: function(paths, replaceQueue) { return false }
+        applyPendingPlaylistViewportRestore: function() {}
+        handleQueueSnapshotChanged: function(view) {}
     }
 
     Viewers.SpectrogramSurface {

@@ -97,6 +97,8 @@ qt_add_qml_module(ferrous
         qml/components/ViewerCloseButton.qml
         qml/dialogs/AboutDialog.qml
         qml/dialogs/DiagnosticsDialog.qml
+        qml/dialogs/GlobalSearchDialog.qml
+        qml/dialogs/ItunesArtworkDialog.qml
         qml/dialogs/LibraryRootNameDialog.qml
         qml/dialogs/PreferencesDialog.qml
         qml/panes/LibraryPane.qml
@@ -110,6 +112,8 @@ qt_add_qml_module(ferrous
         qml/preferences/LibraryPage.qml
         qml/preferences/SpectrogramPage.qml
         qml/preferences/SystemMediaPage.qml
+        qml/viewers/AlbumArtSurface.qml
+        qml/viewers/AlbumArtViewerShell.qml
         qml/viewers/SpectrogramSurface.qml
         qml/viewers/SpectrogramViewerShell.qml
     RESOURCES

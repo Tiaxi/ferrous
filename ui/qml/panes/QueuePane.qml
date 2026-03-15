@@ -21,9 +21,16 @@ Rectangle {
     required property var stepScrollView
     required property var handlePlaylistKeyPress
     required property var clearPlaylistAction
+    required property int popupTransitionMs
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property var selectedQueueIndices
+    required property var rowsForLibraryAction
+    required property var appendLibraryRows
+    required property var droppedExternalPaths
+    required property var submitExternalImport
+    required property var applyPendingPlaylistViewportRestore
+    required property var handleQueueSnapshotChanged
 
     signal viewReady(var view)
 
@@ -94,6 +101,10 @@ Rectangle {
                     : 0
 
                 Component.onCompleted: root.viewReady(playlistView)
+                onContentYChanged: root.applyPendingPlaylistViewportRestore()
+                onContentHeightChanged: root.applyPendingPlaylistViewportRestore()
+                onCountChanged: root.applyPendingPlaylistViewportRestore()
+                onHeightChanged: root.applyPendingPlaylistViewportRestore()
 
                 Keys.onPressed: function(event) {
                     root.handlePlaylistKeyPress(event)
@@ -268,8 +279,8 @@ Rectangle {
                 Menu {
                     id: playlistContextMenu
                     property int rowIndex: -1
-                    enter: Components.PopupTransition { duration: 0 }
-                    exit: Components.PopupTransition { duration: 0 }
+                    enter: Components.PopupTransition { duration: root.popupTransitionMs }
+                    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
                     MenuItem {
                         text: "Play Track"
@@ -354,6 +365,147 @@ Rectangle {
                 anchors.top: parent.top
                 anchors.topMargin: 10
                 width: parent.width
+            }
+
+            Connections {
+                target: root.uiBridge
+
+                function onSnapshotChanged() {
+                    root.handleQueueSnapshotChanged(playlistView)
+                }
+            }
+
+            DropArea {
+                id: playlistDropArea
+                anchors.fill: parent
+                property bool queueReorderDragActive: false
+                property int queueDropInsertIndex: -1
+                property real queueDropIndicatorY: 0
+
+                function updateQueueDropIndicator(dropY) {
+                    const rowHeight = 24
+                    const yInList = dropY - playlistView.y + playlistView.contentY
+                    let insertIndex = Math.floor((yInList + rowHeight * 0.5) / rowHeight)
+                    insertIndex = Math.max(0, Math.min(root.uiBridge.queueLength, insertIndex))
+                    queueDropInsertIndex = insertIndex
+
+                    const contentLineY = insertIndex * rowHeight
+                    const viewLineY = playlistView.y + contentLineY - playlistView.contentY
+                    const minY = playlistView.y
+                    const maxY = playlistView.y + playlistView.height - 2
+                    queueDropIndicatorY = Math.max(minY, Math.min(maxY, viewLineY))
+                }
+
+                onEntered: function(drop) {
+                    queueReorderDragActive = !!(drop.source && drop.source.draggableQueueItem)
+                    if (queueReorderDragActive) {
+                        updateQueueDropIndicator(drop.y)
+                    } else {
+                        queueDropInsertIndex = -1
+                    }
+                }
+
+                onPositionChanged: function(drop) {
+                    if (queueReorderDragActive) {
+                        updateQueueDropIndicator(drop.y)
+                    }
+                }
+
+                onExited: {
+                    queueReorderDragActive = false
+                    queueDropInsertIndex = -1
+                }
+
+                onDropped: function(drop) {
+                    const src = drop.source
+                    if (!src) {
+                        const externalPaths = root.droppedExternalPaths(drop)
+                        if (externalPaths.length > 0
+                                && root.submitExternalImport(externalPaths, false)) {
+                            queueReorderDragActive = false
+                            queueDropInsertIndex = -1
+                            drop.acceptProposedAction()
+                        }
+                        return
+                    }
+                    if (src.draggableQueueItem) {
+                        const from = src.queueRowIndex !== undefined ? src.queueRowIndex : -1
+                        if (from < 0 || root.uiBridge.queueLength <= 1) {
+                            return
+                        }
+                        let insertIndex = queueDropInsertIndex
+                        if (insertIndex < 0) {
+                            updateQueueDropIndicator(drop.y)
+                            insertIndex = queueDropInsertIndex
+                        }
+                        let to = insertIndex > from ? insertIndex - 1 : insertIndex
+                        to = Math.max(0, Math.min(root.uiBridge.queueLength - 1, to))
+                        if (to !== from) {
+                            root.uiBridge.moveQueue(from, to)
+                        }
+                        queueReorderDragActive = false
+                        queueDropInsertIndex = -1
+                        drop.acceptProposedAction()
+                        return
+                    }
+                    if (!src.draggableLibraryItem) {
+                        return
+                    }
+                    const rowMap = {
+                        selectionKey: src.selectionKeyResolved || "",
+                        sourceIndex: src.sourceIndexResolved !== undefined ? src.sourceIndexResolved : -1,
+                        rowType: src.rowTypeResolved || "",
+                        artist: src.artistResolved || "",
+                        name: src.nameResolved || "",
+                        title: src.rowTitle || "",
+                        trackPath: src.trackPathResolved || "",
+                        openPath: src.openPathResolved || "",
+                        playPaths: src.playPathsResolved || []
+                    }
+                    const rows = root.rowsForLibraryAction(rowMap)
+                    if (rows.length > 0) {
+                        root.appendLibraryRows(rows)
+                        queueReorderDragActive = false
+                        queueDropInsertIndex = -1
+                        drop.acceptProposedAction()
+                    }
+                }
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                color: "transparent"
+                border.width: playlistDropArea.containsDrag
+                    && !playlistDropArea.queueReorderDragActive
+                    ? 2
+                    : 0
+                border.color: Kirigami.Theme.highlightColor
+                visible: playlistDropArea.containsDrag
+                    && !playlistDropArea.queueReorderDragActive
+            }
+
+            Rectangle {
+                x: playlistView.x + 4
+                width: Math.max(0, playlistView.width - (playlistView.reservedRightPadding || 0) - 8)
+                height: 2
+                y: playlistDropArea.queueDropIndicatorY
+                radius: 1
+                color: Kirigami.Theme.highlightColor
+                visible: playlistDropArea.containsDrag
+                    && playlistDropArea.queueReorderDragActive
+                    && playlistDropArea.queueDropInsertIndex >= 0
+            }
+
+            Rectangle {
+                x: playlistView.x + 4
+                y: playlistDropArea.queueDropIndicatorY - 2
+                width: 6
+                height: 6
+                radius: 3
+                color: Kirigami.Theme.highlightColor
+                visible: playlistDropArea.containsDrag
+                    && playlistDropArea.queueReorderDragActive
+                    && playlistDropArea.queueDropInsertIndex >= 0
             }
         }
     }

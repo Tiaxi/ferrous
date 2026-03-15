@@ -61,10 +61,7 @@ Kirigami.ApplicationWindow {
     property string positionSmoothingTrackPath: ""
     property string stoppedSpectrogramTrackPath: ""
     property string lastSpectrogramPlaybackState: ""
-    property real albumArtZoom: 1.0
-    property real albumArtPanX: 0.0
-    property real albumArtPanY: 0.0
-    property bool albumArtInitialViewPending: false
+    property int albumArtViewResetToken: 0
     property bool albumArtViewerOpen: false
     property bool albumArtInfoVisible: false
     property var albumArtViewerFileInfo: ({})
@@ -73,10 +70,16 @@ Kirigami.ApplicationWindow {
     property bool albumArtViewerShowsCurrentTrack: true
     readonly property int albumArtViewerDecodeWidth: Math.max(
         1024,
-        Math.ceil(Math.max(root.width, albumArtFullscreenWindow.width, albumArtViewer.width)))
+        Math.ceil(Math.max(
+            root.width,
+            albumArtViewerShell.popupWidth,
+            albumArtViewerShell.wholeScreenWidth)))
     readonly property int albumArtViewerDecodeHeight: Math.max(
         1024,
-        Math.ceil(Math.max(root.height, albumArtFullscreenWindow.height, albumArtViewer.height)))
+        Math.ceil(Math.max(
+            root.height,
+            albumArtViewerShell.popupHeight,
+            albumArtViewerShell.wholeScreenHeight)))
     property bool spectrogramViewerOpen: false
     property string pendingFolderDialogContext: ""
     property string pendingFileDialogContext: ""
@@ -96,9 +99,13 @@ Kirigami.ApplicationWindow {
     property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
     property int globalSearchSelectedDisplayIndex: -1
-    property var globalSearchContextRowData: ({})
     property bool globalSearchOpening: false
     property bool globalSearchIgnoreRefocusFind: false
+    property var globalSearchDialogRef: null
+    property var globalSearchQueryFieldRef: null
+    property var globalSearchResultsViewRef: null
+    property var libraryViewRef: null
+    property var playlistViewRef: null
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -119,6 +126,9 @@ Kirigami.ApplicationWindow {
         && uiBridge.globalSearchModel.nextSelectableIndex)
         ? uiBridge.globalSearchModel
         : globalSearchModelFallback
+    readonly property var libraryTreeModel: (typeof libraryModel !== "undefined" && libraryModel)
+        ? libraryModel
+        : null
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
     readonly property var uiPalette: uiPaletteObject
     readonly property bool themeIsDark: uiPalette.themeIsDark
@@ -1062,7 +1072,7 @@ Kirigami.ApplicationWindow {
     }
 
     function stepGlobalSearchResultsView(wheel) {
-        if (!globalSearchResultsView || !wheel) {
+        if (!globalSearchResultsViewRef || !wheel) {
             return
         }
         let deltaY = 0
@@ -1074,7 +1084,7 @@ Kirigami.ApplicationWindow {
         if (deltaY === 0) {
             return
         }
-        const maxY = Math.max(0, globalSearchResultsView.contentHeight - globalSearchResultsView.height)
+        const maxY = Math.max(0, globalSearchResultsViewRef.contentHeight - globalSearchResultsViewRef.height)
         if (maxY <= 0) {
             return
         }
@@ -1084,34 +1094,34 @@ Kirigami.ApplicationWindow {
             ? Math.max(1, Math.round(Math.abs(wheel.angleDelta.y) / 120))
             : Math.max(1, Math.round(Math.abs(deltaY) / stepPx))
         const direction = deltaY > 0 ? -1 : 1
-        let targetY = globalSearchResultsView.contentY + (direction * notches * stepPx)
+        let targetY = globalSearchResultsViewRef.contentY + (direction * notches * stepPx)
         targetY = Math.max(0, Math.min(maxY, targetY))
 
         if (direction > 0 && globalSearchRowCount() > 0) {
             const lastIndex = globalSearchRowCount() - 1
             const lastRowTop = globalSearchRowTop(lastIndex)
             const lastRowBottom = lastRowTop + globalSearchRowHeight(lastIndex)
-            const viewportBottom = targetY + globalSearchResultsView.height
+            const viewportBottom = targetY + globalSearchResultsViewRef.height
             const lastRowPartiallyVisible = lastRowTop < viewportBottom && lastRowBottom > viewportBottom
             if (lastRowPartiallyVisible) {
-                targetY = Math.max(0, Math.min(maxY, lastRowBottom - globalSearchResultsView.height))
+                targetY = Math.max(0, Math.min(maxY, lastRowBottom - globalSearchResultsViewRef.height))
             } else if ((maxY - targetY) <= globalSearchRowHeight(lastIndex)) {
                 targetY = maxY
             }
         }
 
-        globalSearchResultsView.contentY = targetY
+        globalSearchResultsViewRef.contentY = targetY
         if (direction > 0 && globalSearchRowCount() > 0) {
             const lastIndex = globalSearchRowCount() - 1
-            const probeX = Math.max(0, Math.min(8, globalSearchResultsView.width - 1))
-            const probeY = Math.max(0, globalSearchResultsView.height - 2)
-            const bottomIndex = globalSearchResultsView.indexAt(probeX, probeY)
+            const probeX = Math.max(0, Math.min(8, globalSearchResultsViewRef.width - 1))
+            const probeY = Math.max(0, globalSearchResultsViewRef.height - 2)
+            const bottomIndex = globalSearchResultsViewRef.indexAt(probeX, probeY)
             if (bottomIndex >= lastIndex - 1
-                    || (maxY - globalSearchResultsView.contentY) <= globalSearchRowHeight(lastIndex)) {
-                globalSearchResultsView.positionViewAtIndex(lastIndex, ListView.End)
+                    || (maxY - globalSearchResultsViewRef.contentY) <= globalSearchRowHeight(lastIndex)) {
+                globalSearchResultsViewRef.positionViewAtIndex(lastIndex, ListView.End)
                 Qt.callLater(function() {
-                    if (globalSearchResultsView) {
-                        globalSearchResultsView.positionViewAtIndex(lastIndex, ListView.End)
+                    if (globalSearchResultsViewRef) {
+                        globalSearchResultsViewRef.positionViewAtIndex(lastIndex, ListView.End)
                     }
                 })
             }
@@ -1139,26 +1149,26 @@ Kirigami.ApplicationWindow {
     }
 
     function captureLibraryViewAnchor() {
-        if (!libraryAlbumView || libraryModel.count <= 0) {
+        if (!libraryViewRef || libraryModel.count <= 0) {
             return {
                 key: "",
                 offset: 0,
-                fallbackY: libraryAlbumView ? libraryAlbumView.contentY : 0
+                fallbackY: libraryViewRef ? libraryViewRef.contentY : 0
             }
         }
         const rowHeight = 24
         const topIndex = Math.max(0, Math.min(
             libraryModel.count - 1,
-            Math.floor(libraryAlbumView.contentY / rowHeight)))
+            Math.floor(libraryViewRef.contentY / rowHeight)))
         return {
             key: libraryModel.selectionKeyForRow(topIndex) || "",
-            offset: libraryAlbumView.contentY - (topIndex * rowHeight),
-            fallbackY: libraryAlbumView.contentY
+            offset: libraryViewRef.contentY - (topIndex * rowHeight),
+            fallbackY: libraryViewRef.contentY
         }
     }
 
     function restoreLibraryViewAnchor(anchor) {
-        if (!libraryAlbumView) {
+        if (!libraryViewRef) {
             return
         }
         const rowHeight = 24
@@ -1170,8 +1180,8 @@ Kirigami.ApplicationWindow {
             }
         }
         const restoreY = function() {
-            const maxYNow = Math.max(0, libraryAlbumView.contentHeight - libraryAlbumView.height)
-            libraryAlbumView.contentY = Math.max(0, Math.min(targetY, maxYNow))
+            const maxYNow = Math.max(0, libraryViewRef.contentHeight - libraryViewRef.height)
+            libraryViewRef.contentY = Math.max(0, Math.min(targetY, maxYNow))
         }
         restoreY()
         Qt.callLater(restoreY)
@@ -1186,7 +1196,7 @@ Kirigami.ApplicationWindow {
     }
 
     function applyPendingLibraryExpansionFit() {
-        if (!libraryAlbumView || pendingLibraryExpandFitKey.length === 0) {
+        if (!libraryViewRef || pendingLibraryExpandFitKey.length === 0) {
             return
         }
         const key = pendingLibraryExpandFitKey
@@ -1202,7 +1212,7 @@ Kirigami.ApplicationWindow {
             return
         }
 
-        const viewHeight = Math.max(0, libraryAlbumView.height)
+        const viewHeight = Math.max(0, libraryViewRef.height)
         if (viewHeight <= 0) {
             if (pendingLibraryExpandFitAttempts > 0) {
                 pendingLibraryExpandFitAttempts -= 1
@@ -1234,11 +1244,11 @@ Kirigami.ApplicationWindow {
         const blockTop = rowIndex * rowHeight
         const blockBottom = (lastDescendantIndex + 1) * rowHeight
         if ((blockBottom - blockTop) > viewHeight) {
-            libraryAlbumView.positionViewAtIndex(rowIndex, ListView.Beginning)
+            libraryViewRef.positionViewAtIndex(rowIndex, ListView.Beginning)
         } else {
-            libraryAlbumView.positionViewAtIndex(lastDescendantIndex, ListView.Contain)
+            libraryViewRef.positionViewAtIndex(lastDescendantIndex, ListView.Contain)
         }
-        const visibleTop = libraryAlbumView.contentY
+        const visibleTop = libraryViewRef.contentY
         const visibleBottom = visibleTop + viewHeight
         const blockFits = (blockBottom - blockTop) <= viewHeight
         const blockVisible = blockFits
@@ -1311,7 +1321,7 @@ Kirigami.ApplicationWindow {
         if (!hasReceivedLibraryTreeFrame && lastAppliedLibraryVersion <= 0) {
             return true
         }
-        return uiBridge.libraryScanInProgress && libraryAlbumView.count === 0
+        return uiBridge.libraryScanInProgress && (!libraryViewRef || libraryViewRef.count === 0)
     }
 
     function clearQueueSelection() {
@@ -1321,11 +1331,11 @@ Kirigami.ApplicationWindow {
     }
 
     function requestPlaylistViewportRestoreWindow(durationMs) {
-        if (!playlistView) {
+        if (!playlistViewRef) {
             return
         }
         const ms = Math.max(100, durationMs || 700)
-        playlistViewportRestoreContentY = playlistView.contentY
+        playlistViewportRestoreContentY = playlistViewRef.contentY
         playlistViewportRestoreUntilMs = Math.max(playlistViewportRestoreUntilMs, Date.now() + ms)
     }
 
@@ -1334,14 +1344,52 @@ Kirigami.ApplicationWindow {
     }
 
     function applyPendingPlaylistViewportRestore() {
-        if (!playlistView || !playlistViewportRestoreActive()) {
+        if (!playlistViewRef || !playlistViewportRestoreActive()) {
             return
         }
-        const maxY = Math.max(0, playlistView.contentHeight - playlistView.height)
+        const maxY = Math.max(0, playlistViewRef.contentHeight - playlistViewRef.height)
         const targetY = Math.max(0, Math.min(maxY, playlistViewportRestoreContentY))
-        if (Math.abs(playlistView.contentY - targetY) > 0.5) {
-            playlistView.contentY = targetY
+        if (Math.abs(playlistViewRef.contentY - targetY) > 0.5) {
+            playlistViewRef.contentY = targetY
         }
+    }
+
+    function handleQueueSnapshotChanged(view) {
+        const playlistView = view || playlistViewRef
+        if (!playlistView) {
+            return
+        }
+        root.playlistViewRef = playlistView
+        const playbackState = uiBridge.playbackState || ""
+        const currentTrackPath = uiBridge.currentTrackPath || ""
+        if (!root.autoCenterQueueSelection) {
+            root.lastAutoCenterPlaybackState = playbackState
+            root.lastAutoCenterTrackPath = currentTrackPath
+            return
+        }
+        if (root.playlistViewportRestoreActive()) {
+            root.lastAutoCenterPlaybackState = playbackState
+            root.lastAutoCenterTrackPath = currentTrackPath
+            return
+        }
+        const targetIndex = uiBridge.playingQueueIndex
+        if (playbackState === "Stopped"
+                && root.lastAutoCenterPlaybackState !== "Stopped") {
+            root.lastAutoCenterPlaybackState = playbackState
+            root.lastAutoCenterTrackPath = currentTrackPath
+            return
+        }
+        const trackChanged = currentTrackPath.length > 0
+            && currentTrackPath !== root.lastAutoCenterTrackPath
+        const resumedFromStop = playbackState !== "Stopped"
+            && root.lastAutoCenterPlaybackState === "Stopped"
+        const needsInitialCenter = root.lastCenteredQueueIndex < 0
+        if (targetIndex >= 0 && (trackChanged || resumedFromStop || needsInitialCenter)) {
+            playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
+            root.lastCenteredQueueIndex = targetIndex
+        }
+        root.lastAutoCenterPlaybackState = playbackState
+        root.lastAutoCenterTrackPath = currentTrackPath
     }
 
     function setQueueSingleSelection(index) {
@@ -1663,23 +1711,23 @@ Kirigami.ApplicationWindow {
 
     function playlistPageStep() {
         const rowHeight = 24
-        const viewportHeight = playlistView ? playlistView.height : 240
+        const viewportHeight = playlistViewRef ? playlistViewRef.height : 240
         return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1)
     }
 
     function ensurePlaylistIndexVisible(index) {
-        if (!playlistView || index < 0) {
+        if (!playlistViewRef || index < 0) {
             return
         }
-        const firstVisible = playlistView.indexAt(0, 0)
-        const lastVisible = playlistView.indexAt(0, playlistView.height - 1)
+        const firstVisible = playlistViewRef.indexAt(0, 0)
+        const lastVisible = playlistViewRef.indexAt(0, playlistViewRef.height - 1)
         if (firstVisible >= 0
                 && lastVisible >= 0
                 && index >= firstVisible
                 && index <= lastVisible) {
             return
         }
-        playlistView.positionViewAtIndex(index, ListView.Contain)
+        playlistViewRef.positionViewAtIndex(index, ListView.Contain)
     }
 
     function selectAllQueueItems() {
@@ -1803,32 +1851,32 @@ Kirigami.ApplicationWindow {
     }
 
     function scrollLibrarySelectionKeyIntoView(selectionKey) {
-        if (!libraryAlbumView || !selectionKey || selectionKey.length === 0) {
+        if (!libraryViewRef || !selectionKey || selectionKey.length === 0) {
             return
         }
         const immediateIndex = libraryModel.indexForSelectionKey(selectionKey)
         if (immediateIndex >= 0) {
-            libraryAlbumView.positionViewAtIndex(immediateIndex, ListView.Contain)
+            libraryViewRef.positionViewAtIndex(immediateIndex, ListView.Contain)
         }
         Qt.callLater(function() {
-            if (!libraryAlbumView) {
+            if (!libraryViewRef) {
                 return
             }
             const delayedIndex = libraryModel.indexForSelectionKey(selectionKey)
             if (delayedIndex >= 0) {
-                libraryAlbumView.positionViewAtIndex(delayedIndex, ListView.Contain)
+                libraryViewRef.positionViewAtIndex(delayedIndex, ListView.Contain)
             }
         })
     }
 
     function focusLibraryViewForNavigation() {
-        if (!libraryAlbumView) {
+        if (!libraryViewRef) {
             return
         }
-        libraryAlbumView.forceActiveFocus()
+        libraryViewRef.forceActiveFocus()
         Qt.callLater(function() {
-            if (libraryAlbumView) {
-                libraryAlbumView.forceActiveFocus()
+            if (libraryViewRef) {
+                libraryViewRef.forceActiveFocus()
             }
         })
     }
@@ -1995,7 +2043,7 @@ Kirigami.ApplicationWindow {
     }
 
     function globalSearchRowCount() {
-        return globalSearchResultsView ? (globalSearchResultsView.count || 0) : 0
+        return globalSearchResultsViewRef ? (globalSearchResultsViewRef.count || 0) : 0
     }
 
     function syncGlobalSearchSelectionAfterResultsChange() {
@@ -2033,7 +2081,7 @@ Kirigami.ApplicationWindow {
         const stepDir = direction < 0 ? -1 : 1
         const pageRows = Math.max(
             1,
-            Math.floor(((globalSearchResultsView ? globalSearchResultsView.height : 240) / 24)) - 1)
+            Math.floor(((globalSearchResultsViewRef ? globalSearchResultsViewRef.height : 240) / 24)) - 1)
         let index = globalSearchSelectedDisplayIndex
         if (!isSearchRowSelectable(index)) {
             index = stepDir > 0 ? searchFirstSelectableIndex() : searchLastSelectableIndex()
@@ -2061,17 +2109,17 @@ Kirigami.ApplicationWindow {
             return false
         }
         globalSearchSelectedDisplayIndex = index
-        if (globalSearchResultsView && index >= 0 && index < globalSearchRowCount()) {
+        if (globalSearchResultsViewRef && index >= 0 && index < globalSearchRowCount()) {
             const firstSelectable = searchFirstSelectableIndex()
             if (index === firstSelectable && globalSearchModelApi) {
-                globalSearchResultsView.contentY = 0
+                globalSearchResultsViewRef.contentY = 0
                 Qt.callLater(function() {
-                    if (globalSearchResultsView) {
-                        globalSearchResultsView.contentY = 0
+                    if (globalSearchResultsViewRef) {
+                        globalSearchResultsViewRef.contentY = 0
                     }
                 })
             } else {
-                globalSearchResultsView.positionViewAtIndex(index, ListView.Contain)
+                globalSearchResultsViewRef.positionViewAtIndex(index, ListView.Contain)
             }
         }
         return true
@@ -2088,23 +2136,25 @@ Kirigami.ApplicationWindow {
     }
 
     function openGlobalSearch() {
-        if (globalSearchDialog.visible) {
+        if (globalSearchDialogRef && globalSearchDialogRef.visible) {
             focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
             return
         }
         beginGlobalSearchOpen()
-        globalSearchDialog.open()
+        if (globalSearchDialogRef) {
+            globalSearchDialogRef.open()
+        }
     }
 
     function focusGlobalSearchQueryField(selectAll) {
-        if (!globalSearchQueryField) {
+        if (!globalSearchQueryFieldRef) {
             return
         }
-        globalSearchQueryField.forceActiveFocus()
+        globalSearchQueryFieldRef.forceActiveFocus()
         if (selectAll) {
-            globalSearchQueryField.selectAll()
+            globalSearchQueryFieldRef.selectAll()
         } else {
-            globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+            globalSearchQueryFieldRef.cursorPosition = (globalSearchQueryFieldRef.text || "").length
         }
     }
 
@@ -2112,9 +2162,19 @@ Kirigami.ApplicationWindow {
         root.globalSearchOpening = true
         root.globalSearchIgnoreRefocusFind = true
         root.pendingGlobalSearchPrefillText = ""
-        root.globalSearchOpenInitialText = globalSearchQueryField
-            ? (globalSearchQueryField.text || "")
+        root.globalSearchOpenInitialText = globalSearchQueryFieldRef
+            ? (globalSearchQueryFieldRef.text || "")
             : ""
+    }
+
+    function handleGlobalSearchDialogOpened(queryText) {
+        root.globalSearchOpening = false
+        root.globalSearchIgnoreRefocusFind = true
+        globalSearchOpenSettleTimer.restart()
+        root.syncGlobalSearchSelectionAfterResultsChange()
+        root.focusGlobalSearchQueryField(false)
+        root.applyGlobalSearchOpenText()
+        uiBridge.setGlobalSearchQuery(queryText || "")
     }
 
     function endGlobalSearchOpen(closeDialog) {
@@ -2145,36 +2205,36 @@ Kirigami.ApplicationWindow {
     }
 
     function applyGlobalSearchOpenText() {
-        if (!globalSearchQueryField) {
+        if (!globalSearchQueryFieldRef) {
             return
         }
         if ((root.pendingGlobalSearchPrefillText || "").length > 0) {
-            globalSearchQueryField.text = root.pendingGlobalSearchPrefillText
+            globalSearchQueryFieldRef.text = root.pendingGlobalSearchPrefillText
             root.pendingGlobalSearchPrefillText = ""
             return
         }
 
-        const current = globalSearchQueryField.text || ""
+        const current = globalSearchQueryFieldRef.text || ""
         const initial = root.globalSearchOpenInitialText || ""
         if (current.length <= 0) {
             return
         }
         const trimmed = trimInitialSearchPrefix(current, initial)
         if (trimmed !== current) {
-            globalSearchQueryField.text = trimmed
-            globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+            globalSearchQueryFieldRef.text = trimmed
+            globalSearchQueryFieldRef.cursorPosition = (globalSearchQueryFieldRef.text || "").length
             return
         }
         if (current === initial) {
-            globalSearchQueryField.selectAll()
+            globalSearchQueryFieldRef.selectAll()
         }
     }
 
     function tryCaptureGlobalSearchPrefill(event) {
         const shouldCapture = root.globalSearchOpening
-            || (globalSearchDialog.visible
+            || ((globalSearchDialogRef && globalSearchDialogRef.visible)
                 && root.globalSearchIgnoreRefocusFind
-                && (!globalSearchQueryField || !globalSearchQueryField.activeFocus))
+                && (!globalSearchQueryFieldRef || !globalSearchQueryFieldRef.activeFocus))
         if (!shouldCapture) {
             return false
         }
@@ -2185,16 +2245,17 @@ Kirigami.ApplicationWindow {
         if (!isGlobalSearchPrintableChar(openingText)) {
             return false
         }
-        if (globalSearchDialog.visible && !root.globalSearchOpening && globalSearchQueryField) {
-            const hasSelection = (globalSearchQueryField.selectedText || "").length > 0
-            const current = globalSearchQueryField.text || ""
+        if (globalSearchDialogRef && globalSearchDialogRef.visible && !root.globalSearchOpening
+                && globalSearchQueryFieldRef) {
+            const hasSelection = (globalSearchQueryFieldRef.selectedText || "").length > 0
+            const current = globalSearchQueryFieldRef.text || ""
             if (hasSelection) {
-                globalSearchQueryField.text = openingText
+                globalSearchQueryFieldRef.text = openingText
             } else {
                 const alreadyTyped = trimInitialSearchPrefix(current, root.globalSearchOpenInitialText || "")
-                globalSearchQueryField.text = alreadyTyped + openingText
+                globalSearchQueryFieldRef.text = alreadyTyped + openingText
             }
-            globalSearchQueryField.cursorPosition = (globalSearchQueryField.text || "").length
+            globalSearchQueryFieldRef.cursorPosition = (globalSearchQueryFieldRef.text || "").length
             root.focusGlobalSearchQueryField(false)
         } else {
             root.pendingGlobalSearchPrefillText += openingText
@@ -2240,7 +2301,9 @@ Kirigami.ApplicationWindow {
             return
         }
         requestLibraryRevealForSearchRow(row)
-        globalSearchDialog.close()
+        if (globalSearchDialogRef) {
+            globalSearchDialogRef.close()
+        }
         Qt.callLater(root.focusLibraryViewForNavigation)
     }
 
@@ -2344,7 +2407,9 @@ Kirigami.ApplicationWindow {
             uiBridge.replaceArtistByName((row.artistKey || row.artist || row.label || "").trim())
         }
         requestLibraryRevealForSearchRow(row)
-        globalSearchDialog.close()
+        if (globalSearchDialogRef) {
+            globalSearchDialogRef.close()
+        }
     }
 
     function queueGlobalSearchRow(row) {
@@ -2529,18 +2594,7 @@ Kirigami.ApplicationWindow {
     }
 
     function syncAlbumArtViewerPresentation() {
-        const useWholeScreen = root.useWholeScreenViewerMode
-        if (albumArtViewerOpen && !useWholeScreen) {
-            if (!albumArtViewer.visible) {
-                albumArtViewer.open()
-            }
-        } else if (albumArtViewer.visible) {
-            albumArtViewer.close()
-        }
-        if (albumArtViewerOpen && useWholeScreen) {
-            albumArtFullscreenWindow.requestActivate()
-            root.applyAlbumArtInitialView()
-        }
+        albumArtViewerShell.syncPresentation()
     }
 
     function syncSpectrogramViewerPresentation() {
@@ -2553,42 +2607,6 @@ Kirigami.ApplicationWindow {
 
     function closeSpectrogramViewer() {
         spectrogramViewerOpen = false
-    }
-
-    function clampAlbumArtPan() {
-        const scaledW = albumArtTransform.width * root.albumArtZoom
-        const scaledH = albumArtTransform.height * root.albumArtZoom
-        const limitX = Math.max(0, (scaledW - albumArtViewport.width) / 2)
-        const limitY = Math.max(0, (scaledH - albumArtViewport.height) / 2)
-        root.albumArtPanX = Math.max(-limitX, Math.min(limitX, root.albumArtPanX))
-        root.albumArtPanY = Math.max(-limitY, Math.min(limitY, root.albumArtPanY))
-    }
-
-    function isPointOnAlbumArtImage(item, x, y) {
-        const p = albumArtImageFull.mapFromItem(item, x, y)
-        const xOff = (albumArtImageFull.width - albumArtImageFull.paintedWidth) / 2
-        const yOff = (albumArtImageFull.height - albumArtImageFull.paintedHeight) / 2
-        return p.x >= xOff
-            && p.y >= yOff
-            && p.x <= xOff + albumArtImageFull.paintedWidth
-            && p.y <= yOff + albumArtImageFull.paintedHeight
-    }
-
-    function applyAlbumArtInitialView() {
-        if (!albumArtInitialViewPending || !albumArtViewerOpen) {
-            return
-        }
-        if (albumArtViewport.width <= 0 || albumArtViewport.height <= 0) {
-            return
-        }
-        if (albumArtImageFull.status === Image.Loading) {
-            return
-        }
-        root.albumArtZoom = 1.0
-        root.albumArtPanX = 0.0
-        root.albumArtPanY = 0.0
-        root.clampAlbumArtPan()
-        albumArtInitialViewPending = false
     }
 
     function refreshAlbumArtFileInfo() {
@@ -2664,11 +2682,8 @@ Kirigami.ApplicationWindow {
         albumArtViewerSource = uiBridge.currentTrackCoverPath || ""
         albumArtViewerInfoSource = root.pathFromAnyUrl(albumArtViewerSource)
         albumArtViewerShowsCurrentTrack = true
-        albumArtZoom = 1.0
-        albumArtPanX = 0.0
-        albumArtPanY = 0.0
         albumArtInfoVisible = false
-        albumArtInitialViewPending = true
+        albumArtViewResetToken += 1
         albumArtViewerFileInfo = ({})
         albumArtViewerOpen = true
     }
@@ -2681,11 +2696,8 @@ Kirigami.ApplicationWindow {
         albumArtViewerSource = previewSource
         albumArtViewerInfoSource = (rowMap && (rowMap.normalizedPath || "")) || root.pathFromAnyUrl(previewSource)
         albumArtViewerShowsCurrentTrack = false
-        albumArtZoom = 1.0
-        albumArtPanX = 0.0
-        albumArtPanY = 0.0
         albumArtInfoVisible = true
-        albumArtInitialViewPending = true
+        albumArtViewResetToken += 1
         refreshAlbumArtFileInfo()
         albumArtViewerOpen = true
     }
@@ -2698,10 +2710,7 @@ Kirigami.ApplicationWindow {
             refreshAlbumArtFileInfo()
         }
         root.albumArtInfoVisible = !root.albumArtInfoVisible
-        if (root.useWholeScreenViewerMode
-                && albumArtFullscreenWindow.visibility === Window.FullScreen) {
-            albumArtFullscreenFocusSink.forceActiveFocus()
-        }
+        albumArtViewerShell.focusFullscreen()
     }
 
     function currentTrackItunesArtworkDisabledReason() {
@@ -2719,7 +2728,7 @@ Kirigami.ApplicationWindow {
 
     function openItunesArtworkDialog() {
         itunesArtworkDialog.parent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
-            ? albumArtWindowHost
+            ? albumArtViewerShell.windowHost
             : Overlay.overlay
         uiBridge.searchCurrentTrackArtworkSuggestions()
         itunesArtworkDialog.open()
@@ -2934,10 +2943,10 @@ Kirigami.ApplicationWindow {
 
     Shortcut {
         sequence: "Space"
-        enabled: !(libraryAlbumView && libraryAlbumView.activeFocus)
-            && !(globalSearchDialog.visible
-                && ((globalSearchQueryField && globalSearchQueryField.activeFocus)
-                    || (globalSearchResultsView && globalSearchResultsView.activeFocus)))
+        enabled: !(libraryViewRef && libraryViewRef.activeFocus)
+            && !(globalSearchDialogRef && globalSearchDialogRef.visible
+                && ((globalSearchQueryFieldRef && globalSearchQueryFieldRef.activeFocus)
+                    || (globalSearchResultsViewRef && globalSearchResultsViewRef.activeFocus)))
         onActivated: root.togglePlayPause()
     }
     menuBar: MenuBar {
@@ -3099,624 +3108,44 @@ Kirigami.ApplicationWindow {
         onDismissed: root.resetLibraryRootNameDialog()
     }
 
-    Dialog {
-        id: globalSearchDialog
-        modal: true
-        title: "Global Search"
-        standardButtons: Dialog.Close
-        width: Math.min(1240, root.width - 64)
-        height: Math.min(720, root.height - 80)
-        enter: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        exit: Transition {
-            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-        }
-        onOpened: {
-            root.globalSearchOpening = false
-            root.globalSearchIgnoreRefocusFind = true
-            globalSearchOpenSettleTimer.restart()
-            root.syncGlobalSearchSelectionAfterResultsChange()
-            root.focusGlobalSearchQueryField(false)
-            root.applyGlobalSearchOpenText()
-            uiBridge.setGlobalSearchQuery(globalSearchQueryField.text || "")
-        }
-        onClosed: {
-            root.endGlobalSearchOpen(true)
-        }
-
-        contentItem: ColumnLayout {
-            spacing: 8
-
-            TextField {
-                id: globalSearchQueryField
-                Layout.fillWidth: true
-                placeholderText: "Type artist, album, or track"
-                onTextChanged: {
-                    uiBridge.setGlobalSearchQuery(text)
-                }
-                Keys.onPressed: function(event) {
-                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                        root.focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                        root.navigateGlobalSearchSelectionToLibrary()
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Down) {
-                        const next = root.nextSearchSelectableIndex(
-                            root.globalSearchSelectedDisplayIndex,
-                            1,
-                            true)
-                        if (next >= 0) {
-                            root.selectGlobalSearchDisplayIndex(next)
-                            globalSearchResultsView.forceActiveFocus()
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Up) {
-                        const next = root.nextSearchSelectableIndex(
-                            root.globalSearchSelectedDisplayIndex,
-                            -1,
-                            true)
-                        if (next >= 0) {
-                            root.selectGlobalSearchDisplayIndex(next)
-                            globalSearchResultsView.forceActiveFocus()
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_PageDown) {
-                        if (root.moveGlobalSearchSelectionByPage(1)) {
-                            globalSearchResultsView.forceActiveFocus()
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_PageUp) {
-                        if (root.moveGlobalSearchSelectionByPage(-1)) {
-                            globalSearchResultsView.forceActiveFocus()
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Home) {
-                        const first = root.searchFirstSelectableIndex()
-                        if (first >= 0) {
-                            root.selectGlobalSearchDisplayIndex(first)
-                            globalSearchResultsView.forceActiveFocus()
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_End) {
-                        const last = root.searchLastSelectableIndex()
-                        if (last >= 0) {
-                            root.selectGlobalSearchDisplayIndex(last)
-                            globalSearchResultsView.forceActiveFocus()
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                        root.activateGlobalSearchSelection()
-                        event.accepted = true
-                    }
-                }
-            }
-
-            Label {
-                Layout.fillWidth: true
-                color: root.uiMutedTextColor
-                text: "Artists: " + (uiBridge.globalSearchArtistCount || 0)
-                    + " | Albums: " + (uiBridge.globalSearchAlbumCount || 0)
-                    + " | Tracks: " + (uiBridge.globalSearchTrackCount || 0)
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: root.uiSurfaceRaisedColor
-                border.color: root.uiBorderColor
-
-                ListView {
-                    id: globalSearchResultsView
-                    anchors.fill: parent
-                    clip: true
-                    model: uiBridge.globalSearchModel || []
-                    reuseItems: true
-                    spacing: 0
-                    boundsBehavior: Flickable.StopAtBounds
-                    boundsMovement: Flickable.StopAtBounds
-                    flickDeceleration: root.snappyScrollFlickDeceleration
-                    maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                    pixelAligned: true
-                    readonly property int reservedRightPadding: (globalSearchResultsScrollBar.visible
-                        ? globalSearchResultsScrollBar.width + 8
-                        : 8)
-                    ScrollBar.vertical: ScrollBar {
-                        id: globalSearchResultsScrollBar
-                        policy: ScrollBar.AsNeeded
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        acceptedButtons: Qt.NoButton
-                        preventStealing: true
-                        onWheel: function(wheel) {
-                            root.stepGlobalSearchResultsView(wheel)
-                        }
-                    }
-
-                    Keys.onPressed: function(event) {
-                        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                            root.focusGlobalSearchQueryField(!root.globalSearchIgnoreRefocusFind)
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                            root.navigateGlobalSearchSelectionToLibrary()
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_Down) {
-                            const next = root.nextSearchSelectableIndex(
-                                root.globalSearchSelectedDisplayIndex,
-                                1,
-                                true)
-                            if (next >= 0) {
-                                root.selectGlobalSearchDisplayIndex(next)
-                            }
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_Up) {
-                            const next = root.nextSearchSelectableIndex(
-                                root.globalSearchSelectedDisplayIndex,
-                                -1,
-                                true)
-                            if (next >= 0) {
-                                root.selectGlobalSearchDisplayIndex(next)
-                            }
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_PageDown) {
-                            root.moveGlobalSearchSelectionByPage(1)
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_PageUp) {
-                            root.moveGlobalSearchSelectionByPage(-1)
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_Home) {
-                            const first = root.searchFirstSelectableIndex()
-                            if (first >= 0) {
-                                root.selectGlobalSearchDisplayIndex(first)
-                            }
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_End) {
-                            const last = root.searchLastSelectableIndex()
-                            if (last >= 0) {
-                                root.selectGlobalSearchDisplayIndex(last)
-                            }
-                            event.accepted = true
-                            return
-                        }
-                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                            root.activateGlobalSearchSelection()
-                            event.accepted = true
-                        }
-                    }
-
-                    delegate: Rectangle {
-                        readonly property string rowKind: typeof kind !== "undefined" ? (kind || "") : ""
-                        readonly property string rowTypeValue: typeof rowType !== "undefined"
-                            ? (rowType || "")
-                            : ""
-                        readonly property string sectionTitleValue: typeof sectionTitle !== "undefined"
-                            ? (sectionTitle || "")
-                            : ""
-                        readonly property string labelValue: typeof label !== "undefined" ? (label || "") : ""
-                        readonly property string artistValue: typeof artist !== "undefined"
-                            ? (artist || "")
-                            : ""
-                        readonly property string albumValue: typeof album !== "undefined" ? (album || "") : ""
-                        readonly property string rootLabelValue: typeof rootLabel !== "undefined"
-                            ? (rootLabel || "")
-                            : ""
-                        readonly property string genreValue: typeof genre !== "undefined" ? (genre || "") : ""
-                        readonly property string coverUrlValue: typeof coverUrl !== "undefined"
-                            ? (coverUrl || "")
-                            : ""
-                        readonly property string lengthTextValue: typeof lengthText !== "undefined"
-                            ? (lengthText || "")
-                            : ""
-                        readonly property var yearValue: typeof year !== "undefined" ? year : null
-                        readonly property var trackNumberValue: typeof trackNumber !== "undefined"
-                            ? trackNumber
-                            : null
-                        readonly property var countValue: typeof count !== "undefined" ? count : null
-                        readonly property color rowTextColor: index === root.globalSearchSelectedDisplayIndex
-                            ? root.uiSelectionTextColor
-                            : root.uiTextColor
-                        width: Math.max(
-                            0,
-                            ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                        height: rowKind === "section" ? 30 : 24
-                        color: rowKind === "section"
-                            ? root.uiSectionColor
-                            : (rowKind === "columns"
-                                ? root.uiColumnsColor
-                                : (index === root.globalSearchSelectedDisplayIndex
-                                    ? root.uiSelectionColor
-                                    : (index % 2 === 0
-                                        ? root.uiSurfaceRaisedColor
-                                        : root.uiSurfaceAltColor)))
-
-                        border.width: rowKind === "item" ? 0 : 1
-                        border.color: rowKind === "section"
-                            ? Qt.darker(root.uiSectionColor, 1.12)
-                            : (rowKind === "columns"
-                                ? Qt.darker(root.uiColumnsColor, 1.1)
-                                : "transparent")
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-
-                            Label {
-                                visible: rowKind === "section"
-                                Layout.fillWidth: true
-                                text: sectionTitleValue || ""
-                                font.weight: Font.DemiBold
-                                color: root.uiTextColor
-                            }
-
-                            RowLayout {
-                                visible: rowKind === "columns" && rowTypeValue === "artist"
-                                Layout.fillWidth: true
-                                spacing: 8
-                                Label {
-                                    text: "Name"
-                                    Layout.fillWidth: true
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: "Root"
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                }
-                            }
-
-                            RowLayout {
-                                visible: rowKind === "columns" && rowTypeValue === "album"
-                                Layout.fillWidth: true
-                                spacing: 8
-                                Label { text: ""; Layout.preferredWidth: root.globalSearchCoverColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Artist"; Layout.preferredWidth: root.globalSearchArtistColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: "Root"
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Year"
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: "Genre"
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                }
-                                Label { text: "#"; Layout.preferredWidth: root.globalSearchAlbumCountColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
-                                Label {
-                                    text: "Length"
-                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                            }
-
-                            RowLayout {
-                                visible: rowKind === "columns" && rowTypeValue === "track"
-                                Layout.fillWidth: true
-                                spacing: 8
-                                Label {
-                                    text: "#"
-                                    Layout.preferredWidth: root.globalSearchTrackNumberColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label { text: "Title"; Layout.fillWidth: true; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Artist"; Layout.preferredWidth: root.globalSearchArtistColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: ""; Layout.preferredWidth: root.globalSearchCoverColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label { text: "Album"; Layout.preferredWidth: root.globalSearchAlbumColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: "Root"
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Year"
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: "Genre"
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiMutedTextColor
-                                }
-                                Label { text: "Length"; Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth; font.weight: Font.DemiBold; color: root.uiMutedTextColor; horizontalAlignment: Text.AlignRight }
-                            }
-
-                            Loader {
-                                visible: rowKind === "item"
-                                Layout.fillWidth: true
-                                sourceComponent: rowTypeValue === "artist"
-                                    ? globalSearchArtistItemComponent
-                                    : (rowTypeValue === "album"
-                                        ? globalSearchAlbumItemComponent
-                                        : globalSearchTrackItemComponent)
-                            }
-                        }
-
-                        Component {
-                            id: globalSearchArtistItemComponent
-                            RowLayout {
-                                spacing: 8
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: labelValue || ""
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: rootLabelValue || ""
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                            }
-                        }
-
-                        Component {
-                            id: globalSearchAlbumItemComponent
-                            RowLayout {
-                                spacing: 8
-                                Item {
-                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
-                                    Layout.preferredHeight: 20
-                                    Image {
-                                        anchors.fill: parent
-                                        source: coverUrlValue || ""
-                                        fillMode: Image.PreserveAspectFit
-                                        asynchronous: true
-                                        cache: true
-                                        sourceSize.width: 32
-                                        sourceSize.height: 32
-                                    }
-                                }
-                                Label {
-                                    text: labelValue || ""
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: artistValue || ""
-                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: rootLabelValue || ""
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: yearValue !== undefined && yearValue !== null ? yearValue : ""
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: genreValue || ""
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: countValue !== undefined ? countValue : ""
-                                    Layout.preferredWidth: root.globalSearchAlbumCountColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: lengthTextValue || "--:--"
-                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                            }
-                        }
-
-                        Component {
-                            id: globalSearchTrackItemComponent
-                            RowLayout {
-                                spacing: 8
-                                Label {
-                                    text: trackNumberValue !== undefined && trackNumberValue !== null
-                                        ? String(trackNumberValue).padStart(2, "0")
-                                        : ""
-                                    Layout.preferredWidth: root.globalSearchTrackNumberColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: labelValue || ""
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: artistValue || ""
-                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Item {
-                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
-                                    Layout.preferredHeight: 18
-                                    Image {
-                                        anchors.fill: parent
-                                        source: coverUrlValue || ""
-                                        fillMode: Image.PreserveAspectFit
-                                        asynchronous: true
-                                        cache: true
-                                        sourceSize.width: 24
-                                        sourceSize.height: 24
-                                    }
-                                }
-                                Label {
-                                    text: albumValue || ""
-                                    Layout.preferredWidth: root.globalSearchAlbumColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: rootLabelValue || ""
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: yearValue !== undefined && yearValue !== null ? yearValue : ""
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: genreValue || ""
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: lengthTextValue || "--:--"
-                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                            }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: rowKind === "item"
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onClicked: function(mouse) {
-                                root.selectGlobalSearchDisplayIndex(index)
-                                if (mouse.button === Qt.RightButton) {
-                                    root.globalSearchContextRowData = globalSearchModelApi
-                                        ? globalSearchModelApi.rowDataAt(index)
-                                        : ({})
-                                    globalSearchContextMenu.popup()
-                                    return
-                                }
-                                if (mouse.button === Qt.LeftButton) {
-                                    globalSearchResultsView.forceActiveFocus()
-                                }
-                            }
-                            onDoubleClicked: function(mouse) {
-                                if (mouse.button === Qt.LeftButton) {
-                                    root.selectGlobalSearchDisplayIndex(index)
-                                    root.activateGlobalSearchSelection()
-                                }
-                            }
-                        }
-
-                    }
-                }
-
-                Menu {
-                    id: globalSearchContextMenu
-                    property var rowData: root.globalSearchContextRowData || ({})
-                    enter: Transition {
-                        NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                    }
-                    exit: Transition {
-                        NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                    }
-
-                    MenuItem {
-                        text: "Play"
-                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                        onTriggered: root.activateGlobalSearchRow(globalSearchContextMenu.rowData)
-                    }
-                    MenuItem {
-                        text: "Queue"
-                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                        onTriggered: root.queueGlobalSearchRow(globalSearchContextMenu.rowData)
-                    }
-                    MenuSeparator {}
-                    MenuItem {
-                        text: "Open in " + uiBridge.fileBrowserName
-                        visible: (globalSearchContextMenu.rowData.rowType || "") !== "track"
-                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                        onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
-                    }
-                    MenuItem {
-                        text: "Open containing folder"
-                        visible: (globalSearchContextMenu.rowData.rowType || "") === "track"
-                        enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                        onTriggered: root.openGlobalSearchRowInFileBrowser(globalSearchContextMenu.rowData)
-                    }
-                }
-            }
-
-            Label {
-                Layout.fillWidth: true
-                visible: (uiBridge.globalSearchArtistCount || 0) === 0
-                    && (uiBridge.globalSearchAlbumCount || 0) === 0
-                    && (uiBridge.globalSearchTrackCount || 0) === 0
-                text: (globalSearchQueryField.text || "").trim().length === 0
-                    ? "Type to search"
-                    : "No matches"
-                color: Kirigami.Theme.disabledTextColor
-                horizontalAlignment: Text.AlignHCenter
-            }
+    Dialogs.GlobalSearchDialog {
+        uiBridge: root.uiBridge
+        uiPalette: root.uiPalette
+        windowRoot: root
+        popupTransitionMs: root.uiPopupTransitionMs
+        snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
+        snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
+        globalSearchModelApi: root.globalSearchModelApi
+        selectedDisplayIndex: root.globalSearchSelectedDisplayIndex
+        globalSearchShowsRootColumn: root.globalSearchShowsRootColumn
+        globalSearchIgnoreRefocusFind: root.globalSearchIgnoreRefocusFind
+        globalSearchTrackNumberColumnWidth: root.globalSearchTrackNumberColumnWidth
+        globalSearchCoverColumnWidth: root.globalSearchCoverColumnWidth
+        globalSearchArtistColumnWidth: root.globalSearchArtistColumnWidth
+        globalSearchAlbumColumnWidth: root.globalSearchAlbumColumnWidth
+        globalSearchRootColumnWidth: root.globalSearchRootColumnWidth
+        globalSearchYearColumnWidth: root.globalSearchYearColumnWidth
+        globalSearchTrackGenreColumnWidth: root.globalSearchTrackGenreColumnWidth
+        globalSearchAlbumCountColumnWidth: root.globalSearchAlbumCountColumnWidth
+        globalSearchTrackLengthColumnWidth: root.globalSearchTrackLengthColumnWidth
+        handleOpened: root.handleGlobalSearchDialogOpened
+        handleClosed: root.endGlobalSearchOpen
+        focusQueryField: root.focusGlobalSearchQueryField
+        stepResultsView: root.stepGlobalSearchResultsView
+        nextSelectableIndex: root.nextSearchSelectableIndex
+        selectDisplayIndex: root.selectGlobalSearchDisplayIndex
+        searchFirstSelectableIndex: root.searchFirstSelectableIndex
+        searchLastSelectableIndex: root.searchLastSelectableIndex
+        moveSelectionByPage: root.moveGlobalSearchSelectionByPage
+        activateSelection: root.activateGlobalSearchSelection
+        navigateSelectionToLibrary: root.navigateGlobalSearchSelectionToLibrary
+        activateRow: root.activateGlobalSearchRow
+        queueRow: root.queueGlobalSearchRow
+        openRowInFileBrowser: root.openGlobalSearchRowInFileBrowser
+        onRefsReady: function(dialog, queryField, resultsView) {
+            root.globalSearchDialogRef = dialog
+            root.globalSearchQueryFieldRef = queryField
+            root.globalSearchResultsViewRef = resultsView
         }
     }
 
@@ -3810,339 +3239,36 @@ Kirigami.ApplicationWindow {
             Layout.fillHeight: true
             orientation: Qt.Horizontal
 
-            Rectangle {
-                color: root.uiPaneColor
-                SplitView.preferredWidth: Math.max(300, root.width * 0.26)
-                SplitView.minimumWidth: 250
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 0
-
-                    Components.AlbumArtTile {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: width
-                        uiBridge: root.uiBridge
-                        replaceFromItunesAction: replaceFromItunesAction
-                        currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
-                        openAlbumArtViewer: root.openAlbumArtViewer
-                    }
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        color: root.uiPaneColor
-                        border.color: root.uiBorderColor
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 6
-                            spacing: 6
-
-                            Components.TrackMetadataCard {
-                                Layout.fillWidth: true
-                                uiBridge: root.uiBridge
-                                uiPalette: root.uiPalette
-                                queueTrackNumberText: root.queueTrackNumberText
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    readonly property int scanBacklog: Math.max(
-                                        0,
-                                        uiBridge.libraryScanDiscovered - uiBridge.libraryScanProcessed)
-                                    text: "Artists: " + uiBridge.libraryArtistCount
-                                          + " | albums: " + uiBridge.libraryAlbumCount
-                                          + " | tracks: " + uiBridge.libraryTrackCount
-                                          + (uiBridge.libraryScanInProgress
-                                              ? (" | scanning " + uiBridge.libraryScanProcessed
-                                                 + (scanBacklog > 0
-                                                     ? (" (+" + scanBacklog + " queued)")
-                                                     : "")
-                                                 + (uiBridge.libraryScanFilesPerSecond > 0
-                                                     ? (" @ " + uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
-                                                     : "")
-                                                 + (uiBridge.libraryScanEtaSeconds >= 0
-                                                     ? (" ETA " + Math.ceil(uiBridge.libraryScanEtaSeconds) + "s")
-                                                     : ""))
-                                              : "")
-                                    color: Kirigami.Theme.disabledTextColor
-                                    elide: Text.ElideRight
-                                }
-                            }
-
-                            ListView {
-                                id: libraryAlbumView
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                clip: true
-                                model: libraryModel
-                                activeFocusOnTab: true
-                                focus: true
-                                reuseItems: true
-                                cacheBuffer: 200
-                                boundsBehavior: Flickable.StopAtBounds
-                                boundsMovement: Flickable.StopAtBounds
-                                flickDeceleration: root.snappyScrollFlickDeceleration
-                                maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                                pixelAligned: true
-                                onContentHeightChanged: {
-                                    if (root.pendingLibraryExpandFitKey.length > 0) {
-                                        Qt.callLater(function() {
-                                            root.applyPendingLibraryExpansionFit()
-                                        })
-                                    }
-                                }
-                                ScrollBar.vertical: ScrollBar {
-                                    policy: ScrollBar.AlwaysOn
-                                }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    acceptedButtons: Qt.NoButton
-                                    preventStealing: true
-                                    onWheel: function(wheel) {
-                                        root.stepScrollView(libraryAlbumView, wheel, 24, 3)
-                                    }
-                                }
-                                Keys.onPressed: function(event) {
-                                    root.handleLibraryKeyPress(event)
-                                }
-
-                                delegate: Rectangle {
-                                    id: libraryRow
-                                    readonly property string rowTypeResolved: rowType || ""
-                                    readonly property bool isAlbumRow: rowTypeResolved === "album"
-                                    readonly property bool isTrackRow: rowTypeResolved === "track"
-                                    readonly property bool hasChildren: !isTrackRow && (count || 0) > 0
-                                    readonly property string selectionKeyResolved: selectionKey || ""
-                                    readonly property string artistResolved: artist || ""
-                                    readonly property string nameResolved: name || ""
-                                    readonly property string trackPathResolved: trackPath || ""
-                                    readonly property string openPathResolved: openPath || ""
-                                    readonly property var playPathsResolved: playPaths || []
-                                    readonly property bool draggableLibraryItem: isTrackRow
-                                        || rowTypeResolved === "album"
-                                        || rowTypeResolved === "artist"
-                                        || playPathsResolved.length > 0
-                                    readonly property string rowTitle: title || name || artist || ""
-                                    readonly property bool albumCoverInViewport: isAlbumRow
-                                        && (y + height >= libraryAlbumView.contentY - 48)
-                                        && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
-                                    readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
-                                    readonly property int depthResolved: depth !== undefined ? depth : 0
-                                    width: ListView.view.width
-                                    height: 24
-                                    color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                                        ? root.uiSelectionColor
-                                        : (index % 2 === 0
-                                            ? root.uiSurfaceRaisedColor
-                                            : root.uiSurfaceAltColor)
-
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 6
-                                        anchors.rightMargin: 6
-                                        spacing: 3
-
-                                        Item {
-                                            Layout.preferredWidth: Math.max(0, depthResolved * 18)
-                                        }
-
-                                        Label {
-                                            id: expanderIcon
-                                            Layout.preferredWidth: 24
-                                            Layout.fillHeight: true
-                                            Layout.alignment: Qt.AlignVCenter
-                                            horizontalAlignment: Text.AlignHCenter
-                                            verticalAlignment: Text.AlignVCenter
-                                            text: hasChildren ? (expanded ? "▾" : "▸") : ""
-                                            font.pixelSize: 20
-                                            font.bold: true
-                                            color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                                                ? root.uiSelectionTextColor
-                                                : root.uiMutedTextColor
-                                        }
-
-                                        Item {
-                                            visible: isAlbumRow
-                                            Layout.preferredWidth: 18
-                                            Layout.preferredHeight: 18
-                                            Layout.alignment: Qt.AlignVCenter
-
-                                            Image {
-                                                anchors.fill: parent
-                                                source: albumCoverInViewport
-                                                    ? uiBridge.libraryThumbnailSource(coverPath || "")
-                                                    : ""
-                                                fillMode: Image.PreserveAspectFit
-                                                smooth: false
-                                                asynchronous: true
-                                                cache: true
-                                                sourceSize.width: 32
-                                                sourceSize.height: 32
-                                            }
-                                        }
-
-                                        Label {
-                                            Layout.fillWidth: true
-                                            Layout.fillHeight: true
-                                            Layout.alignment: Qt.AlignVCenter
-                                            elide: Text.ElideRight
-                                            verticalAlignment: Text.AlignVCenter
-                                            text: rowTitle
-                                            color: root.isLibrarySelectionKeySelected(selectionKey || "")
-                                                ? root.uiSelectionTextColor
-                                                : root.uiTextColor
-                                        }
-                                    }
-
-                                    Drag.active: libraryRowMouseArea.drag.active && draggableLibraryItem
-                                    Drag.source: libraryRow
-                                    Drag.hotSpot.x: 16
-                                    Drag.hotSpot.y: height * 0.5
-                                    Drag.dragType: Drag.Automatic
-                                    Drag.supportedActions: Qt.CopyAction
-
-                                    Item {
-                                        id: libraryDragProxy
-                                        visible: false
-                                    }
-
-                                    MouseArea {
-                                        id: libraryRowMouseArea
-                                        anchors.fill: parent
-                                        preventStealing: true
-                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        drag.target: draggableLibraryItem ? libraryDragProxy : null
-                                        drag.smoothed: false
-                                        onReleased: {
-                                            libraryDragProxy.x = 0
-                                            libraryDragProxy.y = 0
-                                        }
-                                        onClicked: function(mouse) {
-                                            libraryAlbumView.forceActiveFocus()
-                                            const rowMap = {
-                                                selectionKey: selectionKeyResolved,
-                                                sourceIndex: sourceIndexResolved,
-                                                rowType: rowTypeResolved,
-                                                artist: artist || "",
-                                                name: name || "",
-                                                title: rowTitle,
-                                                trackPath: trackPathResolved,
-                                                openPath: openPathResolved,
-                                                playPaths: playPathsResolved
-                                            }
-                                            if (mouse.button === Qt.LeftButton
-                                                    && hasChildren
-                                                    && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                                                root.toggleLibraryNode(key)
-                                                return
-                                            }
-                                            root.handleLibraryRowSelection(
-                                                index,
-                                                rowMap,
-                                                mouse.button,
-                                                mouse.modifiers || Qt.NoModifier)
-                                            if (mouse.button === Qt.RightButton) {
-                                                libraryContextMenu.rowMap = rowMap
-                                                libraryContextMenu.popup()
-                                            }
-                                        }
-                                        onDoubleClicked: function(mouse) {
-                                            const rowMap = {
-                                                selectionKey: selectionKeyResolved,
-                                                sourceIndex: sourceIndexResolved,
-                                                rowType: rowTypeResolved,
-                                                artist: artist || "",
-                                                name: name || "",
-                                                title: rowTitle,
-                                                trackPath: trackPathResolved,
-                                                openPath: openPathResolved,
-                                                playPaths: playPathsResolved
-                                            }
-                                            if (hasChildren
-                                                    && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                                                root.toggleLibraryNode(key)
-                                                return
-                                            }
-                                            const rows = root.rowsForLibraryAction(rowMap)
-                                            if (rows.length > 0) {
-                                                root.playLibraryRows(rows)
-                                            }
-                                        }
-                                    }
-
-                                    Menu {
-                                        id: libraryContextMenu
-                                        property var rowMap: ({})
-                                        enter: Transition {
-                                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                                        }
-                                        exit: Transition {
-                                            NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                                        }
-
-                                        MenuItem {
-                                            text: "Play"
-                                            enabled: root.isActionableLibraryRow(libraryContextMenu.rowMap)
-                                            onTriggered: {
-                                                const rows = root.rowsForLibraryAction(libraryContextMenu.rowMap)
-                                                if (rows.length > 0) {
-                                                    root.playLibraryRows(rows)
-                                                }
-                                            }
-                                        }
-                                        MenuItem {
-                                            text: "Queue"
-                                            enabled: root.isActionableLibraryRow(libraryContextMenu.rowMap)
-                                            onTriggered: {
-                                                const rows = root.rowsForLibraryAction(libraryContextMenu.rowMap)
-                                                if (rows.length > 0) {
-                                                    root.appendLibraryRows(rows)
-                                                }
-                                            }
-                                        }
-                                        MenuItem {
-                                            text: "Edit Tags"
-                                            visible: root.canOpenTagEditorForLibrary(libraryContextMenu.rowMap)
-                                            enabled: root.canOpenTagEditorForLibrary(libraryContextMenu.rowMap)
-                                            onTriggered: root.openTagEditorForLibrary(libraryContextMenu.rowMap)
-                                        }
-                                        MenuSeparator {}
-                                        MenuItem { action: playAllLibraryTracksAction }
-                                        MenuItem { action: appendAllLibraryTracksAction }
-                                        MenuSeparator {}
-                                        MenuItem {
-                                            text: "Open in " + uiBridge.fileBrowserName
-                                            visible: libraryContextMenu.rowMap.rowType !== "track"
-                                            enabled: (libraryContextMenu.rowMap.openPath || "").length > 0
-                                            onTriggered: uiBridge.openInFileBrowser(libraryContextMenu.rowMap.openPath || "")
-                                        }
-                                        MenuItem {
-                                            text: "Open containing folder"
-                                            visible: libraryContextMenu.rowMap.rowType === "track"
-                                            enabled: (libraryContextMenu.rowMap.trackPath || "").length > 0
-                                            onTriggered: uiBridge.openContainingFolder(libraryContextMenu.rowMap.trackPath || "")
-                                        }
-                                    }
-                                }
-                            }
-
-                                    Label {
-                                        visible: libraryAlbumView.count === 0
-                                        text: root.isLibraryTreeLoading()
-                                            ? "Loading library..."
-                                            : "Library is empty"
-                                        color: root.uiMutedTextColor
-                                        Layout.fillWidth: true
-                                        horizontalAlignment: Text.AlignHCenter
-                                    }
-                        }
-                    }
+            Panes.SidebarPane {
+                uiBridge: root.uiBridge
+                libraryModel: root.libraryTreeModel
+                uiPalette: root.uiPalette
+                splitPreferredWidth: Math.max(300, root.width * 0.26)
+                replaceFromItunesAction: replaceFromItunesAction
+                currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
+                openAlbumArtViewer: root.openAlbumArtViewer
+                queueTrackNumberText: root.queueTrackNumberText
+                popupTransitionMs: root.uiPopupTransitionMs
+                snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
+                snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
+                pendingLibraryExpandFitKey: root.pendingLibraryExpandFitKey
+                applyPendingLibraryExpansionFit: root.applyPendingLibraryExpansionFit
+                stepScrollView: root.stepScrollView
+                handleLibraryKeyPress: root.handleLibraryKeyPress
+                isLibrarySelectionKeySelected: root.isLibrarySelectionKeySelected
+                toggleLibraryNode: root.toggleLibraryNode
+                handleLibraryRowSelection: root.handleLibraryRowSelection
+                rowsForLibraryAction: root.rowsForLibraryAction
+                playLibraryRows: root.playLibraryRows
+                appendLibraryRows: root.appendLibraryRows
+                isActionableLibraryRow: root.isActionableLibraryRow
+                canOpenTagEditorForLibrary: root.canOpenTagEditorForLibrary
+                openTagEditorForLibrary: root.openTagEditorForLibrary
+                isLibraryTreeLoading: root.isLibraryTreeLoading
+                playAllLibraryTracksAction: playAllLibraryTracksAction
+                appendAllLibraryTracksAction: appendAllLibraryTracksAction
+                onViewReady: function(view) {
+                    root.libraryViewRef = view
                 }
             }
 
@@ -4150,484 +3276,33 @@ Kirigami.ApplicationWindow {
                 orientation: Qt.Vertical
                 SplitView.fillWidth: true
 
-                Rectangle {
-                    color: root.uiSurfaceRaisedColor
-                    SplitView.fillWidth: true
-                    SplitView.preferredHeight: root.height * 0.58
-                    SplitView.minimumHeight: 220
-                    border.color: root.uiBorderColor
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 0
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            implicitHeight: 26
-                            color: root.uiHeaderColor
-                            border.color: root.uiBorderColor
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8 + (playlistView ? playlistView.reservedRightPadding : 0)
-                                Label {
-                                    text: "▶"
-                                    Layout.preferredWidth: root.playlistIndicatorColumnWidth
-                                    horizontalAlignment: Text.AlignHCenter
-                                    color: root.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "#"
-                                    Layout.preferredWidth: root.playlistOrderColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: root.uiMutedTextColor
-                                }
-                                Label { text: "Title"; Layout.fillWidth: true; color: root.uiMutedTextColor }
-                                Label { text: "Artist"; Layout.preferredWidth: 170; color: root.uiMutedTextColor }
-                                Label { text: "Album"; Layout.preferredWidth: 190; color: root.uiMutedTextColor }
-                                Label {
-                                    text: "Length"
-                                    Layout.preferredWidth: 76
-                                    horizontalAlignment: Text.AlignRight
-                                    color: root.uiMutedTextColor
-                                }
-                            }
-                        }
-
-                        ListView {
-                            id: playlistView
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            clip: true
-                            activeFocusOnTab: true
-                            model: uiBridge.queueRows
-                            boundsBehavior: Flickable.StopAtBounds
-                            boundsMovement: Flickable.StopAtBounds
-                            flickDeceleration: root.snappyScrollFlickDeceleration
-                            maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                            pixelAligned: true
-                            property real reservedRightPadding: playlistVerticalScrollBar.visible
-                                ? (playlistVerticalScrollBar.width + 6)
-                                : 0
-                            onContentYChanged: root.applyPendingPlaylistViewportRestore()
-                            onContentHeightChanged: root.applyPendingPlaylistViewportRestore()
-                            onCountChanged: root.applyPendingPlaylistViewportRestore()
-                            onHeightChanged: root.applyPendingPlaylistViewportRestore()
-                            Keys.onPressed: function(event) {
-                                root.handlePlaylistKeyPress(event)
-                            }
-                            ScrollBar.vertical: ScrollBar {
-                                id: playlistVerticalScrollBar
-                                policy: ScrollBar.AsNeeded
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                acceptedButtons: Qt.NoButton
-                                preventStealing: true
-                                onWheel: function(wheel) {
-                                    root.stepScrollView(playlistView, wheel, 24, 3)
-                                }
-                            }
-
-                            delegate: Rectangle {
-                                id: playlistRow
-                                readonly property string titleValue: (typeof title !== "undefined" && title !== undefined)
-                                    ? title
-                                    : ((modelData && typeof modelData === "object") ? (modelData.title || "") : "")
-                                readonly property string artistValue: (typeof artist !== "undefined" && artist !== undefined)
-                                    ? artist
-                                    : ((modelData && typeof modelData === "object") ? (modelData.artist || "") : "")
-                                readonly property string albumValue: (typeof album !== "undefined" && album !== undefined)
-                                    ? album
-                                    : ((modelData && typeof modelData === "object") ? (modelData.album || "") : "")
-                                readonly property string lengthTextValue: (typeof lengthText !== "undefined" && lengthText !== undefined)
-                                    ? lengthText
-                                    : ((modelData && typeof modelData === "object") ? (modelData.lengthText || "--:--") : "--:--")
-                                readonly property bool isCurrentQueueRow: index === uiBridge.playingQueueIndex
-                                readonly property bool draggableQueueItem: true
-                                readonly property int queueRowIndex: index
-                                width: Math.max(
-                                    0,
-                                    ListView.view.width - (playlistView.reservedRightPadding || 0))
-                                height: 24
-                                Drag.active: playlistRowMouseArea.drag.active
-                                Drag.source: playlistRow
-                                Drag.hotSpot.x: width * 0.5
-                                Drag.hotSpot.y: height * 0.5
-                                Drag.dragType: Drag.Automatic
-                                Drag.supportedActions: Qt.MoveAction
-                                color: root.isQueueIndexSelected(index)
-                                    ? root.uiSelectionColor
-                                    : (index % 2 === 0 ? root.uiSurfaceRaisedColor
-                                                        : root.uiSurfaceAltColor)
-
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 8
-                                    anchors.rightMargin: 8
-                                    spacing: 6
-                                    Label {
-                                        text: {
-                                            if (!playlistRow.isCurrentQueueRow) {
-                                                return ""
-                                            }
-                                            if (uiBridge.playbackState === "Paused") {
-                                                return "⏸"
-                                            }
-                                            if (uiBridge.playbackState === "Stopped") {
-                                                return "■"
-                                            }
-                                            return "▶"
-                                        }
-                                        Layout.preferredWidth: root.playlistIndicatorColumnWidth
-                                        horizontalAlignment: Text.AlignHCenter
-                                        font.bold: true
-                                        color: root.isQueueIndexSelected(index)
-                                            ? root.uiSelectionTextColor
-                                            : (playlistRow.isCurrentQueueRow
-                                                ? (uiBridge.playbackState === "Playing"
-                                                    ? root.uiActiveIndicatorColor
-                                                    : root.uiMutedTextColor)
-                                                : root.uiTextColor)
-                                    }
-                                    Label {
-                                        text: root.playlistOrderText(index)
-                                        Layout.preferredWidth: root.playlistOrderColumnWidth
-                                        horizontalAlignment: Text.AlignRight
-                                        color: root.isQueueIndexSelected(index)
-                                            ? root.uiSelectionTextColor
-                                            : root.uiTextColor
-                                    }
-                                    Label {
-                                        text: titleValue
-                                        Layout.fillWidth: true
-                                        elide: Text.ElideRight
-                                        color: root.isQueueIndexSelected(index)
-                                            ? root.uiSelectionTextColor
-                                            : root.uiTextColor
-                                    }
-                                    Label {
-                                        text: artistValue
-                                        Layout.preferredWidth: 170
-                                        elide: Text.ElideRight
-                                        color: root.isQueueIndexSelected(index)
-                                            ? root.uiSelectionTextColor
-                                            : root.uiTextColor
-                                    }
-                                    Label {
-                                        text: albumValue
-                                        Layout.preferredWidth: 190
-                                        elide: Text.ElideRight
-                                        color: root.isQueueIndexSelected(index)
-                                            ? root.uiSelectionTextColor
-                                            : root.uiTextColor
-                                    }
-                                    Label {
-                                        text: lengthTextValue
-                                        Layout.preferredWidth: 76
-                                        horizontalAlignment: Text.AlignRight
-                                        color: root.isQueueIndexSelected(index)
-                                            ? root.uiSelectionTextColor
-                                            : root.uiTextColor
-                                    }
-                                }
-
-                                MouseArea {
-                                    id: playlistRowMouseArea
-                                    anchors.fill: parent
-                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                    drag.target: (pressedButtons & Qt.LeftButton) ? playlistDragProxy : null
-                                    drag.smoothed: false
-                                    onReleased: {
-                                        playlistDragProxy.x = 0
-                                        playlistDragProxy.y = 0
-                                    }
-                                    onPressed: function(mouse) {
-                                        playlistView.forceActiveFocus()
-                                        root.handleQueueRowSelection(
-                                            index,
-                                            mouse.button,
-                                            mouse.modifiers || Qt.NoModifier)
-                                    }
-                                    onClicked: function(mouse) {
-                                        if (mouse.button === Qt.RightButton) {
-                                            playlistContextMenu.rowIndex = index
-                                            playlistContextMenu.popup()
-                                        }
-                                    }
-                                    onDoubleClicked: function(mouse) {
-                                        if (mouse.button === Qt.LeftButton) {
-                                            uiBridge.playAt(index)
-                                        }
-                                    }
-                                }
-
-                                Item {
-                                    id: playlistDragProxy
-                                    x: 0
-                                    y: 0
-                                    width: 1
-                                    height: 1
-                                    visible: false
-                                }
-                            }
-
-                            Menu {
-                                id: playlistContextMenu
-                                property int rowIndex: -1
-                                enter: Transition {
-                                    NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                                }
-                                exit: Transition {
-                                    NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-                                }
-
-                                MenuItem {
-                                    text: "Play Track"
-                                    enabled: playlistContextMenu.rowIndex >= 0
-                                    onTriggered: {
-                                        if (playlistContextMenu.rowIndex >= 0) {
-                                            uiBridge.playAt(playlistContextMenu.rowIndex)
-                                        }
-                                    }
-                                }
-                                MenuItem {
-                                    text: "Open containing folder"
-                                    enabled: playlistContextMenu.rowIndex >= 0
-                                    onTriggered: {
-                                        const path = uiBridge.queuePathAt(playlistContextMenu.rowIndex)
-                                        if (path && path.length > 0) {
-                                            uiBridge.openContainingFolder(path)
-                                        }
-                                    }
-                                }
-                                MenuItem {
-                                    text: "Edit Tags"
-                                    enabled: playlistContextMenu.rowIndex >= 0
-                                    onTriggered: root.openTagEditorForPlaylistRow(playlistContextMenu.rowIndex)
-                                }
-                                MenuItem {
-                                    text: "Remove Track"
-                                    enabled: playlistContextMenu.rowIndex >= 0
-                                    onTriggered: {
-                                        if (playlistContextMenu.rowIndex < 0) {
-                                            return
-                                        }
-                                        if (root.isQueueIndexSelected(playlistContextMenu.rowIndex)
-                                                && root.selectedQueueIndices.length > 1) {
-                                            root.removeSelectedQueueTrack()
-                                        } else {
-                                            root.requestPlaylistViewportRestoreWindow(700)
-                                            uiBridge.removeAt(playlistContextMenu.rowIndex)
-                                        }
-                                    }
-                                }
-                                MenuSeparator {}
-                                MenuItem {
-                                    text: "Move Up"
-                                    enabled: playlistContextMenu.rowIndex > 0
-                                    onTriggered: {
-                                        const from = playlistContextMenu.rowIndex
-                                        if (from > 0) {
-                                            uiBridge.moveQueue(from, from - 1)
-                                        }
-                                    }
-                                }
-                                MenuItem {
-                                    text: "Move Down"
-                                    enabled: playlistContextMenu.rowIndex >= 0
-                                        && playlistContextMenu.rowIndex < uiBridge.queueLength - 1
-                                    onTriggered: {
-                                        const from = playlistContextMenu.rowIndex
-                                        if (from >= 0 && from < uiBridge.queueLength - 1) {
-                                            uiBridge.moveQueue(from, from + 1)
-                                        }
-                                    }
-                                }
-                                MenuSeparator {}
-                                MenuItem { action: clearPlaylistAction }
-                            }
-                        }
-
-                        Label {
-                            visible: uiBridge.queueLength === 0
-                            text: "Playlist is empty"
-                            color: Kirigami.Theme.disabledTextColor
-                            horizontalAlignment: Text.AlignHCenter
-                            Layout.fillWidth: true
-                            Layout.alignment: Qt.AlignHCenter
-                            Layout.topMargin: 10
-                        }
-
-                        Connections {
-                            target: uiBridge
-                            function onSnapshotChanged() {
-                                const playbackState = uiBridge.playbackState || ""
-                                const currentTrackPath = uiBridge.currentTrackPath || ""
-                                if (!root.autoCenterQueueSelection) {
-                                    root.lastAutoCenterPlaybackState = playbackState
-                                    root.lastAutoCenterTrackPath = currentTrackPath
-                                    return
-                                }
-                                if (root.playlistViewportRestoreActive()) {
-                                    root.lastAutoCenterPlaybackState = playbackState
-                                    root.lastAutoCenterTrackPath = currentTrackPath
-                                    return
-                                }
-                                const targetIndex = uiBridge.playingQueueIndex
-                                if (playbackState === "Stopped"
-                                        && root.lastAutoCenterPlaybackState !== "Stopped") {
-                                    root.lastAutoCenterPlaybackState = playbackState
-                                    root.lastAutoCenterTrackPath = currentTrackPath
-                                    return
-                                }
-                                const trackChanged = currentTrackPath.length > 0
-                                    && currentTrackPath !== root.lastAutoCenterTrackPath
-                                const resumedFromStop = playbackState !== "Stopped"
-                                    && root.lastAutoCenterPlaybackState === "Stopped"
-                                const needsInitialCenter = root.lastCenteredQueueIndex < 0
-                                if (targetIndex >= 0 && (trackChanged || resumedFromStop || needsInitialCenter)) {
-                                    playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
-                                    root.lastCenteredQueueIndex = targetIndex
-                                }
-                                root.lastAutoCenterPlaybackState = playbackState
-                                root.lastAutoCenterTrackPath = currentTrackPath
-                            }
-                        }
-                    }
-
-                    DropArea {
-                        id: playlistDropArea
-                        anchors.fill: parent
-                        property bool queueReorderDragActive: false
-                        property int queueDropInsertIndex: -1
-                        property real queueDropIndicatorY: 0
-
-                        function updateQueueDropIndicator(dropY) {
-                            const rowHeight = 24
-                            const yInList = dropY - playlistView.y + playlistView.contentY
-                            let insertIndex = Math.floor((yInList + rowHeight * 0.5) / rowHeight)
-                            insertIndex = Math.max(0, Math.min(uiBridge.queueLength, insertIndex))
-                            queueDropInsertIndex = insertIndex
-
-                            const contentLineY = insertIndex * rowHeight
-                            const viewLineY = playlistView.y + contentLineY - playlistView.contentY
-                            const minY = playlistView.y
-                            const maxY = playlistView.y + playlistView.height - 2
-                            queueDropIndicatorY = Math.max(minY, Math.min(maxY, viewLineY))
-                        }
-
-                        onEntered: function(drop) {
-                            queueReorderDragActive = !!(drop.source && drop.source.draggableQueueItem)
-                            if (queueReorderDragActive) {
-                                updateQueueDropIndicator(drop.y)
-                            } else {
-                                queueDropInsertIndex = -1
-                            }
-                        }
-
-                        onPositionChanged: function(drop) {
-                            if (queueReorderDragActive) {
-                                updateQueueDropIndicator(drop.y)
-                            }
-                        }
-
-                        onExited: {
-                            queueReorderDragActive = false
-                            queueDropInsertIndex = -1
-                        }
-
-                        onDropped: function(drop) {
-                            const src = drop.source
-                            if (!src) {
-                                const externalPaths = root.droppedExternalPaths(drop)
-                                if (externalPaths.length > 0
-                                        && root.submitExternalImport(externalPaths, false)) {
-                                    queueReorderDragActive = false
-                                    queueDropInsertIndex = -1
-                                    drop.acceptProposedAction()
-                                }
-                                return
-                            }
-                            if (src.draggableQueueItem) {
-                                const from = src.queueRowIndex !== undefined ? src.queueRowIndex : -1
-                                if (from < 0 || uiBridge.queueLength <= 1) {
-                                    return
-                                }
-                                let insertIndex = queueDropInsertIndex
-                                if (insertIndex < 0) {
-                                    updateQueueDropIndicator(drop.y)
-                                    insertIndex = queueDropInsertIndex
-                                }
-                                let to = insertIndex > from ? insertIndex - 1 : insertIndex
-                                to = Math.max(0, Math.min(uiBridge.queueLength - 1, to))
-                                if (to !== from) {
-                                    uiBridge.moveQueue(from, to)
-                                }
-                                queueReorderDragActive = false
-                                queueDropInsertIndex = -1
-                                drop.acceptProposedAction()
-                                return
-                            }
-                            if (!src.draggableLibraryItem) {
-                                return
-                            }
-                            const rowMap = {
-                                selectionKey: src.selectionKeyResolved || "",
-                                sourceIndex: src.sourceIndexResolved !== undefined ? src.sourceIndexResolved : -1,
-                                rowType: src.rowTypeResolved || "",
-                                artist: src.artistResolved || "",
-                                name: src.nameResolved || "",
-                                title: src.rowTitle || "",
-                                trackPath: src.trackPathResolved || "",
-                                openPath: src.openPathResolved || "",
-                                playPaths: src.playPathsResolved || []
-                            }
-                            const rows = root.rowsForLibraryAction(rowMap)
-                            if (rows.length > 0) {
-                                root.appendLibraryRows(rows)
-                                queueReorderDragActive = false
-                                queueDropInsertIndex = -1
-                                drop.acceptProposedAction()
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        anchors.fill: parent
-                        color: "transparent"
-                        border.width: playlistDropArea.containsDrag
-                            && !playlistDropArea.queueReorderDragActive
-                            ? 2
-                            : 0
-                        border.color: Kirigami.Theme.highlightColor
-                        visible: playlistDropArea.containsDrag
-                            && !playlistDropArea.queueReorderDragActive
-                    }
-
-                    Rectangle {
-                        x: playlistView.x + 4
-                        width: Math.max(0, playlistView.width - (playlistView.reservedRightPadding || 0) - 8)
-                        height: 2
-                        y: playlistDropArea.queueDropIndicatorY
-                        radius: 1
-                        color: Kirigami.Theme.highlightColor
-                        visible: playlistDropArea.containsDrag
-                            && playlistDropArea.queueReorderDragActive
-                            && playlistDropArea.queueDropInsertIndex >= 0
-                    }
-
-                    Rectangle {
-                        x: playlistView.x + 4
-                        y: playlistDropArea.queueDropIndicatorY - 2
-                        width: 6
-                        height: 6
-                        radius: 3
-                        color: Kirigami.Theme.highlightColor
-                        visible: playlistDropArea.containsDrag
-                            && playlistDropArea.queueReorderDragActive
-                            && playlistDropArea.queueDropInsertIndex >= 0
+                Panes.QueuePane {
+                    uiBridge: root.uiBridge
+                    uiPalette: root.uiPalette
+                    preferredHeight: root.height * 0.58
+                    playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
+                    playlistOrderColumnWidth: root.playlistOrderColumnWidth
+                    playlistOrderText: root.playlistOrderText
+                    isQueueIndexSelected: root.isQueueIndexSelected
+                    handleQueueRowSelection: root.handleQueueRowSelection
+                    openTagEditorForPlaylistRow: root.openTagEditorForPlaylistRow
+                    requestPlaylistViewportRestoreWindow: root.requestPlaylistViewportRestoreWindow
+                    removeSelectedQueueTrack: root.removeSelectedQueueTrack
+                    stepScrollView: root.stepScrollView
+                    handlePlaylistKeyPress: root.handlePlaylistKeyPress
+                    clearPlaylistAction: clearPlaylistAction
+                    popupTransitionMs: root.uiPopupTransitionMs
+                    snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
+                    snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
+                    selectedQueueIndices: root.selectedQueueIndices
+                    rowsForLibraryAction: root.rowsForLibraryAction
+                    appendLibraryRows: root.appendLibraryRows
+                    droppedExternalPaths: root.droppedExternalPaths
+                    submitExternalImport: root.submitExternalImport
+                    applyPendingPlaylistViewportRestore: root.applyPendingPlaylistViewportRestore
+                    handleQueueSnapshotChanged: root.handleQueueSnapshotChanged
+                    onViewReady: function(view) {
+                        root.playlistViewRef = view
                     }
                 }
 
@@ -4664,725 +3339,45 @@ Kirigami.ApplicationWindow {
         closeViewer: root.closeSpectrogramViewer
     }
 
-    Dialog {
+    Dialogs.ItunesArtworkDialog {
         id: itunesArtworkDialog
-        parent: Overlay.overlay
-        modal: true
-        focus: true
-        z: 100
-        property int pendingPreviewIndex: -1
-        property int pendingApplyIndex: -1
-        property string currentArtworkSource: ""
-        property var currentArtworkInfo: ({})
-        readonly property real hostWidth: (parent && parent.width > 0) ? parent.width : root.width
-        readonly property real hostHeight: (parent && parent.height > 0) ? parent.height : root.height
-        width: Math.min(Math.max(320, hostWidth - 48), 920)
-        height: Math.min(Math.max(320, hostHeight - 48), 680)
-        x: (hostWidth - width) / 2
-        y: (hostHeight - height) / 2
-        title: "Replace From iTunes"
-        standardButtons: Dialog.Close
-        function clearPendingActionState() {
-            pendingPreviewIndex = -1
-            pendingApplyIndex = -1
-        }
-        function refreshCurrentArtworkInfo() {
-            currentArtworkSource = uiBridge.currentTrackCoverPath || ""
-            const infoSource = root.pathFromAnyUrl(currentArtworkSource)
-            currentArtworkInfo = infoSource.length > 0
-                ? (uiBridge.imageFileDetails(infoSource) || ({}))
-                : ({})
-        }
-        function suggestionRowAt(index) {
-            return uiBridge.itunesArtworkResultAt(index) || ({})
-        }
-        function suggestionRowReady(row) {
-            return ((row && (row.normalizedPath || "")) || "").length > 0
-        }
-        function requestSuggestionPreview(index) {
-            const row = suggestionRowAt(index)
-            if (suggestionRowReady(row)) {
-                pendingPreviewIndex = -1
-                pendingApplyIndex = -1
-                root.openAlbumArtViewerForSuggestion(row)
-                return
-            }
-            pendingApplyIndex = -1
-            pendingPreviewIndex = index
-            uiBridge.prepareItunesArtworkSuggestion(index)
-        }
-        function requestSuggestionApply(index) {
-            const row = suggestionRowAt(index)
-            if (suggestionRowReady(row)) {
-                pendingPreviewIndex = -1
-                pendingApplyIndex = -1
-                uiBridge.applyItunesArtworkSuggestion(index)
-                itunesArtworkDialog.close()
-                return
-            }
-            pendingPreviewIndex = -1
-            pendingApplyIndex = index
-            uiBridge.prepareItunesArtworkSuggestion(index)
-        }
-        function processPendingSuggestionAction() {
-            if (!visible) {
-                return
-            }
-            if (pendingApplyIndex >= 0) {
-                const applyRow = suggestionRowAt(pendingApplyIndex)
-                if (suggestionRowReady(applyRow)) {
-                    const resolvedIndex = pendingApplyIndex
-                    clearPendingActionState()
-                    uiBridge.applyItunesArtworkSuggestion(resolvedIndex)
-                    itunesArtworkDialog.close()
-                    return
-                }
-                if ((((applyRow && (applyRow.assetError || "")) || "").length > 0)
-                        && !((applyRow && (applyRow.assetLoading || false)) || false)) {
-                    pendingApplyIndex = -1
-                }
-            }
-            if (pendingPreviewIndex >= 0) {
-                const previewRow = suggestionRowAt(pendingPreviewIndex)
-                if (suggestionRowReady(previewRow)) {
-                    clearPendingActionState()
-                    root.openAlbumArtViewerForSuggestion(previewRow)
-                    return
-                }
-                if ((((previewRow && (previewRow.assetError || "")) || "").length > 0)
-                        && !((previewRow && (previewRow.assetLoading || false)) || false)) {
-                    pendingPreviewIndex = -1
-                }
-            }
-        }
-        onOpened: {
-            clearPendingActionState()
-            refreshCurrentArtworkInfo()
-        }
-        onClosed: {
-            clearPendingActionState()
-            uiBridge.clearItunesArtworkSuggestions()
-            itunesArtworkDialog.parent = Overlay.overlay
-        }
-
-        Connections {
-            target: uiBridge
-            function onItunesArtworkChanged() {
-                itunesArtworkDialog.processPendingSuggestionAction()
-            }
-            function onSnapshotChanged() {
-                if (itunesArtworkDialog.visible) {
-                    itunesArtworkDialog.refreshCurrentArtworkInfo()
-                }
-            }
-        }
-
-        contentItem: ColumnLayout {
-            spacing: 12
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 10
-
-                BusyIndicator {
-                    running: uiBridge.itunesArtworkLoading
-                    visible: running
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    text: uiBridge.itunesArtworkStatusText || ""
-                    color: root.uiTextColor
-                    wrapMode: Text.Wrap
-                }
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: implicitHeight
-                implicitHeight: currentArtworkSummaryRow.implicitHeight + 20
-                radius: 12
-                color: root.uiPaneColor
-                border.color: root.uiBorderColor
-                clip: true
-
-                RowLayout {
-                    id: currentArtworkSummaryRow
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 12
-
-                    Item {
-                        Layout.preferredWidth: 92
-                        Layout.preferredHeight: 92
-                        clip: true
-
-                        Image {
-                            id: currentArtworkImage
-                            anchors.fill: parent
-                            fillMode: Image.PreserveAspectFit
-                            source: itunesArtworkDialog.currentArtworkSource
-                            smooth: true
-                            asynchronous: true
-                            cache: true
-                            visible: (itunesArtworkDialog.currentArtworkSource || "").length > 0
-                        }
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 10
-                            color: root.uiSurfaceAltColor
-                            border.color: root.uiBorderColor
-                            visible: !currentArtworkImage.visible
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "No art"
-                                color: root.uiMutedTextColor
-                            }
-                        }
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: "Current album art"
-                            color: root.uiTextColor
-                            font.pixelSize: 16
-                            font.weight: Font.DemiBold
-                            elide: Text.ElideRight
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: [
-                                (itunesArtworkDialog.currentArtworkInfo.resolutionText || ""),
-                                (itunesArtworkDialog.currentArtworkInfo.fileType || ""),
-                                (itunesArtworkDialog.currentArtworkInfo.fileSizeText || "")
-                            ].filter(Boolean).join("  |  ")
-                            color: root.uiMutedTextColor
-                            wrapMode: Text.Wrap
-                            visible: text.length > 0
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            visible: (itunesArtworkDialog.currentArtworkInfo.mimeType || "").length > 0
-                            text: "MIME: " + (itunesArtworkDialog.currentArtworkInfo.mimeType || "")
-                            color: root.uiMutedTextColor
-                            elide: Text.ElideRight
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            visible: (itunesArtworkDialog.currentArtworkSource || "").length === 0
-                            text: "No current album art is available for this track."
-                            color: root.uiMutedTextColor
-                            wrapMode: Text.Wrap
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            visible: (itunesArtworkDialog.currentArtworkSource || "").length > 0
-                                && Object.keys(itunesArtworkDialog.currentArtworkInfo || {}).length === 0
-                            text: "Current artwork metadata is not available."
-                            color: root.uiMutedTextColor
-                            wrapMode: Text.Wrap
-                        }
-                    }
-                }
-            }
-
-            ListView {
-                id: itunesArtworkResultsView
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                clip: true
-                spacing: 10
-                boundsBehavior: Flickable.StopAtBounds
-                rightMargin: itunesArtworkScrollBar.visible ? (itunesArtworkScrollBar.width + 10) : 0
-                model: uiBridge.itunesArtworkResults
-                visible: count > 0
-
-                ScrollBar.vertical: ScrollBar {
-                    id: itunesArtworkScrollBar
-                    policy: ScrollBar.AsNeeded
-                }
-
-                delegate: Rectangle {
-                    required property int index
-                    required property var modelData
-                    x: ListView.view.leftMargin
-                    width: Math.max(0, ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin)
-                    implicitHeight: 136
-                    radius: 12
-                    color: root.uiPaneColor
-                    border.color: root.uiBorderColor
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 12
-
-                        Image {
-                            Layout.preferredWidth: 92
-                            Layout.preferredHeight: 92
-                            fillMode: Image.PreserveAspectFit
-                            source: (modelData && (modelData.previewSource || "")) || ""
-                            smooth: true
-                            asynchronous: true
-                            cache: true
-                        }
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 4
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: (modelData && (modelData.albumTitle || "")) || ""
-                                color: root.uiTextColor
-                                font.pixelSize: 16
-                                font.weight: Font.DemiBold
-                                elide: Text.ElideRight
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: (modelData && (modelData.artistName || "")) || ""
-                                color: root.uiMutedTextColor
-                                elide: Text.ElideRight
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: [
-                                    (modelData && (modelData.resolutionText || "")) || "",
-                                    (modelData && (modelData.fileType || "")) || "",
-                                    (modelData && (modelData.fileSizeText || "")) || ""
-                                ].filter(Boolean).join("  |  ")
-                                color: root.uiMutedTextColor
-                                wrapMode: Text.Wrap
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                visible: ((modelData && (modelData.mimeType || "")) || "").length > 0
-                                text: "MIME: " + (((modelData && (modelData.mimeType || "")) || ""))
-                                color: root.uiMutedTextColor
-                                elide: Text.ElideRight
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: ((modelData && (modelData.assetLoading || false)) || false)
-                                spacing: 8
-
-                                BusyIndicator {
-                                    Layout.preferredWidth: 18
-                                    Layout.preferredHeight: 18
-                                    running: true
-                                }
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: "Loading high-resolution artwork..."
-                                    color: root.uiMutedTextColor
-                                    wrapMode: Text.Wrap
-                                }
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                visible: ((modelData && (modelData.assetError || "")) || "").length > 0
-                                text: (modelData && (modelData.assetError || "")) || ""
-                                color: Kirigami.Theme.negativeTextColor
-                                wrapMode: Text.Wrap
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                visible: !((modelData && (modelData.assetLoading || false)) || false)
-                                    && ((modelData && (modelData.detailStatusText || "")) || "").length > 0
-                                text: (modelData && (modelData.detailStatusText || "")) || ""
-                                color: root.uiMutedTextColor
-                                wrapMode: Text.Wrap
-                            }
-                        }
-
-                        ColumnLayout {
-                            spacing: 8
-
-                            Button {
-                                text: ((modelData && (modelData.assetLoading || false)) || false)
-                                    && itunesArtworkDialog.pendingPreviewIndex === index
-                                    ? "Loading..."
-                                    : "Preview"
-                                enabled: !((modelData && (modelData.assetLoading || false)) || false)
-                                onClicked: itunesArtworkDialog.requestSuggestionPreview(index)
-                            }
-
-                            Button {
-                                text: ((modelData && (modelData.assetLoading || false)) || false)
-                                    && itunesArtworkDialog.pendingApplyIndex === index
-                                    ? "Loading..."
-                                    : "Apply"
-                                enabled: !((modelData && (modelData.assetLoading || false)) || false)
-                                onClicked: itunesArtworkDialog.requestSuggestionApply(index)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        uiBridge: root.uiBridge
+        uiPalette: root.uiPalette
+        windowRoot: root
+        pathFromAnyUrl: root.pathFromAnyUrl
+        openAlbumArtViewerForSuggestion: root.openAlbumArtViewerForSuggestion
     }
 
-    Popup {
-        id: albumArtViewer
-        parent: Overlay.overlay
-        x: 0
-        y: 0
-        width: root.width
-        height: root.height
-        modal: true
-        focus: true
-        padding: 0
-        closePolicy: Popup.CloseOnEscape
-        enter: Transition {
-            NumberAnimation {
-                properties: "opacity,scale,x,y"
-                duration: root.uiPopupTransitionMs
-            }
-        }
-        exit: Transition {
-            NumberAnimation {
-                properties: "opacity,scale,x,y"
-                duration: root.uiPopupTransitionMs
-            }
-        }
-        Shortcut {
-            sequence: "I"
-            context: Qt.WindowShortcut
-            enabled: albumArtViewer.visible
-            onActivated: root.toggleAlbumArtInfoVisible()
-        }
-        onOpened: root.applyAlbumArtInitialView()
-        onClosed: {
-            if (root.albumArtViewerOpen && !root.useWholeScreenViewerMode) {
-                root.albumArtViewerOpen = false
-            }
-        }
-        background: Rectangle {
-            color: "#000000"
-            opacity: 0.87
-        }
-
-        MouseArea {
-            id: albumArtDismissArea
-            z: 0
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onClicked: root.closeAlbumArtViewer()
-        }
-
-        Rectangle {
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            width: 40
-            height: 40
-            radius: 8
-            color: Qt.rgba(1, 1, 1, 0.16)
-            border.color: Qt.rgba(1, 1, 1, 0.52)
-
-            ToolButton {
-                anchors.fill: parent
-                icon.name: "window-close"
-                icon.color: "#ffffff"
-                onClicked: root.closeAlbumArtViewer()
-            }
-        }
-
-        Item {
-            id: albumArtPopupHost
-            anchors.fill: parent
-        }
+    Viewers.AlbumArtViewerShell {
+        id: albumArtViewerShell
+        windowRoot: root
+        viewerOpen: root.albumArtViewerOpen
+        useWholeScreenViewerMode: root.useWholeScreenViewerMode
+        popupTransitionMs: root.uiPopupTransitionMs
+        titleText: root.title
+        closeViewer: root.closeAlbumArtViewer
+        toggleInfoVisible: root.toggleAlbumArtInfoVisible
     }
 
-    Window {
-        id: albumArtFullscreenWindow
-        screen: root.screen
-        transientParent: root
-        modality: Qt.ApplicationModal
-        flags: Qt.Window | Qt.FramelessWindowHint
-        visibility: root.albumArtViewerOpen && root.useWholeScreenViewerMode
-            ? Window.FullScreen
-            : Window.Hidden
-        color: "#000000"
-        title: root.title
-        onVisibilityChanged: function() {
-            if (albumArtFullscreenWindow.visibility === Window.FullScreen) {
-                requestActivate()
-                albumArtFullscreenFocusSink.forceActiveFocus()
-                root.applyAlbumArtInitialView()
-            }
-        }
-        onClosing: function(close) {
-            if (root.albumArtViewerOpen && root.useWholeScreenViewerMode) {
-                root.albumArtViewerOpen = false
-            }
-        }
-
-        FocusScope {
-            id: albumArtFullscreenFocusSink
-            anchors.fill: parent
-            focus: albumArtFullscreenWindow.visibility === Window.FullScreen
-            Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
-                    event.accepted = true
-                    root.closeAlbumArtViewer()
-                }
-            }
-        }
-
-        Shortcut {
-            sequence: "I"
-            context: Qt.WindowShortcut
-            enabled: albumArtFullscreenWindow.visibility === Window.FullScreen
-            onActivated: root.toggleAlbumArtInfoVisible()
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onPressed: albumArtFullscreenFocusSink.forceActiveFocus()
-            onClicked: root.closeAlbumArtViewer()
-        }
-
-        Rectangle {
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            width: 40
-            height: 40
-            radius: 8
-            color: Qt.rgba(1, 1, 1, 0.16)
-            border.color: Qt.rgba(1, 1, 1, 0.52)
-
-            ToolButton {
-                anchors.fill: parent
-                icon.name: "window-close"
-                icon.color: "#ffffff"
-                onClicked: root.closeAlbumArtViewer()
-            }
-        }
-
-        Item {
-            anchors.fill: parent
-            Item {
-                id: albumArtWindowHost
-                anchors.fill: parent
-            }
-        }
-    }
-
-    Item {
+    Viewers.AlbumArtSurface {
         id: albumArtSurface
         parent: root.albumArtViewerOpen
-            ? (root.useWholeScreenViewerMode ? albumArtWindowHost : albumArtPopupHost)
+            ? (root.useWholeScreenViewerMode ? albumArtViewerShell.windowHost : albumArtViewerShell.popupHost)
             : albumArtMainHost
         visible: root.albumArtViewerOpen
         anchors.fill: parent
-        clip: true
-        onWidthChanged: root.applyAlbumArtInitialView()
-        onHeightChanged: root.applyAlbumArtInitialView()
-
-        Item {
-            id: albumArtViewport
-            anchors.fill: parent
-            clip: true
-            onWidthChanged: root.applyAlbumArtInitialView()
-            onHeightChanged: root.applyAlbumArtInitialView()
-
-            Item {
-                id: albumArtTransform
-                readonly property real nativeWidth: albumArtImageFull.sourceSize.width > 0
-                    ? albumArtImageFull.sourceSize.width
-                    : albumArtViewport.width
-                readonly property real nativeHeight: albumArtImageFull.sourceSize.height > 0
-                    ? albumArtImageFull.sourceSize.height
-                    : albumArtViewport.height
-                readonly property real fitScale: {
-                    const w = nativeWidth > 0 ? nativeWidth : 1
-                    const h = nativeHeight > 0 ? nativeHeight : 1
-                    const scaleX = albumArtViewport.width / w
-                    const scaleY = albumArtViewport.height / h
-                    return Math.min(1.0, scaleX, scaleY)
-                }
-                width: Math.max(1, nativeWidth * fitScale)
-                height: Math.max(1, nativeHeight * fitScale)
-                x: (albumArtViewport.width - width) / 2 + root.albumArtPanX
-                y: (albumArtViewport.height - height) / 2 + root.albumArtPanY
-                scale: root.albumArtZoom
-                transformOrigin: Item.Center
-
-                Image {
-                    id: albumArtImageFull
-                    anchors.fill: parent
-                    source: root.albumArtViewerSource
-                    fillMode: Image.PreserveAspectFit
-                    smooth: true
-                    asynchronous: true
-                    cache: true
-                    retainWhileLoading: false
-                    sourceSize.width: root.albumArtViewerDecodeWidth
-                    sourceSize.height: root.albumArtViewerDecodeHeight
-                    onStatusChanged: root.applyAlbumArtInitialView()
-                }
-            }
-
-            MouseArea {
-                id: albumArtPanArea
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                hoverEnabled: true
-                preventStealing: true
-                property real lastX: 0
-                property real lastY: 0
-                cursorShape: root.albumArtZoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
-                onPressed: function(mouse) {
-                    if (mouse.button === Qt.RightButton) {
-                        albumArtViewerContextMenu.popup()
-                        return
-                    }
-                    if (!root.isPointOnAlbumArtImage(albumArtPanArea, mouse.x, mouse.y)) {
-                        root.closeAlbumArtViewer()
-                        return
-                    }
-                    lastX = mouse.x
-                    lastY = mouse.y
-                    cursorShape = Qt.ClosedHandCursor
-                }
-                onReleased: {
-                    cursorShape = root.albumArtZoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
-                }
-                onPositionChanged: function(mouse) {
-                    if (!pressed || root.albumArtZoom <= 1.0) {
-                        return
-                    }
-                    root.albumArtPanX += mouse.x - lastX
-                    root.albumArtPanY += mouse.y - lastY
-                    lastX = mouse.x
-                    lastY = mouse.y
-                    root.clampAlbumArtPan()
-                }
-                onDoubleClicked: function(mouse) {
-                    if (mouse.button !== Qt.LeftButton) {
-                        return
-                    }
-                    if (root.albumArtZoom > 1.0) {
-                        root.albumArtZoom = 1.0
-                        root.albumArtPanX = 0.0
-                        root.albumArtPanY = 0.0
-                    } else {
-                        root.albumArtZoom = 2.0
-                        root.clampAlbumArtPan()
-                    }
-                }
-                onWheel: function(wheel) {
-                    const oldZoom = root.albumArtZoom
-                    const delta = wheel.angleDelta.y > 0 ? 1.1 : 0.9
-                    const nextZoom = Math.max(1.0, Math.min(6.0, oldZoom * delta))
-                    if (Math.abs(nextZoom - oldZoom) < 0.0001) {
-                        wheel.accepted = true
-                        return
-                    }
-                    const pivotX = wheel.x - albumArtViewport.width / 2
-                    const pivotY = wheel.y - albumArtViewport.height / 2
-                    const ratio = nextZoom / oldZoom
-                    root.albumArtZoom = nextZoom
-                    root.albumArtPanX = (root.albumArtPanX + pivotX) * ratio - pivotX
-                    root.albumArtPanY = (root.albumArtPanY + pivotY) * ratio - pivotY
-                    root.clampAlbumArtPan()
-                    wheel.accepted = true
-                }
-            }
-
-            Menu {
-                id: albumArtViewerContextMenu
-                MenuItem { action: replaceFromItunesAction }
-                MenuItem {
-                    enabled: false
-                    visible: !replaceFromItunesAction.enabled
-                    text: root.currentTrackItunesArtworkDisabledReason()
-                }
-            }
-        }
-
-        Column {
-            z: 30
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.margins: 12
-            spacing: 8
-
-            Rectangle {
-                width: 40
-                height: 40
-                radius: 8
-                color: Qt.rgba(1, 1, 1, 0.16)
-                border.color: Qt.rgba(1, 1, 1, 0.52)
-
-                ToolButton {
-                    anchors.fill: parent
-                    contentItem: Text {
-                        text: "i"
-                        color: "#ffffff"
-                        font.pixelSize: 16
-                        font.weight: Font.DemiBold
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    onClicked: root.toggleAlbumArtInfoVisible()
-                }
-            }
-
-            Rectangle {
-                visible: root.albumArtInfoVisible && albumArtInfoLabel.text.length > 0
-                width: Math.min(540, albumArtSurface.width - 24)
-                color: Qt.rgba(0, 0, 0, 0.58)
-                border.color: Qt.rgba(1, 1, 1, 0.24)
-                radius: 10
-                implicitHeight: albumArtInfoLabel.implicitHeight + 20
-
-                Text {
-                    id: albumArtInfoLabel
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    color: "#f2f2f2"
-                    text: root.albumArtInfoOverlayText()
-                    wrapMode: Text.WrapAnywhere
-                    textFormat: Text.PlainText
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
-                    hoverEnabled: true
-                    preventStealing: true
-                    onPressed: albumArtFullscreenFocusSink.forceActiveFocus()
-                    onWheel: function(wheel) {
-                        albumArtFullscreenFocusSink.forceActiveFocus()
-                        wheel.accepted = true
-                    }
-                }
-            }
-        }
+        viewerOpen: root.albumArtViewerOpen
+        viewerSource: root.albumArtViewerSource
+        infoVisible: root.albumArtInfoVisible
+        initialViewToken: root.albumArtViewResetToken
+        viewerDecodeWidth: root.albumArtViewerDecodeWidth
+        viewerDecodeHeight: root.albumArtViewerDecodeHeight
+        infoOverlayText: root.albumArtInfoOverlayText()
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
+        closeViewer: root.closeAlbumArtViewer
+        toggleInfoVisible: root.toggleAlbumArtInfoVisible
+        focusFullscreen: albumArtViewerShell.focusFullscreen
     }
 
     Item {

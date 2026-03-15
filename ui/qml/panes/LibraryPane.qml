@@ -31,6 +31,8 @@ Rectangle {
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
 
+    signal viewReady(var view)
+
     color: root.uiPalette.uiPaneColor
     border.color: root.uiPalette.uiBorderColor
 
@@ -88,6 +90,8 @@ Rectangle {
             flickDeceleration: root.snappyScrollFlickDeceleration
             maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
             pixelAligned: true
+
+            Component.onCompleted: root.viewReady(libraryAlbumView)
 
             onContentHeightChanged: {
                 if (root.pendingLibraryExpandFitKey.length > 0) {

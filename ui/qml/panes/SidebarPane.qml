@@ -35,6 +35,8 @@ Rectangle {
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
 
+    signal viewReady(var view)
+
     color: root.uiPalette.uiPaneColor
     SplitView.preferredWidth: root.splitPreferredWidth
     SplitView.minimumWidth: 250
@@ -50,7 +52,6 @@ Rectangle {
             replaceFromItunesAction: root.replaceFromItunesAction
             currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
             openAlbumArtViewer: root.openAlbumArtViewer
-            popupTransitionMs: root.popupTransitionMs
         }
 
         LibraryPane {
@@ -79,6 +80,9 @@ Rectangle {
             isLibraryTreeLoading: root.isLibraryTreeLoading
             playAllLibraryTracksAction: root.playAllLibraryTracksAction
             appendAllLibraryTracksAction: root.appendAllLibraryTracksAction
+            onViewReady: function(view) {
+                root.viewReady(view)
+            }
         }
     }
 }
