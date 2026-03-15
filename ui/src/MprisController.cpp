@@ -173,6 +173,9 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
 
 MprisController::~MprisController() {
     QDBusConnection sessionBus = QDBusConnection::sessionBus();
+    if (!sessionBus.isConnected()) {
+        return;
+    }
     if (m_serviceRegistered) {
         sessionBus.unregisterService(QString::fromUtf8(kMprisService));
     }

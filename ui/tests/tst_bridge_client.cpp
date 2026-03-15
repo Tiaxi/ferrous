@@ -50,6 +50,7 @@ private slots:
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
     void mprisCanPauseOnlyWhilePlaying();
+    void mprisControllerConstructionDoesNotCrash();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -459,6 +460,37 @@ void BridgeClientTest::mprisCanPauseOnlyWhilePlaying() {
 
     client.m_playbackState = QStringLiteral("Playing");
     QCOMPARE(controller.canPause(), true);
+}
+
+void BridgeClientTest::mprisControllerConstructionDoesNotCrash() {
+    // Regression test: constructing MprisController and letting it run through
+    // its deferred setEnabled() (via the QTimer::singleShot in the constructor)
+    // must not crash regardless of whether the D-Bus session bus is in the
+    // uninitialised state found in the RPM %check environment.
+    //
+    // Covers two historical crash sites:
+    // 1. Constructor → setEnabled() → registerService() → libdbus null-mutex SIGSEGV
+    //    (fixed by deferring setEnabled to a singleShot timer)
+    // 2. Destructor → unregisterService() → libdbus null-mutex SIGSEGV
+    //    (fixed by guarding destructor calls behind isConnected())
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_playbackState = QStringLiteral("Playing");
+
+    {
+        MprisController controller(&client);
+        // Spin the event loop so the deferred setEnabled() timer fires and
+        // attempts D-Bus registration. This must not crash.
+        QCoreApplication::processEvents();
+        // Basic state checks: enabled flag should be set regardless of whether
+        // D-Bus registration succeeded.
+        QVERIFY(controller.enabled());
+        QCOMPARE(controller.playbackStatus(), QStringLiteral("Playing"));
+        QCOMPARE(controller.canPause(), true);
+    }
+    // Destructor runs here — unregisterService() must not crash even if the
+    // controller happened to register successfully in the processEvents() call.
 }
 
 int main(int argc, char **argv) {
