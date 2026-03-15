@@ -7,6 +7,7 @@ import "../components" as Components
 Rectangle {
     id: root
 
+    required property var controller
     required property var uiBridge
     required property var libraryModel
     required property var uiPalette
@@ -14,24 +15,15 @@ Rectangle {
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property int popupTransitionMs
-    required property string pendingLibraryExpandFitKey
-    required property var applyPendingLibraryExpansionFit
     required property var stepScrollView
-    required property var handleLibraryKeyPress
-    required property var isLibrarySelectionKeySelected
-    required property var toggleLibraryNode
-    required property var handleLibraryRowSelection
     required property var rowsForLibraryAction
     required property var playLibraryRows
     required property var appendLibraryRows
     required property var isActionableLibraryRow
     required property var canOpenTagEditorForLibrary
     required property var openTagEditorForLibrary
-    required property var isLibraryTreeLoading
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
-
-    signal viewReady(var view)
 
     color: root.uiPalette.uiPaneColor
     border.color: root.uiPalette.uiBorderColor
@@ -91,12 +83,12 @@ Rectangle {
             maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
             pixelAligned: true
 
-            Component.onCompleted: root.viewReady(libraryAlbumView)
+            Component.onCompleted: root.controller.registerView(libraryAlbumView)
 
             onContentHeightChanged: {
-                if (root.pendingLibraryExpandFitKey.length > 0) {
+                if (root.controller.pendingExpandFitKey.length > 0) {
                     Qt.callLater(function() {
-                        root.applyPendingLibraryExpansionFit()
+                        root.controller.applyPendingExpansionFit()
                     })
                 }
             }
@@ -115,7 +107,7 @@ Rectangle {
             }
 
             Keys.onPressed: function(event) {
-                root.handleLibraryKeyPress(event)
+                root.controller.handleKeyPress(event)
             }
 
             delegate: Rectangle {
@@ -144,7 +136,7 @@ Rectangle {
 
                 width: ListView.view.width
                 height: 24
-                color: root.isLibrarySelectionKeySelected(selectionKey || "")
+                color: root.controller.isSelectionKeySelected(selectionKey || "")
                     ? root.uiPalette.uiSelectionColor
                     : (index % 2 === 0
                         ? root.uiPalette.uiSurfaceRaisedColor
@@ -170,7 +162,7 @@ Rectangle {
                         text: hasChildren ? (expanded ? "▾" : "▸") : ""
                         font.pixelSize: 20
                         font.bold: true
-                        color: root.isLibrarySelectionKeySelected(selectionKey || "")
+                        color: root.controller.isSelectionKeySelected(selectionKey || "")
                             ? root.uiPalette.uiSelectionTextColor
                             : root.uiPalette.uiMutedTextColor
                     }
@@ -202,7 +194,7 @@ Rectangle {
                         elide: Text.ElideRight
                         verticalAlignment: Text.AlignVCenter
                         text: rowTitle
-                        color: root.isLibrarySelectionKeySelected(selectionKey || "")
+                        color: root.controller.isSelectionKeySelected(selectionKey || "")
                             ? root.uiPalette.uiSelectionTextColor
                             : root.uiPalette.uiTextColor
                     }
@@ -249,10 +241,10 @@ Rectangle {
                         if (mouse.button === Qt.LeftButton
                                 && hasChildren
                                 && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                            root.toggleLibraryNode(key)
+                            root.controller.toggleNode(key)
                             return
                         }
-                        root.handleLibraryRowSelection(
+                        root.controller.handleRowSelection(
                             index,
                             rowMap,
                             mouse.button,
@@ -276,7 +268,7 @@ Rectangle {
                             playPaths: playPathsResolved
                         }
                         if (hasChildren && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
-                            root.toggleLibraryNode(key)
+                            root.controller.toggleNode(key)
                             return
                         }
                         const rows = root.rowsForLibraryAction(rowMap)
@@ -348,7 +340,7 @@ Rectangle {
         Label {
             visible: libraryAlbumView.count === 0
                 && libraryAlbumView.contentHeight <= libraryAlbumView.height
-            text: root.isLibraryTreeLoading() ? "Loading library..." : "Library is empty"
+            text: root.controller.isTreeLoading() ? "Loading library..." : "Library is empty"
             color: root.uiPalette.uiMutedTextColor
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter

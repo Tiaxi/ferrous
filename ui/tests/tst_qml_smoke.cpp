@@ -537,6 +537,15 @@ Item {
         uiBridge: bridge
     }
 
+    Controllers.LibraryController {
+        id: libraryController
+        uiBridge: bridge
+        libraryModel: sidebarModel
+        tryCaptureGlobalSearchPrefill: function(event) { return false }
+        rowsForAction: function(rowMap) { return rowMap ? [rowMap] : [] }
+        playRows: function(rows) {}
+    }
+
     QtObject {
         id: tagEditorApi
         property bool open: false
@@ -728,6 +737,7 @@ Item {
         y: 180
         width: 360
         height: 520
+        controller: libraryController
         uiBridge: bridge
         libraryModel: sidebarModel
         uiPalette: palette
@@ -739,20 +749,13 @@ Item {
         popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
-        pendingLibraryExpandFitKey: ""
-        applyPendingLibraryExpansionFit: function() {}
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        handleLibraryKeyPress: function(event) {}
-        isLibrarySelectionKeySelected: function(key) { return false }
-        toggleLibraryNode: function(key) {}
-        handleLibraryRowSelection: function(index, rowMap, button, modifiers) {}
         rowsForLibraryAction: function(rowMap) { return [] }
         playLibraryRows: function(rows) {}
         appendLibraryRows: function(rows) {}
         isActionableLibraryRow: function(rowMap) { return false }
         canOpenTagEditorForLibrary: function(rowMap) { return false }
         openTagEditorForLibrary: function(rowMap) {}
-        isLibraryTreeLoading: function() { return false }
         playAllLibraryTracksAction: playAllLibraryTracksAction
         appendAllLibraryTracksAction: appendAllLibraryTracksAction
     }

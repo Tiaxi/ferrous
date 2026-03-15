@@ -26,23 +26,6 @@ Kirigami.ApplicationWindow {
             ? context + " \u2014 " + root.appDisplayName
             : root.appDisplayName
     }
-    property string selectedLibrarySelectionKey: ""
-    property int selectedLibrarySourceIndex: -1
-    property string selectedLibraryRowType: ""
-    property string selectedLibraryArtist: ""
-    property string selectedLibraryAlbum: ""
-    property string selectedLibraryTrackPath: ""
-    property string selectedLibraryOpenPath: ""
-    property var selectedLibraryPlayPaths: []
-    property var selectedLibrarySelectionKeys: []
-    property int librarySelectionAnchorIndex: -1
-    property int lastAppliedLibraryVersion: -1
-    property int pendingLibraryVersion: -1
-    property bool hasReceivedLibraryTreeFrame: false
-    property string pendingLibraryAnchorKey: ""
-    property real pendingLibraryAnchorOffset: 0
-    property real pendingLibraryAnchorFallbackY: 0
-    property bool pendingLibraryAnchorValid: false
     property real displayedPositionSeconds: 0
     property bool positionSmoothingPrimed: false
     property real positionSmoothingAnchorSeconds: 0
@@ -79,16 +62,6 @@ Kirigami.ApplicationWindow {
     property string transientBridgeError: ""
     property real rememberedVolumeBeforeMute: 1.0
     property bool volumeMuted: false
-    property string libraryTypeAheadBuffer: ""
-    property string pendingLibraryRevealSelectionKey: ""
-    property var pendingLibraryRevealExpandKeys: []
-    property int pendingLibraryRevealAttempts: 0
-    property string pendingLibraryExpandFitKey: ""
-    property int pendingLibraryExpandFitAttempts: 0
-    property string pendingSearchOpenSelectionKey: ""
-    property var pendingSearchOpenExpandKeys: []
-    property int pendingSearchOpenAttempts: 0
-    property var libraryViewRef: null
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -136,15 +109,35 @@ Kirigami.ApplicationWindow {
         id: globalSearchController
         uiBridge: root.uiBridge
         globalSearchModelApi: root.globalSearchModelApi
-        requestLibraryRevealForSearchRow: root.requestLibraryRevealForSearchRow
-        focusLibraryViewForNavigation: root.focusLibraryViewForNavigation
-        requestOpenInFileBrowserForSearchRow: root.openGlobalSearchRowInFileBrowser
+        requestLibraryRevealForSearchRow: libraryController.requestRevealForSearchRow
+        focusLibraryViewForNavigation: libraryController.focusViewForNavigation
+        requestOpenInFileBrowserForSearchRow: libraryController.requestOpenInFileBrowserForSearchRow
     }
 
     Controllers.QueueController {
         id: queueController
         uiBridge: root.uiBridge
     }
+
+    Controllers.LibraryController {
+        id: libraryController
+        uiBridge: root.uiBridge
+        libraryModel: root.libraryTreeModel
+        tryCaptureGlobalSearchPrefill: globalSearchController.tryCapturePrefill
+        rowsForAction: root.rowsForLibraryAction
+        playRows: root.playLibraryRows
+    }
+
+    readonly property string selectedLibrarySelectionKey: libraryController.selectedSelectionKey
+    readonly property int selectedLibrarySourceIndex: libraryController.selectedSourceIndex
+    readonly property string selectedLibraryRowType: libraryController.selectedRowType
+    readonly property string selectedLibraryArtist: libraryController.selectedArtist
+    readonly property string selectedLibraryAlbum: libraryController.selectedAlbum
+    readonly property string selectedLibraryTrackPath: libraryController.selectedTrackPath
+    readonly property string selectedLibraryOpenPath: libraryController.selectedOpenPath
+    readonly property var selectedLibraryPlayPaths: libraryController.selectedPlayPaths
+    readonly property var selectedLibrarySelectionKeys: libraryController.selectedSelectionKeys
+    readonly property var libraryViewRef: libraryController.view
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
         const previousState = previousPlaybackState || ""
@@ -551,27 +544,6 @@ Kirigami.ApplicationWindow {
         onTriggered: root.transientBridgeError = ""
     }
 
-    Timer {
-        id: libraryTypeAheadTimer
-        interval: 900
-        repeat: false
-        onTriggered: root.libraryTypeAheadBuffer = ""
-    }
-
-    Timer {
-        id: libraryRevealRetryTimer
-        interval: 80
-        repeat: false
-        onTriggered: root.applyPendingLibraryReveal()
-    }
-
-    Timer {
-        id: searchOpenRetryTimer
-        interval: 80
-        repeat: false
-        onTriggered: root.applyPendingSearchOpen()
-    }
-
     function moveSelected(delta) {
         const from = uiBridge.selectedQueueIndex
         if (from < 0 || uiBridge.queueLength <= 0) {
@@ -866,144 +838,7 @@ Kirigami.ApplicationWindow {
     }
 
     function isLibrarySelectionKeySelected(key) {
-        return key.length > 0 && selectedLibrarySelectionKeys.indexOf(key) >= 0
-    }
-
-    function clearLibraryPrimarySelection() {
-        root.selectedLibrarySelectionKey = ""
-        root.selectedLibrarySourceIndex = -1
-        root.selectedLibraryRowType = ""
-        root.selectedLibraryArtist = ""
-        root.selectedLibraryAlbum = ""
-        root.selectedLibraryTrackPath = ""
-        root.selectedLibraryOpenPath = ""
-        root.selectedLibraryPlayPaths = []
-    }
-
-    function applyLibraryPrimaryRow(rowMap) {
-        root.selectedLibrarySelectionKey = rowMap.selectionKey || ""
-        root.selectedLibrarySourceIndex = rowMap.sourceIndex !== undefined ? rowMap.sourceIndex : -1
-        root.selectedLibraryRowType = rowMap.rowType || ""
-        root.selectedLibraryArtist = rowMap.artist || ""
-        root.selectedLibraryAlbum = rowMap.name || ""
-        root.selectedLibraryTrackPath = rowMap.trackPath || ""
-        root.selectedLibraryOpenPath = rowMap.openPath || ""
-        root.selectedLibraryPlayPaths = rowMap.playPaths || []
-    }
-
-    function applyLibraryPrimaryFromIndex(index) {
-        const rowMap = libraryModel.rowDataForRow(index)
-        if (rowMap && rowMap.selectionKey && rowMap.selectionKey.length > 0) {
-            applyLibraryPrimaryRow(rowMap)
-            return true
-        }
-        return false
-    }
-
-    function setLibrarySingleSelection(index, rowMap) {
-        if (!rowMap.selectionKey || rowMap.selectionKey.length === 0) {
-            selectedLibrarySelectionKeys = []
-            librarySelectionAnchorIndex = -1
-            clearLibraryPrimarySelection()
-            return
-        }
-        selectedLibrarySelectionKeys = [rowMap.selectionKey]
-        librarySelectionAnchorIndex = index
-        applyLibraryPrimaryRow(rowMap)
-    }
-
-    function setLibraryRangeSelection(index) {
-        const anchor = librarySelectionAnchorIndex >= 0 ? librarySelectionAnchorIndex : index
-        const first = Math.min(anchor, index)
-        const last = Math.max(anchor, index)
-        const keys = []
-        for (let i = first; i <= last; ++i) {
-            const rowMap = libraryModel.rowDataForRow(i)
-            const key = rowMap.selectionKey || ""
-            if (key.length > 0 && keys.indexOf(key) < 0) {
-                keys.push(key)
-            }
-        }
-        selectedLibrarySelectionKeys = keys
-        librarySelectionAnchorIndex = anchor
-        applyLibraryPrimaryFromIndex(index)
-    }
-
-    function toggleLibrarySelection(index, rowMap) {
-        const key = rowMap.selectionKey || ""
-        if (key.length === 0) {
-            return
-        }
-        const keys = selectedLibrarySelectionKeys.slice()
-        const pos = keys.indexOf(key)
-        if (pos >= 0) {
-            keys.splice(pos, 1)
-        } else {
-            keys.push(key)
-        }
-        selectedLibrarySelectionKeys = keys
-        librarySelectionAnchorIndex = index
-        if (keys.length === 0) {
-            clearLibraryPrimarySelection()
-            return
-        }
-        if (keys.indexOf(selectedLibrarySelectionKey) >= 0) {
-            return
-        }
-        const fallbackKey = keys[keys.length - 1]
-        const fallbackIndex = libraryModel.indexForSelectionKey(fallbackKey)
-        if (!applyLibraryPrimaryFromIndex(fallbackIndex)) {
-            clearLibraryPrimarySelection()
-        }
-    }
-
-    function handleLibraryRowSelection(index, rowMap, button, modifiers) {
-        if (!rowMap.selectionKey || rowMap.selectionKey.length === 0) {
-            return
-        }
-        const shift = (modifiers & Qt.ShiftModifier) !== 0
-        const ctrl = (modifiers & Qt.ControlModifier) !== 0
-        if (shift) {
-            setLibraryRangeSelection(index)
-            return
-        }
-        if (ctrl) {
-            toggleLibrarySelection(index, rowMap)
-            return
-        }
-        if (button === Qt.RightButton && isLibrarySelectionKeySelected(rowMap.selectionKey)) {
-            librarySelectionAnchorIndex = index
-            applyLibraryPrimaryRow(rowMap)
-            return
-        }
-        setLibrarySingleSelection(index, rowMap)
-    }
-
-    function toggleLibraryNode(key) {
-        if (!key || key.length === 0) {
-            return
-        }
-        const index = libraryModel.indexForSelectionKey(key)
-        let expanding = false
-        if (index >= 0) {
-            const rowMap = libraryModel.rowDataForRow(index) || ({})
-            const rowType = rowMap.rowType || ""
-            const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0
-            expanding = hasChildren && !Boolean(rowMap.expanded)
-        }
-        if (expanding) {
-            scheduleLibraryExpansionFit(key)
-        } else if (pendingLibraryExpandFitKey === key) {
-            pendingLibraryExpandFitKey = ""
-            pendingLibraryExpandFitAttempts = 0
-        }
-        pendingLibraryAnchorValid = false
-        libraryModel.toggleKey(key)
-        if (expanding) {
-            Qt.callLater(function() {
-                root.applyPendingLibraryExpansionFit()
-            })
-        }
+        return libraryController.isSelectionKeySelected(key)
     }
 
     function stepScrollView(view, wheel, rowHeight, rowsPerStep) {
@@ -1033,200 +868,6 @@ Kirigami.ApplicationWindow {
         const targetY = view.contentY + (direction * notches * stepPx)
         view.contentY = Math.max(0, Math.min(maxY, targetY))
         wheel.accepted = true
-    }
-
-    function captureLibraryViewAnchor() {
-        if (!libraryViewRef || libraryModel.count <= 0) {
-            return {
-                key: "",
-                offset: 0,
-                fallbackY: libraryViewRef ? libraryViewRef.contentY : 0
-            }
-        }
-        const rowHeight = 24
-        const topIndex = Math.max(0, Math.min(
-            libraryModel.count - 1,
-            Math.floor(libraryViewRef.contentY / rowHeight)))
-        return {
-            key: libraryModel.selectionKeyForRow(topIndex) || "",
-            offset: libraryViewRef.contentY - (topIndex * rowHeight),
-            fallbackY: libraryViewRef.contentY
-        }
-    }
-
-    function restoreLibraryViewAnchor(anchor) {
-        if (!libraryViewRef) {
-            return
-        }
-        const rowHeight = 24
-        let targetY = anchor && anchor.fallbackY !== undefined ? anchor.fallbackY : 0
-        if (anchor && anchor.key && anchor.key.length > 0) {
-            const index = libraryModel.indexForSelectionKey(anchor.key)
-            if (index >= 0) {
-                targetY = (index * rowHeight) + (anchor.offset || 0)
-            }
-        }
-        const restoreY = function() {
-            const maxYNow = Math.max(0, libraryViewRef.contentHeight - libraryViewRef.height)
-            libraryViewRef.contentY = Math.max(0, Math.min(targetY, maxYNow))
-        }
-        restoreY()
-        Qt.callLater(restoreY)
-    }
-
-    function scheduleLibraryExpansionFit(key) {
-        if (!key || key.length === 0) {
-            return
-        }
-        pendingLibraryExpandFitKey = key
-        pendingLibraryExpandFitAttempts = 4
-    }
-
-    function applyPendingLibraryExpansionFit() {
-        if (!libraryViewRef || pendingLibraryExpandFitKey.length === 0) {
-            return
-        }
-        const key = pendingLibraryExpandFitKey
-        const rowIndex = libraryModel.indexForSelectionKey(key)
-        if (rowIndex < 0 || rowIndex >= libraryModel.count) {
-            return
-        }
-
-        const rowMap = libraryModel.rowDataForRow(rowIndex) || ({})
-        if (!rowMap || !rowMap.expanded) {
-            pendingLibraryExpandFitKey = ""
-            pendingLibraryExpandFitAttempts = 0
-            return
-        }
-
-        const viewHeight = Math.max(0, libraryViewRef.height)
-        if (viewHeight <= 0) {
-            if (pendingLibraryExpandFitAttempts > 0) {
-                pendingLibraryExpandFitAttempts -= 1
-                Qt.callLater(function() {
-                    root.applyPendingLibraryExpansionFit()
-                })
-            } else {
-                pendingLibraryExpandFitKey = ""
-            }
-            return
-        }
-
-        const rowHeight = 24
-        const baseDepth = rowMap.depth !== undefined ? rowMap.depth : 0
-        let lastDescendantIndex = rowIndex
-        for (let i = rowIndex + 1; i < libraryModel.count; ++i) {
-            const descendant = libraryModel.rowDataForRow(i) || ({})
-            const descendantDepth = descendant.depth !== undefined ? descendant.depth : 0
-            if (descendantDepth <= baseDepth) {
-                break
-            }
-            lastDescendantIndex = i
-        }
-
-        if ((rowMap.count || 0) > 0 && lastDescendantIndex === rowIndex) {
-            return
-        }
-
-        const blockTop = rowIndex * rowHeight
-        const blockBottom = (lastDescendantIndex + 1) * rowHeight
-        if ((blockBottom - blockTop) > viewHeight) {
-            libraryViewRef.positionViewAtIndex(rowIndex, ListView.Beginning)
-        } else {
-            libraryViewRef.positionViewAtIndex(lastDescendantIndex, ListView.Contain)
-        }
-        const visibleTop = libraryViewRef.contentY
-        const visibleBottom = visibleTop + viewHeight
-        const blockFits = (blockBottom - blockTop) <= viewHeight
-        const blockVisible = blockFits
-            ? (blockTop >= visibleTop - 0.5 && blockBottom <= visibleBottom + 0.5)
-            : Math.abs(visibleTop - blockTop) <= 0.5
-        if (blockVisible) {
-            pendingLibraryExpandFitKey = ""
-            pendingLibraryExpandFitAttempts = 0
-            return
-        }
-    }
-
-    function finishPendingLibraryTreeApply() {
-        if (pendingLibraryVersion < 0 || libraryModel.parsing) {
-            return
-        }
-        lastAppliedLibraryVersion = pendingLibraryVersion
-        pendingLibraryVersion = -1
-        root.syncLibrarySelectionToVisibleRows()
-        if (pendingLibraryAnchorValid) {
-            if (pendingLibraryExpandFitKey.length === 0) {
-                restoreLibraryViewAnchor({
-                    key: pendingLibraryAnchorKey,
-                    offset: pendingLibraryAnchorOffset,
-                    fallbackY: pendingLibraryAnchorFallbackY
-                })
-            }
-            pendingLibraryAnchorValid = false
-        }
-        if (pendingLibraryExpandFitKey.length > 0) {
-            applyPendingLibraryExpansionFit()
-        }
-    }
-
-    function requestLibraryTreeApply(version, treeBytes) {
-        if (version <= 0 && (!treeBytes || treeBytes.length === 0)) {
-            return
-        }
-        if (version < 0 || version === pendingLibraryVersion) {
-            return
-        }
-        if (version === lastAppliedLibraryVersion && pendingLibraryVersion < 0) {
-            return
-        }
-        const anchor = captureLibraryViewAnchor()
-        pendingLibraryAnchorKey = anchor.key || ""
-        pendingLibraryAnchorOffset = anchor.offset || 0
-        pendingLibraryAnchorFallbackY = anchor.fallbackY || 0
-        pendingLibraryAnchorValid = true
-        hasReceivedLibraryTreeFrame = true
-        pendingLibraryVersion = version
-        libraryModel.setLibraryTreeFromBinary(treeBytes || "")
-        finishPendingLibraryTreeApply()
-    }
-
-    function isLibraryTreeLoading() {
-        if (pendingLibraryVersion >= 0 || libraryModel.parsing) {
-            return true
-        }
-        if (!hasReceivedLibraryTreeFrame && lastAppliedLibraryVersion <= 0) {
-            return true
-        }
-        return uiBridge.libraryScanInProgress && (!libraryViewRef || libraryViewRef.count === 0)
-    }
-
-    function syncLibrarySelectionToVisibleRows() {
-        const valid = []
-        for (let i = 0; i < selectedLibrarySelectionKeys.length; ++i) {
-            const key = selectedLibrarySelectionKeys[i]
-            if (libraryModel.hasSelectionKey(key) && valid.indexOf(key) < 0) {
-                valid.push(key)
-            }
-        }
-        selectedLibrarySelectionKeys = valid
-        if (selectedLibrarySelectionKey.length > 0
-                && selectedLibrarySelectionKeys.indexOf(selectedLibrarySelectionKey) < 0) {
-            if (selectedLibrarySelectionKeys.length > 0) {
-                const fallbackIndex =
-                    libraryModel.indexForSelectionKey(selectedLibrarySelectionKeys[0])
-                if (!applyLibraryPrimaryFromIndex(fallbackIndex)) {
-                    clearLibraryPrimarySelection()
-                }
-            } else {
-                clearLibraryPrimarySelection()
-            }
-        }
-        if (librarySelectionAnchorIndex >= libraryModel.count || librarySelectionAnchorIndex < 0) {
-            librarySelectionAnchorIndex = selectedLibrarySelectionKey.length > 0
-                ? libraryModel.indexForSelectionKey(selectedLibrarySelectionKey)
-                : -1
-        }
     }
 
     function formatSampleRateText(sampleRateHz) {
@@ -1385,356 +1026,8 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    function currentLibrarySelectionIndex() {
-        if (selectedLibrarySelectionKey.length > 0) {
-            const selectedIndex = libraryModel.indexForSelectionKey(selectedLibrarySelectionKey)
-            if (selectedIndex >= 0) {
-                return selectedIndex
-            }
-        }
-        if (libraryModel.count > 0) {
-            return 0
-        }
-        return -1
-    }
-
-    function selectLibraryIndex(index) {
-        if (index < 0 || index >= libraryModel.count) {
-            return false
-        }
-        const rowMap = libraryModel.rowDataForRow(index)
-        if (!rowMap || !(rowMap.selectionKey || "").length) {
-            return false
-        }
-        setLibrarySingleSelection(index, rowMap)
-        scrollLibrarySelectionKeyIntoView(rowMap.selectionKey || "")
-        return true
-    }
-
-    function scrollLibrarySelectionKeyIntoView(selectionKey) {
-        if (!libraryViewRef || !selectionKey || selectionKey.length === 0) {
-            return
-        }
-        const immediateIndex = libraryModel.indexForSelectionKey(selectionKey)
-        if (immediateIndex >= 0) {
-            libraryViewRef.positionViewAtIndex(immediateIndex, ListView.Contain)
-        }
-        Qt.callLater(function() {
-            if (!libraryViewRef) {
-                return
-            }
-            const delayedIndex = libraryModel.indexForSelectionKey(selectionKey)
-            if (delayedIndex >= 0) {
-                libraryViewRef.positionViewAtIndex(delayedIndex, ListView.Contain)
-            }
-        })
-    }
-
-    function focusLibraryViewForNavigation() {
-        if (!libraryViewRef) {
-            return
-        }
-        libraryViewRef.forceActiveFocus()
-        Qt.callLater(function() {
-            if (libraryViewRef) {
-                libraryViewRef.forceActiveFocus()
-            }
-        })
-    }
-
-    function selectLibraryRelative(delta) {
-        if (libraryModel.count <= 0) {
-            return
-        }
-        const current = currentLibrarySelectionIndex()
-        const base = current >= 0 ? current : 0
-        const next = Math.max(0, Math.min(libraryModel.count - 1, base + delta))
-        selectLibraryIndex(next)
-    }
-
-    function expandLibrarySelection() {
-        const index = currentLibrarySelectionIndex()
-        if (index < 0) {
-            return
-        }
-        if (selectedLibrarySelectionKey.length === 0) {
-            selectLibraryIndex(index)
-        }
-        const rowMap = libraryModel.rowDataForRow(index)
-        const rowType = rowMap.rowType || ""
-        const key = rowMap.key || ""
-        const expanded = !!rowMap.expanded
-        const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0 && key.length > 0
-        if (hasChildren && !expanded) {
-            toggleLibraryNode(key)
-            return
-        }
-        if (index + 1 < libraryModel.count) {
-            const nextRow = libraryModel.rowDataForRow(index + 1)
-            const nextDepth = nextRow.depth !== undefined ? nextRow.depth : 0
-            const currentDepth = rowMap.depth !== undefined ? rowMap.depth : 0
-            if (nextDepth > currentDepth) {
-                selectLibraryIndex(index + 1)
-            }
-        }
-    }
-
-    function collapseLibrarySelection() {
-        const index = currentLibrarySelectionIndex()
-        if (index < 0) {
-            return
-        }
-        if (selectedLibrarySelectionKey.length === 0) {
-            selectLibraryIndex(index)
-        }
-        const rowMap = libraryModel.rowDataForRow(index)
-        const key = rowMap.key || ""
-        const expanded = !!rowMap.expanded
-        const rowType = rowMap.rowType || ""
-        const currentDepth = rowMap.depth !== undefined ? rowMap.depth : 0
-        const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0 && key.length > 0
-        if (hasChildren && expanded) {
-            toggleLibraryNode(key)
-            return
-        }
-        for (let i = index - 1; i >= 0; --i) {
-            const candidate = libraryModel.rowDataForRow(i)
-            const candidateDepth = candidate.depth !== undefined ? candidate.depth : 0
-            if (candidateDepth < currentDepth) {
-                selectLibraryIndex(i)
-                return
-            }
-        }
-    }
-
-    function activateLibrarySelection() {
-        const index = currentLibrarySelectionIndex()
-        if (index < 0) {
-            return
-        }
-        if (selectedLibrarySelectionKey.length === 0) {
-            selectLibraryIndex(index)
-        }
-        const rowMap = libraryModel.rowDataForRow(index)
-        const rows = rowsForLibraryAction(rowMap)
-        if (rows.length > 0) {
-            playLibraryRows(rows)
-        }
-    }
-
-    function libraryTypeAheadSearch(prefix) {
-        if (prefix.length === 0) {
-            return false
-        }
-        const total = libraryModel.count
-        if (total <= 0) {
-            return false
-        }
-        for (let i = 0; i < total; ++i) {
-            const rowMap = libraryModel.rowDataForRow(i)
-            if ((rowMap.rowType || "") !== "artist") {
-                continue
-            }
-            const name = (rowMap.artist || "").toLowerCase()
-            if (name.startsWith(prefix)) {
-                selectLibraryIndex(i)
-                return true
-            }
-        }
-        return false
-    }
-
-    function handleLibraryKeyPress(event) {
-        if (globalSearchController.tryCapturePrefill(event)) {
-            return
-        }
-        if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0) {
-            return
-        }
-        if (libraryModel.count <= 0) {
-            return
-        }
-        if (event.key === Qt.Key_Up) {
-            selectLibraryRelative(-1)
-            event.accepted = true
-            return
-        }
-        if (event.key === Qt.Key_Down) {
-            selectLibraryRelative(1)
-            event.accepted = true
-            return
-        }
-        if (event.key === Qt.Key_Right) {
-            expandLibrarySelection()
-            event.accepted = true
-            return
-        }
-        if (event.key === Qt.Key_Left) {
-            collapseLibrarySelection()
-            event.accepted = true
-            return
-        }
-        if (event.key === Qt.Key_Space) {
-            const index = currentLibrarySelectionIndex()
-            if (index >= 0) {
-                const rowMap = libraryModel.rowDataForRow(index)
-                const rowType = rowMap.rowType || ""
-                if (rowType !== "track" && (rowMap.key || "").length > 0 && (rowMap.count || 0) > 0) {
-                    toggleLibraryNode(rowMap.key || "")
-                }
-            }
-            event.accepted = true
-            return
-        }
-        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            activateLibrarySelection()
-            event.accepted = true
-            return
-        }
-
-        const text = event.text || ""
-        if (text.length === 1 && text !== "\n" && text !== "\r" && text !== "\t") {
-            const nextPrefix = (root.libraryTypeAheadBuffer + text).toLowerCase()
-            root.libraryTypeAheadBuffer = nextPrefix
-            libraryTypeAheadTimer.restart()
-            if (libraryTypeAheadSearch(nextPrefix)) {
-                event.accepted = true
-            }
-        }
-    }
-
     function openDiagnostics() {
         diagnosticsDialog.open()
-    }
-
-    function requestLibraryRevealForSearchRow(row) {
-        if (!row) {
-            return
-        }
-        const expandKeys = []
-        if ((row.artistKey || "").length > 0) {
-            expandKeys.push(row.artistKey)
-        }
-        if ((row.albumKey || "").length > 0) {
-            expandKeys.push(row.albumKey)
-        }
-        if ((row.sectionKey || "").length > 0) {
-            expandKeys.push(row.sectionKey)
-        }
-        pendingLibraryRevealExpandKeys = expandKeys
-        pendingLibraryRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")
-        pendingLibraryRevealAttempts = 80
-        Qt.callLater(root.applyPendingLibraryReveal)
-    }
-
-    function ensureLibraryKeyExpanded(key) {
-        const normalized = (key || "").trim()
-        if (normalized.length === 0) {
-            return true
-        }
-        const rowIndex = libraryModel.indexForSelectionKey(normalized)
-        if (rowIndex < 0) {
-            return false
-        }
-        const rowMap = libraryModel.rowDataForRow(rowIndex)
-        if (!rowMap) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0
-        if (!hasChildren) {
-            return true
-        }
-        if (!!rowMap.expanded) {
-            return true
-        }
-        libraryModel.toggleKey(normalized)
-        return false
-    }
-
-    function applyPendingLibraryReveal() {
-        if (pendingLibraryRevealSelectionKey.length === 0) {
-            return
-        }
-        for (let i = 0; i < pendingLibraryRevealExpandKeys.length; ++i) {
-            const expandKey = pendingLibraryRevealExpandKeys[i] || ""
-            if (expandKey.length > 0) {
-                ensureLibraryKeyExpanded(expandKey)
-            }
-        }
-        const index = libraryModel.indexForSelectionKey(pendingLibraryRevealSelectionKey)
-        if (index >= 0) {
-            selectLibraryIndex(index)
-            focusLibraryViewForNavigation()
-            pendingLibraryRevealSelectionKey = ""
-            pendingLibraryRevealExpandKeys = []
-            pendingLibraryRevealAttempts = 0
-            return
-        }
-        if (pendingLibraryRevealAttempts <= 0) {
-            pendingLibraryRevealSelectionKey = ""
-            pendingLibraryRevealExpandKeys = []
-            return
-        }
-        pendingLibraryRevealAttempts -= 1
-        libraryRevealRetryTimer.restart()
-    }
-
-    function applyPendingSearchOpen() {
-        if (pendingSearchOpenSelectionKey.length === 0) {
-            return
-        }
-        for (let i = 0; i < pendingSearchOpenExpandKeys.length; ++i) {
-            const expandKey = pendingSearchOpenExpandKeys[i] || ""
-            if (expandKey.length > 0) {
-                ensureLibraryKeyExpanded(expandKey)
-            }
-        }
-        const index = libraryModel.indexForSelectionKey(pendingSearchOpenSelectionKey)
-        if (index >= 0) {
-            const rowMap = libraryModel.rowDataForRow(index)
-            const openPath = rowMap.openPath || rowMap.trackPath || ""
-            if (openPath.length > 0) {
-                uiBridge.openInFileBrowser(openPath)
-            }
-            pendingSearchOpenSelectionKey = ""
-            pendingSearchOpenExpandKeys = []
-            pendingSearchOpenAttempts = 0
-            return
-        }
-        if (pendingSearchOpenAttempts <= 0) {
-            pendingSearchOpenSelectionKey = ""
-            pendingSearchOpenExpandKeys = []
-            return
-        }
-        pendingSearchOpenAttempts -= 1
-        searchOpenRetryTimer.restart()
-    }
-
-    function openGlobalSearchRowInFileBrowser(row) {
-        if (!row || row.kind !== "item") {
-            return
-        }
-        const rowType = row.rowType || ""
-        if (rowType === "track") {
-            uiBridge.openContainingFolder(row.trackPath || "")
-            return
-        }
-        const selectionKey = rowType === "album" ? (row.albumKey || "") : (row.artistKey || "")
-        if (selectionKey.length === 0) {
-            return
-        }
-        const expandKeys = []
-        if ((row.artistKey || "").length > 0) {
-            expandKeys.push(row.artistKey)
-        }
-        if (rowType === "album" && (row.albumKey || "").length > 0) {
-            expandKeys.push(row.albumKey)
-        }
-        pendingSearchOpenSelectionKey = selectionKey
-        pendingSearchOpenExpandKeys = expandKeys
-        pendingSearchOpenAttempts = 80
-        Qt.callLater(root.applyPendingSearchOpen)
     }
 
     function urlToLocalPath(urlValue) {
@@ -2487,6 +1780,7 @@ Kirigami.ApplicationWindow {
             orientation: Qt.Horizontal
 
             Panes.SidebarPane {
+                controller: libraryController
                 uiBridge: root.uiBridge
                 libraryModel: root.libraryTreeModel
                 uiPalette: root.uiPalette
@@ -2498,25 +1792,15 @@ Kirigami.ApplicationWindow {
                 popupTransitionMs: root.uiPopupTransitionMs
                 snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                 snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
-                pendingLibraryExpandFitKey: root.pendingLibraryExpandFitKey
-                applyPendingLibraryExpansionFit: root.applyPendingLibraryExpansionFit
                 stepScrollView: root.stepScrollView
-                handleLibraryKeyPress: root.handleLibraryKeyPress
-                isLibrarySelectionKeySelected: root.isLibrarySelectionKeySelected
-                toggleLibraryNode: root.toggleLibraryNode
-                handleLibraryRowSelection: root.handleLibraryRowSelection
                 rowsForLibraryAction: root.rowsForLibraryAction
                 playLibraryRows: root.playLibraryRows
                 appendLibraryRows: root.appendLibraryRows
                 isActionableLibraryRow: root.isActionableLibraryRow
                 canOpenTagEditorForLibrary: root.canOpenTagEditorForLibrary
                 openTagEditorForLibrary: root.openTagEditorForLibrary
-                isLibraryTreeLoading: root.isLibraryTreeLoading
                 playAllLibraryTracksAction: playAllLibraryTracksAction
                 appendAllLibraryTracksAction: appendAllLibraryTracksAction
-                onViewReady: function(view) {
-                    root.libraryViewRef = view
-                }
             }
 
             SplitView {
@@ -2746,7 +2030,7 @@ Kirigami.ApplicationWindow {
             root.lastSpectrogramPlaybackState = playbackState
         }
         function onLibraryTreeFrameReceived(version, treeBytes) {
-            root.requestLibraryTreeApply(version, treeBytes || "")
+            libraryController.requestTreeApply(version, treeBytes || "")
         }
         function onAnalysisChanged() {
             applyAnalysisDelta()
@@ -2770,8 +2054,8 @@ Kirigami.ApplicationWindow {
     Connections {
         target: libraryModel
         function onTreeApplied() {
-            root.finishPendingLibraryTreeApply()
-            root.applyPendingLibraryReveal()
+            libraryController.finishPendingTreeApply()
+            libraryController.applyPendingReveal()
         }
         function onNodeExpansionRequested(key, expanded) {
             uiBridge.setLibraryNodeExpanded(key, expanded)
@@ -2787,7 +2071,7 @@ Kirigami.ApplicationWindow {
     }
 
     Component.onCompleted: {
-        root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
+        libraryController.requestTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
         root.displayedPositionSeconds = uiBridge.positionSeconds
         root.syncMutedVolumeState()
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
@@ -2796,7 +2080,7 @@ Kirigami.ApplicationWindow {
         root.positionSmoothingLastMs = Date.now()
         root.positionSmoothingTrackPath = uiBridge.currentTrackPath
         queueController.initializeFromBridge()
-        root.syncLibrarySelectionToVisibleRows()
+        libraryController.syncSelectionToVisibleRows()
         globalSearchController.syncSelectionAfterResultsChange()
     }
 }
