@@ -1100,6 +1100,7 @@ impl BridgeLoopRuntime {
             process_library_event(event, &self.external_queue_details_tx, &mut self.state);
         if urgency.is_pending() {
             self.flags.session_dirty = true;
+            self.handle_library_refresh(urgency);
         }
         urgency
     }
@@ -6656,6 +6657,46 @@ mod tests {
         assert_eq!(snapshot.playback.state, PlaybackState::Stopped);
         assert_eq!(snapshot.playback.current.as_ref(), Some(&track));
         assert_eq!(snapshot.metadata.title, "ferrous_reactive_stopped_metadata");
+    }
+
+    #[test]
+    fn library_event_rebuilds_tree_on_first_wake() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let _ = runtime.drain_pending_updates(&event_tx);
+        runtime.flags.pending_snapshot = SnapshotUrgency::None;
+        while event_rx.try_recv().is_ok() {}
+
+        let root = p("/music");
+        let snapshot = LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks: vec![library_track(
+                "/music/Artist/Album/01 - Song.flac",
+                &root,
+                "Artist",
+                "Album",
+                Some(2020),
+                Some(1),
+            )],
+            ..LibrarySnapshot::default()
+        };
+
+        runtime.handle_wake(
+            BridgeLoopWake::Library(LibraryEvent::Snapshot(snapshot)),
+            &event_tx,
+        );
+
+        let snapshot = match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(BridgeEvent::Snapshot(snapshot)) => *snapshot,
+            other => panic!("expected library snapshot, got {other:?}"),
+        };
+        assert_eq!(snapshot.library.tracks.len(), 1);
+        assert!(snapshot.pre_built_tree_bytes.is_some());
+        assert!(!snapshot
+            .pre_built_tree_bytes
+            .as_ref()
+            .is_some_and(|bytes| bytes.is_empty()));
     }
 
     #[test]
