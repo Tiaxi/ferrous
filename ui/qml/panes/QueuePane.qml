@@ -7,32 +7,23 @@ import "../components" as Components
 Rectangle {
     id: root
 
+    required property var controller
     required property var uiBridge
     required property var uiPalette
     required property real preferredHeight
     required property int playlistIndicatorColumnWidth
     required property int playlistOrderColumnWidth
     required property var playlistOrderText
-    required property var isQueueIndexSelected
-    required property var handleQueueRowSelection
     required property var openTagEditorForPlaylistRow
-    required property var requestPlaylistViewportRestoreWindow
-    required property var removeSelectedQueueTrack
     required property var stepScrollView
-    required property var handlePlaylistKeyPress
     required property var clearPlaylistAction
     required property int popupTransitionMs
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
-    required property var selectedQueueIndices
     required property var rowsForLibraryAction
     required property var appendLibraryRows
     required property var droppedExternalPaths
     required property var submitExternalImport
-    required property var applyPendingPlaylistViewportRestore
-    required property var handleQueueSnapshotChanged
-
-    signal viewReady(var view)
 
     color: root.uiPalette.uiSurfaceRaisedColor
     SplitView.fillWidth: true
@@ -100,14 +91,14 @@ Rectangle {
                     ? (playlistVerticalScrollBar.width + 6)
                     : 0
 
-                Component.onCompleted: root.viewReady(playlistView)
-                onContentYChanged: root.applyPendingPlaylistViewportRestore()
-                onContentHeightChanged: root.applyPendingPlaylistViewportRestore()
-                onCountChanged: root.applyPendingPlaylistViewportRestore()
-                onHeightChanged: root.applyPendingPlaylistViewportRestore()
+                Component.onCompleted: root.controller.registerView(playlistView)
+                onContentYChanged: root.controller.applyPendingViewportRestore()
+                onContentHeightChanged: root.controller.applyPendingViewportRestore()
+                onCountChanged: root.controller.applyPendingViewportRestore()
+                onHeightChanged: root.controller.applyPendingViewportRestore()
 
                 Keys.onPressed: function(event) {
-                    root.handlePlaylistKeyPress(event)
+                    root.controller.handlePlaylistKeyPress(event)
                 }
 
                 ScrollBar.vertical: ScrollBar {
@@ -150,7 +141,7 @@ Rectangle {
                     Drag.hotSpot.y: height * 0.5
                     Drag.dragType: Drag.Automatic
                     Drag.supportedActions: Qt.MoveAction
-                    color: root.isQueueIndexSelected(index)
+                    color: root.controller.isIndexSelected(index)
                         ? root.uiPalette.uiSelectionColor
                         : (index % 2 === 0 ? root.uiPalette.uiSurfaceRaisedColor
                                             : root.uiPalette.uiSurfaceAltColor)
@@ -177,7 +168,7 @@ Rectangle {
                             Layout.preferredWidth: root.playlistIndicatorColumnWidth
                             horizontalAlignment: Text.AlignHCenter
                             font.bold: true
-                            color: root.isQueueIndexSelected(index)
+                            color: root.controller.isIndexSelected(index)
                                 ? root.uiPalette.uiSelectionTextColor
                                 : (playlistRow.isCurrentQueueRow
                                     ? (root.uiBridge.playbackState === "Playing"
@@ -190,7 +181,7 @@ Rectangle {
                             text: root.playlistOrderText(index)
                             Layout.preferredWidth: root.playlistOrderColumnWidth
                             horizontalAlignment: Text.AlignRight
-                            color: root.isQueueIndexSelected(index)
+                            color: root.controller.isIndexSelected(index)
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
@@ -199,7 +190,7 @@ Rectangle {
                             text: titleValue
                             Layout.fillWidth: true
                             elide: Text.ElideRight
-                            color: root.isQueueIndexSelected(index)
+                            color: root.controller.isIndexSelected(index)
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
@@ -208,7 +199,7 @@ Rectangle {
                             text: artistValue
                             Layout.preferredWidth: 170
                             elide: Text.ElideRight
-                            color: root.isQueueIndexSelected(index)
+                            color: root.controller.isIndexSelected(index)
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
@@ -217,7 +208,7 @@ Rectangle {
                             text: albumValue
                             Layout.preferredWidth: 190
                             elide: Text.ElideRight
-                            color: root.isQueueIndexSelected(index)
+                            color: root.controller.isIndexSelected(index)
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
@@ -226,7 +217,7 @@ Rectangle {
                             text: lengthTextValue
                             Layout.preferredWidth: 76
                             horizontalAlignment: Text.AlignRight
-                            color: root.isQueueIndexSelected(index)
+                            color: root.controller.isIndexSelected(index)
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
@@ -246,7 +237,7 @@ Rectangle {
 
                         onPressed: function(mouse) {
                             playlistView.forceActiveFocus()
-                            root.handleQueueRowSelection(
+                            root.controller.handleRowSelection(
                                 index,
                                 mouse.button,
                                 mouse.modifiers || Qt.NoModifier)
@@ -316,11 +307,11 @@ Rectangle {
                             if (playlistContextMenu.rowIndex < 0) {
                                 return
                             }
-                            if (root.isQueueIndexSelected(playlistContextMenu.rowIndex)
-                                    && root.selectedQueueIndices.length > 1) {
-                                root.removeSelectedQueueTrack()
+                            if (root.controller.isIndexSelected(playlistContextMenu.rowIndex)
+                                    && root.controller.selectedIndices.length > 1) {
+                                root.controller.removeSelectedTrack()
                             } else {
-                                root.requestPlaylistViewportRestoreWindow(700)
+                                root.controller.requestViewportRestoreWindow(700)
                                 root.uiBridge.removeAt(playlistContextMenu.rowIndex)
                             }
                         }
@@ -371,7 +362,7 @@ Rectangle {
                 target: root.uiBridge
 
                 function onSnapshotChanged() {
-                    root.handleQueueSnapshotChanged(playlistView)
+                    root.controller.handleSnapshotChanged(playlistView)
                 }
             }
 

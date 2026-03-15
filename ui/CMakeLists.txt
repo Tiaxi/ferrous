@@ -96,6 +96,7 @@ qt_add_qml_module(ferrous
         qml/components/UiPalette.qml
         qml/components/ViewerCloseButton.qml
         qml/controllers/GlobalSearchController.qml
+        qml/controllers/QueueController.qml
         qml/dialogs/AboutDialog.qml
         qml/dialogs/DiagnosticsDialog.qml
         qml/dialogs/GlobalSearchDialog.qml

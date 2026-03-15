@@ -532,6 +532,11 @@ Item {
         requestOpenInFileBrowserForSearchRow: function(row) {}
     }
 
+    Controllers.QueueController {
+        id: queueController
+        uiBridge: bridge
+    }
+
     QtObject {
         id: tagEditorApi
         property bool open: false
@@ -758,30 +763,23 @@ Item {
         y: 180
         width: 720
         height: 320
+        controller: queueController
         uiBridge: bridge
         uiPalette: palette
         preferredHeight: height
         playlistIndicatorColumnWidth: 22
         playlistOrderColumnWidth: 34
         playlistOrderText: function(index) { return String(index + 1) }
-        isQueueIndexSelected: function(index) { return false }
-        handleQueueRowSelection: function(index, button, modifiers) {}
         openTagEditorForPlaylistRow: function(index) {}
-        requestPlaylistViewportRestoreWindow: function(durationMs) {}
-        removeSelectedQueueTrack: function() {}
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        handlePlaylistKeyPress: function(event) {}
         clearPlaylistAction: clearPlaylistAction
         popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
-        selectedQueueIndices: []
         rowsForLibraryAction: function(rowMap) { return [] }
         appendLibraryRows: function(rows) {}
         droppedExternalPaths: function(drop) { return [] }
         submitExternalImport: function(paths, replaceQueue) { return false }
-        applyPendingPlaylistViewportRestore: function() {}
-        handleQueueSnapshotChanged: function(view) {}
     }
 
     Viewers.SpectrogramSurface {

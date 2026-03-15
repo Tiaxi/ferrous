@@ -36,10 +36,6 @@ Kirigami.ApplicationWindow {
     property var selectedLibraryPlayPaths: []
     property var selectedLibrarySelectionKeys: []
     property int librarySelectionAnchorIndex: -1
-    property var selectedQueueIndices: []
-    property var selectedQueueIndexLookup: ({})
-    property int queueSelectionAnchorIndex: -1
-    property int lastSyncedBridgeSelectedQueueIndex: -2
     property int lastAppliedLibraryVersion: -1
     property int pendingLibraryVersion: -1
     property bool hasReceivedLibraryTreeFrame: false
@@ -47,13 +43,6 @@ Kirigami.ApplicationWindow {
     property real pendingLibraryAnchorOffset: 0
     property real pendingLibraryAnchorFallbackY: 0
     property bool pendingLibraryAnchorValid: false
-    property int lastSeenQueueVersion: -1
-    property int lastCenteredQueueIndex: -2
-    property string lastAutoCenterPlaybackState: ""
-    property string lastAutoCenterTrackPath: ""
-    property real playlistViewportRestoreUntilMs: 0
-    property real playlistViewportRestoreContentY: 0
-    property bool autoCenterQueueSelection: true
     property real displayedPositionSeconds: 0
     property bool positionSmoothingPrimed: false
     property real positionSmoothingAnchorSeconds: 0
@@ -100,7 +89,6 @@ Kirigami.ApplicationWindow {
     property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
     property var libraryViewRef: null
-    property var playlistViewRef: null
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -151,6 +139,11 @@ Kirigami.ApplicationWindow {
         requestLibraryRevealForSearchRow: root.requestLibraryRevealForSearchRow
         focusLibraryViewForNavigation: root.focusLibraryViewForNavigation
         requestOpenInFileBrowserForSearchRow: root.openGlobalSearchRowInFileBrowser
+    }
+
+    Controllers.QueueController {
+        id: queueController
+        uiBridge: root.uiBridge
     }
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
@@ -769,8 +762,8 @@ Kirigami.ApplicationWindow {
             return
         }
         let indices = [rowIndex]
-        if (root.isQueueIndexSelected(rowIndex) && root.selectedQueueIndices.length > 1) {
-            indices = root.selectedQueueIndices.slice().sort(function(a, b) { return a - b })
+        if (queueController.isIndexSelected(rowIndex) && queueController.selectedIndices.length > 1) {
+            indices = queueController.selectedIndices.slice().sort(function(a, b) { return a - b })
         }
         const selections = []
         for (let i = 0; i < indices.length; ++i) {
@@ -870,30 +863,6 @@ Kirigami.ApplicationWindow {
 
     function librarySelectionCount() {
         return selectedLibrarySelectionKeys.length
-    }
-
-    function queueSelectionCount() {
-        if (selectedQueueIndices.length > 0) {
-            return selectedQueueIndices.length
-        }
-        return uiBridge.selectedQueueIndex >= 0 ? 1 : 0
-    }
-
-    function isQueueIndexSelected(index) {
-        return !!selectedQueueIndexLookup[index]
-    }
-
-    function setSelectedQueueIndices(indices) {
-        const next = indices || []
-        selectedQueueIndices = next
-        const lookup = ({})
-        for (let i = 0; i < next.length; ++i) {
-            const idx = next[i]
-            if (idx >= 0 && idx < uiBridge.queueLength) {
-                lookup[idx] = true
-            }
-        }
-        selectedQueueIndexLookup = lookup
     }
 
     function isLibrarySelectionKeySelected(key) {
@@ -1222,16 +1191,6 @@ Kirigami.ApplicationWindow {
         finishPendingLibraryTreeApply()
     }
 
-    function resetQueueSelectionForUpdatedQueue() {
-        if (uiBridge.selectedQueueIndex >= 0 && uiBridge.selectedQueueIndex < uiBridge.queueLength) {
-            setSelectedQueueIndices([uiBridge.selectedQueueIndex])
-            queueSelectionAnchorIndex = uiBridge.selectedQueueIndex
-        } else {
-            setSelectedQueueIndices([])
-            queueSelectionAnchorIndex = -1
-        }
-    }
-
     function isLibraryTreeLoading() {
         if (pendingLibraryVersion >= 0 || libraryModel.parsing) {
             return true
@@ -1240,168 +1199,6 @@ Kirigami.ApplicationWindow {
             return true
         }
         return uiBridge.libraryScanInProgress && (!libraryViewRef || libraryViewRef.count === 0)
-    }
-
-    function clearQueueSelection() {
-        setSelectedQueueIndices([])
-        queueSelectionAnchorIndex = -1
-        uiBridge.selectQueueIndex(-1)
-    }
-
-    function requestPlaylistViewportRestoreWindow(durationMs) {
-        if (!playlistViewRef) {
-            return
-        }
-        const ms = Math.max(100, durationMs || 700)
-        playlistViewportRestoreContentY = playlistViewRef.contentY
-        playlistViewportRestoreUntilMs = Math.max(playlistViewportRestoreUntilMs, Date.now() + ms)
-    }
-
-    function playlistViewportRestoreActive() {
-        return playlistViewportRestoreUntilMs > Date.now()
-    }
-
-    function applyPendingPlaylistViewportRestore() {
-        if (!playlistViewRef || !playlistViewportRestoreActive()) {
-            return
-        }
-        const maxY = Math.max(0, playlistViewRef.contentHeight - playlistViewRef.height)
-        const targetY = Math.max(0, Math.min(maxY, playlistViewportRestoreContentY))
-        if (Math.abs(playlistViewRef.contentY - targetY) > 0.5) {
-            playlistViewRef.contentY = targetY
-        }
-    }
-
-    function handleQueueSnapshotChanged(view) {
-        const playlistView = view || playlistViewRef
-        if (!playlistView) {
-            return
-        }
-        root.playlistViewRef = playlistView
-        const playbackState = uiBridge.playbackState || ""
-        const currentTrackPath = uiBridge.currentTrackPath || ""
-        if (!root.autoCenterQueueSelection) {
-            root.lastAutoCenterPlaybackState = playbackState
-            root.lastAutoCenterTrackPath = currentTrackPath
-            return
-        }
-        if (root.playlistViewportRestoreActive()) {
-            root.lastAutoCenterPlaybackState = playbackState
-            root.lastAutoCenterTrackPath = currentTrackPath
-            return
-        }
-        const targetIndex = uiBridge.playingQueueIndex
-        if (playbackState === "Stopped"
-                && root.lastAutoCenterPlaybackState !== "Stopped") {
-            root.lastAutoCenterPlaybackState = playbackState
-            root.lastAutoCenterTrackPath = currentTrackPath
-            return
-        }
-        const trackChanged = currentTrackPath.length > 0
-            && currentTrackPath !== root.lastAutoCenterTrackPath
-        const resumedFromStop = playbackState !== "Stopped"
-            && root.lastAutoCenterPlaybackState === "Stopped"
-        const needsInitialCenter = root.lastCenteredQueueIndex < 0
-        if (targetIndex >= 0 && (trackChanged || resumedFromStop || needsInitialCenter)) {
-            playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
-            root.lastCenteredQueueIndex = targetIndex
-        }
-        root.lastAutoCenterPlaybackState = playbackState
-        root.lastAutoCenterTrackPath = currentTrackPath
-    }
-
-    function setQueueSingleSelection(index) {
-        if (index < 0 || index >= uiBridge.queueLength) {
-            clearQueueSelection()
-            return
-        }
-        if (selectedQueueIndices.length === 1
-                && selectedQueueIndices[0] === index
-                && queueSelectionAnchorIndex === index
-                && uiBridge.selectedQueueIndex === index) {
-            return
-        }
-        setSelectedQueueIndices([index])
-        queueSelectionAnchorIndex = index
-        uiBridge.selectQueueIndex(index)
-    }
-
-    function setQueueRangeSelection(index) {
-        if (index < 0 || index >= uiBridge.queueLength) {
-            return
-        }
-        const anchor = queueSelectionAnchorIndex >= 0
-            ? queueSelectionAnchorIndex
-            : (uiBridge.selectedQueueIndex >= 0 ? uiBridge.selectedQueueIndex : index)
-        const first = Math.min(anchor, index)
-        const last = Math.max(anchor, index)
-        const indices = []
-        for (let i = first; i <= last; ++i) {
-            indices.push(i)
-        }
-        setSelectedQueueIndices(indices)
-        queueSelectionAnchorIndex = anchor
-        uiBridge.selectQueueIndex(index)
-    }
-
-    function toggleQueueSelection(index) {
-        if (index < 0 || index >= uiBridge.queueLength) {
-            return
-        }
-        const indices = selectedQueueIndices.slice()
-        const pos = indices.indexOf(index)
-        if (pos >= 0) {
-            indices.splice(pos, 1)
-        } else {
-            indices.push(index)
-            indices.sort(function(a, b) { return a - b })
-        }
-        setSelectedQueueIndices(indices)
-        queueSelectionAnchorIndex = index
-        if (indices.length > 0) {
-            uiBridge.selectQueueIndex(index)
-        } else {
-            uiBridge.selectQueueIndex(-1)
-        }
-    }
-
-    function handleQueueRowSelection(index, button, modifiers) {
-        const shift = (modifiers & Qt.ShiftModifier) !== 0
-        const ctrl = (modifiers & Qt.ControlModifier) !== 0
-        if (shift) {
-            setQueueRangeSelection(index)
-            return
-        }
-        if (ctrl) {
-            toggleQueueSelection(index)
-            return
-        }
-        if (button === Qt.RightButton && isQueueIndexSelected(index)) {
-            queueSelectionAnchorIndex = index
-            uiBridge.selectQueueIndex(index)
-            return
-        }
-        setQueueSingleSelection(index)
-    }
-
-    function syncQueueSelectionToCurrentQueue() {
-        const valid = []
-        const seen = ({})
-        for (let i = 0; i < selectedQueueIndices.length; ++i) {
-            const idx = selectedQueueIndices[i]
-            if (idx >= 0 && idx < uiBridge.queueLength && !seen[idx]) {
-                seen[idx] = true
-                valid.push(idx)
-            }
-        }
-        valid.sort(function(a, b) { return a - b })
-        if (valid.length === 0 && uiBridge.selectedQueueIndex >= 0) {
-            valid.push(uiBridge.selectedQueueIndex)
-        }
-        setSelectedQueueIndices(valid)
-        if (queueSelectionAnchorIndex < 0 || queueSelectionAnchorIndex >= uiBridge.queueLength) {
-            queueSelectionAnchorIndex = valid.length > 0 ? valid[valid.length - 1] : -1
-        }
     }
 
     function syncLibrarySelectionToVisibleRows() {
@@ -1585,160 +1382,6 @@ Kirigami.ApplicationWindow {
             ]
         default:
             return []
-        }
-    }
-
-    function selectQueueRelative(delta) {
-        if (uiBridge.queueLength <= 0) {
-            return
-        }
-        const current = uiBridge.selectedQueueIndex >= 0
-            ? uiBridge.selectedQueueIndex
-            : uiBridge.playingQueueIndex
-        const base = current >= 0 ? current : 0
-        const nextIdx = Math.max(0, Math.min(uiBridge.queueLength - 1, base + delta))
-        setQueueSingleSelection(nextIdx)
-    }
-
-    function firstSelectedQueueIndex() {
-        let first = -1
-        for (let i = 0; i < selectedQueueIndices.length; ++i) {
-            const idx = selectedQueueIndices[i]
-            if (idx < 0 || idx >= uiBridge.queueLength) {
-                continue
-            }
-            if (first < 0 || idx < first) {
-                first = idx
-            }
-        }
-        if (first >= 0) {
-            return first
-        }
-        if (uiBridge.selectedQueueIndex >= 0 && uiBridge.selectedQueueIndex < uiBridge.queueLength) {
-            return uiBridge.selectedQueueIndex
-        }
-        return -1
-    }
-
-    function playFirstSelectedQueueTrack() {
-        const target = firstSelectedQueueIndex()
-        if (target >= 0) {
-            uiBridge.playAt(target)
-        }
-    }
-
-    function playlistPageStep() {
-        const rowHeight = 24
-        const viewportHeight = playlistViewRef ? playlistViewRef.height : 240
-        return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1)
-    }
-
-    function ensurePlaylistIndexVisible(index) {
-        if (!playlistViewRef || index < 0) {
-            return
-        }
-        const firstVisible = playlistViewRef.indexAt(0, 0)
-        const lastVisible = playlistViewRef.indexAt(0, playlistViewRef.height - 1)
-        if (firstVisible >= 0
-                && lastVisible >= 0
-                && index >= firstVisible
-                && index <= lastVisible) {
-            return
-        }
-        playlistViewRef.positionViewAtIndex(index, ListView.Contain)
-    }
-
-    function selectAllQueueItems() {
-        if (uiBridge.queueLength <= 0) {
-            clearQueueSelection()
-            return
-        }
-        const indices = []
-        for (let i = 0; i < uiBridge.queueLength; ++i) {
-            indices.push(i)
-        }
-        const primary = uiBridge.selectedQueueIndex >= 0
-            ? uiBridge.selectedQueueIndex
-            : 0
-        setSelectedQueueIndices(indices)
-        queueSelectionAnchorIndex = primary
-        uiBridge.selectQueueIndex(primary)
-    }
-
-    function handlePlaylistKeyPress(event) {
-        if (!event) {
-            return
-        }
-        const modifiers = event.modifiers || Qt.NoModifier
-        const ctrl = (modifiers & Qt.ControlModifier) !== 0
-        const shift = (modifiers & Qt.ShiftModifier) !== 0
-
-        if (!ctrl && !shift
-                && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
-            playFirstSelectedQueueTrack()
-            event.accepted = true
-            return
-        }
-
-        if (ctrl && !shift && event.key === Qt.Key_A) {
-            selectAllQueueItems()
-            event.accepted = true
-            return
-        }
-
-        let delta = 0
-        if (event.key === Qt.Key_Up) {
-            delta = -1
-        } else if (event.key === Qt.Key_Down) {
-            delta = 1
-        } else if (event.key === Qt.Key_PageUp) {
-            delta = -playlistPageStep()
-        } else if (event.key === Qt.Key_PageDown) {
-            delta = playlistPageStep()
-        } else {
-            return
-        }
-
-        if (uiBridge.queueLength <= 0) {
-            event.accepted = true
-            return
-        }
-
-        const current = uiBridge.selectedQueueIndex >= 0
-            ? uiBridge.selectedQueueIndex
-            : (uiBridge.playingQueueIndex >= 0 ? uiBridge.playingQueueIndex : 0)
-        const next = Math.max(0, Math.min(uiBridge.queueLength - 1, current + delta))
-        if (shift) {
-            setQueueRangeSelection(next)
-        } else {
-            setQueueSingleSelection(next)
-        }
-        ensurePlaylistIndexVisible(next)
-        event.accepted = true
-    }
-
-    function removeSelectedQueueTrack() {
-        if (selectedQueueIndices.length > 0) {
-            const indices = selectedQueueIndices.slice()
-            indices.sort(function(a, b) { return b - a })
-            if (uiBridge.queueLength > 0 && indices.length >= uiBridge.queueLength) {
-                requestPlaylistViewportRestoreWindow(700)
-                uiBridge.clearQueue()
-                setSelectedQueueIndices([])
-                queueSelectionAnchorIndex = -1
-                return
-            }
-            requestPlaylistViewportRestoreWindow(Math.max(700, indices.length * 120))
-            for (let i = 0; i < indices.length; ++i) {
-                uiBridge.removeAt(indices[i])
-            }
-            setSelectedQueueIndices([])
-            queueSelectionAnchorIndex = -1
-            return
-        }
-        if (uiBridge.selectedQueueIndex >= 0) {
-            requestPlaylistViewportRestoreWindow(700)
-            uiBridge.removeAt(uiBridge.selectedQueueIndex)
         }
     }
 
@@ -2439,22 +2082,22 @@ Kirigami.ApplicationWindow {
         id: removeSelectedTrackAction
         text: "Remove Selected Track"
         shortcut: "Delete"
-        enabled: root.queueSelectionCount() > 0
-        onTriggered: root.removeSelectedQueueTrack()
+        enabled: queueController.selectionCount() > 0
+        onTriggered: queueController.removeSelectedTrack()
     }
     Action {
         id: selectPreviousTrackAction
         text: "Select Previous Track"
         shortcut: "Ctrl+Up"
         enabled: uiBridge.queueLength > 0
-        onTriggered: root.selectQueueRelative(-1)
+        onTriggered: queueController.selectRelative(-1)
     }
     Action {
         id: selectNextTrackAction
         text: "Select Next Track"
         shortcut: "Ctrl+Down"
         enabled: uiBridge.queueLength > 0
-        onTriggered: root.selectQueueRelative(1)
+        onTriggered: queueController.selectRelative(1)
     }
     Action {
         id: globalSearchAction
@@ -2471,8 +2114,8 @@ Kirigami.ApplicationWindow {
         id: autoCenterSelectionAction
         text: "Follow Current Track in Playlist"
         checkable: true
-        checked: root.autoCenterQueueSelection
-        onTriggered: root.autoCenterQueueSelection = checked
+        checked: queueController.autoCenterSelection
+        onTriggered: queueController.autoCenterSelection = checked
     }
     Action {
         id: resetSpectrogramAction
@@ -2881,33 +2524,23 @@ Kirigami.ApplicationWindow {
                 SplitView.fillWidth: true
 
                 Panes.QueuePane {
+                    controller: queueController
                     uiBridge: root.uiBridge
                     uiPalette: root.uiPalette
                     preferredHeight: root.height * 0.58
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: root.playlistOrderText
-                    isQueueIndexSelected: root.isQueueIndexSelected
-                    handleQueueRowSelection: root.handleQueueRowSelection
                     openTagEditorForPlaylistRow: root.openTagEditorForPlaylistRow
-                    requestPlaylistViewportRestoreWindow: root.requestPlaylistViewportRestoreWindow
-                    removeSelectedQueueTrack: root.removeSelectedQueueTrack
                     stepScrollView: root.stepScrollView
-                    handlePlaylistKeyPress: root.handlePlaylistKeyPress
                     clearPlaylistAction: clearPlaylistAction
                     popupTransitionMs: root.uiPopupTransitionMs
                     snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                     snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
-                    selectedQueueIndices: root.selectedQueueIndices
                     rowsForLibraryAction: root.rowsForLibraryAction
                     appendLibraryRows: root.appendLibraryRows
                     droppedExternalPaths: root.droppedExternalPaths
                     submitExternalImport: root.submitExternalImport
-                    applyPendingPlaylistViewportRestore: root.applyPendingPlaylistViewportRestore
-                    handleQueueSnapshotChanged: root.handleQueueSnapshotChanged
-                    onViewReady: function(view) {
-                        root.playlistViewRef = view
-                    }
                 }
 
                 Panes.SpectrogramPane {
@@ -3058,17 +2691,7 @@ Kirigami.ApplicationWindow {
                     root.albumArtViewerFileInfo = ({})
                 }
             }
-            if (uiBridge.queueVersion !== root.lastSeenQueueVersion) {
-                root.lastSeenQueueVersion = uiBridge.queueVersion
-                root.resetQueueSelectionForUpdatedQueue()
-                root.applyPendingPlaylistViewportRestore()
-                root.syncQueueSelectionToCurrentQueue()
-                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
-            }
-            if (uiBridge.selectedQueueIndex !== root.lastSyncedBridgeSelectedQueueIndex) {
-                root.syncQueueSelectionToCurrentQueue()
-                root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
-            }
+            queueController.handleBridgeSnapshotUpdate()
         }
         function onPlaybackChanged() {
             const playbackState = uiBridge.playbackState || ""
@@ -3165,9 +2788,6 @@ Kirigami.ApplicationWindow {
 
     Component.onCompleted: {
         root.requestLibraryTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
-        root.lastSeenQueueVersion = uiBridge.queueVersion
-        root.lastAutoCenterPlaybackState = uiBridge.playbackState
-        root.lastAutoCenterTrackPath = uiBridge.currentTrackPath
         root.displayedPositionSeconds = uiBridge.positionSeconds
         root.syncMutedVolumeState()
         root.positionSmoothingPrimed = uiBridge.playbackState === "Playing"
@@ -3175,8 +2795,7 @@ Kirigami.ApplicationWindow {
         root.positionSmoothingAnimationMs = 0
         root.positionSmoothingLastMs = Date.now()
         root.positionSmoothingTrackPath = uiBridge.currentTrackPath
-        root.syncQueueSelectionToCurrentQueue()
-        root.lastSyncedBridgeSelectedQueueIndex = uiBridge.selectedQueueIndex
+        queueController.initializeFromBridge()
         root.syncLibrarySelectionToVisibleRows()
         globalSearchController.syncSelectionAfterResultsChange()
     }
