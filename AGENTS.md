@@ -28,6 +28,11 @@
 - Treat UI jank, visible hitching, delayed feedback, and blocked interaction as correctness issues, not polish-only issues.
 - Apply this rule to both backend and frontend design and implementation work, especially when introducing I/O, parsing, image processing, model updates, or expensive recomputation.
 
+## Test Rule
+- Always add unit tests when feasible to lock in implementation details, behavioural logic, or bug fixes and prevent future regressions.
+- Prefer testing the specific invariant or edge case that motivated the change.
+- Tests should be self-contained and not depend on external files or network access.
+
 ## Commit Policy
 - Autonomous commits are allowed in this repository.
 - Commit when all of the following are true:

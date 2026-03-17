@@ -361,6 +361,27 @@ mod tests {
     }
 
     #[test]
+    fn play_at_without_play_stays_stopped() {
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let (pcm_tx, _pcm_rx) = unbounded();
+        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.command(PlaybackCommand::PlayAt(1));
+        engine.command(PlaybackCommand::Poll);
+
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.current.as_ref(), Some(&b));
+        assert_eq!(
+            snap.state,
+            PlaybackState::Stopped,
+            "PlayAt alone must not start playback (session restore relies on this)"
+        );
+    }
+
+    #[test]
     fn previous_at_start_keeps_first_track() {
         let (analysis_tx, _analysis_rx) = unbounded();
         let (pcm_tx, _pcm_rx) = unbounded();
@@ -1255,7 +1276,7 @@ mod backend {
             let Some(path) = path else {
                 return;
             };
-            self.switch_to_path(path, current_index, TrackChangeKind::Manual, true);
+            self.switch_to_path(path, current_index, TrackChangeKind::Manual, false);
         }
 
         fn advance_manual(&mut self, next: bool) {
