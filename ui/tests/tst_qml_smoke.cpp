@@ -1345,7 +1345,11 @@ void QmlSmokeTest::spectrogramQueuedDrainConsumesReadyRows() {
     QVERIFY(pendingBefore >= static_cast<size_t>(extraRows));
 
     item.m_pendingPhase = 3.0;
-    QVERIFY(item.advanceAnimationLocked(0.0));
+    // Use a small but valid dt (1ms) so gapDetected is false and the drain
+    // is governed by pendingPhase rather than consuming the entire backlog.
+    // At 46.875 rows/s with max boost=3× the phase advances by ~0.14 per ms,
+    // keeping floor(3 + advance) == 3 regardless of backlog size.
+    QVERIFY(item.advanceAnimationLocked(0.001));
 
     QCOMPARE(item.m_columns.size(), columnsBefore + 3);
     QCOMPARE(item.m_pendingColumns.size(), pendingBefore - 3);
