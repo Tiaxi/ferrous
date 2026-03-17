@@ -151,8 +151,8 @@ pub(crate) fn probe_raw_surround_technical_details(
             };
 
             if details.duration_secs.is_none() {
-                tracing::warn!(
-                    "GStreamer Discoverer returned no duration for {}, \
+                eprintln!(
+                    "[ferrous] GStreamer Discoverer returned no duration for {}, \
                      trying bitstream header fallback",
                     path.display()
                 );
@@ -162,8 +162,8 @@ pub(crate) fn probe_raw_surround_technical_details(
             Some(details)
         }
         Err(err) => {
-            tracing::warn!(
-                "GStreamer Discoverer failed for {}: {} — \
+            eprintln!(
+                "[ferrous] GStreamer Discoverer failed for {}: {} — \
                  this may be caused by an appended APEv2 tag confusing the demuxer; \
                  trying bitstream header fallback",
                 path.display(),

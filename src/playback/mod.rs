@@ -1018,7 +1018,7 @@ mod backend {
                     pcm_tx,
                     analysis_track_token,
                 ) {
-                    tracing::error!("gstreamer playback engine failed: {err:#}");
+                    eprintln!("[ferrous] gstreamer playback engine failed: {err:#}");
                 }
             });
 
@@ -1485,8 +1485,8 @@ mod backend {
                     self.emit_snapshot();
                 }
                 gst::MessageView::Error(err) => {
-                    tracing::error!(
-                        "gstreamer error from {:?}: {} ({:?})",
+                    eprintln!(
+                        "[ferrous] gstreamer error from {:?}: {} ({:?})",
                         err.src().map(gstreamer::prelude::GstObjectExt::path_string),
                         err.error(),
                         err.debug()
@@ -1918,9 +1918,8 @@ mod backend {
         gst::ElementFactory::make(&output_sink_name)
             .build()
             .or_else(|_| {
-                tracing::warn!(
-                    "failed to build output sink '{}', falling back to autoaudiosink",
-                    output_sink_name
+                eprintln!(
+                    "[ferrous] failed to build output sink '{output_sink_name}', falling back to autoaudiosink"
                 );
                 gst::ElementFactory::make("autoaudiosink").build()
             })

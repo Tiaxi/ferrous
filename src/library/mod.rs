@@ -1647,7 +1647,7 @@ fn load_existing_tracks_for_root(
     let mut existing = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked
+        SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked, duration_secs
         FROM tracks
         WHERE root_path = ?1
            OR (root_path = '' AND (path = ?1 OR path LIKE ?1 || '/%'))
@@ -1661,18 +1661,22 @@ fn load_existing_tracks_for_root(
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, Option<f64>>(6)?,
             ))
         });
         if let Ok(rows) = mapped {
             for item in rows.flatten() {
-                let file_stem = Path::new(&item.0)
+                let path = Path::new(&item.0);
+                let file_stem = path
                     .file_stem()
                     .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
                 let filename_fallback = !item.1.trim().is_empty() && item.1 == file_stem;
+                let missing_duration = item.6.is_none() || item.6.is_some_and(|d| d <= 0.0);
                 let suspicious_metadata = item.1.trim().is_empty()
                     || (item.2.is_none()
                         && filename_fallback
-                        && leading_track_number(&file_stem).is_some());
+                        && leading_track_number(&file_stem).is_some())
+                    || (missing_duration && is_raw_surround_file(path));
                 existing.insert(
                     item.0,
                     ExistingTrackScanState {
@@ -1970,8 +1974,8 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
         }
 
         if out.duration_secs.is_none() {
-            tracing::warn!(
-                "could not determine duration for raw surround file: {}",
+            eprintln!(
+                "[ferrous] could not determine duration for raw surround file: {}",
                 path.display()
             );
         }
