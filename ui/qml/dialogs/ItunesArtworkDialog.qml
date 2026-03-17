@@ -16,6 +16,8 @@ Dialog {
     property int pendingApplyIndex: -1
     property string currentArtworkSource: ""
     property var currentArtworkInfo: ({})
+    property real _savedContentY: 0
+    property int _savedResultCount: 0
     readonly property real hostWidth: (parent && parent.width > 0) ? parent.width : root.windowRoot.width
     readonly property real hostHeight: (parent && parent.height > 0) ? parent.height : root.windowRoot.height
 
@@ -128,7 +130,14 @@ Dialog {
         target: root.uiBridge
 
         function onItunesArtworkChanged() {
+            root._savedContentY = itunesArtworkResultsView.contentY
+            root._savedResultCount = itunesArtworkResultsView.count
             root.processPendingSuggestionAction()
+            Qt.callLater(() => {
+                if (itunesArtworkResultsView.count === root._savedResultCount) {
+                    itunesArtworkResultsView.contentY = root._savedContentY
+                }
+            })
         }
 
         function onSnapshotChanged() {
