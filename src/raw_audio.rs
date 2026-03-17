@@ -122,7 +122,7 @@ pub(crate) fn probe_raw_surround_technical_details(
     gst::init().ok()?;
 
     let uri = url::Url::from_file_path(path).ok()?.to_string();
-    let timeout = gst::ClockTime::from_seconds(5);
+    let timeout = gst::ClockTime::from_seconds(10);
     let discoverer = gst_pbutils::Discoverer::new(timeout).ok()?;
     let info = discoverer.discover_uri(&uri).ok()?;
     let audio_info = info.audio_streams().into_iter().next()?;

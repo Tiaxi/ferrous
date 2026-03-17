@@ -1944,7 +1944,7 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
             out.year = tag.date().map(|v| i32::from(v.year));
             out.track_no = tag.track();
         }
-        out.duration_secs = Some(tagged.properties().duration().as_secs_f32());
+        out.duration_secs = Some(tagged.properties().duration().as_secs_f32()).filter(|d| *d > 0.0);
     }
 
     if is_raw_surround_file(path) {
@@ -1966,7 +1966,7 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
         }
 
         if let Some(details) = probe_raw_surround_technical_details(path) {
-            out.duration_secs = out.duration_secs.or(details.duration_secs);
+            out.duration_secs = details.duration_secs.or(out.duration_secs);
         }
     }
 

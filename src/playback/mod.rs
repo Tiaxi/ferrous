@@ -1255,7 +1255,7 @@ mod backend {
             let Some(path) = path else {
                 return;
             };
-            self.switch_to_path(path, current_index, TrackChangeKind::Manual, false);
+            self.switch_to_path(path, current_index, TrackChangeKind::Manual, true);
         }
 
         fn advance_manual(&mut self, next: bool) {
@@ -1493,6 +1493,10 @@ mod backend {
                     );
                     self.buffering_active = false;
                     self.snapshot.state = PlaybackState::Stopped;
+                    // Tear down the faulted pipeline fully so subsequent
+                    // tracks can start from a clean state.
+                    let _ = self.playbin.set_state(gst::State::Null);
+                    let _ = self.playbin.set_state(gst::State::Ready);
                     self.emit_snapshot();
                 }
                 _ => {}
@@ -1627,6 +1631,7 @@ mod backend {
     ) {
         let was_playing = snapshot.state == PlaybackState::Playing || force_play;
         soft_mute(playbin, applied_volume);
+        let _ = playbin.set_state(gst::State::Null);
         let _ = playbin.set_state(gst::State::Ready);
         playbin.set_property("uri", uri);
         if was_playing {
