@@ -1740,6 +1740,8 @@ fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
                 | BridgeLibraryCommand::AppendAlbumByKey { .. }
                 | BridgeLibraryCommand::ReplaceArtistByKey { .. }
                 | BridgeLibraryCommand::AppendArtistByKey { .. }
+                | BridgeLibraryCommand::ReplaceRootByPath { .. }
+                | BridgeLibraryCommand::AppendRootByPath { .. }
                 | BridgeLibraryCommand::ReplaceAllTracks
                 | BridgeLibraryCommand::AppendAllTracks
                 | BridgeLibraryCommand::RefreshEditedPaths(_)
