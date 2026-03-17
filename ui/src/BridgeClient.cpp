@@ -844,6 +844,14 @@ BridgeClient::BridgeClient(QObject *parent)
         this,
         &BridgeClient::dispatchPendingSearchApplyFrame);
 
+    m_searchModelApplyTimer.setSingleShot(true);
+    m_searchModelApplyTimer.setInterval(0);
+    connect(
+        &m_searchModelApplyTimer,
+        &QTimer::timeout,
+        this,
+        &BridgeClient::applyDeferredSearchDisplayRows);
+
     {
         bool ok = false;
         const int configuredBudgetMs =
@@ -2846,7 +2854,10 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
             m_globalSearchTrackCount = 0;
             changed = true;
         }
-        if (m_globalSearchModel.rowCount() > 0) {
+        if (m_globalSearchModel.rowCount() > 0
+            || m_searchModelApplyTimer.isActive()) {
+            m_searchModelApplyTimer.stop();
+            m_deferredSearchDisplayRows.clear();
             m_globalSearchModel.replaceRows({});
             changed = true;
         }
@@ -3784,7 +3795,13 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
             m_globalSearchTrackResults.clear();
         }
     }
-    m_globalSearchModel.replaceRows(std::move(frame.displayRows));
+    // Defer the model row update to the next event-loop tick so that any
+    // pending input events (keystrokes, scroll) are processed before the
+    // QML delegate update runs.  If a new frame arrives before the timer
+    // fires, the stored rows are overwritten and the timer is restarted,
+    // giving latest-wins coalescing for free.
+    m_deferredSearchDisplayRows = std::move(frame.displayRows);
+    m_searchModelApplyTimer.start();
     m_searchFramesApplied++;
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -3819,6 +3836,10 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     m_globalSearchSentAtMs.take(frame.seq);
 #endif
     return true;
+}
+
+void BridgeClient::applyDeferredSearchDisplayRows() {
+    m_globalSearchModel.replaceRows(std::move(m_deferredSearchDisplayRows));
 }
 
 void BridgeClient::flushGlobalSearchQuery() {

@@ -413,6 +413,7 @@ private:
     void dispatchPendingSearchApplyFrame();
     int searchApplyDispatchDelayMs() const;
     bool applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
+    void applyDeferredSearchDisplayRows();
     void startCoverLookupWorker();
     void stopCoverLookupWorker();
     void requestTrackCoverLookup(const QString &trackPath);
@@ -601,6 +602,8 @@ private:
     QTimer m_globalSearchDebounceTimer;
     QTimer m_searchApplyDispatchTimer;
     int m_searchApplyDispatchMs{12};
+    QTimer m_searchModelApplyTimer;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> m_deferredSearchDisplayRows;
     std::thread m_searchApplyThread;
     mutable std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;

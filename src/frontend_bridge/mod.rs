@@ -1640,42 +1640,42 @@ fn search_artist_row_limit() -> usize {
     std::env::var("FERROUS_SEARCH_ARTIST_LIMIT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(32, |v| v.clamp(8, 400))
+        .map_or(5, |v| v.clamp(1, 400))
 }
 
 fn search_artist_row_limit_short() -> usize {
     std::env::var("FERROUS_SEARCH_ARTIST_LIMIT_SHORT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(24, |v| v.clamp(8, 400))
+        .map_or(5, |v| v.clamp(1, 400))
 }
 
 fn search_album_row_limit() -> usize {
     std::env::var("FERROUS_SEARCH_ALBUM_LIMIT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(64, |v| v.clamp(8, 800))
+        .map_or(10, |v| v.clamp(1, 800))
 }
 
 fn search_album_row_limit_short() -> usize {
     std::env::var("FERROUS_SEARCH_ALBUM_LIMIT_SHORT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(40, |v| v.clamp(8, 800))
+        .map_or(10, |v| v.clamp(1, 800))
 }
 
 fn search_track_row_limit() -> usize {
     std::env::var("FERROUS_SEARCH_TRACK_LIMIT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(128, |v| v.clamp(16, 2_000))
+        .map_or(20, |v| v.clamp(1, 2_000))
 }
 
 fn search_track_row_limit_short() -> usize {
     std::env::var("FERROUS_SEARCH_TRACK_LIMIT_SHORT")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(80, |v| v.clamp(16, 2_000))
+        .map_or(20, |v| v.clamp(1, 2_000))
 }
 
 fn search_cancel_poll_rows() -> usize {
