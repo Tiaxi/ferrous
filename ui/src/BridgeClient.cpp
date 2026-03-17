@@ -178,19 +178,12 @@ QString searchCoverUrlFast(const QString &path) {
     if (path.startsWith(QStringLiteral("file://"))) {
         return path;
     }
-
-    const QFileInfo info(path);
-    if (!info.exists() || !info.isFile()) {
-        return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded);
-    }
-
-    const QString canonicalPath = info.canonicalFilePath().isEmpty()
-        ? info.absoluteFilePath()
-        : info.canonicalFilePath();
-    QUrl coverUrl = QUrl::fromLocalFile(canonicalPath);
-    coverUrl.setFragment(
-        QStringLiteral("v=%1").arg(info.lastModified().toMSecsSinceEpoch()));
-    return coverUrl.toString(QUrl::FullyEncoded);
+    // Pure path→URL conversion with no filesystem I/O.  The previous
+    // implementation did 3+ stat() syscalls per unique cover path which
+    // is extremely expensive on network mounts.  QML Image already
+    // handles missing files gracefully, and stale thumbnails in search
+    // results are harmless, so the existence/mtime checks are unnecessary.
+    return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded);
 }
 
 QString cacheOnlyLocalFileUrl(const QString &path) {
