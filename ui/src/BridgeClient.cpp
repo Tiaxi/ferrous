@@ -814,10 +814,10 @@ BridgeClient::BridgeClient(QObject *parent)
     });
 
     m_globalSearchDebounceTimer.setSingleShot(true);
-    m_globalSearchDebounceMs = readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 90);
+    m_globalSearchDebounceMs = readEnvMillis("FERROUS_UI_SEARCH_DEBOUNCE_MS", 40);
     m_globalSearchShortDebounceMs = readEnvMillis(
         "FERROUS_UI_SEARCH_DEBOUNCE_SHORT_MS",
-        std::max(220, m_globalSearchDebounceMs + 130));
+        std::max(100, m_globalSearchDebounceMs + 60));
     {
         bool ok = false;
         const int value =
