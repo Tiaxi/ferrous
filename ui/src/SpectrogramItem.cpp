@@ -1024,7 +1024,8 @@ void SpectrogramItem::absorbPendingHistoryLocked(int retainPending) {
 
 bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
     double dt = elapsedSeconds;
-    if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.25) {
+    const bool gapDetected = !std::isfinite(dt) || dt <= 0.0 || dt > 0.25;
+    if (gapDetected) {
         const double fallbackFps = m_fpsValue > 0 ? static_cast<double>(m_fpsValue) : 60.0;
         dt = 1.0 / std::max(30.0, fallbackFps);
     }
@@ -1038,9 +1039,39 @@ bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
         return false;
     }
 
-    const double prevPhase = m_pendingPhase;
-    m_pendingPhase += rowsPerSecond * dt;
     const int backlog = static_cast<int>(m_pendingColumns.size());
+
+    // After a display gap (sleep/background/compositor stall), the analysis
+    // engine kept producing rows while frameSwapped was paused.  Drain the
+    // entire backlog immediately so the spectrogram catches up to the current
+    // audio position instead of lagging permanently.
+    if (gapDetected && backlog > 0) {
+        const bool consumed = consumePendingColumnsLocked(backlog);
+        m_pendingPhase = 0.0;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (consumed) {
+            noteSmoothnessProfileDrainLocked(backlog);
+            noteSeekProfileDrainLocked(backlog);
+        }
+#endif
+        return consumed;
+    }
+
+    // Catch-up boost: if the pending queue is growing during normal playback
+    // (e.g. due to small timing discrepancies between audio output rate and
+    // display refresh rate), accelerate the drain proportionally so the
+    // spectrogram never drifts more than a few rows behind.
+    constexpr int kCatchUpThreshold = 4;
+    double boost = 1.0;
+    if (backlog > kCatchUpThreshold) {
+        // Ramp from 1× at threshold to 2× at 2×threshold, capped at 3×.
+        boost = std::min(3.0,
+            1.0 + static_cast<double>(backlog - kCatchUpThreshold)
+                / static_cast<double>(kCatchUpThreshold));
+    }
+
+    const double prevPhase = m_pendingPhase;
+    m_pendingPhase += rowsPerSecond * dt * boost;
 
     bool consumed = false;
     const int ready = std::min(
