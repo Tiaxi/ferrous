@@ -1968,6 +1968,13 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
         if let Some(details) = probe_raw_surround_technical_details(path) {
             out.duration_secs = details.duration_secs.or(out.duration_secs);
         }
+
+        if out.duration_secs.is_none() {
+            tracing::warn!(
+                "could not determine duration for raw surround file: {}",
+                path.display()
+            );
+        }
     }
 
     out.cover_path = find_cover_path_for_track(path);

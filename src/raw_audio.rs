@@ -124,30 +124,160 @@ pub(crate) fn probe_raw_surround_technical_details(
     let uri = url::Url::from_file_path(path).ok()?.to_string();
     let timeout = gst::ClockTime::from_seconds(10);
     let discoverer = gst_pbutils::Discoverer::new(timeout).ok()?;
-    let info = discoverer.discover_uri(&uri).ok()?;
-    let audio_info = info.audio_streams().into_iter().next()?;
+    match discoverer.discover_uri(&uri) {
+        Ok(info) => {
+            let audio_info = info.audio_streams().into_iter().next()?;
 
-    let bitrate_kbps = kbps_from_bits_per_second(audio_info.bitrate())
-        .or_else(|| kbps_from_bits_per_second(audio_info.max_bitrate()));
+            let bitrate_kbps = kbps_from_bits_per_second(audio_info.bitrate())
+                .or_else(|| kbps_from_bits_per_second(audio_info.max_bitrate()));
 
-    Some(RawAudioTechnicalDetails {
-        duration_secs: info
-            .duration()
-            .map(gst::ClockTime::nseconds)
-            .map(std::time::Duration::from_nanos)
-            .map(|duration| duration.as_secs_f32())
-            .filter(|value| *value > 0.0),
-        sample_rate_hz: Some(audio_info.sample_rate()).filter(|value| *value > 0),
-        bitrate_kbps,
-        channels: u8::try_from(audio_info.channels())
-            .ok()
-            .filter(|value| *value > 0),
-        bit_depth: u8::try_from(audio_info.depth())
-            .ok()
-            .filter(|value| *value > 0),
-        current_bitrate_kbps: bitrate_kbps,
-        format_label: raw_surround_format_label(path),
-    })
+            let mut details = RawAudioTechnicalDetails {
+                duration_secs: info
+                    .duration()
+                    .map(gst::ClockTime::nseconds)
+                    .map(std::time::Duration::from_nanos)
+                    .map(|duration| duration.as_secs_f32())
+                    .filter(|value| *value > 0.0),
+                sample_rate_hz: Some(audio_info.sample_rate()).filter(|value| *value > 0),
+                bitrate_kbps,
+                channels: u8::try_from(audio_info.channels())
+                    .ok()
+                    .filter(|value| *value > 0),
+                bit_depth: u8::try_from(audio_info.depth())
+                    .ok()
+                    .filter(|value| *value > 0),
+                current_bitrate_kbps: bitrate_kbps,
+                format_label: raw_surround_format_label(path),
+            };
+
+            if details.duration_secs.is_none() {
+                tracing::warn!(
+                    "GStreamer Discoverer returned no duration for {}, \
+                     trying bitstream header fallback",
+                    path.display()
+                );
+                details.duration_secs = estimate_duration_from_bitstream(path);
+            }
+
+            Some(details)
+        }
+        Err(err) => {
+            tracing::warn!(
+                "GStreamer Discoverer failed for {}: {} — \
+                 this may be caused by an appended APEv2 tag confusing the demuxer; \
+                 trying bitstream header fallback",
+                path.display(),
+                err
+            );
+            let duration_secs = estimate_duration_from_bitstream(path);
+            Some(RawAudioTechnicalDetails {
+                duration_secs,
+                format_label: raw_surround_format_label(path),
+                ..RawAudioTechnicalDetails::default()
+            })
+        }
+    }
+}
+
+/// Estimate duration from the bitstream frame header bitrate and file size,
+/// subtracting the `APEv2` tag if present.  Works for AC3 (A/52) and DTS files.
+#[allow(clippy::cast_precision_loss)]
+fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
+    let mut file = File::open(path).ok()?;
+    let file_len = file.seek(SeekFrom::End(0)).ok()?;
+
+    // Determine audio-only size by subtracting the APEv2 tag.
+    let apev2_size = read_apev2_footer(&mut file, file_len).map_or(0, |footer| {
+        let tag_size = u64::from(footer.tag_size);
+        // tag_size covers items + footer; check for a separate header.
+        let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
+        if let Some(header_start) = file_len.checked_sub(with_header) {
+            if has_ape_preamble(&mut file, header_start) {
+                return with_header;
+            }
+        }
+        tag_size
+    });
+    let audio_bytes = file_len.saturating_sub(apev2_size);
+    if audio_bytes == 0 {
+        return None;
+    }
+
+    // Read the first few bytes for header parsing.
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+
+    let bitrate_bps = if is_dts_file(path) {
+        parse_dts_bitrate(&header)?
+    } else {
+        parse_ac3_bitrate(&header)?
+    };
+
+    if bitrate_bps == 0 {
+        return None;
+    }
+
+    let duration = (audio_bytes as f64 * 8.0) / f64::from(bitrate_bps);
+    #[allow(clippy::cast_possible_truncation)]
+    let duration = duration as f32;
+    (duration > 0.0).then_some(duration)
+}
+
+/// AC3 bitrate lookup indexed by `frmsizecod / 2` (kbps) — A/52 Table 5.18.
+const AC3_BITRATES_KBPS: [u32; 19] = [
+    32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
+];
+
+/// DTS sample rate table indexed by SFREQ code.
+const DTS_SAMPLE_RATES: [u32; 16] = [
+    0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100, 0, 0, 12000, 24000, 48000, 0, 0,
+];
+
+/// Parse the bitrate from an AC3 (A/52) sync frame header.
+///
+/// Layout of the first 5 bytes:
+///   `[0..2]` sync word `0x0B77`
+///   `[2..4]` CRC1
+///   `[4]`    fscod (2 bits) | frmsizecod (6 bits)
+fn parse_ac3_bitrate(header: &[u8]) -> Option<u32> {
+    if header.len() < 5 || header[0] != 0x0B || header[1] != 0x77 {
+        return None;
+    }
+    let frmsizcod = usize::from(header[4] & 0x3F);
+    let kbps = *AC3_BITRATES_KBPS.get(frmsizcod / 2)?;
+    Some(kbps * 1000)
+}
+
+/// Parse the bitrate from a DTS frame header.
+///
+/// Sync word: `0x7FFE8001` (bytes `[0..4]`).
+/// Frame size and sample rate are extracted from the header to compute
+/// the bitrate as `frame_bytes * 8 * sample_rate / 512` (512 PCM samples
+/// per DTS frame).
+fn parse_dts_bitrate(header: &[u8]) -> Option<u32> {
+    if header.len() < 12 {
+        return None;
+    }
+    if header[0] != 0x7F || header[1] != 0xFE || header[2] != 0x80 || header[3] != 0x01 {
+        return None;
+    }
+
+    // FSIZE is in bits 47..61 (14 bits), big-endian packed.
+    let fsize_raw = (u16::from(header[5] & 0x03) << 12)
+        | (u16::from(header[6]) << 4)
+        | (u16::from(header[7]) >> 4);
+    let frame_bytes = u32::from(fsize_raw) + 1;
+
+    // SFREQ is at bits 67..71.
+    let sfreq_code = usize::from((header[8] >> 2) & 0x0F);
+    let sample_rate = *DTS_SAMPLE_RATES.get(sfreq_code)?;
+    if sample_rate == 0 || frame_bytes == 0 {
+        return None;
+    }
+
+    let bitrate = u64::from(frame_bytes) * 8 * u64::from(sample_rate) / 512;
+    u32::try_from(bitrate).ok()
 }
 
 #[cfg(not(feature = "gst"))]
@@ -698,6 +828,99 @@ mod tests {
             .filter(|window| *window == super::APE_PREAMBLE)
             .count();
         assert_eq!(ape_count, 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ac3_bitrate_parses_standard_header() {
+        // AC3 sync word 0x0B77, CRC1 placeholder, fscod=00 (48kHz), frmsizecod=12 → index 6 → 96 kbps
+        let header = [0x0B, 0x77, 0x00, 0x00, 0b00_001100, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(super::parse_ac3_bitrate(&header), Some(96_000));
+    }
+
+    #[test]
+    fn ac3_bitrate_parses_640kbps() {
+        // frmsizecod=36 → index 18 → 640 kbps
+        let header = [0x0B, 0x77, 0x00, 0x00, 0b00_100100, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(super::parse_ac3_bitrate(&header), Some(640_000));
+    }
+
+    #[test]
+    fn ac3_bitrate_rejects_bad_sync() {
+        let header = [0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(super::parse_ac3_bitrate(&header), None);
+    }
+
+    #[test]
+    fn dts_bitrate_parses_standard_header() {
+        // DTS sync: 7F FE 80 01
+        // Build a header with known FSIZE and SFREQ.
+        // FSIZE = 2047 (frame_bytes = 2048) at bits 47..61
+        // SFREQ = 13 (48000 Hz) at bits 67..71
+        //
+        // Byte layout:
+        //   [0..4] = 7F FE 80 01  (sync)
+        //   [4]    = don't care (FTYPE, SHORT, CPF, NBLKS upper)
+        //   [5]    = NBLKS lower 2 bits | FSIZE upper 2 bits
+        //           FSIZE=2047 → 0b_0111_1111_1111 (11 bits in 14-bit field → upper 2 = 0b01)
+        //           → byte5 lower 2 bits = 0b11 (FSIZE bits 12..13)
+        //           Wait, FSIZE is 14 bits. 2047 = 0x7FF = 0b0000_0111_1111_1111
+        //           byte5[1:0] = bits 13..12 = 0b00
+        //   Actually let me just compute the exact bytes.
+        //
+        // FSIZE = 2047 → 14 bits → 0b00_0111_1111_1111
+        // Packed into bytes 5..7:
+        //   byte5 & 0x03 = upper 2 bits of 14 = 0b00
+        //   byte6 = next 8 bits = 0b0111_1111 = 0x7F
+        //   byte7 upper 4 bits = lower 4 bits = 0b1111 → 0xF0
+        //
+        // SFREQ = 13 → 4 bits → 0b1101
+        // Packed into byte 8: bits [5..2] = (byte8 >> 2) & 0x0F
+        //   byte8 = 0b00_1101_00 = 0x34
+        let mut header = [0u8; 12];
+        header[0] = 0x7F;
+        header[1] = 0xFE;
+        header[2] = 0x80;
+        header[3] = 0x01;
+        header[5] = 0x00; // FSIZE upper 2 = 0
+        header[6] = 0x7F; // FSIZE mid 8
+        header[7] = 0xF0; // FSIZE lower 4 in upper nibble
+        header[8] = 0x34; // SFREQ=13 at bits 5..2
+
+        // frame_bytes = 2047 + 1 = 2048
+        // sample_rate = 48000
+        // bitrate = 2048 * 8 * 48000 / 512 = 1_536_000
+        assert_eq!(super::parse_dts_bitrate(&header), Some(1_536_000));
+    }
+
+    #[test]
+    fn dts_bitrate_rejects_bad_sync() {
+        let header = [0u8; 12];
+        assert_eq!(super::parse_dts_bitrate(&header), None);
+    }
+
+    #[test]
+    fn estimate_duration_from_ac3_with_apev2() {
+        // Build a fake AC3 file: valid header + padding + APEv2 tag
+        let path = test_path("ac3-duration", "ac3");
+
+        // AC3 header: 0x0B77, CRC, fscod=00 frmsizecod=26 → index 13 → 320 kbps
+        let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
+        let audio_size: usize = 320_000; // 320 kB of audio → 8 seconds at 320 kbps
+        let mut data = Vec::with_capacity(audio_size + 200);
+        data.extend_from_slice(&ac3_header);
+        data.resize(audio_size, 0x00);
+        let tag = build_test_apev2_tag(&[("Title", "Test")], true);
+        data.extend_from_slice(&tag);
+
+        std::fs::write(&path, &data).expect("write test file");
+
+        let duration = super::estimate_duration_from_bitstream(&path);
+        assert!(duration.is_some(), "should estimate duration");
+        let d = duration.unwrap();
+        // audio_size = 320000 bytes, bitrate = 320000 bps → duration = 320000*8/320000 = 8.0s
+        assert!((d - 8.0).abs() < 0.1, "expected ~8.0s, got {d}");
 
         let _ = std::fs::remove_file(path);
     }
