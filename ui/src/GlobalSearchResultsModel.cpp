@@ -181,32 +181,6 @@ void GlobalSearchResultsModel::replaceRows(QVector<SearchDisplayRow> rows) {
         return;
     }
 
-    // When the overlap region has completely different content (e.g. topic
-    // switch like "stam1na" → "por"), the surgical diff path is slower than
-    // a bulk rebuild because QML processes each dataChanged range
-    // synchronously.  Sample a few rows to detect this case cheaply.
-    if (overlap >= 32) {
-        const int sampleCount = std::min(overlap, 16);
-        bool allDiffer = true;
-        for (int i = 0; i < sampleCount; ++i) {
-            const qsizetype idx = static_cast<qsizetype>(i);
-            if (m_rows[idx].equivalentForView(rows[idx])) {
-                allDiffer = false;
-                break;
-            }
-        }
-        if (allDiffer) {
-            beginRemoveRows(QModelIndex{}, 0, oldSize - 1);
-            m_rows.clear();
-            endRemoveRows();
-
-            beginInsertRows(QModelIndex{}, 0, newSize - 1);
-            m_rows = std::move(rows);
-            endInsertRows();
-            return;
-        }
-    }
-
     if (newSize < oldSize) {
         beginRemoveRows(QModelIndex{}, newSize, oldSize - 1);
         m_rows.resize(newSize);
