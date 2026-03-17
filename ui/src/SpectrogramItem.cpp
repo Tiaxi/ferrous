@@ -265,7 +265,7 @@ int SpectrogramItem::maxColumns() const {
 
 void SpectrogramItem::setMaxColumns(int value) {
     QMutexLocker lock(&m_stateMutex);
-    const int clamped = std::clamp(value, 128, 4096);
+    const int clamped = std::clamp(value, 128, 8192);
     if (m_maxColumns == clamped) {
         return;
     }
