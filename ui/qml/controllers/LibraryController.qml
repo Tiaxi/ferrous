@@ -78,6 +78,9 @@ QtObject {
         if (rowType === "artist") {
             return (rowMap.artist || "").length > 0
         }
+        if (rowType === "root") {
+            return (rowMap.openPath || "").length > 0
+        }
         const paths = rowMap.playPaths || []
         return paths.length > 0
     }
@@ -106,6 +109,10 @@ QtObject {
             root.uiBridge.appendArtistByName(rowMap.selectionKey || rowMap.artist || "")
             return true
         }
+        if (rowType === "root") {
+            root.uiBridge.appendRootByPath(rowMap.openPath || "")
+            return true
+        }
         root.uiBridge.appendPaths(rowMap.playPaths || [])
         return true
     }
@@ -132,6 +139,10 @@ QtObject {
         }
         if (rowType === "artist") {
             root.uiBridge.replaceArtistByName(rowMap.selectionKey || rowMap.artist || "")
+            return true
+        }
+        if (rowType === "root") {
+            root.uiBridge.replaceRootByPath(rowMap.openPath || "")
             return true
         }
         root.uiBridge.replaceWithPaths(rowMap.playPaths || [])

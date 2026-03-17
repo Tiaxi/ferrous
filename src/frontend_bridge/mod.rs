@@ -145,6 +145,12 @@ pub enum BridgeLibraryCommand {
     AppendArtistByKey {
         artist: String,
     },
+    ReplaceRootByPath {
+        root: String,
+    },
+    AppendRootByPath {
+        root: String,
+    },
     ReplaceAllTracks,
     AppendAllTracks,
     ApplyAlbumArt {
@@ -3015,6 +3021,15 @@ fn handle_library_collection_command(
             &artist,
             QueueMode::Append,
         )),
+        BridgeLibraryCommand::ReplaceRootByPath { root } => Some(queue_root_by_path(
+            state,
+            runtime,
+            &root,
+            QueueMode::Replace,
+        )),
+        BridgeLibraryCommand::AppendRootByPath { root } => {
+            Some(queue_root_by_path(state, runtime, &root, QueueMode::Append))
+        }
         BridgeLibraryCommand::ReplaceAllTracks => {
             Some(queue_all_tracks(state, runtime, QueueMode::Replace))
         }
@@ -3083,6 +3098,28 @@ fn queue_artist_by_key(
     let paths =
         collect_artist_paths_for_queue(&state.library, artist, state.settings.library_sort_mode);
     queue_paths(state, runtime, paths, mode)
+}
+
+fn queue_root_by_path(
+    state: &mut BridgeState,
+    runtime: &LibraryCommandRuntime<'_>,
+    root_path: &str,
+    mode: QueueMode,
+) -> bool {
+    let paths = collect_root_paths_for_queue(&state.library, root_path);
+    queue_paths(state, runtime, paths, mode)
+}
+
+fn collect_root_paths_for_queue(library: &LibrarySnapshot, root_path: &str) -> Vec<PathBuf> {
+    let root = std::path::Path::new(root_path);
+    let mut paths: Vec<PathBuf> = library
+        .tracks
+        .iter()
+        .filter(|track| track.path.starts_with(root))
+        .map(|track| track.path.clone())
+        .collect();
+    paths.sort();
+    paths
 }
 
 fn queue_all_tracks(

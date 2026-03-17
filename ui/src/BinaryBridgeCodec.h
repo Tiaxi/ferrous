@@ -71,6 +71,8 @@ enum CommandId : quint16 {
     CmdRenameRoot = 45,
     CmdApplyAlbumArt = 46,
     CmdRefreshEditedPaths = 47,
+    CmdReplaceRootByPath = 48,
+    CmdAppendRootByPath = 49,
 };
 
 struct DecodedPlayback {

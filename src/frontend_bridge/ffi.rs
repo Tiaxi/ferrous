@@ -1090,6 +1090,12 @@ fn parse_library_collection_command(
         },
         37 => BridgeLibraryCommand::ReplaceAllTracks,
         38 => BridgeLibraryCommand::AppendAllTracks,
+        48 => BridgeLibraryCommand::ReplaceRootByPath {
+            root: reader.read_u16_string()?,
+        },
+        49 => BridgeLibraryCommand::AppendRootByPath {
+            root: reader.read_u16_string()?,
+        },
         46 => BridgeLibraryCommand::ApplyAlbumArt {
             track_path: PathBuf::from(reader.read_u16_string()?),
             artwork_path: PathBuf::from(reader.read_u16_string()?),

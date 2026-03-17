@@ -2640,6 +2640,24 @@ void BridgeClient::appendArtistByName(const QString &artist) {
         artist));
 }
 
+void BridgeClient::replaceRootByPath(const QString &rootPath) {
+    if (rootPath.trimmed().isEmpty()) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdReplaceRootByPath,
+        rootPath));
+}
+
+void BridgeClient::appendRootByPath(const QString &rootPath) {
+    if (rootPath.trimmed().isEmpty()) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdAppendRootByPath,
+        rootPath));
+}
+
 void BridgeClient::replaceAllLibraryTracks() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(
         BinaryBridgeCodec::CmdReplaceAllTracks));
