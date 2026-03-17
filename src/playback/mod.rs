@@ -1533,6 +1533,7 @@ mod backend {
         analysis_track_token: Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
         gst::init().context("gst::init failed")?;
+        disable_apedemux();
 
         let playbin = gst::ElementFactory::make("playbin")
             .build()
@@ -1590,6 +1591,18 @@ mod backend {
 
         let _ = runtime.playbin.set_state(gst::State::Null);
         Ok(())
+    }
+
+    /// Prevent `GStreamer` from auto-plugging `apedemux` for files with `APEv2` tags.
+    ///
+    /// We handle `APEv2` tags ourselves.  When `apedemux` encounters a raw
+    /// surround file (AC3/DTS) with an appended `APEv2` tag, it strips the tag
+    /// but then fails to type-detect the remaining audio content, which can
+    /// trigger a crash inside playbin's pad-removal callback.
+    fn disable_apedemux() {
+        if let Some(factory) = gst::ElementFactory::find("apedemux") {
+            factory.set_rank(gst::Rank::NONE);
+        }
     }
 
     fn configure_playbin_buffering(playbin: &gst::Element) {
