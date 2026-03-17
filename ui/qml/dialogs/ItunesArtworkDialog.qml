@@ -66,6 +66,8 @@ Dialog {
         }
         root.pendingApplyIndex = -1
         root.pendingPreviewIndex = index
+        root._savedContentY = itunesArtworkResultsView.contentY
+        root._savedResultCount = itunesArtworkResultsView.count
         root.uiBridge.prepareItunesArtworkSuggestion(index)
     }
 
@@ -80,6 +82,8 @@ Dialog {
         }
         root.pendingPreviewIndex = -1
         root.pendingApplyIndex = index
+        root._savedContentY = itunesArtworkResultsView.contentY
+        root._savedResultCount = itunesArtworkResultsView.count
         root.uiBridge.prepareItunesArtworkSuggestion(index)
     }
 
@@ -130,8 +134,6 @@ Dialog {
         target: root.uiBridge
 
         function onItunesArtworkChanged() {
-            root._savedContentY = itunesArtworkResultsView.contentY
-            root._savedResultCount = itunesArtworkResultsView.count
             root.processPendingSuggestionAction()
             Qt.callLater(() => {
                 if (itunesArtworkResultsView.count === root._savedResultCount) {
