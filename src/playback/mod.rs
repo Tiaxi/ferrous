@@ -1534,6 +1534,11 @@ mod backend {
                 if let Some((path, queue_index)) =
                     maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
                 {
+                    eprintln!(
+                        "[ferrous] gapless handoff detected: {name} pos={pos:.3}s",
+                        name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                        pos = self.snapshot.position.as_secs_f64(),
+                    );
                     let track_token = self.advance_track_token_gapless();
                     self.emit_track_changed(
                         path,
@@ -1574,19 +1579,31 @@ mod backend {
             match msg.view() {
                 gst::MessageView::Buffering(buffering) => {
                     let percent = buffering.percent();
+                    eprintln!(
+                        "[ferrous] buffering: {percent}% (active={a}, state={s:?})",
+                        a = self.buffering_active,
+                        s = self.snapshot.state,
+                    );
                     if percent < 100 {
                         if self.snapshot.state == PlaybackState::Playing && !self.buffering_active {
+                            eprintln!("[ferrous] buffering: PAUSING pipeline");
                             let _ = self.playbin.set_state(gst::State::Paused);
                             self.buffering_active = true;
                         }
                     } else if self.buffering_active {
                         self.buffering_active = false;
+                        eprintln!("[ferrous] buffering: RESUMING pipeline");
                         if self.snapshot.state == PlaybackState::Playing {
                             let _ = self.playbin.set_state(gst::State::Playing);
                         }
                     }
                 }
                 gst::MessageView::Eos(..) => {
+                    eprintln!(
+                        "[ferrous] EOS received (pending_cross_format={pend}, state={state:?})",
+                        pend = self.pending_eos_track_switch.load(Ordering::Relaxed),
+                        state = self.snapshot.state,
+                    );
                     if self.pending_eos_track_switch.swap(false, Ordering::AcqRel) {
                         // Cross-format transition: about-to-finish advanced the
                         // queue but didn't set the URI.  Do a full pipeline switch.
@@ -1695,10 +1712,19 @@ mod backend {
                 let new_path = q.next_natural()?;
                 drop(q);
 
-                // Same file extension → gapless (same decoder reused).
-                // Different extension → let EOS fire, handle in bus handler.
-                if same_audio_extension(&old_path, &new_path) {
+                // Same file extension AND not raw surround → gapless (same
+                // decoder reused).  Raw surround (AC3/DTS) decoders have a
+                // long priming period (~1.2s) that causes GStreamer's internal
+                // stream combiner to stall during gapless transitions.  A clean
+                // pipeline restart via the EOS path is much faster (~100ms).
+                let gapless_ok =
+                    same_audio_extension(&old_path, &new_path) && !is_raw_surround_file(&old_path);
+                if gapless_ok {
                     if let Some(uri) = file_uri(&new_path) {
+                        eprintln!(
+                            "[ferrous] about-to-finish: gapless {ext} → setting URI",
+                            ext = old_path.extension().and_then(|e| e.to_str()).unwrap_or("?"),
+                        );
                         playbin_obj.set_property("uri", uri);
                     } else {
                         eprintln!(
@@ -1707,6 +1733,10 @@ mod backend {
                         );
                     }
                 } else {
+                    eprintln!(
+                        "[ferrous] about-to-finish: EOS path ({ext})",
+                        ext = old_path.extension().and_then(|e| e.to_str()).unwrap_or("?"),
+                    );
                     pending_eos.store(true, Ordering::Release);
                 }
                 None
@@ -1787,7 +1817,12 @@ mod backend {
             }
             let location = source.property_value("location").get::<String>().ok()?;
             let path = PathBuf::from(&location);
-            let (audio_start, audio_end) = audio_byte_range(&path)?;
+            let range = audio_byte_range(&path);
+            eprintln!(
+                "[ferrous] source-setup: {name} range={range:?}",
+                name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            );
+            let (audio_start, audio_end) = range?;
 
             let src_pad = source.static_pad("src")?;
             let bytes_seen = AtomicU64::new(0);
@@ -1838,6 +1873,57 @@ mod backend {
                 gst::PadProbeReturn::Ok
             });
             None
+        });
+    }
+
+    /// Pad probe that logs gaps in audio buffer delivery.
+    #[allow(clippy::pedantic)]
+    fn install_audio_delivery_probe(pad: &gst::GhostPad) {
+        use std::sync::Mutex as StdMutex;
+        struct DeliveryState {
+            last_wall: Instant,
+            last_pts_ns: u64,
+            last_end_ns: u64,
+        }
+        let state = StdMutex::new(DeliveryState {
+            last_wall: Instant::now(),
+            last_pts_ns: u64::MAX,
+            last_end_ns: u64::MAX,
+        });
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+            let Some(buf) = info.buffer() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let pts_ns = buf.pts().map_or(u64::MAX, |t| t.nseconds());
+            let dur_ns = buf.duration().map_or(0, |d| d.nseconds());
+            let end_ns = if pts_ns != u64::MAX {
+                pts_ns + dur_ns
+            } else {
+                u64::MAX
+            };
+            if let Ok(mut st) = state.lock() {
+                let wall_now = Instant::now();
+                let wall_delta = wall_now.duration_since(st.last_wall);
+                // Log when wall-clock gap > 30ms (potential audio underrun)
+                if wall_delta > Duration::from_millis(30) && st.last_pts_ns != u64::MAX {
+                    let pts_gap = if pts_ns != u64::MAX && st.last_end_ns != u64::MAX {
+                        (pts_ns as f64 - st.last_end_ns as f64) / 1e6
+                    } else {
+                        f64::NAN
+                    };
+                    eprintln!(
+                        "[ferrous] audio delivery gap: wall={wall:.1}ms pts_gap={pts_gap:.1}ms \
+                         (prev_end={pe:.3}s new_pts={np:.3}s)",
+                        wall = wall_delta.as_secs_f64() * 1000.0,
+                        pe = st.last_end_ns as f64 / 1e9,
+                        np = pts_ns as f64 / 1e9,
+                    );
+                }
+                st.last_wall = wall_now;
+                st.last_pts_ns = pts_ns;
+                st.last_end_ns = end_ns;
+            }
+            gst::PadProbeReturn::Ok
         });
     }
 
@@ -1919,6 +2005,10 @@ mod backend {
         startup_ramp_hold_until: &mut Option<Instant>,
         force_play: bool,
     ) {
+        eprintln!(
+            "[ferrous] switch_track: {name} (Null→Ready→Playing cycle)",
+            name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+        );
         let was_playing = snapshot.state == PlaybackState::Playing || force_play;
         soft_mute(playbin, applied_volume);
         let _ = playbin.set_state(gst::State::Null);
@@ -2510,6 +2600,10 @@ mod backend {
             .map_err(|_| anyhow!("failed activating ghost pad"))?;
         bin.add_pad(&ghost)
             .map_err(|_| anyhow!("failed adding ghost pad to bin"))?;
+
+        // Timing probe: detect gaps in audio delivery at the sink input.
+        // Logs when the interval between consecutive buffers exceeds 30ms.
+        install_audio_delivery_probe(&ghost);
 
         Ok(bin)
     }
