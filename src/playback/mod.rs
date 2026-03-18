@@ -1562,6 +1562,26 @@ mod backend {
                     let _ = self.playbin.set_state(gst::State::Ready);
                     self.emit_snapshot();
                 }
+                gst::MessageView::Warning(warn) => {
+                    eprintln!(
+                        "[ferrous] gstreamer warning from {:?}: {} ({:?})",
+                        warn.src()
+                            .map(gstreamer::prelude::GstObjectExt::path_string),
+                        warn.error(),
+                        warn.debug()
+                    );
+                }
+                gst::MessageView::StateChanged(sc) => {
+                    // Only log playbin-level state changes, not every
+                    // internal element, to keep output manageable.
+                    if sc.src().is_some_and(|s| s == &self.playbin) {
+                        eprintln!(
+                            "[ferrous] playbin state: {:?} → {:?}",
+                            sc.old(),
+                            sc.current()
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -1898,6 +1918,14 @@ mod backend {
         prof_sent: usize,
         prof_dropped: usize,
         prof_samples: usize,
+        /// Exponential moving average of per-buffer RMS, used by the PCM
+        /// spike detector to identify anomalous decoder output.
+        rolling_rms: f32,
+        /// Suppress spike detection for the first N buffers after a track
+        /// change, while the rolling RMS is still settling from zero.
+        spike_warmup_remaining: u32,
+        /// Last observed track token, for detecting track changes.
+        last_track_token: u64,
     }
 
     impl AnalysisTapState {
@@ -1919,6 +1947,9 @@ mod backend {
                 prof_sent: 0,
                 prof_dropped: 0,
                 prof_samples: 0,
+                rolling_rms: 0.0,
+                spike_warmup_remaining: 20,
+                last_track_token: 0,
             }
         }
 
@@ -1942,11 +1973,19 @@ mod backend {
                 return;
             }
 
+            let current_token = self.track_token.load(Ordering::Relaxed);
+            if current_token != self.last_track_token {
+                self.last_track_token = current_token;
+                self.reset_spike_detector();
+            }
+
             let channel_labels = self.channel_labels_for_sample(sample);
             let pcm = decode_interleaved_f32(bytes);
             if pcm.is_empty() {
                 return;
             }
+
+            self.check_pcm_spike(&pcm, sample);
 
             let channels = channel_labels.len().max(1);
             let chunk_width = self.tap_chunk_samples.saturating_mul(channels);
@@ -2007,6 +2046,83 @@ mod backend {
             self.prof_sent = 0;
             self.prof_dropped = 0;
             self.prof_samples = 0;
+        }
+
+        /// Detect anomalous amplitude spikes in decoded PCM that may indicate
+        /// decoder corruption.  Logs full diagnostic context when triggered.
+        fn check_pcm_spike(&mut self, pcm: &[f32], sample: &gst::Sample) {
+            // Compute buffer peak and RMS.
+            let mut sum_sq: f64 = 0.0;
+            let mut peak: f32 = 0.0;
+            for &s in pcm {
+                let abs = s.abs();
+                if abs > peak {
+                    peak = abs;
+                }
+                sum_sq += f64::from(s) * f64::from(s);
+            }
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let rms = (sum_sq / pcm.len().max(1) as f64).sqrt() as f32;
+
+            // Let the rolling average settle before checking for spikes.
+            if self.spike_warmup_remaining > 0 {
+                self.spike_warmup_remaining -= 1;
+                self.rolling_rms = rms;
+                return;
+            }
+
+            // Slow-moving exponential average (α ≈ 0.03).  At ~46 buffers/s
+            // (1024 samples at 44.1 kHz) the time constant is roughly 0.7 s.
+            let alpha: f32 = 0.03;
+            self.rolling_rms = self.rolling_rms * (1.0 - alpha) + rms * alpha;
+
+            // Spike criterion: peak near full-scale AND energy far above
+            // recent average.  Thresholds are deliberately conservative to
+            // avoid false positives on legitimately loud music.
+            let spike = peak > 0.95 && self.rolling_rms > 0.001 && rms > self.rolling_rms * 20.0; // ~26 dB above average
+
+            if spike {
+                let caps_info = sample
+                    .caps()
+                    .and_then(|c| gst_audio::AudioInfo::from_caps(c).ok());
+                let (channels, rate) = caps_info
+                    .as_ref()
+                    .map_or((0, 0), |info| (info.channels(), info.rate()));
+
+                let pts = sample
+                    .buffer()
+                    .and_then(gst::BufferRef::pts)
+                    .map_or(0, gst::ClockTime::nseconds);
+
+                eprintln!(
+                    "[ferrous] PCM SPIKE DETECTED: peak={peak:.4} rms={rms:.4} \
+                     rolling_rms={:.4} ratio={:.1}x | \
+                     channels={channels} rate={rate} pts={pts}ns samples={}",
+                    self.rolling_rms,
+                    rms / self.rolling_rms.max(f32::EPSILON),
+                    pcm.len(),
+                );
+
+                // Dump a few samples around the peak so we can inspect the
+                // waveform shape (descending tone vs white noise vs click).
+                #[allow(clippy::float_cmp)] // exact: finding the sample that set `peak`
+                if let Some(peak_idx) = pcm.iter().position(|s| s.abs() == peak) {
+                    let start = peak_idx.saturating_sub(8);
+                    let end = (peak_idx + 9).min(pcm.len());
+                    let window: Vec<String> =
+                        pcm[start..end].iter().map(|s| format!("{s:.4}")).collect();
+                    eprintln!(
+                        "[ferrous]   peak at sample {peak_idx}: [{}]",
+                        window.join(", ")
+                    );
+                }
+            }
+        }
+
+        /// Reset spike detector state for a new track.
+        fn reset_spike_detector(&mut self) {
+            self.rolling_rms = 0.0;
+            self.spike_warmup_remaining = 20;
         }
     }
 
@@ -2099,6 +2215,24 @@ mod backend {
         Ok(())
     }
 
+    /// Log every caps change that reaches the tee — these indicate decoder
+    /// format renegotiations (channel count, sample rate, etc.) that could
+    /// be the trigger for noise bursts.
+    fn install_caps_change_probe(tee: &gst::Element) {
+        let Some(tee_sink) = tee.static_pad("sink") else {
+            return;
+        };
+        tee_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |_pad, info| {
+            if let Some(gst::PadProbeData::Event(ref event)) = info.data {
+                if let gst::EventView::Caps(caps_ev) = event.view() {
+                    let caps = caps_ev.caps();
+                    eprintln!("[ferrous] audio sink caps change: {caps}");
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
     #[cfg_attr(
         not(feature = "profiling-logs"),
         allow(unused_variables, unused_assignments)
@@ -2185,6 +2319,7 @@ mod backend {
 
         gst::Element::link_many([&input_capsfilter, &tee])
             .context("failed to link audio sink ingress")?;
+        install_caps_change_probe(&tee);
         gst::Element::link_many([
             &queue_out,
             &conv_out,
