@@ -483,6 +483,16 @@ impl AnalysisRuntimeState {
             chunk.channel_labels.clone()
         };
         if chunk_labels != self.pcm_labels {
+            // GStreamer decoders (especially AC3/DTS) may initially report
+            // fewer channels during startup before settling on the real
+            // layout.  Suppress transient channel-count reductions to avoid
+            // a brief spectrogram layout flicker.  Once the FIFO has enough
+            // data the startup window has passed and we accept any change.
+            let is_startup_reduction = chunk_labels.len() < self.pcm_labels.len()
+                && self.pcm_fifo.len() < self.pcm_labels.len() * 4096;
+            if is_startup_reduction {
+                return;
+            }
             self.pcm_labels.clone_from(&chunk_labels);
             self.pcm_fifo.clear();
             self.pending_channels.clear();
