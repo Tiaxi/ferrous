@@ -1750,8 +1750,17 @@ mod backend {
         let current_path = state.current()?;
         let current_index = state.current_index().unwrap_or(0);
         let path_changed = snapshot.current.as_ref() != Some(&current_path);
+        if !path_changed {
+            return None;
+        }
+        // The position query may either reset to near-zero (same-format
+        // gapless) or stay pinned at the old track's end during cross-format
+        // transitions where GStreamer reconfigures the decoder.  Accept
+        // both as evidence that the handoff has occurred.
         let at_track_start = snapshot.position <= Duration::from_secs(2);
-        if path_changed && at_track_start {
+        let at_track_end =
+            snapshot.duration > Duration::ZERO && snapshot.position >= snapshot.duration;
+        if at_track_start || at_track_end {
             snapshot.current = Some(current_path.clone());
             snapshot.current_queue_index = Some(current_index);
             return Some((current_path, current_index));
@@ -2398,13 +2407,35 @@ mod backend {
         }
 
         #[test]
-        fn natural_handoff_does_not_emit_before_track_start_window() {
+        fn natural_handoff_emits_when_position_at_track_end() {
+            // Cross-format gapless: position stays at the old track's end
+            // because GStreamer's position query doesn't reset during
+            // decoder reconfiguration.
+            let first = PathBuf::from("/tmp/gst_handoff_a.flac");
+            let second = PathBuf::from("/tmp/gst_handoff_b.ac3");
+            let queue_state = setup_queue_two_tracks(&first, &second);
+            let mut snapshot = PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                position: Duration::from_secs(415),
+                duration: Duration::from_secs(415),
+                current: Some(first),
+                ..PlaybackSnapshot::default()
+            };
+
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot);
+            assert_eq!(emitted, Some((second.clone(), 1)));
+            assert_eq!(snapshot.current.as_ref(), Some(&second));
+        }
+
+        #[test]
+        fn natural_handoff_does_not_emit_mid_track() {
             let first = PathBuf::from("/tmp/gst_handoff_a.flac");
             let second = PathBuf::from("/tmp/gst_handoff_b.flac");
             let queue_state = setup_queue_two_tracks(&first, &second);
             let mut snapshot = PlaybackSnapshot {
                 state: PlaybackState::Playing,
                 position: Duration::from_secs(3),
+                duration: Duration::from_secs(200),
                 current: Some(first.clone()),
                 ..PlaybackSnapshot::default()
             };
