@@ -4350,12 +4350,12 @@ fn choose_most_common_genre(counts: &HashMap<String, usize>) -> String {
     best.map_or_else(String::new, |(genre, _)| genre.to_string())
 }
 
-fn is_main_album_disc_section(section_name: &str) -> bool {
+pub(crate) fn is_main_album_disc_section(section_name: &str) -> bool {
     let section = section_name.trim().to_ascii_lowercase();
     if section.is_empty() {
         return false;
     }
-    for prefix in ["cd", "disc", "disk"] {
+    for prefix in ["cd", "disc", "disk", "dvd"] {
         let Some(rest) = section.strip_prefix(prefix) else {
             continue;
         };
@@ -5422,6 +5422,8 @@ mod tests {
         assert!(is_main_album_disc_section("CD 2"));
         assert!(is_main_album_disc_section("disc-03"));
         assert!(is_main_album_disc_section("Disk 4 (bonus)"));
+        assert!(is_main_album_disc_section("DVD1"));
+        assert!(is_main_album_disc_section("DVD 2"));
         assert!(!is_main_album_disc_section("Live"));
         assert!(!is_main_album_disc_section("discography"));
     }

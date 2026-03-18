@@ -69,6 +69,8 @@ struct ResolvedAlbum {
 struct ResolvedSection {
     name: String,
     path: PathBuf,
+    cover_path: Option<String>,
+    year: Option<i32>,
     tracks: Vec<OrderedTrack>,
 }
 
@@ -160,6 +162,7 @@ impl FlatTreeRow {
         key: String,
         title: &str,
         path: &str,
+        cover_path: &str,
         play_paths: Vec<String>,
         child_count: usize,
     ) -> Self {
@@ -173,7 +176,7 @@ impl FlatTreeRow {
             key,
             artist: String::new(),
             path: path.to_string(),
-            cover_path: String::new(),
+            cover_path: cover_path.to_string(),
             track_path: String::new(),
             play_paths,
         }
@@ -661,11 +664,18 @@ fn append_album_tracks(
             .iter()
             .map(|track| track.path.clone())
             .collect::<Vec<_>>();
+        let section_title = if let Some(year) = section.year {
+            format!("{} ({year})", section.name)
+        } else {
+            section.name.clone()
+        };
+        let section_cover = section.cover_path.as_deref().unwrap_or_default();
         out.push(FlatTreeRow::section(
             section_depth,
             section_row_key(root_path, artist_name, &album.folder_name, &section.name),
-            &section.name,
+            &section_title,
             &section_path,
+            section_cover,
             section_play_paths,
             section.tracks.len(),
         ));
@@ -732,28 +742,48 @@ fn push_u16_string(out: &mut Vec<u8>, value: &str) {
 }
 
 fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
-    let mut all_tracks = Vec::new();
-    all_tracks.extend(album.root_tracks.iter().cloned());
-    for section_tracks in album.sections.values() {
-        all_tracks.extend(section_tracks.iter().cloned());
-    }
+    // Classify sections: disc sections (CD1, DVD1, etc.) contribute to album metadata,
+    // non-disc sections (Bonus, independent sub-albums) are independent.
+    let mut album_tracks: Vec<TrackLeaf> = album.root_tracks.clone();
+    let mut sections = Vec::new();
 
-    let title = resolve_album_title(&all_tracks, &album.folder_name);
-    let year = resolve_album_year(&all_tracks);
+    for (name, tracks) in &album.sections {
+        let is_disc = super::is_main_album_disc_section(name);
+        if is_disc {
+            album_tracks.extend(tracks.iter().cloned());
+        }
 
-    let mut sections = album
-        .sections
-        .iter()
-        .map(|(name, tracks)| ResolvedSection {
+        let section_cover = resolve_album_cover(tracks)
+            .or_else(|| find_image_in_dir(&album.folder_path.join(name)));
+        let section_year = if is_disc {
+            None // disc sections don't get independent year
+        } else {
+            resolve_album_year(tracks)
+        };
+
+        sections.push(ResolvedSection {
             name: name.clone(),
             path: album.folder_path.join(name),
+            cover_path: if is_disc { None } else { section_cover },
+            year: section_year,
             tracks: order_tracks(tracks),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
     sections.sort_by(|a, b| natural_cmp(&a.name, &b.name));
 
-    let cover_path = resolve_album_cover(&all_tracks)
-        .or_else(|| select_album_cover(&album.folder_path, &sections));
+    let title = resolve_album_title(&album_tracks, &album.folder_name);
+    let year = resolve_album_year(&album_tracks);
+
+    // Album cover fallback: embedded art from album tracks, then image in album dir,
+    // then image in disc section dirs (not non-disc sections).
+    let cover_path = resolve_album_cover(&album_tracks)
+        .or_else(|| find_image_in_dir(&album.folder_path))
+        .or_else(|| {
+            sections
+                .iter()
+                .filter(|s| super::is_main_album_disc_section(&s.name))
+                .find_map(|s| find_image_in_dir(&s.path))
+        });
 
     ResolvedAlbum {
         title,
@@ -820,20 +850,6 @@ fn resolve_album_cover(all_tracks: &[TrackLeaf]) -> Option<String> {
         .map(|track| track.cover_path.trim())
         .find(|path| !path.is_empty())
         .map(ToString::to_string)
-}
-
-fn select_album_cover(album_path: &Path, sections: &[ResolvedSection]) -> Option<String> {
-    if let Some(path) = find_image_in_dir(album_path) {
-        return Some(path);
-    }
-
-    for section in sections {
-        if let Some(path) = find_image_in_dir(&section.path) {
-            return Some(path);
-        }
-    }
-
-    None
 }
 
 fn find_image_in_dir(dir: &Path) -> Option<String> {
@@ -1516,5 +1532,270 @@ mod tests {
         assert!(!track_row.artist.is_empty());
         assert!(track_row.cover_path.is_empty());
         assert!(track_row.depth > 0);
+    }
+
+    fn leaf(path: &str, album: &str, year: Option<i32>, track_no: Option<u32>) -> TrackLeaf {
+        let file_stem = Path::new(path)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        TrackLeaf {
+            path: PathBuf::from(path),
+            title: file_stem.clone(),
+            file_stem,
+            album_tag: album.to_string(),
+            cover_path: String::new(),
+            year,
+            track_no,
+        }
+    }
+
+    fn leaf_with_cover(
+        path: &str,
+        album: &str,
+        year: Option<i32>,
+        track_no: Option<u32>,
+        cover: &str,
+    ) -> TrackLeaf {
+        let mut l = leaf(path, album, year, track_no);
+        l.cover_path = cover.to_string();
+        l
+    }
+
+    #[test]
+    fn disc_only_album_inherits_year_from_all_disc_sections() {
+        let album = AlbumNodeBuilder {
+            folder_name: "The Incident".to_string(),
+            folder_path: PathBuf::from("/music/PT/The Incident"),
+            root_tracks: vec![],
+            sections: BTreeMap::from([
+                (
+                    "CD1".to_string(),
+                    vec![
+                        leaf(
+                            "/music/PT/The Incident/CD1/01.flac",
+                            "The Incident",
+                            Some(2009),
+                            Some(1),
+                        ),
+                        leaf(
+                            "/music/PT/The Incident/CD1/02.flac",
+                            "The Incident",
+                            Some(2009),
+                            Some(2),
+                        ),
+                    ],
+                ),
+                (
+                    "CD2".to_string(),
+                    vec![leaf(
+                        "/music/PT/The Incident/CD2/01.flac",
+                        "The Incident",
+                        Some(2009),
+                        Some(1),
+                    )],
+                ),
+            ]),
+        };
+        let resolved = resolve_album(&album);
+        assert_eq!(
+            resolved.year,
+            Some(2009),
+            "album year should come from disc sections"
+        );
+        assert_eq!(resolved.title, "The Incident");
+        // Disc sections should NOT have independent cover/year
+        for section in &resolved.sections {
+            assert!(
+                section.cover_path.is_none(),
+                "disc section should not have independent cover"
+            );
+            assert!(
+                section.year.is_none(),
+                "disc section should not have independent year"
+            );
+        }
+    }
+
+    #[test]
+    fn disc_only_album_inherits_cover_from_disc_section_tracks() {
+        let album = AlbumNodeBuilder {
+            folder_name: "Album".to_string(),
+            folder_path: PathBuf::from("/music/Artist/Album"),
+            root_tracks: vec![],
+            sections: BTreeMap::from([(
+                "CD1".to_string(),
+                vec![leaf_with_cover(
+                    "/music/Artist/Album/CD1/01.flac",
+                    "Album",
+                    Some(2020),
+                    Some(1),
+                    "/music/Artist/Album/CD1/cover.jpg",
+                )],
+            )]),
+        };
+        let resolved = resolve_album(&album);
+        assert_eq!(
+            resolved.cover_path.as_deref(),
+            Some("/music/Artist/Album/CD1/cover.jpg"),
+            "album should inherit embedded cover from disc section tracks"
+        );
+    }
+
+    #[test]
+    fn non_disc_sections_do_not_contribute_to_album_metadata() {
+        let album = AlbumNodeBuilder {
+            folder_name: "Muut".to_string(),
+            folder_path: PathBuf::from("/music/PT/Muut"),
+            root_tracks: vec![],
+            sections: BTreeMap::from([
+                (
+                    "Lightbulb Sun".to_string(),
+                    vec![leaf_with_cover(
+                        "/music/PT/Muut/Lightbulb Sun/01.flac",
+                        "Lightbulb Sun",
+                        Some(2000),
+                        Some(1),
+                        "/music/PT/Muut/Lightbulb Sun/cover.jpg",
+                    )],
+                ),
+                (
+                    "Voyage 34".to_string(),
+                    vec![leaf_with_cover(
+                        "/music/PT/Muut/Voyage 34/01.flac",
+                        "Voyage 34",
+                        Some(1992),
+                        Some(1),
+                        "/music/PT/Muut/Voyage 34/cover.jpg",
+                    )],
+                ),
+            ]),
+        };
+        let resolved = resolve_album(&album);
+        // Album should NOT inherit cover or year from non-disc sections
+        assert!(
+            resolved.cover_path.is_none(),
+            "grouping folder should have no cover"
+        );
+        assert!(
+            resolved.year.is_none(),
+            "grouping folder should have no year"
+        );
+        // Each section should have its own cover and year
+        let ls = resolved
+            .sections
+            .iter()
+            .find(|s| s.name == "Lightbulb Sun")
+            .unwrap();
+        assert_eq!(
+            ls.cover_path.as_deref(),
+            Some("/music/PT/Muut/Lightbulb Sun/cover.jpg")
+        );
+        assert_eq!(ls.year, Some(2000));
+        let v34 = resolved
+            .sections
+            .iter()
+            .find(|s| s.name == "Voyage 34")
+            .unwrap();
+        assert_eq!(
+            v34.cover_path.as_deref(),
+            Some("/music/PT/Muut/Voyage 34/cover.jpg")
+        );
+        assert_eq!(v34.year, Some(1992));
+    }
+
+    #[test]
+    fn mixed_disc_and_non_disc_sections() {
+        let album = AlbumNodeBuilder {
+            folder_name: "Album".to_string(),
+            folder_path: PathBuf::from("/music/Artist/Album"),
+            root_tracks: vec![leaf(
+                "/music/Artist/Album/01.flac",
+                "Album",
+                Some(2010),
+                Some(1),
+            )],
+            sections: BTreeMap::from([
+                (
+                    "CD1".to_string(),
+                    vec![leaf(
+                        "/music/Artist/Album/CD1/01.flac",
+                        "Album",
+                        Some(2010),
+                        Some(1),
+                    )],
+                ),
+                (
+                    "CD2".to_string(),
+                    vec![leaf(
+                        "/music/Artist/Album/CD2/01.flac",
+                        "Album",
+                        Some(2010),
+                        Some(1),
+                    )],
+                ),
+                (
+                    "Bonus".to_string(),
+                    vec![leaf_with_cover(
+                        "/music/Artist/Album/Bonus/01.flac",
+                        "Bonus Tracks",
+                        Some(2015),
+                        Some(1),
+                        "/music/Artist/Album/Bonus/cover.jpg",
+                    )],
+                ),
+            ]),
+        };
+        let resolved = resolve_album(&album);
+        // Album metadata from root + CD1 + CD2 only
+        assert_eq!(resolved.year, Some(2010));
+        assert_eq!(resolved.title, "Album");
+        // Bonus section has its own cover and year
+        let bonus = resolved
+            .sections
+            .iter()
+            .find(|s| s.name == "Bonus")
+            .unwrap();
+        assert_eq!(
+            bonus.cover_path.as_deref(),
+            Some("/music/Artist/Album/Bonus/cover.jpg")
+        );
+        assert_eq!(bonus.year, Some(2015));
+        // CD sections should not have independent metadata
+        let cd1 = resolved.sections.iter().find(|s| s.name == "CD1").unwrap();
+        assert!(cd1.cover_path.is_none());
+        assert!(cd1.year.is_none());
+    }
+
+    #[test]
+    fn section_year_appears_in_title_in_flat_rows() {
+        let album = ResolvedAlbum {
+            title: "Muut".to_string(),
+            year: None,
+            folder_name: "Muut".to_string(),
+            folder_path: PathBuf::from("/music/PT/Muut"),
+            cover_path: None,
+            root_tracks: vec![],
+            sections: vec![ResolvedSection {
+                name: "Lightbulb Sun".to_string(),
+                path: PathBuf::from("/music/PT/Muut/Lightbulb Sun"),
+                cover_path: Some("/cover.jpg".to_string()),
+                year: Some(2000),
+                tracks: vec![OrderedTrack {
+                    label: "01 - Track".to_string(),
+                    path: "/music/PT/Muut/Lightbulb Sun/01.flac".to_string(),
+                    number: 1,
+                }],
+            }],
+        };
+        let mut rows = Vec::new();
+        append_album_tracks(&mut rows, "PT", &album, "/music", 2, 3);
+        let section_row = rows
+            .iter()
+            .find(|r| r.row_type == ROW_TYPE_SECTION)
+            .unwrap();
+        assert_eq!(section_row.title, "Lightbulb Sun (2000)");
+        assert_eq!(section_row.cover_path, "/cover.jpg");
     }
 }

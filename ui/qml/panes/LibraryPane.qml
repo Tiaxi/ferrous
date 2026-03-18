@@ -109,6 +109,7 @@ Rectangle {
 
                 readonly property string rowTypeResolved: rowType || ""
                 readonly property bool isAlbumRow: rowTypeResolved === "album"
+                readonly property bool isSectionRow: rowTypeResolved === "section"
                 readonly property bool isTrackRow: rowTypeResolved === "track"
                 readonly property bool hasChildren: !isTrackRow && (count || 0) > 0
                 readonly property string selectionKeyResolved: selectionKey || ""
@@ -122,7 +123,7 @@ Rectangle {
                     || rowTypeResolved === "artist"
                     || playPathsResolved.length > 0
                 readonly property string rowTitle: title || name || artist || ""
-                readonly property bool albumCoverInViewport: isAlbumRow
+                readonly property bool albumCoverInViewport: (isAlbumRow || (isSectionRow && (coverPath || "") !== ""))
                     && (y + height >= libraryAlbumView.contentY - 48)
                     && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
                 readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
@@ -162,7 +163,7 @@ Rectangle {
                     }
 
                     Item {
-                        visible: isAlbumRow
+                        visible: isAlbumRow || (isSectionRow && (coverPath || "") !== "")
                         Layout.preferredWidth: 18
                         Layout.preferredHeight: 18
                         Layout.alignment: Qt.AlignVCenter
