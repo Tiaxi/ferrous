@@ -711,7 +711,7 @@ mod backend {
 mod backend {
     use std::path::{Path, PathBuf};
     use std::sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     };
     use std::time::{Duration, Instant};
@@ -1017,6 +1017,8 @@ mod backend {
         target_volume: f32,
         applied_volume: f32,
         startup_gain_ramp: bool,
+        startup_ramp_hold_until: Option<Instant>,
+        gapless_transition_pending: Arc<AtomicBool>,
         buffering_active: bool,
         seek_hold: Option<(Instant, Duration)>,
     }
@@ -1048,7 +1050,9 @@ mod backend {
 
     impl GstPlaybackRuntime {
         fn command_wait_timeout(&self) -> Duration {
-            if self.snapshot.state == PlaybackState::Playing
+            if self.gapless_transition_pending.load(Ordering::Relaxed) {
+                Duration::from_millis(5)
+            } else if self.snapshot.state == PlaybackState::Playing
                 || self.buffering_active
                 || self.seek_hold.is_some()
                 || self.startup_gain_ramp
@@ -1067,6 +1071,7 @@ mod backend {
             analysis_tx: Sender<AnalysisCommand>,
             analysis_track_token: Arc<AtomicU64>,
             event_tx: Sender<PlaybackEvent>,
+            gapless_transition_pending: Arc<AtomicBool>,
         ) -> Self {
             Self {
                 playbin,
@@ -1081,6 +1086,8 @@ mod backend {
                 target_volume: 1.0,
                 applied_volume: 1.0,
                 startup_gain_ramp: false,
+                startup_ramp_hold_until: None,
+                gapless_transition_pending,
                 buffering_active: false,
                 seek_hold: None,
             }
@@ -1139,6 +1146,7 @@ mod backend {
                 &uri,
                 &mut self.applied_volume,
                 &mut self.startup_gain_ramp,
+                &mut self.startup_ramp_hold_until,
                 force_play,
             );
             self.buffering_active = false;
@@ -1150,6 +1158,7 @@ mod backend {
             soft_mute(&self.playbin, &mut self.applied_volume);
             let _ = self.playbin.set_state(gst::State::Ready);
             self.startup_gain_ramp = false;
+            self.startup_ramp_hold_until = None;
             self.buffering_active = false;
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
@@ -1315,9 +1324,15 @@ mod backend {
                 self.playbin
                     .set_property("volume", f64::from(self.applied_volume));
                 self.startup_gain_ramp = true;
+                self.startup_ramp_hold_until = Some(Instant::now() + Duration::from_millis(80));
             }
             self.buffering_active = false;
             if self.playbin.set_state(gst::State::Playing).is_ok() {
+                if was_stopped {
+                    // Re-assert mute after state transition to close the race
+                    // window where new internal elements may not have volume=0.
+                    self.playbin.set_property("volume", 0.0_f64);
+                }
                 self.snapshot.state = PlaybackState::Playing;
                 if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
                     self.startup_gain_ramp = true;
@@ -1341,6 +1356,7 @@ mod backend {
             soft_mute(&self.playbin, &mut self.applied_volume);
             if self.playbin.set_state(gst::State::Ready).is_ok() {
                 self.startup_gain_ramp = false;
+                self.startup_ramp_hold_until = None;
                 self.buffering_active = false;
                 self.seek_hold = None;
                 self.snapshot.state = PlaybackState::Stopped;
@@ -1394,24 +1410,47 @@ mod backend {
             if self.snapshot.state == PlaybackState::Stopped
                 && !self.startup_gain_ramp
                 && self.seek_hold.is_none()
+                && self.startup_ramp_hold_until.is_none()
+                && !self.gapless_transition_pending.load(Ordering::Relaxed)
             {
                 return;
             }
 
             let mut snapshot_changed = false;
-            let delta = self.target_volume - self.applied_volume;
-            if delta.abs() > f32::EPSILON
-                && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp)
-            {
-                let step = if self.startup_gain_ramp { 0.45 } else { 0.18 };
-                if delta.abs() <= step {
-                    self.applied_volume = self.target_volume;
-                    self.startup_gain_ramp = false;
+
+            // Startup silence hold: keep volume at zero until the decoder has
+            // had time to stabilise (prevents AC3/DTS garbage frames from
+            // reaching the speakers).
+            let hold_active = if let Some(hold_until) = self.startup_ramp_hold_until {
+                if Instant::now() < hold_until {
+                    if self.applied_volume != 0.0 {
+                        self.applied_volume = 0.0;
+                        self.playbin.set_property("volume", 0.0_f64);
+                    }
+                    true
                 } else {
-                    self.applied_volume += delta.signum() * step;
+                    self.startup_ramp_hold_until = None;
+                    false
                 }
-                self.playbin
-                    .set_property("volume", f64::from(self.applied_volume));
+            } else {
+                false
+            };
+
+            if !hold_active {
+                let delta = self.target_volume - self.applied_volume;
+                if delta.abs() > f32::EPSILON
+                    && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp)
+                {
+                    let step = if self.startup_gain_ramp { 0.45 } else { 0.18 };
+                    if delta.abs() <= step {
+                        self.applied_volume = self.target_volume;
+                        self.startup_gain_ramp = false;
+                    } else {
+                        self.applied_volume += delta.signum() * step;
+                    }
+                    self.playbin
+                        .set_property("volume", f64::from(self.applied_volume));
+                }
                 if (self.snapshot.volume - self.applied_volume).abs() > f32::EPSILON {
                     self.snapshot.volume = self.applied_volume;
                     snapshot_changed = true;
@@ -1456,6 +1495,18 @@ mod backend {
                 let track_token = self.advance_track_token();
                 self.emit_track_changed(path, queue_index, TrackChangeKind::Natural, track_token);
                 snapshot_changed = true;
+
+                // Gapless transition protection: mute and hold on natural
+                // handoff to prevent decoder startup garbage from playing.
+                if self
+                    .gapless_transition_pending
+                    .swap(false, Ordering::AcqRel)
+                {
+                    self.applied_volume = 0.0;
+                    self.playbin.set_property("volume", 0.0_f64);
+                    self.startup_gain_ramp = true;
+                    self.startup_ramp_hold_until = Some(Instant::now() + Duration::from_millis(80));
+                }
             }
             if snapshot_changed {
                 self.emit_snapshot();
@@ -1549,9 +1600,11 @@ mod backend {
         playbin.set_property("audio-sink", &analysis_sink);
 
         let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
+        let gapless_transition_pending = Arc::new(AtomicBool::new(false));
 
         {
             let queue_state = Arc::clone(&queue_state);
+            let gapless_pending = Arc::clone(&gapless_transition_pending);
             playbin.connect("about-to-finish", false, move |values| {
                 let maybe_playbin = values.first().and_then(|v| v.get::<gst::Element>().ok());
                 let playbin_obj = maybe_playbin?;
@@ -1560,6 +1613,7 @@ mod backend {
                 if let Some(next_path) = next {
                     if let Some(uri) = file_uri(&next_path) {
                         playbin_obj.set_property("uri", uri);
+                        gapless_pending.store(true, Ordering::Release);
                     }
                 }
                 None
@@ -1573,6 +1627,7 @@ mod backend {
             analysis_tx,
             analysis_track_token,
             event_tx,
+            gapless_transition_pending,
         );
         runtime
             .playbin
@@ -1693,6 +1748,7 @@ mod backend {
         uri: &str,
         applied_volume: &mut f32,
         startup_gain_ramp: &mut bool,
+        startup_ramp_hold_until: &mut Option<Instant>,
         force_play: bool,
     ) {
         let was_playing = snapshot.state == PlaybackState::Playing || force_play;
@@ -1702,13 +1758,19 @@ mod backend {
         playbin.set_property("uri", uri);
         if was_playing {
             let _ = playbin.set_state(gst::State::Playing);
+            // Re-assert mute after state transition to close the race window
+            // where new internal elements may not have volume=0.
+            playbin.set_property("volume", 0.0_f64);
             snapshot.state = PlaybackState::Playing;
             *startup_gain_ramp = true;
+            *startup_ramp_hold_until = Some(Instant::now() + Duration::from_millis(80));
         } else if snapshot.state == PlaybackState::Paused {
             let _ = playbin.set_state(gst::State::Paused);
             *startup_gain_ramp = false;
+            *startup_ramp_hold_until = None;
         } else {
             *startup_gain_ramp = false;
+            *startup_ramp_hold_until = None;
         }
         snapshot.current = Some(path.to_path_buf());
         snapshot.position = Duration::ZERO;
