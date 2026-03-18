@@ -724,7 +724,10 @@ mod backend {
     use gstreamer_audio as gst_audio;
 
     use crate::analysis::{AnalysisCommand, AnalysisPcmChunk, SpectrogramChannelLabel};
-    use crate::raw_audio::{is_dts_file, is_raw_surround_file, register_raw_surround_typefinders};
+    use crate::raw_audio::{
+        audio_only_byte_length, is_dts_file, is_raw_surround_file,
+        register_raw_surround_typefinders,
+    };
 
     use super::{
         PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
@@ -1645,6 +1648,12 @@ mod backend {
         )?;
         playbin.set_property("audio-sink", &analysis_sink);
 
+        // Strip APEv2 tags from raw surround file sources so the AC3/DTS
+        // parser never encounters garbage tag bytes at the end.  Without
+        // this, the parser stalls scanning for sync words it will never
+        // find, causing an audible gap during gapless transitions.
+        install_apev2_strip_probe(&playbin);
+
         let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
         let pending_eos_track_switch = Arc::new(AtomicBool::new(false));
 
@@ -1740,6 +1749,43 @@ mod backend {
                     autoplug_select_result(if skip { 2 } else { 0 })
                 });
             }
+            None
+        });
+    }
+
+    /// Install a `source-setup` handler on playbin that attaches a pad
+    /// probe to each source element feeding a raw surround file.  The
+    /// probe drops bytes past the audio boundary (before the `APEv2` tag),
+    /// preventing the AC3/DTS parser from scanning non-audio data.
+    fn install_apev2_strip_probe(playbin: &gst::Element) {
+        playbin.connect("source-setup", false, |values| {
+            let source = values.get(1)?.get::<gst::Element>().ok()?;
+            if !source.has_property("location") {
+                return None;
+            }
+            let location = source.property_value("location").get::<String>().ok()?;
+            let path = PathBuf::from(&location);
+            let audio_end = audio_only_byte_length(&path)?;
+
+            let src_pad = source.static_pad("src")?;
+            let bytes_seen = AtomicU64::new(0);
+            src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                let buf_size = match info.buffer() {
+                    Some(buf) => buf.size() as u64,
+                    None => return gst::PadProbeReturn::Ok,
+                };
+                let offset = bytes_seen.fetch_add(buf_size, Ordering::Relaxed);
+                if offset >= audio_end {
+                    return gst::PadProbeReturn::Drop;
+                }
+                if offset + buf_size > audio_end {
+                    let keep = usize::try_from(audio_end - offset).unwrap_or(0);
+                    if let Some(buf) = info.buffer_mut() {
+                        buf.make_mut().set_size(keep);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
             None
         });
     }

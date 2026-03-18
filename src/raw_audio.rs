@@ -181,6 +181,35 @@ pub(crate) fn raw_surround_format_label(path: &Path) -> String {
     }
 }
 
+/// Return the byte offset where audio content ends in a raw surround file,
+/// i.e. the file size minus the appended `APEv2` tag (if any).
+/// Returns `None` when the file is not a raw surround file or has no tag.
+pub(crate) fn audio_only_byte_length(path: &Path) -> Option<u64> {
+    if !is_raw_surround_file(path) {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let file_len = file.seek(SeekFrom::End(0)).ok()?;
+    let footer = read_apev2_footer(&mut file, file_len)?;
+    let tag_size = u64::from(footer.tag_size);
+    // tag_size covers items + footer; check for a separate header.
+    let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
+    let total = if file_len
+        .checked_sub(with_header)
+        .is_some_and(|header_start| has_ape_preamble(&mut file, header_start))
+    {
+        with_header
+    } else {
+        tag_size
+    };
+    let audio_len = file_len.saturating_sub(total);
+    if audio_len > 0 {
+        Some(audio_len)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn read_appended_apev2_text_metadata(path: &Path) -> Option<RawAudioTagMetadata> {
     if !is_raw_surround_file(path) {
         return None;
@@ -789,9 +818,10 @@ fn build_ape_block(size_field: u32, item_count: u32, flag_byte: u8) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_test_apev2_tag, parse_ape_number_pair, parse_ape_track_number, parse_ape_year,
-        raw_surround_format_label, read_appended_apev2_text_metadata,
-        write_appended_apev2_text_metadata, write_test_apev2_file, RawAudioTagMetadata,
+        audio_only_byte_length, build_test_apev2_tag, parse_ape_number_pair,
+        parse_ape_track_number, parse_ape_year, raw_surround_format_label,
+        read_appended_apev2_text_metadata, write_appended_apev2_text_metadata,
+        write_test_apev2_file, RawAudioTagMetadata,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1026,5 +1056,30 @@ mod tests {
         assert!((d - 8.0).abs() < 0.1, "expected ~8.0s, got {d}");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn audio_only_byte_length_excludes_apev2_tag() {
+        let path = test_path("audio-byte-len", "ac3");
+
+        let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
+        let audio_size: usize = 4096;
+        let mut data = Vec::with_capacity(audio_size + 200);
+        data.extend_from_slice(&ac3_header);
+        data.resize(audio_size, 0x00);
+        let tag = build_test_apev2_tag(&[("Title", "Test")], true);
+        data.extend_from_slice(&tag);
+
+        std::fs::write(&path, &data).expect("write test file");
+
+        let audio_len = audio_only_byte_length(&path);
+        assert_eq!(audio_len, Some(audio_size as u64));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn audio_only_byte_length_returns_none_for_non_surround_file() {
+        assert!(audio_only_byte_length(Path::new("/tmp/test.flac")).is_none());
     }
 }
