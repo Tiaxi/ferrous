@@ -433,11 +433,13 @@ impl AnalysisRuntimeState {
         self.snapshot.spectrogram_seq = 0;
         self.spectrogram.reset();
         self.pcm_fifo.clear();
-        // Keep current pcm_labels rather than resetting to [Mono].
-        // The first PCM chunk will correct the labels if the channel
-        // layout changed, avoiding a brief layout flicker in the UI
-        // (e.g., momentary full-height single channel before switching
-        // to the real 6-channel surround layout).
+        // Clear labels so the first chunk from the new track
+        // unconditionally sets them.  Keeping stale labels from the
+        // previous track would cause the transient-suppression logic in
+        // push_pcm_chunk to misidentify a legitimate channel-count
+        // reduction (e.g. 5.1 → stereo) as a decoder startup transient,
+        // permanently blocking all incoming audio.
+        self.pcm_labels.clear();
     }
 
     fn handle_pcm_ready(
@@ -2221,6 +2223,104 @@ mod tests {
         assert_eq!(
             level_message_bin_index(time_ns, 10_000_000_000, 100),
             Some(70)
+        );
+    }
+
+    #[test]
+    fn push_pcm_chunk_accepts_stereo_after_surround_track_change() {
+        let mut state = AnalysisRuntimeState::new();
+        let token = 1;
+        state.active_pcm_track_token = token;
+
+        let surround_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+            SpectrogramChannelLabel::FrontCenter,
+            SpectrogramChannelLabel::Lfe,
+            SpectrogramChannelLabel::RearLeft,
+            SpectrogramChannelLabel::RearRight,
+        ];
+
+        // Simulate playing a 5.1 track: push enough data to exit the
+        // startup window.
+        state.pcm_labels = surround_labels.clone();
+        let surround_samples: Vec<f32> = vec![0.1; 6 * 5000];
+        state.push_pcm_chunk(AnalysisPcmChunk {
+            samples: surround_samples,
+            channel_labels: surround_labels,
+            track_token: token,
+        });
+        assert!(
+            !state.pcm_fifo.is_empty(),
+            "surround data should be in FIFO"
+        );
+
+        // Switch to a new stereo track.
+        let token2 = 2;
+        state.active_pcm_track_token = token2;
+        state.reset_spectrogram_state();
+
+        // Push stereo chunk for the new track.
+        let stereo_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+        ];
+        let stereo_samples: Vec<f32> = vec![0.2; 2 * 1024];
+        state.push_pcm_chunk(AnalysisPcmChunk {
+            samples: stereo_samples,
+            channel_labels: stereo_labels.clone(),
+            track_token: token2,
+        });
+
+        // The stereo data must be accepted, not suppressed.
+        assert_eq!(state.pcm_labels, stereo_labels);
+        assert!(
+            !state.pcm_fifo.is_empty(),
+            "stereo data must be accepted after track change, not suppressed"
+        );
+    }
+
+    #[test]
+    fn push_pcm_chunk_suppresses_transient_channel_reduction_during_startup() {
+        let mut state = AnalysisRuntimeState::new();
+        let token = 1;
+        state.active_pcm_track_token = token;
+
+        // First chunk arrives with the real surround layout.
+        let surround_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+            SpectrogramChannelLabel::FrontCenter,
+            SpectrogramChannelLabel::Lfe,
+            SpectrogramChannelLabel::RearLeft,
+            SpectrogramChannelLabel::RearRight,
+        ];
+        state.push_pcm_chunk(AnalysisPcmChunk {
+            samples: vec![0.1; 6 * 100],
+            channel_labels: surround_labels.clone(),
+            track_token: token,
+        });
+        assert_eq!(state.pcm_labels, surround_labels);
+        let fifo_after_surround = state.pcm_fifo.len();
+
+        // Decoder transiently reports fewer channels during startup.
+        // This should be suppressed (data dropped, labels unchanged).
+        let stereo_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+        ];
+        state.push_pcm_chunk(AnalysisPcmChunk {
+            samples: vec![0.2; 2 * 100],
+            channel_labels: stereo_labels,
+            track_token: token,
+        });
+
+        // Labels should NOT have changed — the transient was suppressed.
+        assert_eq!(state.pcm_labels, surround_labels);
+        assert_eq!(
+            state.pcm_fifo.len(),
+            fifo_after_surround,
+            "transient stereo data should be dropped during startup"
         );
     }
 }
