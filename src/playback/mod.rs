@@ -724,7 +724,7 @@ mod backend {
     use gstreamer_audio as gst_audio;
 
     use crate::analysis::{AnalysisCommand, AnalysisPcmChunk, SpectrogramChannelLabel};
-    use crate::raw_audio::{is_dts_file, register_raw_surround_typefinders};
+    use crate::raw_audio::{is_dts_file, is_raw_surround_file, register_raw_surround_typefinders};
 
     use super::{
         PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
@@ -1324,7 +1324,16 @@ mod backend {
                 self.playbin
                     .set_property("volume", f64::from(self.applied_volume));
                 self.startup_gain_ramp = true;
-                self.startup_ramp_hold_until = Some(Instant::now() + Duration::from_millis(80));
+                self.startup_ramp_hold_until = if self
+                    .snapshot
+                    .current
+                    .as_deref()
+                    .is_some_and(is_raw_surround_file)
+                {
+                    Some(Instant::now() + Duration::from_millis(80))
+                } else {
+                    None
+                };
             }
             self.buffering_active = false;
             if self.playbin.set_state(gst::State::Playing).is_ok() {
@@ -1406,6 +1415,45 @@ mod backend {
             self.emit_snapshot();
         }
 
+        /// Drive the startup volume ramp, respecting the optional silence hold
+        /// for AC3/DTS decoder stabilisation.  Returns `true` when the
+        /// snapshot volume changed and needs to be emitted.
+        fn poll_volume_ramp(&mut self) -> bool {
+            // Startup silence hold: keep volume at zero until the decoder has
+            // had time to stabilise (prevents AC3/DTS garbage frames from
+            // reaching the speakers).
+            if let Some(hold_until) = self.startup_ramp_hold_until {
+                if Instant::now() < hold_until {
+                    if self.applied_volume != 0.0 {
+                        self.applied_volume = 0.0;
+                        self.playbin.set_property("volume", 0.0_f64);
+                    }
+                    return false;
+                }
+                self.startup_ramp_hold_until = None;
+            }
+
+            let delta = self.target_volume - self.applied_volume;
+            if delta.abs() > f32::EPSILON
+                && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp)
+            {
+                let step = if self.startup_gain_ramp { 0.45 } else { 0.18 };
+                if delta.abs() <= step {
+                    self.applied_volume = self.target_volume;
+                    self.startup_gain_ramp = false;
+                } else {
+                    self.applied_volume += delta.signum() * step;
+                }
+                self.playbin
+                    .set_property("volume", f64::from(self.applied_volume));
+            }
+            if (self.snapshot.volume - self.applied_volume).abs() > f32::EPSILON {
+                self.snapshot.volume = self.applied_volume;
+                return true;
+            }
+            false
+        }
+
         fn poll(&mut self) {
             if self.snapshot.state == PlaybackState::Stopped
                 && !self.startup_gain_ramp
@@ -1416,46 +1464,7 @@ mod backend {
                 return;
             }
 
-            let mut snapshot_changed = false;
-
-            // Startup silence hold: keep volume at zero until the decoder has
-            // had time to stabilise (prevents AC3/DTS garbage frames from
-            // reaching the speakers).
-            let hold_active = if let Some(hold_until) = self.startup_ramp_hold_until {
-                if Instant::now() < hold_until {
-                    if self.applied_volume != 0.0 {
-                        self.applied_volume = 0.0;
-                        self.playbin.set_property("volume", 0.0_f64);
-                    }
-                    true
-                } else {
-                    self.startup_ramp_hold_until = None;
-                    false
-                }
-            } else {
-                false
-            };
-
-            if !hold_active {
-                let delta = self.target_volume - self.applied_volume;
-                if delta.abs() > f32::EPSILON
-                    && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp)
-                {
-                    let step = if self.startup_gain_ramp { 0.45 } else { 0.18 };
-                    if delta.abs() <= step {
-                        self.applied_volume = self.target_volume;
-                        self.startup_gain_ramp = false;
-                    } else {
-                        self.applied_volume += delta.signum() * step;
-                    }
-                    self.playbin
-                        .set_property("volume", f64::from(self.applied_volume));
-                }
-                if (self.snapshot.volume - self.applied_volume).abs() > f32::EPSILON {
-                    self.snapshot.volume = self.applied_volume;
-                    snapshot_changed = true;
-                }
-            }
+            let mut snapshot_changed = self.poll_volume_ramp();
 
             let mut position_locked = false;
             if let Some((until, target)) = self.seek_hold.as_ref().copied() {
@@ -1493,11 +1502,18 @@ mod backend {
                 maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
             {
                 let track_token = self.advance_track_token();
-                self.emit_track_changed(path, queue_index, TrackChangeKind::Natural, track_token);
+                self.emit_track_changed(
+                    path.clone(),
+                    queue_index,
+                    TrackChangeKind::Natural,
+                    track_token,
+                );
                 snapshot_changed = true;
 
                 // Gapless transition protection: mute and hold on natural
-                // handoff to prevent decoder startup garbage from playing.
+                // handoff to prevent AC3/DTS decoder startup garbage from
+                // reaching the speakers.  Other codecs produce clean output
+                // immediately, so they only get the normal gain ramp (no hold).
                 if self
                     .gapless_transition_pending
                     .swap(false, Ordering::AcqRel)
@@ -1505,7 +1521,11 @@ mod backend {
                     self.applied_volume = 0.0;
                     self.playbin.set_property("volume", 0.0_f64);
                     self.startup_gain_ramp = true;
-                    self.startup_ramp_hold_until = Some(Instant::now() + Duration::from_millis(80));
+                    self.startup_ramp_hold_until = if is_raw_surround_file(&path) {
+                        Some(Instant::now() + Duration::from_millis(80))
+                    } else {
+                        None
+                    };
                 }
             }
             if snapshot_changed {
@@ -1741,6 +1761,7 @@ mod backend {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn switch_track(
         playbin: &gst::Element,
         snapshot: &mut PlaybackSnapshot,
@@ -1763,7 +1784,15 @@ mod backend {
             playbin.set_property("volume", 0.0_f64);
             snapshot.state = PlaybackState::Playing;
             *startup_gain_ramp = true;
-            *startup_ramp_hold_until = Some(Instant::now() + Duration::from_millis(80));
+            // AC3/DTS decoders produce garbage frames during startup — hold
+            // silence until the decoder has stabilised.  Other codecs produce
+            // clean output immediately, so skip the hold to avoid swallowing
+            // the start of the track.
+            *startup_ramp_hold_until = if is_raw_surround_file(path) {
+                Some(Instant::now() + Duration::from_millis(80))
+            } else {
+                None
+            };
         } else if snapshot.state == PlaybackState::Paused {
             let _ = playbin.set_state(gst::State::Paused);
             *startup_gain_ramp = false;
