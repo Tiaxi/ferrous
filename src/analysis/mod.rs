@@ -335,12 +335,12 @@ impl AnalysisRuntimeState {
         waveform_decode_active_token: &AtomicU64,
     ) {
         self.active_track_token = track_token;
-        self.active_pcm_track_token = track_token;
-        // For gapless transitions the PCM stream is continuous and the
-        // channel layout won't change, so keep pcm_labels_pending_init
-        // false to avoid disabling the transient-reduction suppression
-        // (which would cause a visible channel-info flicker).
+        // For gapless transitions the PCM stream is continuous — the
+        // playback module did NOT update the shared PCM tap atomic, so
+        // chunks still arrive with the old token.  Keep active_pcm_track_token
+        // unchanged so they are accepted without a gap.
         if !gapless {
+            self.active_pcm_track_token = track_token;
             self.pcm_labels_pending_init = true;
         }
         waveform_decode_active_token.store(track_token, Ordering::Relaxed);

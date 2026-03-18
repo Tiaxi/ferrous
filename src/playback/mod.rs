@@ -1016,7 +1016,13 @@ mod backend {
         playbin: gst::Element,
         queue_state: Arc<Mutex<GaplessQueue>>,
         analysis_tx: Sender<AnalysisCommand>,
-        analysis_track_token: Arc<AtomicU64>,
+        /// Shared with the PCM tap thread.  The tap reads this to tag each
+        /// chunk; the analysis runtime uses the value to filter stale data.
+        /// Only updated for non-gapless transitions (manual, cross-format).
+        analysis_pcm_token: Arc<AtomicU64>,
+        /// Local counter for generating unique track tokens (waveform jobs,
+        /// track-changed events).  Always incremented, even for gapless.
+        track_token_counter: u64,
         event_tx: Sender<PlaybackEvent>,
         snapshot: PlaybackSnapshot,
         target_volume: f32,
@@ -1075,7 +1081,7 @@ mod backend {
             playbin: gst::Element,
             queue_state: Arc<Mutex<GaplessQueue>>,
             analysis_tx: Sender<AnalysisCommand>,
-            analysis_track_token: Arc<AtomicU64>,
+            analysis_pcm_token: Arc<AtomicU64>,
             event_tx: Sender<PlaybackEvent>,
             pending_eos_track_switch: Arc<AtomicBool>,
         ) -> Self {
@@ -1083,7 +1089,8 @@ mod backend {
                 playbin,
                 queue_state,
                 analysis_tx,
-                analysis_track_token,
+                analysis_pcm_token,
+                track_token_counter: 0,
                 event_tx,
                 snapshot: PlaybackSnapshot {
                     volume: 1.0,
@@ -1105,12 +1112,24 @@ mod backend {
                 .send(PlaybackEvent::Snapshot(self.snapshot.clone()));
         }
 
-        fn advance_track_token(&self) -> u64 {
-            let track_token = self.analysis_track_token.fetch_add(1, Ordering::Relaxed) + 1;
-            let _ = self
-                .analysis_tx
-                .send(AnalysisCommand::SetTrackToken(track_token));
-            track_token
+        /// Advance the track token for a non-gapless transition (manual or
+        /// cross-format).  Updates the shared PCM tap atomic so the analysis
+        /// runtime accepts only chunks from the new track.
+        fn advance_track_token(&mut self) -> u64 {
+            self.track_token_counter += 1;
+            let token = self.track_token_counter;
+            self.analysis_pcm_token.store(token, Ordering::Relaxed);
+            let _ = self.analysis_tx.send(AnalysisCommand::SetTrackToken(token));
+            token
+        }
+
+        /// Advance the track token for a gapless transition.  Returns a
+        /// unique token for waveform tracking but does NOT touch the shared
+        /// PCM tap atomic — the audio stream is continuous and PCM chunks
+        /// must keep flowing without interruption.
+        fn advance_track_token_gapless(&mut self) -> u64 {
+            self.track_token_counter += 1;
+            self.track_token_counter
         }
 
         fn emit_track_changed(
@@ -1515,7 +1534,7 @@ mod backend {
                 if let Some((path, queue_index)) =
                     maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
                 {
-                    let track_token = self.advance_track_token();
+                    let track_token = self.advance_track_token_gapless();
                     self.emit_track_changed(
                         path,
                         queue_index,
