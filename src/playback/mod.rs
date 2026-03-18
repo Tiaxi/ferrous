@@ -1598,12 +1598,14 @@ mod backend {
     /// decodebins.  We handle `APEv2` tags ourselves; `apedemux` causes
     /// crashes and decode failures for AC3/DTS files with appended tags.
     ///
-    /// Uses `element-setup` to intercept each `decodebin` as it is created,
-    /// then connects to its `autoplug-select` signal to return SKIP for
-    /// `apedemux`.  This works regardless of typefinder rank state.
+    /// Uses `deep-element-added` (a recursive `GstBin` signal) to intercept
+    /// every element created anywhere in the pipeline, including nested
+    /// decodebins inside uridecodebin.  When a decodebin appears, its
+    /// `autoplug-select` signal is hooked to return SKIP for `apedemux`.
     fn install_apedemux_block(playbin: &gst::Element) {
-        playbin.connect("element-setup", false, |values| {
-            let element = values.get(1).and_then(|v| v.get::<gst::Element>().ok())?;
+        playbin.connect("deep-element-added", false, |values| {
+            // deep-element-added(bin, sub_bin, element)
+            let element = values.get(2).and_then(|v| v.get::<gst::Element>().ok())?;
             let is_decodebin = element.factory().is_some_and(|f| f.name() == "decodebin");
             if is_decodebin {
                 element.connect("autoplug-select", false, |values| {
