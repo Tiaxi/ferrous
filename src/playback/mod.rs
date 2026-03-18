@@ -1020,6 +1020,10 @@ mod backend {
         startup_ramp_hold_until: Option<Instant>,
         buffering_active: bool,
         seek_hold: Option<(Instant, Duration)>,
+        /// Deadline for forcing a gapless handoff when the position query
+        /// doesn't reset (cross-format transitions).  Set when the queue
+        /// path diverges but position hasn't confirmed the new track.
+        gapless_handoff_deadline: Option<Instant>,
     }
 
     pub fn spawn_engine(
@@ -1085,6 +1089,7 @@ mod backend {
                 startup_ramp_hold_until: None,
                 buffering_active: false,
                 seek_hold: None,
+                gapless_handoff_deadline: None,
             }
         }
 
@@ -1145,6 +1150,7 @@ mod backend {
                 force_play,
             );
             self.buffering_active = false;
+            self.gapless_handoff_deadline = None;
             self.emit_track_changed(path, queue_index, kind, track_token);
             self.emit_snapshot();
         }
@@ -1481,7 +1487,11 @@ mod backend {
                     }
                 }
             }
-            if !position_locked
+            // Skip duration queries while position is locked at zero
+            // (cross-format gapless handoff) — the query would return the
+            // old track's duration during decoder reconfiguration.
+            let duration_locked = position_locked && self.snapshot.position == Duration::ZERO;
+            if !duration_locked
                 && (self.snapshot.state != PlaybackState::Stopped
                     || self.snapshot.duration == Duration::ZERO)
             {
@@ -1496,19 +1506,48 @@ mod backend {
             if let Some((path, queue_index)) =
                 maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
             {
+                // Same-format gapless: position already near zero, clean
+                // handoff with no position manipulation needed.
+                self.gapless_handoff_deadline = None;
                 let track_token = self.advance_track_token();
                 self.emit_track_changed(path, queue_index, TrackChangeKind::Natural, track_token);
-                // Lock position at zero during cross-format gapless
-                // transitions.  Without this, query_position returns
-                // stale values from the old stream while GStreamer
-                // reconfigures the decoder, immediately overwriting the
-                // reset.  The hold keeps the UI at 0:00 until the new
-                // stream's position queries start returning valid values.
-                self.snapshot.position = Duration::ZERO;
-                self.snapshot.duration = Duration::ZERO;
-                self.snapshot.current_bitrate_kbps = None;
-                self.seek_hold = Some((Instant::now() + Duration::from_secs(1), Duration::ZERO));
                 snapshot_changed = true;
+            } else if is_gapless_path_diverged(&self.queue_state, &self.snapshot) {
+                // Queue advanced (about-to-finish fired) but position
+                // didn't reset — cross-format gapless where GStreamer is
+                // reconfiguring the decoder.  Start a deadline; when it
+                // expires, force the handoff.
+                let deadline = *self
+                    .gapless_handoff_deadline
+                    .get_or_insert_with(|| Instant::now() + Duration::from_secs(2));
+                if Instant::now() >= deadline {
+                    self.gapless_handoff_deadline = None;
+                    if let Ok(state) = self.queue_state.lock() {
+                        if let Some(path) = state.current() {
+                            let queue_index = state.current_index().unwrap_or(0);
+                            drop(state);
+                            self.snapshot.current = Some(path.clone());
+                            self.snapshot.current_queue_index = Some(queue_index);
+                            let track_token = self.advance_track_token();
+                            self.emit_track_changed(
+                                path,
+                                queue_index,
+                                TrackChangeKind::Natural,
+                                track_token,
+                            );
+                            // Lock position at zero until the new decoder's
+                            // position queries start returning valid values.
+                            self.snapshot.position = Duration::ZERO;
+                            self.snapshot.duration = Duration::ZERO;
+                            self.snapshot.current_bitrate_kbps = None;
+                            self.seek_hold =
+                                Some((Instant::now() + Duration::from_secs(2), Duration::ZERO));
+                            snapshot_changed = true;
+                        }
+                    }
+                }
+            } else {
+                self.gapless_handoff_deadline = None;
             }
             if snapshot_changed {
                 self.emit_snapshot();
@@ -1746,12 +1785,19 @@ mod backend {
         }
     }
 
+    /// Check whether gapless playback has rolled over to the next track.
+    ///
+    /// Returns `Some` when the queue has advanced (about-to-finish set a
+    /// new URI) AND the position confirms the new track is playing
+    /// (position near zero).  This works for same-format gapless where
+    /// the pipeline resets the stream position.
+    ///
+    /// For cross-format gapless the position may not reset — the caller
+    /// uses [`is_gapless_path_diverged`] + a deadline to handle that.
     fn maybe_emit_natural_handoff(
         queue_state: &Arc<Mutex<GaplessQueue>>,
         snapshot: &mut PlaybackSnapshot,
     ) -> Option<(PathBuf, usize)> {
-        // Gapless handoff sets next URI early in about-to-finish.
-        // Emit TrackChanged only once playback has actually rolled over.
         if snapshot.state != PlaybackState::Playing {
             return None;
         }
@@ -1761,29 +1807,33 @@ mod backend {
         let current_path = state.current()?;
         let current_index = state.current_index().unwrap_or(0);
         let path_changed = snapshot.current.as_ref() != Some(&current_path);
-        if !path_changed {
-            return None;
-        }
-        // The position query may either reset to near-zero (same-format
-        // gapless) or stay pinned at the old track's end during cross-format
-        // transitions where GStreamer reconfigures the decoder.  Accept
-        // both as evidence that the handoff has occurred.
-        //
-        // The end-of-track margin (2 s) matches the start-of-track window
-        // and accounts for about-to-finish firing up to ~2 s before the end,
-        // after which query_position may stop updating (returning None or a
-        // stale value).  Slightly early detection is acceptable because the
-        // seek_hold locks position at 0:00 until the new stream reports
-        // valid values.
         let at_track_start = snapshot.position <= Duration::from_secs(2);
-        let at_track_end = snapshot.duration > Duration::ZERO
-            && snapshot.position + Duration::from_secs(2) >= snapshot.duration;
-        if at_track_start || at_track_end {
+        if path_changed && at_track_start {
             snapshot.current = Some(current_path.clone());
             snapshot.current_queue_index = Some(current_index);
             return Some((current_path, current_index));
         }
         None
+    }
+
+    /// Check whether the queue has advanced (about-to-finish fired) but
+    /// the normal handoff detection hasn't confirmed it yet.  This
+    /// happens during cross-format gapless transitions where the
+    /// pipeline reconfigures the decoder and position doesn't reset.
+    fn is_gapless_path_diverged(
+        queue_state: &Arc<Mutex<GaplessQueue>>,
+        snapshot: &PlaybackSnapshot,
+    ) -> bool {
+        if snapshot.state != PlaybackState::Playing {
+            return false;
+        }
+        let Ok(state) = queue_state.lock() else {
+            return false;
+        };
+        let Some(current_path) = state.current() else {
+            return false;
+        };
+        snapshot.current.as_ref() != Some(&current_path)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2425,25 +2475,26 @@ mod backend {
         }
 
         #[test]
-        fn natural_handoff_emits_when_position_at_track_end() {
-            // Cross-format gapless: position stays near the old track's end
-            // because GStreamer's position query stops updating during
-            // decoder reconfiguration.  query_position may be up to ~1-2s
-            // short of the duration by the time about-to-finish fires.
+        fn gapless_path_diverged_detects_cross_format_transition() {
+            // Cross-format gapless: queue advanced but position stuck at
+            // old track's end.  is_gapless_path_diverged should return
+            // true while maybe_emit_natural_handoff returns None.
             let first = PathBuf::from("/tmp/gst_handoff_a.flac");
             let second = PathBuf::from("/tmp/gst_handoff_b.ac3");
             let queue_state = setup_queue_two_tracks(&first, &second);
-            let mut snapshot = PlaybackSnapshot {
+            let snapshot = PlaybackSnapshot {
                 state: PlaybackState::Playing,
-                position: Duration::from_millis(413_500), // ~1.5s short of duration
+                position: Duration::from_millis(413_500),
                 duration: Duration::from_secs(415),
                 current: Some(first),
                 ..PlaybackSnapshot::default()
             };
 
-            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot);
-            assert_eq!(emitted, Some((second.clone(), 1)));
-            assert_eq!(snapshot.current.as_ref(), Some(&second));
+            assert!(is_gapless_path_diverged(&queue_state, &snapshot));
+
+            let mut snapshot2 = snapshot;
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot2);
+            assert_eq!(emitted, None);
         }
 
         #[test]
