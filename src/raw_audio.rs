@@ -181,33 +181,53 @@ pub(crate) fn raw_surround_format_label(path: &Path) -> String {
     }
 }
 
-/// Return the byte offset where audio content ends in a raw surround file,
-/// i.e. the file size minus the appended `APEv2` tag (if any).
-/// Returns `None` when the file is not a raw surround file or has no tag.
-pub(crate) fn audio_only_byte_length(path: &Path) -> Option<u64> {
+/// Byte range of clean audio within a raw surround file: first sync word
+/// through end of audio (before `APEv2` tag).  Returns `None` for non-raw
+/// surround files or when there is nothing to strip.
+pub(crate) fn audio_byte_range(path: &Path) -> Option<(u64, u64)> {
     if !is_raw_surround_file(path) {
         return None;
     }
     let mut file = File::open(path).ok()?;
     let file_len = file.seek(SeekFrom::End(0)).ok()?;
-    let footer = read_apev2_footer(&mut file, file_len)?;
-    let tag_size = u64::from(footer.tag_size);
-    // tag_size covers items + footer; check for a separate header.
-    let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
-    let total = if file_len
-        .checked_sub(with_header)
-        .is_some_and(|header_start| has_ape_preamble(&mut file, header_start))
-    {
-        with_header
-    } else {
-        tag_size
+
+    // --- audio end: subtract APEv2 tag if present ---
+    let audio_end = match read_apev2_footer(&mut file, file_len) {
+        Some(footer) => {
+            let tag_size = u64::from(footer.tag_size);
+            let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
+            let total = if file_len
+                .checked_sub(with_header)
+                .is_some_and(|hs| has_ape_preamble(&mut file, hs))
+            {
+                with_header
+            } else {
+                tag_size
+            };
+            file_len.saturating_sub(total)
+        }
+        None => file_len,
     };
-    let audio_len = file_len.saturating_sub(total);
-    if audio_len > 0 {
-        Some(audio_len)
+
+    // --- audio start: first sync word (skip partial leading frame) ---
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let scan_len = usize::try_from(audio_end.min(8192)).unwrap_or(8192);
+    let mut buf = vec![0u8; scan_len];
+    file.read_exact(&mut buf).ok()?;
+    let sync_offset = if is_dts_file(path) {
+        find_dts_sync(&buf).unwrap_or(0)
     } else {
-        None
+        find_ac3_sync(&buf).unwrap_or(0)
+    };
+    let audio_start = sync_offset as u64;
+
+    if audio_start == 0 && audio_end == file_len {
+        return None; // nothing to strip
     }
+    if audio_start >= audio_end {
+        return None;
+    }
+    Some((audio_start, audio_end))
 }
 
 pub(crate) fn read_appended_apev2_text_metadata(path: &Path) -> Option<RawAudioTagMetadata> {
@@ -818,10 +838,9 @@ fn build_ape_block(size_field: u32, item_count: u32, flag_byte: u8) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_only_byte_length, build_test_apev2_tag, parse_ape_number_pair,
-        parse_ape_track_number, parse_ape_year, raw_surround_format_label,
-        read_appended_apev2_text_metadata, write_appended_apev2_text_metadata,
-        write_test_apev2_file, RawAudioTagMetadata,
+        audio_byte_range, build_test_apev2_tag, parse_ape_number_pair, parse_ape_track_number,
+        parse_ape_year, raw_surround_format_label, read_appended_apev2_text_metadata,
+        write_appended_apev2_text_metadata, write_test_apev2_file, RawAudioTagMetadata,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1059,27 +1078,46 @@ mod tests {
     }
 
     #[test]
-    fn audio_only_byte_length_excludes_apev2_tag() {
-        let path = test_path("audio-byte-len", "ac3");
+    fn audio_byte_range_strips_leading_garbage_and_apev2_tag() {
+        let path = test_path("audio-byte-range", "ac3");
 
+        // 16 bytes of leading garbage, then AC3 sync word + audio, then tag.
+        let leading_garbage = [0xFFu8; 16];
         let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
-        let audio_size: usize = 4096;
-        let mut data = Vec::with_capacity(audio_size + 200);
+        let audio_payload_size: usize = 4096;
+        let mut data = Vec::new();
+        data.extend_from_slice(&leading_garbage);
         data.extend_from_slice(&ac3_header);
-        data.resize(audio_size, 0x00);
+        data.resize(leading_garbage.len() + audio_payload_size, 0x00);
         let tag = build_test_apev2_tag(&[("Title", "Test")], true);
         data.extend_from_slice(&tag);
 
         std::fs::write(&path, &data).expect("write test file");
 
-        let audio_len = audio_only_byte_length(&path);
-        assert_eq!(audio_len, Some(audio_size as u64));
+        let range = audio_byte_range(&path);
+        let (start, end) = range.expect("should return a range");
+        assert_eq!(start, leading_garbage.len() as u64);
+        assert_eq!(end, (leading_garbage.len() + audio_payload_size) as u64);
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn audio_only_byte_length_returns_none_for_non_surround_file() {
-        assert!(audio_only_byte_length(Path::new("/tmp/test.flac")).is_none());
+    fn audio_byte_range_returns_none_for_non_surround_file() {
+        assert!(audio_byte_range(Path::new("/tmp/test.flac")).is_none());
+    }
+
+    #[test]
+    fn audio_byte_range_returns_none_when_nothing_to_strip() {
+        // AC3 file with sync word at byte 0 and no APEv2 tag → nothing to strip.
+        let path = test_path("audio-byte-range-clean", "ac3");
+        let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
+        let mut data = vec![0u8; 4096];
+        data[..ac3_header.len()].copy_from_slice(&ac3_header);
+        std::fs::write(&path, &data).expect("write test file");
+
+        assert!(audio_byte_range(&path).is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 }
