@@ -433,7 +433,11 @@ impl AnalysisRuntimeState {
         self.snapshot.spectrogram_seq = 0;
         self.spectrogram.reset();
         self.pcm_fifo.clear();
-        self.pcm_labels = vec![SpectrogramChannelLabel::Mono];
+        // Keep current pcm_labels rather than resetting to [Mono].
+        // The first PCM chunk will correct the labels if the channel
+        // layout changed, avoiding a brief layout flicker in the UI
+        // (e.g., momentary full-height single channel before switching
+        // to the real 6-channel surround layout).
     }
 
     fn handle_pcm_ready(
