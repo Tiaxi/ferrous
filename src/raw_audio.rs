@@ -8,6 +8,56 @@ use gstreamer as gst;
 #[cfg(feature = "gst")]
 use gstreamer_pbutils as gst_pbutils;
 
+#[cfg(feature = "gst")]
+use std::sync::Once;
+
+/// Register high-priority typefinders for AC3 and DTS so that raw surround
+/// files with appended `APEv2` tags are identified by their audio sync words
+/// rather than the trailing tag.
+#[cfg(feature = "gst")]
+pub(crate) fn register_raw_surround_typefinders() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let ac3_caps = gst::Caps::builder("audio/x-ac3").build();
+        let _ = gst::TypeFind::register(
+            None,
+            "ferrous-ac3-typefind",
+            gst::Rank::PRIMARY + 1,
+            Some("ac3"),
+            Some(&ac3_caps),
+            |tf| {
+                if let Some(data) = tf.peek(0, 2) {
+                    if data == [0x0B, 0x77] {
+                        tf.suggest(
+                            gst::TypeFindProbability::Maximum,
+                            &gst::Caps::builder("audio/x-ac3").build(),
+                        );
+                    }
+                }
+            },
+        );
+
+        let dts_caps = gst::Caps::builder("audio/x-dts").build();
+        let _ = gst::TypeFind::register(
+            None,
+            "ferrous-dts-typefind",
+            gst::Rank::PRIMARY + 1,
+            Some("dts"),
+            Some(&dts_caps),
+            |tf| {
+                if let Some(data) = tf.peek(0, 4) {
+                    if data == [0x7F, 0xFE, 0x80, 0x01] {
+                        tf.suggest(
+                            gst::TypeFindProbability::Maximum,
+                            &gst::Caps::builder("audio/x-dts").build(),
+                        );
+                    }
+                }
+            },
+        );
+    });
+}
+
 const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
 const APE_TAG_HEADER_BYTES: usize = 32;
 const APE_TAG_HEADER_BYTES_U64: u64 = 32;
@@ -120,6 +170,7 @@ pub(crate) fn probe_raw_surround_technical_details(
     }
 
     gst::init().ok()?;
+    register_raw_surround_typefinders();
 
     let uri = url::Url::from_file_path(path).ok()?.to_string();
     let timeout = gst::ClockTime::from_seconds(10);
