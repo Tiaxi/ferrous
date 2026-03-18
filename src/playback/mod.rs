@@ -1539,6 +1539,7 @@ mod backend {
             .build()
             .map_err(|_| anyhow!("failed to create playbin"))?;
         configure_playbin_buffering(&playbin);
+        install_apedemux_block(&playbin);
 
         let analysis_sink = build_analysis_audio_sink(
             analysis_tx.clone(),
@@ -1591,6 +1592,36 @@ mod backend {
 
         let _ = runtime.playbin.set_state(gst::State::Null);
         Ok(())
+    }
+
+    /// Prevent `apedemux` from being auto-plugged inside playbin's internal
+    /// decodebins.  We handle `APEv2` tags ourselves; `apedemux` causes
+    /// crashes and decode failures for AC3/DTS files with appended tags.
+    ///
+    /// Uses `element-setup` to intercept each `decodebin` as it is created,
+    /// then connects to its `autoplug-select` signal to return SKIP for
+    /// `apedemux`.  This works regardless of typefinder rank state.
+    fn install_apedemux_block(playbin: &gst::Element) {
+        playbin.connect("element-setup", false, |values| {
+            let element = values.get(1).and_then(|v| v.get::<gst::Element>().ok())?;
+            let dominated_by_apedemux = element
+                .factory()
+                .is_some_and(|f| f.name().contains("decodebin"));
+            if dominated_by_apedemux {
+                element.connect("autoplug-select", false, |values| {
+                    let factory = values
+                        .get(3)
+                        .and_then(|v| v.get::<gst::ElementFactory>().ok());
+                    if factory.is_some_and(|f| f.name() == "apedemux") {
+                        // GST_AUTOPLUG_SELECT_SKIP = 2
+                        return Some(2i32.to_value());
+                    }
+                    // GST_AUTOPLUG_SELECT_TRY = 0
+                    Some(0i32.to_value())
+                });
+            }
+            None
+        });
     }
 
     fn configure_playbin_buffering(playbin: &gst::Element) {
