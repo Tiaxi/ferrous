@@ -1481,8 +1481,9 @@ mod backend {
                     }
                 }
             }
-            if self.snapshot.state != PlaybackState::Stopped
-                || self.snapshot.duration == Duration::ZERO
+            if !position_locked
+                && (self.snapshot.state != PlaybackState::Stopped
+                    || self.snapshot.duration == Duration::ZERO)
             {
                 if let Some(dur) = self.playbin.query_duration::<gst::ClockTime>() {
                     let next_dur = Duration::from_nanos(dur.nseconds());
@@ -1497,12 +1498,16 @@ mod backend {
             {
                 let track_token = self.advance_track_token();
                 self.emit_track_changed(path, queue_index, TrackChangeKind::Natural, track_token);
-                // Reset position/duration so the UI doesn't stay stuck on
-                // the old track's values while GStreamer reconfigures the
-                // decoder during cross-format gapless transitions.
+                // Lock position at zero during cross-format gapless
+                // transitions.  Without this, query_position returns
+                // stale values from the old stream while GStreamer
+                // reconfigures the decoder, immediately overwriting the
+                // reset.  The hold keeps the UI at 0:00 until the new
+                // stream's position queries start returning valid values.
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.duration = Duration::ZERO;
                 self.snapshot.current_bitrate_kbps = None;
+                self.seek_hold = Some((Instant::now() + Duration::from_secs(1), Duration::ZERO));
                 snapshot_changed = true;
             }
             if snapshot_changed {
@@ -1764,13 +1769,15 @@ mod backend {
         // transitions where GStreamer reconfigures the decoder.  Accept
         // both as evidence that the handoff has occurred.
         //
-        // The end-of-track margin (500 ms) accounts for the last audio
-        // frame ending slightly before the reported duration, and for
-        // query_position returning None during the transition (leaving the
-        // stored position a frame or two short).
+        // The end-of-track margin (2 s) matches the start-of-track window
+        // and accounts for about-to-finish firing up to ~2 s before the end,
+        // after which query_position may stop updating (returning None or a
+        // stale value).  Slightly early detection is acceptable because the
+        // seek_hold locks position at 0:00 until the new stream reports
+        // valid values.
         let at_track_start = snapshot.position <= Duration::from_secs(2);
         let at_track_end = snapshot.duration > Duration::ZERO
-            && snapshot.position + Duration::from_millis(500) >= snapshot.duration;
+            && snapshot.position + Duration::from_secs(2) >= snapshot.duration;
         if at_track_start || at_track_end {
             snapshot.current = Some(current_path.clone());
             snapshot.current_queue_index = Some(current_index);
@@ -2419,16 +2426,16 @@ mod backend {
 
         #[test]
         fn natural_handoff_emits_when_position_at_track_end() {
-            // Cross-format gapless: position stays at the old track's end
-            // because GStreamer's position query doesn't reset during
-            // decoder reconfiguration.  The last position may be a frame
-            // short of the duration (e.g. 32 ms for AC3).
+            // Cross-format gapless: position stays near the old track's end
+            // because GStreamer's position query stops updating during
+            // decoder reconfiguration.  query_position may be up to ~1-2s
+            // short of the duration by the time about-to-finish fires.
             let first = PathBuf::from("/tmp/gst_handoff_a.flac");
             let second = PathBuf::from("/tmp/gst_handoff_b.ac3");
             let queue_state = setup_queue_two_tracks(&first, &second);
             let mut snapshot = PlaybackSnapshot {
                 state: PlaybackState::Playing,
-                position: Duration::from_millis(414_968), // ~32ms short of duration
+                position: Duration::from_millis(413_500), // ~1.5s short of duration
                 duration: Duration::from_secs(415),
                 current: Some(first),
                 ..PlaybackSnapshot::default()
@@ -2446,7 +2453,7 @@ mod backend {
             let queue_state = setup_queue_two_tracks(&first, &second);
             let mut snapshot = PlaybackSnapshot {
                 state: PlaybackState::Playing,
-                position: Duration::from_secs(3),
+                position: Duration::from_secs(100),
                 duration: Duration::from_secs(200),
                 current: Some(first.clone()),
                 ..PlaybackSnapshot::default()
