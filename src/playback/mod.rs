@@ -1604,24 +1604,29 @@ mod backend {
     fn install_apedemux_block(playbin: &gst::Element) {
         playbin.connect("element-setup", false, |values| {
             let element = values.get(1).and_then(|v| v.get::<gst::Element>().ok())?;
-            let dominated_by_apedemux = element
-                .factory()
-                .is_some_and(|f| f.name().contains("decodebin"));
-            if dominated_by_apedemux {
+            let is_decodebin = element.factory().is_some_and(|f| f.name() == "decodebin");
+            if is_decodebin {
                 element.connect("autoplug-select", false, |values| {
                     let factory = values
                         .get(3)
                         .and_then(|v| v.get::<gst::ElementFactory>().ok());
-                    if factory.is_some_and(|f| f.name() == "apedemux") {
-                        // GST_AUTOPLUG_SELECT_SKIP = 2
-                        return Some(2i32.to_value());
-                    }
-                    // GST_AUTOPLUG_SELECT_TRY = 0
-                    Some(0i32.to_value())
+                    let skip = factory.is_some_and(|f| f.name() == "apedemux");
+                    autoplug_select_result(if skip { 2 } else { 0 })
                 });
             }
             None
         });
+    }
+
+    /// Build a `GstAutoplugSelectResult` enum value for signal return.
+    fn autoplug_select_result(value: i32) -> Option<gst::glib::Value> {
+        use gst::glib::translate::ToGlibPtrMut;
+        let gtype = gst::glib::Type::from_name("GstAutoplugSelectResult")?;
+        let mut gvalue = gst::glib::Value::from_type(gtype);
+        unsafe {
+            gst::glib::gobject_ffi::g_value_set_enum(gvalue.to_glib_none_mut().0, value);
+        }
+        Some(gvalue)
     }
 
     fn configure_playbin_buffering(playbin: &gst::Element) {
