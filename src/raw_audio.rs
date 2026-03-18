@@ -11,13 +11,40 @@ use gstreamer_pbutils as gst_pbutils;
 #[cfg(feature = "gst")]
 use std::sync::Once;
 
-/// Register high-priority typefinders for AC3 and DTS so that raw surround
-/// files with appended `APEv2` tags are identified by their audio sync words
-/// rather than the trailing tag.
+/// Disable `GStreamer`'s APE tag handling so that raw surround files with
+/// appended `APEv2` tags are not misidentified as `application/x-apetag`.
+///
+/// We handle `APEv2` tags ourselves via [`read_appended_apev2_text_metadata`].
+/// The `GStreamer` APE typefinder + `apedemux` combo causes crashes and decode
+/// failures for AC3/DTS files because `apedemux` strips the tag but cannot
+/// identify the remaining audio content.
+///
+/// We also register backup typefinders for AC3/DTS that check the audio sync
+/// words at byte 0, ensuring correct type detection even if the built-in
+/// typefinders are not installed.
 #[cfg(feature = "gst")]
 pub(crate) fn register_raw_surround_typefinders() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // Disable the APE tag typefinder so files are never identified as
+        // application/x-apetag.
+        {
+            use gst::prelude::{GstObjectExt, PluginFeatureExtManual};
+
+            for factory in gst::TypeFindFactory::factories() {
+                let name = factory.name();
+                if name.contains("apetag") || name.contains("ape_tag") {
+                    factory.set_rank(gst::Rank::NONE);
+                }
+            }
+
+            if let Some(factory) = gst::ElementFactory::find("apedemux") {
+                factory.set_rank(gst::Rank::NONE);
+            }
+        }
+
+        // Register AC3/DTS typefinders as a safety net in case the built-in
+        // ones are not installed.
         let ac3_caps = gst::Caps::builder("audio/x-ac3").build();
         let _ = gst::TypeFind::register(
             None,
