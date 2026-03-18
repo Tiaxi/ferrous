@@ -54,8 +54,9 @@ pub(crate) fn register_raw_surround_typefinders() {
             }
         }
 
-        // Register AC3/DTS typefinders as a safety net in case the built-in
-        // ones are not installed.
+        // Register AC3/DTS typefinders.  AC3 files ripped from DVDs often
+        // start with a partial frame (leftover bytes from the previous
+        // track's last frame), so we scan up to 2 kB for the sync word.
         let ac3_caps = gst::Caps::builder("audio/x-ac3").build();
         let _ = gst::TypeFind::register(
             None,
@@ -64,8 +65,11 @@ pub(crate) fn register_raw_surround_typefinders() {
             Some("ac3"),
             Some(&ac3_caps),
             |tf| {
-                if let Some(data) = tf.peek(0, 2) {
-                    if data == [0x0B, 0x77] {
+                // AC3 frame size is at most 3840 bytes; scan 2 kB which
+                // covers any partial leading frame.
+                let scan_len: u32 = 2048;
+                if let Some(data) = tf.peek(0, scan_len) {
+                    if find_ac3_sync(data).is_some() {
                         tf.suggest(
                             gst::TypeFindProbability::Maximum,
                             &gst::Caps::builder("audio/x-ac3").build(),
@@ -83,8 +87,9 @@ pub(crate) fn register_raw_surround_typefinders() {
             Some("dts"),
             Some(&dts_caps),
             |tf| {
-                if let Some(data) = tf.peek(0, 4) {
-                    if data == [0x7F, 0xFE, 0x80, 0x01] {
+                let scan_len: u32 = 8192; // DTS frames can be large
+                if let Some(data) = tf.peek(0, scan_len) {
+                    if find_dts_sync(data).is_some() {
                         tf.suggest(
                             gst::TypeFindProbability::Maximum,
                             &gst::Caps::builder("audio/x-dts").build(),
@@ -292,15 +297,20 @@ fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
         return None;
     }
 
-    // Read the first few bytes for header parsing.
+    // Read enough bytes to scan for the first valid frame header.
+    // AC3 files ripped from DVDs may start with a partial frame
+    // (up to ~1792 bytes of leftover data from the previous track).
     file.seek(SeekFrom::Start(0)).ok()?;
-    let mut header = [0u8; 12];
-    file.read_exact(&mut header).ok()?;
+    let scan_len = usize::try_from(2048u64.min(audio_bytes)).unwrap_or(2048);
+    let mut buf = vec![0u8; scan_len];
+    file.read_exact(&mut buf).ok()?;
 
     let bitrate_bps = if is_dts_file(path) {
-        parse_dts_bitrate(&header)?
+        let offset = find_dts_sync(&buf)?;
+        parse_dts_bitrate(&buf[offset..])?
     } else {
-        parse_ac3_bitrate(&header)?
+        let offset = find_ac3_sync(&buf)?;
+        parse_ac3_bitrate(&buf[offset..])?
     };
 
     if bitrate_bps == 0 {
@@ -323,6 +333,11 @@ const DTS_SAMPLE_RATES: [u32; 16] = [
     0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100, 0, 0, 12000, 24000, 48000, 0, 0,
 ];
 
+/// Find the byte offset of the first AC3 sync word (`0x0B77`) in `data`.
+fn find_ac3_sync(data: &[u8]) -> Option<usize> {
+    data.windows(2).position(|w| w == [0x0B, 0x77])
+}
+
 /// Parse the bitrate from an AC3 (A/52) sync frame header.
 ///
 /// Layout of the first 5 bytes:
@@ -336,6 +351,11 @@ fn parse_ac3_bitrate(header: &[u8]) -> Option<u32> {
     let frmsizcod = usize::from(header[4] & 0x3F);
     let kbps = *AC3_BITRATES_KBPS.get(frmsizcod / 2)?;
     Some(kbps * 1000)
+}
+
+/// Find the byte offset of the first DTS sync word (`0x7FFE8001`) in `data`.
+fn find_dts_sync(data: &[u8]) -> Option<usize> {
+    data.windows(4).position(|w| w == [0x7F, 0xFE, 0x80, 0x01])
 }
 
 /// Parse the bitrate from a DTS frame header.
