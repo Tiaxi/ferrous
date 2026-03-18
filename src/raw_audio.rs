@@ -55,8 +55,8 @@ pub(crate) fn register_raw_surround_typefinders() {
         let _ = gst::TypeFind::register(
             None,
             "ferrous-ac3-typefind",
-            gst::Rank::PRIMARY + 1,
-            Some("ac3"),
+            gst::Rank::PRIMARY + 256,
+            None,
             Some(&ac3_caps),
             |tf| {
                 // AC3 frame size is at most 3840 bytes; scan 2 kB which
@@ -77,8 +77,8 @@ pub(crate) fn register_raw_surround_typefinders() {
         let _ = gst::TypeFind::register(
             None,
             "ferrous-dts-typefind",
-            gst::Rank::PRIMARY + 1,
-            Some("dts"),
+            gst::Rank::PRIMARY + 256,
+            None,
             Some(&dts_caps),
             |tf| {
                 let scan_len: u32 = 8192; // DTS frames can be large
