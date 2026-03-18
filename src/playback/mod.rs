@@ -711,7 +711,7 @@ mod backend {
 mod backend {
     use std::path::{Path, PathBuf};
     use std::sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     };
     use std::time::{Duration, Instant};
@@ -1020,10 +1020,10 @@ mod backend {
         startup_ramp_hold_until: Option<Instant>,
         buffering_active: bool,
         seek_hold: Option<(Instant, Duration)>,
-        /// Deadline for forcing a gapless handoff when the position query
-        /// doesn't reset (cross-format transitions).  Set when the queue
-        /// path diverges but position hasn't confirmed the new track.
-        gapless_handoff_deadline: Option<Instant>,
+        /// Set by the about-to-finish handler when the next track has a
+        /// different codec (file extension).  The EOS handler will perform
+        /// a full pipeline switch instead of relying on gapless playback.
+        pending_eos_track_switch: Arc<AtomicBool>,
     }
 
     pub fn spawn_engine(
@@ -1072,6 +1072,7 @@ mod backend {
             analysis_tx: Sender<AnalysisCommand>,
             analysis_track_token: Arc<AtomicU64>,
             event_tx: Sender<PlaybackEvent>,
+            pending_eos_track_switch: Arc<AtomicBool>,
         ) -> Self {
             Self {
                 playbin,
@@ -1089,7 +1090,7 @@ mod backend {
                 startup_ramp_hold_until: None,
                 buffering_active: false,
                 seek_hold: None,
-                gapless_handoff_deadline: None,
+                pending_eos_track_switch,
             }
         }
 
@@ -1150,7 +1151,8 @@ mod backend {
                 force_play,
             );
             self.buffering_active = false;
-            self.gapless_handoff_deadline = None;
+            self.pending_eos_track_switch
+                .store(false, Ordering::Release);
             self.emit_track_changed(path, queue_index, kind, track_token);
             self.emit_snapshot();
         }
@@ -1161,6 +1163,8 @@ mod backend {
             self.startup_gain_ramp = false;
             self.startup_ramp_hold_until = None;
             self.buffering_active = false;
+            self.pending_eos_track_switch
+                .store(false, Ordering::Release);
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
@@ -1369,6 +1373,8 @@ mod backend {
                 self.startup_ramp_hold_until = None;
                 self.buffering_active = false;
                 self.seek_hold = None;
+                self.pending_eos_track_switch
+                    .store(false, Ordering::Release);
                 self.snapshot.state = PlaybackState::Stopped;
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
@@ -1487,13 +1493,8 @@ mod backend {
                     }
                 }
             }
-            // Skip duration queries while position is locked at zero
-            // (cross-format gapless handoff) — the query would return the
-            // old track's duration during decoder reconfiguration.
-            let duration_locked = position_locked && self.snapshot.position == Duration::ZERO;
-            if !duration_locked
-                && (self.snapshot.state != PlaybackState::Stopped
-                    || self.snapshot.duration == Duration::ZERO)
+            if self.snapshot.state != PlaybackState::Stopped
+                || self.snapshot.duration == Duration::ZERO
             {
                 if let Some(dur) = self.playbin.query_duration::<gst::ClockTime>() {
                     let next_dur = Duration::from_nanos(dur.nseconds());
@@ -1503,51 +1504,21 @@ mod backend {
                     }
                 }
             }
-            if let Some((path, queue_index)) =
-                maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
-            {
-                // Same-format gapless: position already near zero, clean
-                // handoff with no position manipulation needed.
-                self.gapless_handoff_deadline = None;
-                let track_token = self.advance_track_token();
-                self.emit_track_changed(path, queue_index, TrackChangeKind::Natural, track_token);
-                snapshot_changed = true;
-            } else if is_gapless_path_diverged(&self.queue_state, &self.snapshot) {
-                // Queue advanced (about-to-finish fired) but position
-                // didn't reset — cross-format gapless where GStreamer is
-                // reconfiguring the decoder.  Start a deadline; when it
-                // expires, force the handoff.
-                let deadline = *self
-                    .gapless_handoff_deadline
-                    .get_or_insert_with(|| Instant::now() + Duration::from_secs(2));
-                if Instant::now() >= deadline {
-                    self.gapless_handoff_deadline = None;
-                    if let Ok(state) = self.queue_state.lock() {
-                        if let Some(path) = state.current() {
-                            let queue_index = state.current_index().unwrap_or(0);
-                            drop(state);
-                            self.snapshot.current = Some(path.clone());
-                            self.snapshot.current_queue_index = Some(queue_index);
-                            let track_token = self.advance_track_token();
-                            self.emit_track_changed(
-                                path,
-                                queue_index,
-                                TrackChangeKind::Natural,
-                                track_token,
-                            );
-                            // Lock position at zero until the new decoder's
-                            // position queries start returning valid values.
-                            self.snapshot.position = Duration::ZERO;
-                            self.snapshot.duration = Duration::ZERO;
-                            self.snapshot.current_bitrate_kbps = None;
-                            self.seek_hold =
-                                Some((Instant::now() + Duration::from_secs(2), Duration::ZERO));
-                            snapshot_changed = true;
-                        }
-                    }
+            // Only check for same-format gapless handoff when we are NOT
+            // waiting for EOS to drive a cross-format switch.
+            if !self.pending_eos_track_switch.load(Ordering::Acquire) {
+                if let Some((path, queue_index)) =
+                    maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
+                {
+                    let track_token = self.advance_track_token();
+                    self.emit_track_changed(
+                        path,
+                        queue_index,
+                        TrackChangeKind::Natural,
+                        track_token,
+                    );
+                    snapshot_changed = true;
                 }
-            } else {
-                self.gapless_handoff_deadline = None;
             }
             if snapshot_changed {
                 self.emit_snapshot();
@@ -1592,6 +1563,20 @@ mod backend {
                     }
                 }
                 gst::MessageView::Eos(..) => {
+                    if self.pending_eos_track_switch.swap(false, Ordering::AcqRel) {
+                        // Cross-format transition: about-to-finish advanced the
+                        // queue but didn't set the URI.  Do a full pipeline switch.
+                        let next = self.queue_state.lock().ok().and_then(|state| {
+                            let path = state.current()?;
+                            let index = state.current_index().unwrap_or(0);
+                            Some((path, index))
+                        });
+                        if let Some((path, index)) = next {
+                            self.switch_to_path(path, index, TrackChangeKind::Natural, true);
+                            return;
+                        }
+                    }
+                    // Normal EOS: end of queue
                     self.buffering_active = false;
                     self.snapshot.state = PlaybackState::Stopped;
                     self.snapshot.position = Duration::ZERO;
@@ -1661,29 +1646,38 @@ mod backend {
         playbin.set_property("audio-sink", &analysis_sink);
 
         let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
+        let pending_eos_track_switch = Arc::new(AtomicBool::new(false));
 
         {
             let queue_state = Arc::clone(&queue_state);
+            let pending_eos = Arc::clone(&pending_eos_track_switch);
             playbin.connect("about-to-finish", false, move |values| {
-                let maybe_playbin = values.first().and_then(|v| v.get::<gst::Element>().ok());
-                let playbin_obj = maybe_playbin?;
+                let playbin_obj = values.first()?.get::<gst::Element>().ok()?;
 
-                let next = match queue_state.lock() {
-                    Ok(mut q) => q.next_natural(),
+                let mut q = match queue_state.lock() {
+                    Ok(q) => q,
                     Err(e) => {
                         eprintln!("[ferrous] about-to-finish: queue lock poisoned: {e}");
-                        None
+                        return None;
                     }
                 };
-                if let Some(next_path) = next {
-                    if let Some(uri) = file_uri(&next_path) {
+                let old_path = q.current()?;
+                let new_path = q.next_natural()?;
+                drop(q);
+
+                // Same file extension → gapless (same decoder reused).
+                // Different extension → let EOS fire, handle in bus handler.
+                if same_audio_extension(&old_path, &new_path) {
+                    if let Some(uri) = file_uri(&new_path) {
                         playbin_obj.set_property("uri", uri);
                     } else {
                         eprintln!(
                             "[ferrous] about-to-finish: failed to convert path to URI: {}",
-                            next_path.display()
+                            new_path.display()
                         );
                     }
+                } else {
+                    pending_eos.store(true, Ordering::Release);
                 }
                 None
             });
@@ -1696,6 +1690,7 @@ mod backend {
             analysis_tx,
             analysis_track_token,
             event_tx,
+            pending_eos_track_switch,
         );
         runtime
             .playbin
@@ -1789,11 +1784,11 @@ mod backend {
     ///
     /// Returns `Some` when the queue has advanced (about-to-finish set a
     /// new URI) AND the position confirms the new track is playing
-    /// (position near zero).  This works for same-format gapless where
-    /// the pipeline resets the stream position.
+    /// (position near zero).  This handles same-format gapless where
+    /// the pipeline reuses the decoder and resets the stream position.
     ///
-    /// For cross-format gapless the position may not reset — the caller
-    /// uses [`is_gapless_path_diverged`] + a deadline to handle that.
+    /// Cross-format transitions are handled separately via the
+    /// `pending_eos_track_switch` flag and the EOS bus handler.
     fn maybe_emit_natural_handoff(
         queue_state: &Arc<Mutex<GaplessQueue>>,
         snapshot: &mut PlaybackSnapshot,
@@ -1814,26 +1809,6 @@ mod backend {
             return Some((current_path, current_index));
         }
         None
-    }
-
-    /// Check whether the queue has advanced (about-to-finish fired) but
-    /// the normal handoff detection hasn't confirmed it yet.  This
-    /// happens during cross-format gapless transitions where the
-    /// pipeline reconfigures the decoder and position doesn't reset.
-    fn is_gapless_path_diverged(
-        queue_state: &Arc<Mutex<GaplessQueue>>,
-        snapshot: &PlaybackSnapshot,
-    ) -> bool {
-        if snapshot.state != PlaybackState::Playing {
-            return false;
-        }
-        let Ok(state) = queue_state.lock() else {
-            return false;
-        };
-        let Some(current_path) = state.current() else {
-            return false;
-        };
-        snapshot.current.as_ref() != Some(&current_path)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2475,26 +2450,39 @@ mod backend {
         }
 
         #[test]
-        fn gapless_path_diverged_detects_cross_format_transition() {
-            // Cross-format gapless: queue advanced but position stuck at
-            // old track's end.  is_gapless_path_diverged should return
-            // true while maybe_emit_natural_handoff returns None.
-            let first = PathBuf::from("/tmp/gst_handoff_a.flac");
-            let second = PathBuf::from("/tmp/gst_handoff_b.ac3");
-            let queue_state = setup_queue_two_tracks(&first, &second);
-            let snapshot = PlaybackSnapshot {
-                state: PlaybackState::Playing,
-                position: Duration::from_millis(413_500),
-                duration: Duration::from_secs(415),
-                current: Some(first),
-                ..PlaybackSnapshot::default()
-            };
+        fn same_audio_extension_matches_same_codecs() {
+            assert!(same_audio_extension(
+                Path::new("/tmp/a.flac"),
+                Path::new("/tmp/b.flac")
+            ));
+            assert!(same_audio_extension(
+                Path::new("/tmp/a.AC3"),
+                Path::new("/tmp/b.ac3")
+            ));
+        }
 
-            assert!(is_gapless_path_diverged(&queue_state, &snapshot));
+        #[test]
+        fn same_audio_extension_rejects_different_codecs() {
+            assert!(!same_audio_extension(
+                Path::new("/tmp/a.flac"),
+                Path::new("/tmp/b.ac3")
+            ));
+            assert!(!same_audio_extension(
+                Path::new("/tmp/a.ac3"),
+                Path::new("/tmp/b.dts")
+            ));
+        }
 
-            let mut snapshot2 = snapshot;
-            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot2);
-            assert_eq!(emitted, None);
+        #[test]
+        fn same_audio_extension_rejects_missing_extension() {
+            assert!(!same_audio_extension(
+                Path::new("/tmp/noext"),
+                Path::new("/tmp/b.flac")
+            ));
+            assert!(!same_audio_extension(
+                Path::new("/tmp/a.flac"),
+                Path::new("/tmp/noext")
+            ));
         }
 
         #[test]
@@ -2595,6 +2583,24 @@ mod backend {
             queue.set_shuffle_enabled(true);
             assert_eq!(queue.next_natural().as_ref(), Some(&b));
             assert!(queue.next_natural().is_none());
+        }
+    }
+
+    /// Compare lowercase file extensions to decide whether two tracks can
+    /// share a gapless decoder chain.  Conservative: any mismatch (including
+    /// missing extensions) falls back to the safe EOS-based switch.
+    fn same_audio_extension(a: &Path, b: &Path) -> bool {
+        let ext_a = a
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase);
+        let ext_b = b
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase);
+        match (ext_a, ext_b) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
         }
     }
 
