@@ -1606,8 +1606,20 @@ mod backend {
         playbin.connect("deep-element-added", false, |values| {
             // deep-element-added(bin, sub_bin, element)
             let element = values.get(2).and_then(|v| v.get::<gst::Element>().ok())?;
-            let is_decodebin = element.factory().is_some_and(|f| f.name() == "decodebin");
-            if is_decodebin {
+            let factory_name = element.factory().map(|f| f.name().to_string());
+            eprintln!(
+                "[ferrous] deep-element-added: factory={:?}",
+                factory_name
+            );
+            let has_autoplug = matches!(
+                factory_name.as_deref(),
+                Some("decodebin" | "uridecodebin" | "decodebin3" | "uridecodebin3")
+            );
+            if has_autoplug {
+                eprintln!(
+                    "[ferrous] installing autoplug-select apedemux block on {:?}",
+                    factory_name
+                );
                 element.connect("autoplug-select", false, |values| {
                     let factory = values
                         .get(3)
