@@ -1497,6 +1497,12 @@ mod backend {
             {
                 let track_token = self.advance_track_token();
                 self.emit_track_changed(path, queue_index, TrackChangeKind::Natural, track_token);
+                // Reset position/duration so the UI doesn't stay stuck on
+                // the old track's values while GStreamer reconfigures the
+                // decoder during cross-format gapless transitions.
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.duration = Duration::ZERO;
+                self.snapshot.current_bitrate_kbps = None;
                 snapshot_changed = true;
             }
             if snapshot_changed {
