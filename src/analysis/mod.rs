@@ -492,10 +492,13 @@ impl AnalysisRuntimeState {
             chunk.channel_labels.clone()
         };
         if chunk_labels == self.pcm_labels {
-            // Labels match — first chunk of the new track has the same
-            // format as the previous track.  Clear the init flag without
-            // resetting anything, preserving smooth gapless continuity.
-            self.pcm_labels_pending_init = false;
+            // Labels match.  Do NOT clear pcm_labels_pending_init here —
+            // during cross-format gapless transitions, residual buffers
+            // from the old decoder (still in GStreamer's queues) can arrive
+            // tagged with the new track token but carrying the old format.
+            // Clearing the flag on these would re-enable suppression before
+            // the real new-format buffers arrive.  The flag is only cleared
+            // in the != branch when a genuine label change is accepted.
         } else {
             // GStreamer decoders (especially AC3/DTS) may initially report
             // fewer channels during startup before settling on the real
@@ -2391,5 +2394,60 @@ mod tests {
             !state.pcm_labels_pending_init,
             "init flag should be cleared after first label set"
         );
+    }
+
+    #[test]
+    fn push_pcm_chunk_survives_residual_old_format_buffers_during_gapless() {
+        // During cross-format gapless, residual buffers from the old
+        // decoder (still in GStreamer's queues) arrive tagged with the
+        // new token but carrying the old format.  These must NOT clear
+        // pcm_labels_pending_init, or the subsequent real format change
+        // will be suppressed.
+        let mut state = AnalysisRuntimeState::new();
+        let token = 1;
+        state.active_pcm_track_token = token;
+        state.pcm_labels_pending_init = false;
+
+        let surround_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+            SpectrogramChannelLabel::FrontCenter,
+            SpectrogramChannelLabel::Lfe,
+            SpectrogramChannelLabel::RearLeft,
+            SpectrogramChannelLabel::RearRight,
+        ];
+        state.pcm_labels = surround_labels.clone();
+        state.pcm_fifo.extend(vec![0.1f32; 6 * 500]);
+
+        // Gapless transition: token changes, flag set.
+        let token2 = 2;
+        state.active_pcm_track_token = token2;
+        state.pcm_labels_pending_init = true;
+
+        // Residual 5.1 buffer arrives with the NEW token but OLD format.
+        state.push_pcm_chunk(AnalysisPcmChunk {
+            samples: vec![0.1; 6 * 256],
+            channel_labels: surround_labels,
+            track_token: token2,
+        });
+        // Flag must still be set — the residual buffer must not clear it.
+        assert!(
+            state.pcm_labels_pending_init,
+            "residual old-format buffer must not clear pending_init flag"
+        );
+
+        // Now the real stereo buffers arrive — must be accepted.
+        let stereo_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+        ];
+        state.push_pcm_chunk(AnalysisPcmChunk {
+            samples: vec![0.2; 2 * 1024],
+            channel_labels: stereo_labels.clone(),
+            track_token: token2,
+        });
+
+        assert_eq!(state.pcm_labels, stereo_labels);
+        assert!(!state.pcm_labels_pending_init);
     }
 }
