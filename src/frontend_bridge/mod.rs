@@ -4527,6 +4527,7 @@ fn process_playback_event(
                         path: pending.path,
                         reset_spectrogram: pending.reset_spectrogram,
                         track_token: pending.track_token,
+                        gapless: false,
                     });
                 }
             }
@@ -4543,6 +4544,7 @@ fn process_playback_event(
             state.analysis.waveform_coverage_seconds = 0.0;
             state.analysis.waveform_complete = false;
             metadata.request(path.clone());
+            let is_gapless = matches!(kind, TrackChangeKind::Gapless);
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
             if state.playback.state == PlaybackState::Stopped {
                 state.pending_waveform_track = Some(PendingWaveformTrack {
@@ -4556,6 +4558,7 @@ fn process_playback_event(
                     path,
                     reset_spectrogram,
                     track_token,
+                    gapless: is_gapless,
                 });
             }
             SnapshotUrgency::Immediate

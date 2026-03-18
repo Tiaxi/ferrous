@@ -45,6 +45,9 @@ pub enum AnalysisCommand {
         path: PathBuf,
         reset_spectrogram: bool,
         track_token: u64,
+        /// When true (same-format gapless), skip PCM label re-init so the
+        /// spectrogram/channel state stays continuous.
+        gapless: bool,
     },
     SetTrackToken(u64),
     ResetSpectrogram,
@@ -264,9 +267,11 @@ impl AnalysisRuntimeState {
                 path,
                 reset_spectrogram,
                 track_token,
+                gapless,
             } => self.handle_track_change(
                 path,
                 reset_spectrogram,
+                gapless,
                 track_token,
                 event_tx,
                 waveform_job_tx,
@@ -274,7 +279,9 @@ impl AnalysisRuntimeState {
             ),
             AnalysisCommand::SetTrackToken(track_token) => {
                 self.active_pcm_track_token = track_token;
-                self.pcm_labels_pending_init = true;
+                // Don't set pcm_labels_pending_init here — the subsequent
+                // SetTrack command will set it when appropriate (skipped
+                // for gapless transitions to keep channel state continuous).
             }
             AnalysisCommand::ResetSpectrogram => {
                 self.reset_spectrogram_state();
@@ -316,10 +323,12 @@ impl AnalysisRuntimeState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_track_change(
         &mut self,
         path: PathBuf,
         reset_spectrogram: bool,
+        gapless: bool,
         track_token: u64,
         event_tx: &Sender<AnalysisEvent>,
         waveform_job_tx: &Sender<WaveformDecodeJob>,
@@ -327,7 +336,13 @@ impl AnalysisRuntimeState {
     ) {
         self.active_track_token = track_token;
         self.active_pcm_track_token = track_token;
-        self.pcm_labels_pending_init = true;
+        // For gapless transitions the PCM stream is continuous and the
+        // channel layout won't change, so keep pcm_labels_pending_init
+        // false to avoid disabling the transient-reduction suppression
+        // (which would cause a visible channel-info flicker).
+        if !gapless {
+            self.pcm_labels_pending_init = true;
+        }
         waveform_decode_active_token.store(track_token, Ordering::Relaxed);
         self.active_track_stamp = source_stamp(&path);
         self.active_track_path = Some(path.clone());

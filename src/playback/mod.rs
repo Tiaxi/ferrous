@@ -69,6 +69,9 @@ pub enum PlaybackCommand {
 #[derive(Debug, Clone)]
 pub enum TrackChangeKind {
     Manual,
+    /// Same-format gapless: decoder reused, audio stream is continuous.
+    Gapless,
+    /// Cross-format or EOS-based: pipeline was restarted.
     Natural,
 }
 
@@ -231,7 +234,7 @@ mod tests {
                     track_token: _,
                 } = evt
                 {
-                    if path == b && matches!(kind, TrackChangeKind::Natural) {
+                    if path == b && matches!(kind, TrackChangeKind::Gapless) {
                         observed = Some((path, kind));
                         break;
                     }
@@ -239,9 +242,9 @@ mod tests {
             }
         }
 
-        let (path, kind) = observed.expect("natural handoff track change");
+        let (path, kind) = observed.expect("gapless handoff track change");
         assert_eq!(path, b);
-        assert!(matches!(kind, TrackChangeKind::Natural));
+        assert!(matches!(kind, TrackChangeKind::Gapless));
     }
 
     #[test]
@@ -687,7 +690,7 @@ mod backend {
                                     let _ = event_tx.send(PlaybackEvent::TrackChanged {
                                         path: next,
                                         queue_index: queue_idx,
-                                        kind: TrackChangeKind::Natural,
+                                        kind: TrackChangeKind::Gapless,
                                         track_token: 0,
                                     });
                                 } else {
@@ -1516,7 +1519,7 @@ mod backend {
                     self.emit_track_changed(
                         path,
                         queue_index,
-                        TrackChangeKind::Natural,
+                        TrackChangeKind::Gapless,
                         track_token,
                     );
                     snapshot_changed = true;
