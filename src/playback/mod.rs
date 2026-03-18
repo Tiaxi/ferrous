@@ -1757,9 +1757,14 @@ mod backend {
         // gapless) or stay pinned at the old track's end during cross-format
         // transitions where GStreamer reconfigures the decoder.  Accept
         // both as evidence that the handoff has occurred.
+        //
+        // The end-of-track margin (500 ms) accounts for the last audio
+        // frame ending slightly before the reported duration, and for
+        // query_position returning None during the transition (leaving the
+        // stored position a frame or two short).
         let at_track_start = snapshot.position <= Duration::from_secs(2);
-        let at_track_end =
-            snapshot.duration > Duration::ZERO && snapshot.position >= snapshot.duration;
+        let at_track_end = snapshot.duration > Duration::ZERO
+            && snapshot.position + Duration::from_millis(500) >= snapshot.duration;
         if at_track_start || at_track_end {
             snapshot.current = Some(current_path.clone());
             snapshot.current_queue_index = Some(current_index);
@@ -2410,13 +2415,14 @@ mod backend {
         fn natural_handoff_emits_when_position_at_track_end() {
             // Cross-format gapless: position stays at the old track's end
             // because GStreamer's position query doesn't reset during
-            // decoder reconfiguration.
+            // decoder reconfiguration.  The last position may be a frame
+            // short of the duration (e.g. 32 ms for AC3).
             let first = PathBuf::from("/tmp/gst_handoff_a.flac");
             let second = PathBuf::from("/tmp/gst_handoff_b.ac3");
             let queue_state = setup_queue_two_tracks(&first, &second);
             let mut snapshot = PlaybackSnapshot {
                 state: PlaybackState::Playing,
-                position: Duration::from_secs(415),
+                position: Duration::from_millis(414_968), // ~32ms short of duration
                 duration: Duration::from_secs(415),
                 current: Some(first),
                 ..PlaybackSnapshot::default()
