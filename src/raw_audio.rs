@@ -31,14 +31,25 @@ pub(crate) fn register_raw_surround_typefinders() {
         {
             use gst::prelude::{GstObjectExt, PluginFeatureExtManual};
 
+            // Disable all typefinders whose caps mention APE tags, and the
+            // apedemux element.  Match on caps string rather than factory name
+            // because the factory name varies across GStreamer versions.
             for factory in gst::TypeFindFactory::factories() {
-                let name = factory.name();
-                if name.contains("apetag") || name.contains("ape_tag") {
+                let dominated_by_ape = factory.caps().is_some_and(|c| {
+                    c.to_string().contains("apetag") || c.to_string().contains("x-ape")
+                });
+                if dominated_by_ape {
+                    eprintln!(
+                        "[ferrous] disabling APE typefinder: {} (caps: {:?})",
+                        factory.name(),
+                        factory.caps().map(|c| c.to_string())
+                    );
                     factory.set_rank(gst::Rank::NONE);
                 }
             }
 
             if let Some(factory) = gst::ElementFactory::find("apedemux") {
+                eprintln!("[ferrous] disabling apedemux element factory");
                 factory.set_rank(gst::Rank::NONE);
             }
         }
