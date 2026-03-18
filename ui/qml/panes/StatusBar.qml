@@ -12,7 +12,7 @@ ToolBar {
     required property var channelStatusIconSource
     required property bool themeIsDark
 
-    implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
+    implicitHeight: Math.max(contentItem.implicitHeight, 20) + topPadding + bottomPadding
     leftPadding: 14
     rightPadding: 10
     topPadding: 2
