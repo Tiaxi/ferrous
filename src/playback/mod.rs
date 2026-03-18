@@ -1618,10 +1618,21 @@ mod backend {
                 let maybe_playbin = values.first().and_then(|v| v.get::<gst::Element>().ok());
                 let playbin_obj = maybe_playbin?;
 
-                let next = queue_state.lock().ok().and_then(|mut q| q.next_natural());
+                let next = match queue_state.lock() {
+                    Ok(mut q) => q.next_natural(),
+                    Err(e) => {
+                        eprintln!("[ferrous] about-to-finish: queue lock poisoned: {e}");
+                        None
+                    }
+                };
                 if let Some(next_path) = next {
                     if let Some(uri) = file_uri(&next_path) {
                         playbin_obj.set_property("uri", uri);
+                    } else {
+                        eprintln!(
+                            "[ferrous] about-to-finish: failed to convert path to URI: {}",
+                            next_path.display()
+                        );
                     }
                 }
                 None

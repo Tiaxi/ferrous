@@ -158,6 +158,10 @@ struct AnalysisRuntimeState {
     waveform_db_writes_since_prune: usize,
     pcm_fifo: VecDeque<f32>,
     pcm_labels: Vec<SpectrogramChannelLabel>,
+    /// Set on track changes; disables transient channel-reduction
+    /// suppression for the first label change so that legitimate
+    /// cross-track format changes (e.g. 5.1 → stereo) are accepted.
+    pcm_labels_pending_init: bool,
     active_pcm_track_token: u64,
     profile_enabled: bool,
     prof_last: std::time::Instant,
@@ -235,6 +239,7 @@ impl AnalysisRuntimeState {
             waveform_db_writes_since_prune: 0,
             pcm_fifo: VecDeque::with_capacity(48_000),
             pcm_labels: vec![SpectrogramChannelLabel::Mono],
+            pcm_labels_pending_init: true,
             active_pcm_track_token: 0,
             profile_enabled: cfg!(feature = "profiling-logs")
                 && std::env::var_os("FERROUS_PROFILE").is_some(),
@@ -269,6 +274,7 @@ impl AnalysisRuntimeState {
             ),
             AnalysisCommand::SetTrackToken(track_token) => {
                 self.active_pcm_track_token = track_token;
+                self.pcm_labels_pending_init = true;
             }
             AnalysisCommand::ResetSpectrogram => {
                 self.reset_spectrogram_state();
@@ -321,6 +327,7 @@ impl AnalysisRuntimeState {
     ) {
         self.active_track_token = track_token;
         self.active_pcm_track_token = track_token;
+        self.pcm_labels_pending_init = true;
         waveform_decode_active_token.store(track_token, Ordering::Relaxed);
         self.active_track_stamp = source_stamp(&path);
         self.active_track_path = Some(path.clone());
@@ -484,17 +491,28 @@ impl AnalysisRuntimeState {
         } else {
             chunk.channel_labels.clone()
         };
-        if chunk_labels != self.pcm_labels {
+        if chunk_labels == self.pcm_labels {
+            // Labels match — first chunk of the new track has the same
+            // format as the previous track.  Clear the init flag without
+            // resetting anything, preserving smooth gapless continuity.
+            self.pcm_labels_pending_init = false;
+        } else {
             // GStreamer decoders (especially AC3/DTS) may initially report
             // fewer channels during startup before settling on the real
             // layout.  Suppress transient channel-count reductions to avoid
             // a brief spectrogram layout flicker.  Once the FIFO has enough
             // data the startup window has passed and we accept any change.
-            let is_startup_reduction = chunk_labels.len() < self.pcm_labels.len()
+            //
+            // Skip suppression when pcm_labels_pending_init is set — the
+            // first label change after a track change is always legitimate
+            // (a real format difference, not a decoder transient).
+            let is_startup_reduction = !self.pcm_labels_pending_init
+                && chunk_labels.len() < self.pcm_labels.len()
                 && self.pcm_fifo.len() < self.pcm_labels.len() * 4096;
             if is_startup_reduction {
                 return;
             }
+            self.pcm_labels_pending_init = false;
             self.pcm_labels.clone_from(&chunk_labels);
             self.pcm_fifo.clear();
             self.pending_channels.clear();
@@ -2321,6 +2339,57 @@ mod tests {
             state.pcm_fifo.len(),
             fifo_after_surround,
             "transient stereo data should be dropped during startup"
+        );
+    }
+
+    #[test]
+    fn push_pcm_chunk_accepts_stereo_after_gapless_surround_transition() {
+        // Gapless (Natural) transitions do NOT call reset_spectrogram_state.
+        // The pcm_labels_pending_init flag must still allow the format change.
+        let mut state = AnalysisRuntimeState::new();
+        let token = 1;
+        state.active_pcm_track_token = token;
+        state.pcm_labels_pending_init = false;
+
+        let surround_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+            SpectrogramChannelLabel::FrontCenter,
+            SpectrogramChannelLabel::Lfe,
+            SpectrogramChannelLabel::RearLeft,
+            SpectrogramChannelLabel::RearRight,
+        ];
+        state.pcm_labels = surround_labels;
+
+        // Fill FIFO with surround data, then drain most of it to simulate
+        // spectrogram processing having consumed the buffer.
+        state.pcm_fifo.extend(vec![0.1f32; 6 * 500]);
+
+        // Gapless transition: only token changes + pcm_labels_pending_init
+        // is set (mirrors SetTrackToken handler). NO reset_spectrogram_state.
+        let token2 = 2;
+        state.active_pcm_track_token = token2;
+        state.pcm_labels_pending_init = true;
+
+        // Push stereo chunk — must NOT be suppressed.
+        let stereo_labels = vec![
+            SpectrogramChannelLabel::FrontLeft,
+            SpectrogramChannelLabel::FrontRight,
+        ];
+        state.push_pcm_chunk(AnalysisPcmChunk {
+            samples: vec![0.2; 2 * 1024],
+            channel_labels: stereo_labels.clone(),
+            track_token: token2,
+        });
+
+        assert_eq!(state.pcm_labels, stereo_labels);
+        assert!(
+            !state.pcm_fifo.is_empty(),
+            "stereo data must be accepted during gapless transition"
+        );
+        assert!(
+            !state.pcm_labels_pending_init,
+            "init flag should be cleared after first label set"
         );
     }
 }
