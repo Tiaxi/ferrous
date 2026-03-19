@@ -1035,6 +1035,12 @@ mod backend {
         /// different codec (file extension).  The EOS handler will perform
         /// a full pipeline switch instead of relying on gapless playback.
         pending_eos_track_switch: Arc<AtomicBool>,
+        /// playbin3 pre-rolls the next stream ~2 s before the current track
+        /// ends, which causes `query_duration` to return the *next* track's
+        /// duration prematurely.  We stash the pending duration here and only
+        /// commit it when the position actually confirms the stream switch
+        /// (i.e., position jumps backward).
+        pending_gapless_duration: Option<Duration>,
     }
 
     pub fn spawn_engine(
@@ -1103,6 +1109,7 @@ mod backend {
                 buffering_active: false,
                 seek_hold: None,
                 pending_eos_track_switch,
+                pending_gapless_duration: None,
             }
         }
 
@@ -1177,6 +1184,7 @@ mod backend {
             self.buffering_active = false;
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
+            self.pending_gapless_duration = None;
             self.emit_track_changed(path, queue_index, kind, track_token);
             self.emit_snapshot();
         }
@@ -1189,6 +1197,7 @@ mod backend {
             self.buffering_active = false;
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
+            self.pending_gapless_duration = None;
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
@@ -1511,6 +1520,20 @@ mod backend {
             if !position_locked && self.snapshot.state != PlaybackState::Stopped {
                 if let Some(pos) = self.playbin.query_position::<gst::ClockTime>() {
                     let next_pos = Duration::from_nanos(pos.nseconds());
+                    // playbin3 pre-rolls the next stream ~2 s before the
+                    // current track ends.  Detect the actual stream switch by
+                    // a large backward position jump (the new stream starts
+                    // near zero while the old was near the end).
+                    let jumped_backward = next_pos < self.snapshot.position
+                        && self.snapshot.position.saturating_sub(next_pos) > Duration::from_secs(1);
+                    if jumped_backward {
+                        // Commit the deferred duration from the pre-rolled
+                        // stream now that the switch has actually happened.
+                        if let Some(dur) = self.pending_gapless_duration.take() {
+                            self.snapshot.duration = dur;
+                            snapshot_changed = true;
+                        }
+                    }
                     if self.snapshot.position != next_pos {
                         self.snapshot.position = next_pos;
                         snapshot_changed = true;
@@ -1523,8 +1546,17 @@ mod backend {
                 if let Some(dur) = self.playbin.query_duration::<gst::ClockTime>() {
                     let next_dur = Duration::from_nanos(dur.nseconds());
                     if self.snapshot.duration != next_dur {
-                        self.snapshot.duration = next_dur;
-                        snapshot_changed = true;
+                        // playbin3 reports the next track's duration before
+                        // the stream switch actually happens.  Defer the
+                        // update until the position confirms the switch,
+                        // unless we haven't committed any duration yet
+                        // (initial track start).
+                        if self.snapshot.duration == Duration::ZERO {
+                            self.snapshot.duration = next_dur;
+                            snapshot_changed = true;
+                        } else {
+                            self.pending_gapless_duration = Some(next_dur);
+                        }
                     }
                 }
             }
@@ -1631,14 +1663,16 @@ mod backend {
                     );
                 }
                 gst::MessageView::StateChanged(sc) => {
-                    // Only log playbin-level state changes, not every
-                    // internal element, to keep output manageable.
-                    if sc.src().is_some_and(|s| s == &self.playbin) {
-                        eprintln!(
-                            "[ferrous] playbin state: {:?} → {:?}",
-                            sc.old(),
-                            sc.current()
-                        );
+                    if cfg!(feature = "profiling-logs") {
+                        // Only log playbin-level state changes, not every
+                        // internal element, to keep output manageable.
+                        if sc.src().is_some_and(|s| s == &self.playbin) {
+                            eprintln!(
+                                "[ferrous] playbin state: {:?} → {:?}",
+                                sc.old(),
+                                sc.current()
+                            );
+                        }
                     }
                 }
                 _ => {}
@@ -1656,9 +1690,9 @@ mod backend {
         gst::init().context("gst::init failed")?;
         register_raw_surround_typefinders();
 
-        let playbin = gst::ElementFactory::make("playbin")
+        let playbin = gst::ElementFactory::make("playbin3")
             .build()
-            .map_err(|_| anyhow!("failed to create playbin"))?;
+            .map_err(|_| anyhow!("failed to create playbin3"))?;
         configure_playbin_buffering(&playbin);
         install_apedemux_block(&playbin);
 
@@ -2385,8 +2419,10 @@ mod backend {
         tee_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |_pad, info| {
             if let Some(gst::PadProbeData::Event(ref event)) = info.data {
                 if let gst::EventView::Caps(caps_ev) = event.view() {
-                    let caps = caps_ev.caps();
-                    eprintln!("[ferrous] audio sink caps change: {caps}");
+                    if cfg!(feature = "profiling-logs") {
+                        let caps = caps_ev.caps();
+                        eprintln!("[ferrous] audio sink caps change: {caps}");
+                    }
                 }
             }
             gst::PadProbeReturn::Ok
