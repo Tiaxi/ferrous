@@ -13,6 +13,7 @@ Item {
     required property string titleText
     required property var closeViewer
     required property var toggleInfoVisible
+    required property var switchComparisonImage
 
     property alias popupHost: albumArtPopupHost
     property alias windowHost: albumArtWindowHost
@@ -71,6 +72,20 @@ Item {
             context: Qt.WindowShortcut
             enabled: albumArtViewer.visible
             onActivated: root.toggleInfoVisible()
+        }
+
+        Shortcut {
+            sequence: "Left"
+            context: Qt.WindowShortcut
+            enabled: albumArtViewer.visible
+            onActivated: root.switchComparisonImage()
+        }
+
+        Shortcut {
+            sequence: "Right"
+            context: Qt.WindowShortcut
+            enabled: albumArtViewer.visible
+            onActivated: root.switchComparisonImage()
         }
 
         onClosed: {
@@ -140,6 +155,9 @@ Item {
                 if (event.key === Qt.Key_Escape) {
                     event.accepted = true
                     root.closeViewer()
+                } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+                    event.accepted = true
+                    root.switchComparisonImage()
                 }
             }
         }

@@ -709,6 +709,7 @@ Item {
         uiPalette: palette
         windowRoot: harness
         openAlbumArtViewerForSuggestion: function(row) {}
+        openAlbumArtViewerForCurrentArt: function() {}
     }
 
     Dialogs.TagEditorDialog {
@@ -763,6 +764,7 @@ Item {
         titleText: "Ferrous"
         closeViewer: function() {}
         toggleInfoVisible: function() {}
+        switchComparisonImage: function() {}
     }
 
     Viewers.AlbumArtSurface {
@@ -783,6 +785,8 @@ Item {
         closeViewer: function() {}
         toggleInfoVisible: function() {}
         focusFullscreen: function() {}
+        comparisonLabel: ""
+        comparisonModeAvailable: false
     }
 
     Panes.SidebarPane {

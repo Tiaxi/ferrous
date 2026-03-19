@@ -1095,6 +1095,7 @@ Kirigami.ApplicationWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         openAlbumArtViewerForSuggestion: viewerController.openAlbumArtViewerForSuggestion
+        openAlbumArtViewerForCurrentArt: viewerController.openAlbumArtViewerForCurrentArt
     }
 
     Viewers.AlbumArtViewerShell {
@@ -1108,6 +1109,7 @@ Kirigami.ApplicationWindow {
         toggleInfoVisible: function() {
             viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
         }
+        switchComparisonImage: viewerController.switchComparisonImage
     }
 
     Viewers.AlbumArtSurface {
@@ -1131,6 +1133,8 @@ Kirigami.ApplicationWindow {
             viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
         }
         focusFullscreen: albumArtViewerShell.focusFullscreen
+        comparisonLabel: viewerController.comparisonLabel
+        comparisonModeAvailable: viewerController.comparisonModeAvailable
     }
 
     Item {

@@ -11,6 +11,7 @@ Dialog {
     required property var uiPalette
     required property var windowRoot
     required property var openAlbumArtViewerForSuggestion
+    required property var openAlbumArtViewerForCurrentArt
 
     property int pendingPreviewIndex: -1
     property int pendingApplyIndex: -1
@@ -272,6 +273,12 @@ Dialog {
                         color: root.uiPalette.uiMutedTextColor
                         wrapMode: Text.Wrap
                     }
+                }
+
+                Button {
+                    text: "Preview"
+                    enabled: (root.currentArtworkSource || "").length > 0
+                    onClicked: root.openAlbumArtViewerForCurrentArt()
                 }
             }
         }

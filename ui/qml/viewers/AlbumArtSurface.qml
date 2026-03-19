@@ -16,6 +16,8 @@ Item {
     required property var closeViewer
     required property var toggleInfoVisible
     required property var focusFullscreen
+    required property string comparisonLabel
+    required property bool comparisonModeAvailable
 
     property real zoom: 1.0
     property real panX: 0.0
@@ -208,6 +210,49 @@ Item {
         anchors.left: parent.left
         anchors.margins: 12
         spacing: 8
+
+        Rectangle {
+            visible: root.comparisonLabel.length > 0
+            color: Qt.rgba(0, 0, 0, 0.58)
+            border.color: Qt.rgba(1, 1, 1, 0.24)
+            radius: 10
+            width: comparisonLabelRow.implicitWidth + 20
+            height: comparisonLabelRow.implicitHeight + 12
+
+            Row {
+                id: comparisonLabelRow
+                anchors.centerIn: parent
+                spacing: 6
+
+                Text {
+                    visible: root.comparisonModeAvailable
+                    text: "\u25C0 \u25B6"
+                    color: Qt.rgba(1, 1, 1, 0.45)
+                    font.pixelSize: 13
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                    text: root.comparisonLabel
+                    color: "#ffffff"
+                    font.pixelSize: 14
+                    font.weight: Font.DemiBold
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+                hoverEnabled: true
+                preventStealing: true
+                onPressed: root.focusFullscreen()
+                onWheel: function(wheel) {
+                    root.focusFullscreen()
+                    wheel.accepted = true
+                }
+            }
+        }
 
         Rectangle {
             width: 40

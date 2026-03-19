@@ -14,10 +14,22 @@ QtObject {
     property string albumArtViewerInfoSource: ""
     property string albumArtViewerSource: ""
     property bool albumArtViewerShowsCurrentTrack: true
+    property bool comparisonModeAvailable: false
+    property string comparisonCurrentSource: ""
+    property string comparisonCurrentInfoSource: ""
+    property string comparisonCandidateSource: ""
+    property string comparisonCandidateInfoSource: ""
+    property string comparisonLabel: ""
     property bool spectrogramViewerOpen: false
 
     function closeAlbumArtViewer() {
         root.albumArtViewerOpen = false
+        root.comparisonModeAvailable = false
+        root.comparisonCurrentSource = ""
+        root.comparisonCurrentInfoSource = ""
+        root.comparisonCandidateSource = ""
+        root.comparisonCandidateInfoSource = ""
+        root.comparisonLabel = ""
     }
 
     function closeSpectrogramViewer() {
@@ -74,6 +86,28 @@ QtObject {
         root.albumArtInfoVisible = false
         root.albumArtViewResetToken += 1
         root.albumArtViewerFileInfo = ({})
+        root.comparisonModeAvailable = false
+        root.comparisonLabel = ""
+        root.albumArtViewerOpen = true
+    }
+
+    function openAlbumArtViewerForCurrentArt() {
+        const currentSource = root.uiBridge.currentTrackCoverPath || ""
+        if (currentSource.length === 0) {
+            return
+        }
+        root.albumArtViewerSource = currentSource
+        root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(currentSource)
+        root.albumArtViewerShowsCurrentTrack = true
+        root.comparisonCurrentSource = currentSource
+        root.comparisonCurrentInfoSource = root.albumArtViewerInfoSource
+        root.comparisonCandidateSource = ""
+        root.comparisonCandidateInfoSource = ""
+        root.comparisonModeAvailable = false
+        root.comparisonLabel = "Current Album Art"
+        root.albumArtInfoVisible = true
+        root.albumArtViewResetToken += 1
+        root.refreshAlbumArtFileInfo()
         root.albumArtViewerOpen = true
     }
 
@@ -86,10 +120,39 @@ QtObject {
         root.albumArtViewerInfoSource = (rowMap && (rowMap.normalizedPath || ""))
             || PathUtils.pathFromAnyUrl(previewSource)
         root.albumArtViewerShowsCurrentTrack = false
+
+        const currentSource = root.uiBridge.currentTrackCoverPath || ""
+        root.comparisonCandidateSource = previewSource
+        root.comparisonCandidateInfoSource = root.albumArtViewerInfoSource
+        root.comparisonCurrentSource = currentSource
+        root.comparisonCurrentInfoSource = PathUtils.pathFromAnyUrl(currentSource)
+        root.comparisonModeAvailable = currentSource.length > 0
+        root.comparisonLabel = "iTunes Candidate"
+
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
         root.refreshAlbumArtFileInfo()
         root.albumArtViewerOpen = true
+    }
+
+    function switchComparisonImage() {
+        if (!root.comparisonModeAvailable) {
+            return
+        }
+        if (root.albumArtViewerShowsCurrentTrack) {
+            root.albumArtViewerSource = root.comparisonCandidateSource
+            root.albumArtViewerInfoSource = root.comparisonCandidateInfoSource
+            root.albumArtViewerShowsCurrentTrack = false
+            root.comparisonLabel = "iTunes Candidate"
+        } else {
+            root.albumArtViewerSource = root.comparisonCurrentSource
+            root.albumArtViewerInfoSource = root.comparisonCurrentInfoSource
+            root.albumArtViewerShowsCurrentTrack = true
+            root.comparisonLabel = "Current Album Art"
+        }
+        root.albumArtInfoVisible = true
+        root.albumArtViewResetToken += 1
+        root.refreshAlbumArtFileInfo()
     }
 
     function toggleAlbumArtInfoVisible(focusFullscreen) {
@@ -135,6 +198,10 @@ QtObject {
                 && root.albumArtViewerSource !== (root.uiBridge.currentTrackCoverPath || "")) {
             root.albumArtViewerSource = root.uiBridge.currentTrackCoverPath || ""
             root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)
+            if (root.comparisonModeAvailable || root.comparisonCurrentSource.length > 0) {
+                root.comparisonCurrentSource = root.albumArtViewerSource
+                root.comparisonCurrentInfoSource = root.albumArtViewerInfoSource
+            }
             if (root.albumArtInfoVisible) {
                 root.refreshAlbumArtFileInfo()
             } else {
