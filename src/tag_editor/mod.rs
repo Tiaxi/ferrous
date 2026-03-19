@@ -802,6 +802,7 @@ pub(crate) fn save_rows(request: SaveRequest) -> SaveResponse {
     }
 }
 
+// Sequential file-rename pipeline — splitting would fragment the transactional logic.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
     let mut results = Vec::new();

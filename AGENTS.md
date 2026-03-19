@@ -33,6 +33,12 @@
 - Prefer testing the specific invariant or edge case that motivated the change.
 - Tests should be self-contained and not depend on external files or network access.
 
+## Clippy Suppression Rule
+- Do not add `#[allow(clippy::...)]` attributes unless there is a genuine, unavoidable reason (e.g. FFI constraints, intentional numeric casts in signal processing, exact float comparison with a known source).
+- Every suppression must have a brief justification comment on the line immediately above the `#[allow(...)]` explaining *why* it is necessary.
+- Prefer refactoring over suppression: extract helpers to fix `too_many_lines`, restructure arguments or use context structs to fix `too_many_arguments`, use explicit conversions to fix cast warnings.
+- Never suppress warnings to avoid fixing the underlying code quality issue.
+
 ## Commit Policy
 - Autonomous commits are allowed in this repository.
 - Commit when all of the following are true:

@@ -221,6 +221,12 @@ impl AnalysisEngine {
     }
 }
 
+struct AnalysisContext<'a> {
+    event_tx: &'a Sender<AnalysisEvent>,
+    waveform_job_tx: &'a Sender<WaveformDecodeJob>,
+    waveform_decode_active_token: &'a AtomicU64,
+}
+
 impl AnalysisRuntimeState {
     fn new() -> Self {
         Self {
@@ -255,28 +261,14 @@ impl AnalysisRuntimeState {
         }
     }
 
-    fn handle_command(
-        &mut self,
-        cmd: AnalysisCommand,
-        event_tx: &Sender<AnalysisEvent>,
-        waveform_job_tx: &Sender<WaveformDecodeJob>,
-        waveform_decode_active_token: &AtomicU64,
-    ) {
+    fn handle_command(&mut self, cmd: AnalysisCommand, ctx: &AnalysisContext<'_>) {
         match cmd {
             AnalysisCommand::SetTrack {
                 path,
                 reset_spectrogram,
                 track_token,
                 gapless,
-            } => self.handle_track_change(
-                path,
-                reset_spectrogram,
-                gapless,
-                track_token,
-                event_tx,
-                waveform_job_tx,
-                waveform_decode_active_token,
-            ),
+            } => self.handle_track_change(path, reset_spectrogram, gapless, track_token, ctx),
             AnalysisCommand::SetTrackToken(track_token) => {
                 self.active_pcm_track_token = track_token;
                 // Don't set pcm_labels_pending_init here — the subsequent
@@ -285,12 +277,12 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::ResetSpectrogram => {
                 self.reset_spectrogram_state();
-                self.emit_snapshot(event_tx, true);
+                self.emit_snapshot(ctx.event_tx, true);
             }
             AnalysisCommand::SetSampleRate(rate) => {
                 if rate > 0 {
                     self.snapshot.sample_rate_hz = rate;
-                    self.emit_snapshot(event_tx, true);
+                    self.emit_snapshot(ctx.event_tx, true);
                 }
             }
             AnalysisCommand::SetFftSize(size) => {
@@ -298,13 +290,13 @@ impl AnalysisRuntimeState {
                 let hop = (fft / 8).max(64);
                 self.spectrogram.set_fft_size(fft, hop);
                 self.reset_spectrogram_state();
-                self.emit_snapshot(event_tx, true);
+                self.emit_snapshot(ctx.event_tx, true);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
                 self.snapshot.spectrogram_view_mode = view_mode;
                 self.spectrogram.set_view_mode(view_mode);
                 self.reset_spectrogram_state();
-                self.emit_snapshot(event_tx, true);
+                self.emit_snapshot(ctx.event_tx, true);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -318,21 +310,18 @@ impl AnalysisRuntimeState {
                 coverage_seconds,
                 complete,
                 done,
-                event_tx,
+                ctx.event_tx,
             ),
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn handle_track_change(
         &mut self,
         path: PathBuf,
         reset_spectrogram: bool,
         gapless: bool,
         track_token: u64,
-        event_tx: &Sender<AnalysisEvent>,
-        waveform_job_tx: &Sender<WaveformDecodeJob>,
-        waveform_decode_active_token: &AtomicU64,
+        ctx: &AnalysisContext<'_>,
     ) {
         self.active_track_token = track_token;
         // For gapless transitions the PCM stream is continuous — the
@@ -343,7 +332,8 @@ impl AnalysisRuntimeState {
             self.active_pcm_track_token = track_token;
             self.pcm_labels_pending_init = true;
         }
-        waveform_decode_active_token.store(track_token, Ordering::Relaxed);
+        ctx.waveform_decode_active_token
+            .store(track_token, Ordering::Relaxed);
         self.active_track_stamp = source_stamp(&path);
         self.active_track_path = Some(path.clone());
 
@@ -354,18 +344,20 @@ impl AnalysisRuntimeState {
         if reset_spectrogram {
             self.reset_spectrogram_state();
         }
-        self.emit_snapshot(event_tx, true);
+        self.emit_snapshot(ctx.event_tx, true);
 
         if let Some(peaks) = self.load_cached_waveform(&path) {
             self.snapshot.waveform_peaks = peaks;
             self.snapshot.waveform_coverage_seconds = 0.0;
             self.snapshot.waveform_complete = true;
             self.waveform_dirty = true;
-            self.emit_snapshot(event_tx, true);
+            self.emit_snapshot(ctx.event_tx, true);
             return;
         }
 
-        let _ = waveform_job_tx.send(WaveformDecodeJob { track_token, path });
+        let _ = ctx
+            .waveform_job_tx
+            .send(WaveformDecodeJob { track_token, path });
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
@@ -683,12 +675,12 @@ fn spawn_analysis_worker(
                 select! {
                     recv(cmd_rx) -> msg => {
                         let Ok(cmd) = msg else { break; };
-                        state.handle_command(
-                            cmd,
-                            &event_tx,
-                            &waveform_job_tx,
-                            waveform_decode_active_token.as_ref(),
-                        );
+                        let ctx = AnalysisContext {
+                            event_tx: &event_tx,
+                            waveform_job_tx: &waveform_job_tx,
+                            waveform_decode_active_token: waveform_decode_active_token.as_ref(),
+                        };
+                        state.handle_command(cmd, &ctx);
                     }
                     recv(pcm_rx) -> msg => {
                         let Ok(chunk) = msg else { break; };

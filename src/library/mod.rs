@@ -1253,6 +1253,7 @@ fn is_case_only_rename(current: &Path, target: &Path) -> bool {
     current.to_string_lossy().to_lowercase() == target.to_string_lossy().to_lowercase()
 }
 
+// Single DB transaction with multi-table updates — splitting would break atomicity.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn rename_indexed_metadata_paths(
     renames: &[(PathBuf, PathBuf)],
@@ -1763,6 +1764,7 @@ fn apply_metadata_result<U>(
     on_upsert(&task, &indexed);
 }
 
+// Full directory scan with progress reporting — sequential walk with interleaved DB writes.
 #[allow(clippy::too_many_lines)]
 fn scan_root<F, U>(
     conn: &Connection,

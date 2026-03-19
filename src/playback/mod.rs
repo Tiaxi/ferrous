@@ -1171,16 +1171,7 @@ mod backend {
             };
             let track_token = self.advance_track_token();
             self.snapshot.current_queue_index = Some(queue_index);
-            switch_track(
-                &self.playbin,
-                &mut self.snapshot,
-                path.as_path(),
-                &uri,
-                &mut self.applied_volume,
-                &mut self.startup_gain_ramp,
-                &mut self.startup_ramp_hold_until,
-                force_play,
-            );
+            self.switch_track(path.as_path(), &uri, force_play);
             self.buffering_active = false;
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
@@ -1190,7 +1181,7 @@ mod backend {
         }
 
         fn stop_with_empty_queue(&mut self) {
-            soft_mute(&self.playbin, &mut self.applied_volume);
+            self.soft_mute();
             let _ = self.playbin.set_state(gst::State::Ready);
             self.startup_gain_ramp = false;
             self.startup_ramp_hold_until = None;
@@ -1400,7 +1391,7 @@ mod backend {
         }
 
         fn stop(&mut self) {
-            soft_mute(&self.playbin, &mut self.applied_volume);
+            self.soft_mute();
             if self.playbin.set_state(gst::State::Ready).is_ok() {
                 self.startup_gain_ramp = false;
                 self.startup_ramp_hold_until = None;
@@ -1678,6 +1669,66 @@ mod backend {
                 _ => {}
             }
         }
+
+        fn soft_mute(&mut self) {
+            if self.applied_volume <= 0.0001 {
+                self.applied_volume = 0.0;
+                self.playbin
+                    .set_property("volume", f64::from(self.applied_volume));
+                return;
+            }
+            for _ in 0..3 {
+                self.applied_volume *= 0.35;
+                if self.applied_volume <= 0.0001 {
+                    self.applied_volume = 0.0;
+                }
+                self.playbin
+                    .set_property("volume", f64::from(self.applied_volume));
+                std::thread::sleep(Duration::from_millis(4));
+                if self.applied_volume == 0.0 {
+                    break;
+                }
+            }
+            self.applied_volume = 0.0;
+            self.playbin
+                .set_property("volume", f64::from(self.applied_volume));
+        }
+
+        fn switch_track(&mut self, path: &Path, uri: &str, force_play: bool) {
+            let was_playing = self.snapshot.state == PlaybackState::Playing || force_play;
+            self.soft_mute();
+            let _ = self.playbin.set_state(gst::State::Null);
+            let _ = self.playbin.set_state(gst::State::Ready);
+            self.playbin.set_property("uri", uri);
+            if was_playing {
+                let _ = self.playbin.set_state(gst::State::Playing);
+                // Re-assert mute after state transition to close the race window
+                // where new internal elements may not have volume=0.
+                self.playbin.set_property("volume", 0.0_f64);
+                self.snapshot.state = PlaybackState::Playing;
+                self.startup_gain_ramp = true;
+                // AC3/DTS decoders produce garbage frames during startup — hold
+                // silence until the decoder has stabilised.  Other codecs produce
+                // clean output immediately, so skip the hold to avoid swallowing
+                // the start of the track.
+                self.startup_ramp_hold_until = if is_raw_surround_file(path) {
+                    Some(Instant::now() + Duration::from_millis(80))
+                } else {
+                    None
+                };
+            } else if self.snapshot.state == PlaybackState::Paused {
+                let _ = self.playbin.set_state(gst::State::Paused);
+                self.startup_gain_ramp = false;
+                self.startup_ramp_hold_until = None;
+            } else {
+                self.startup_gain_ramp = false;
+                self.startup_ramp_hold_until = None;
+            }
+            self.snapshot.current = Some(path.to_path_buf());
+            self.snapshot.position = Duration::ZERO;
+            self.snapshot.duration = Duration::ZERO;
+            self.snapshot.current_bitrate_kbps = None;
+        }
     }
 
     fn run_gst_engine(
@@ -1942,73 +1993,6 @@ mod backend {
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn switch_track(
-        playbin: &gst::Element,
-        snapshot: &mut PlaybackSnapshot,
-        path: &Path,
-        uri: &str,
-        applied_volume: &mut f32,
-        startup_gain_ramp: &mut bool,
-        startup_ramp_hold_until: &mut Option<Instant>,
-        force_play: bool,
-    ) {
-        let was_playing = snapshot.state == PlaybackState::Playing || force_play;
-        soft_mute(playbin, applied_volume);
-        let _ = playbin.set_state(gst::State::Null);
-        let _ = playbin.set_state(gst::State::Ready);
-        playbin.set_property("uri", uri);
-        if was_playing {
-            let _ = playbin.set_state(gst::State::Playing);
-            // Re-assert mute after state transition to close the race window
-            // where new internal elements may not have volume=0.
-            playbin.set_property("volume", 0.0_f64);
-            snapshot.state = PlaybackState::Playing;
-            *startup_gain_ramp = true;
-            // AC3/DTS decoders produce garbage frames during startup — hold
-            // silence until the decoder has stabilised.  Other codecs produce
-            // clean output immediately, so skip the hold to avoid swallowing
-            // the start of the track.
-            *startup_ramp_hold_until = if is_raw_surround_file(path) {
-                Some(Instant::now() + Duration::from_millis(80))
-            } else {
-                None
-            };
-        } else if snapshot.state == PlaybackState::Paused {
-            let _ = playbin.set_state(gst::State::Paused);
-            *startup_gain_ramp = false;
-            *startup_ramp_hold_until = None;
-        } else {
-            *startup_gain_ramp = false;
-            *startup_ramp_hold_until = None;
-        }
-        snapshot.current = Some(path.to_path_buf());
-        snapshot.position = Duration::ZERO;
-        snapshot.duration = Duration::ZERO;
-        snapshot.current_bitrate_kbps = None;
-    }
-
-    fn soft_mute(playbin: &gst::Element, applied_volume: &mut f32) {
-        if *applied_volume <= 0.0001 {
-            *applied_volume = 0.0;
-            playbin.set_property("volume", f64::from(*applied_volume));
-            return;
-        }
-        for _ in 0..3 {
-            *applied_volume *= 0.35;
-            if *applied_volume <= 0.0001 {
-                *applied_volume = 0.0;
-            }
-            playbin.set_property("volume", f64::from(*applied_volume));
-            std::thread::sleep(Duration::from_millis(4));
-            if *applied_volume == 0.0 {
-                break;
-            }
-        }
-        *applied_volume = 0.0;
-        playbin.set_property("volume", f64::from(*applied_volume));
-    }
-
     fn decode_interleaved_f32(bytes: &[u8]) -> Vec<f32> {
         let mut pcm = Vec::with_capacity(bytes.len() / 4);
         for chunk in bytes.chunks_exact(4) {
@@ -2255,6 +2239,7 @@ mod backend {
                 }
                 sum_sq += f64::from(s) * f64::from(s);
             }
+            // Precision loss is acceptable: len never exceeds audio buffer size, f32 RMS is sufficient.
             #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
             let rms = (sum_sq / pcm.len().max(1) as f64).sqrt() as f32;
 

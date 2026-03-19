@@ -751,8 +751,16 @@ enum BridgeLoopWake {
     Shutdown,
 }
 
+fn env_duration_ms(var: &str, default: u64, min: u64, max: u64) -> Duration {
+    Duration::from_millis(
+        std::env::var(var)
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map_or(default, |v| v.clamp(min, max)),
+    )
+}
+
 impl BridgeLoopRuntime {
-    #[allow(clippy::too_many_lines)]
     fn new(options: BridgeRuntimeOptions) -> Self {
         let (analysis, analysis_rx) = AnalysisEngine::new();
         let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
@@ -788,36 +796,15 @@ impl BridgeLoopRuntime {
             &lastfm,
         );
 
-        let playing_poll_interval = Duration::from_millis(
-            std::env::var("FERROUS_PLAYBACK_POLL_MS")
-                .ok()
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .map_or(40, |value| value.clamp(8, 500)),
-        );
-        let paused_poll_interval = Duration::from_millis(
-            std::env::var("FERROUS_PLAYBACK_PAUSED_POLL_MS")
-                .ok()
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .map_or(333, |value| value.clamp(125, 1000)),
-        );
-        let playing_snapshot_interval = Duration::from_millis(
-            std::env::var("FERROUS_BRIDGE_PLAYING_HEARTBEAT_MS")
-                .ok()
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .map_or(100, |value| value.clamp(33, 1000)),
-        );
-        let analysis_snapshot_interval = Duration::from_millis(
-            std::env::var("FERROUS_BRIDGE_ANALYSIS_SNAPSHOT_MS")
-                .ok()
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .map_or(16, |value| value.clamp(8, 1000)),
-        );
-        let paused_snapshot_interval = Duration::from_millis(
-            std::env::var("FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS")
-                .ok()
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .map_or(333, |value| value.clamp(125, 1000)),
-        );
+        let playing_poll_interval = env_duration_ms("FERROUS_PLAYBACK_POLL_MS", 40, 8, 500);
+        let paused_poll_interval =
+            env_duration_ms("FERROUS_PLAYBACK_PAUSED_POLL_MS", 333, 125, 1000);
+        let playing_snapshot_interval =
+            env_duration_ms("FERROUS_BRIDGE_PLAYING_HEARTBEAT_MS", 100, 33, 1000);
+        let analysis_snapshot_interval =
+            env_duration_ms("FERROUS_BRIDGE_ANALYSIS_SNAPSHOT_MS", 16, 8, 1000);
+        let paused_snapshot_interval =
+            env_duration_ms("FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS", 333, 125, 1000);
         Self {
             analysis,
             analysis_rx,

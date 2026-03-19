@@ -318,6 +318,7 @@ pub(crate) fn probe_raw_surround_technical_details(
 
 /// Estimate duration from the bitstream frame header bitrate and file size,
 /// subtracting the `APEv2` tag if present.  Works for AC3 (A/52) and DTS files.
+// Duration estimate from byte count — f64 precision loss is negligible.
 #[allow(clippy::cast_precision_loss)]
 fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
     let mut file = File::open(path).ok()?;
@@ -361,6 +362,7 @@ fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
     }
 
     let duration = (audio_bytes as f64 * 8.0) / f64::from(bitrate_bps);
+    // f64 → f32 for duration display — intentional.
     #[allow(clippy::cast_possible_truncation)]
     let duration = duration as f32;
     (duration > 0.0).then_some(duration)

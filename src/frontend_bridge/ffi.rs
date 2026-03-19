@@ -449,6 +449,7 @@ fn merge_queue_snapshot(
     latest_snapshot
 }
 
+// Receiver is consumed by this thread's main loop — ownership transfer is intentional.
 #[allow(clippy::needless_pass_by_value)]
 fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Receiver<BridgeEvent>) {
     loop {
