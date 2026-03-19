@@ -214,37 +214,6 @@ QString normalizedItunesMatchKey(const QString &value) {
     return value.simplified().toCaseFolded();
 }
 
-int itunesMatchRankGroup(
-    const QString &candidateAlbum,
-    const QString &candidateArtist,
-    const QString &wantedAlbum,
-    const QString &wantedArtist)
-{
-    const QString album = normalizedItunesMatchKey(candidateAlbum);
-    const QString artist = normalizedItunesMatchKey(candidateArtist);
-    const QString wantedAlbumKey = normalizedItunesMatchKey(wantedAlbum);
-    const QString wantedArtistKey = normalizedItunesMatchKey(wantedArtist);
-
-    const bool albumExact = !album.isEmpty() && album == wantedAlbumKey;
-    const bool artistExact = !artist.isEmpty() && artist == wantedArtistKey;
-    const bool albumPartial = !wantedAlbumKey.isEmpty() && album.contains(wantedAlbumKey);
-    const bool artistPartial = !wantedArtistKey.isEmpty() && artist.contains(wantedArtistKey);
-
-    if (albumExact && artistExact) {
-        return 0;
-    }
-    if (albumExact) {
-        return 1;
-    }
-    if (artistExact) {
-        return 2;
-    }
-    if (albumPartial || artistPartial) {
-        return 3;
-    }
-    return 4;
-}
-
 QString replaceUrlTerminalExtension(const QString &urlString, const QString &extension) {
     const QString trimmedExtension = extension.trimmed().toLower();
     if (trimmedExtension.isEmpty()) {
@@ -2944,7 +2913,10 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
         return rawPreview;
     };
 
-    auto addAlbumResults = [aggregation, album, artist](const QJsonArray &results) {
+    const QByteArray albumUtf8 = album.toUtf8();
+    const QByteArray artistUtf8 = artist.toUtf8();
+
+    auto addAlbumResults = [aggregation, albumUtf8, artistUtf8](const QJsonArray &results) {
         for (const QJsonValue &value : results) {
             const QJsonObject obj = value.toObject();
             const QString artworkUrl100 = obj.value(QStringLiteral("artworkUrl100")).toString();
@@ -2981,11 +2953,17 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             candidate.collectionUrl = obj.value(QStringLiteral("collectionViewUrl")).toString().trimmed();
             candidate.previewUrl = deriveItunesPreviewUrl(artworkUrl100);
             candidate.assetUrls = assetUrls;
-            candidate.rankGroup = itunesMatchRankGroup(
-                candidate.albumTitle,
-                candidate.artistName,
-                album,
-                artist);
+            const QByteArray candidateAlbumUtf8 = candidate.albumTitle.toUtf8();
+            const QByteArray candidateArtistUtf8 = candidate.artistName.toUtf8();
+            candidate.relevanceScore = ferrous_ffi_fuzzy_match_score(
+                reinterpret_cast<const uint8_t *>(candidateAlbumUtf8.constData()),
+                candidateAlbumUtf8.size(),
+                reinterpret_cast<const uint8_t *>(candidateArtistUtf8.constData()),
+                candidateArtistUtf8.size(),
+                reinterpret_cast<const uint8_t *>(albumUtf8.constData()),
+                albumUtf8.size(),
+                reinterpret_cast<const uint8_t *>(artistUtf8.constData()),
+                artistUtf8.size());
             candidate.apiOrder = aggregation->nextApiOrder++;
             aggregation->candidates.push_back(std::move(candidate));
         }
@@ -2996,8 +2974,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             aggregation->candidates.begin(),
             aggregation->candidates.end(),
             [](const ItunesArtworkCandidate &lhs, const ItunesArtworkCandidate &rhs) {
-                if (lhs.rankGroup != rhs.rankGroup) {
-                    return lhs.rankGroup < rhs.rankGroup;
+                if (lhs.relevanceScore != rhs.relevanceScore) {
+                    return lhs.relevanceScore > rhs.relevanceScore;
                 }
                 return lhs.apiOrder < rhs.apiOrder;
         });

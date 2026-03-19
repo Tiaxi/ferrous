@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod artwork;
 pub mod frontend_bridge;
+pub mod fuzzy_match;
 pub mod lastfm;
 pub mod library;
 pub mod metadata;

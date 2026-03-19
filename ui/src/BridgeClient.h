@@ -359,7 +359,7 @@ private:
         QString collectionUrl;
         QString previewUrl;
         QStringList assetUrls;
-        int rankGroup{0};
+        double relevanceScore{0.0};
         int apiOrder{0};
     };
 

@@ -953,6 +953,39 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_free_buffer(ptr: *mut c_uchar, l
     drop(Vec::from_raw_parts(ptr, len, len));
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// Each `(ptr, len)` pair must point to `len` readable bytes for the
+/// duration of this call (or `ptr` may be null when `len` is 0).
+pub unsafe extern "C" fn ferrous_ffi_fuzzy_match_score(
+    candidate_album_ptr: *const c_uchar,
+    candidate_album_len: usize,
+    candidate_artist_ptr: *const c_uchar,
+    candidate_artist_len: usize,
+    wanted_album_ptr: *const c_uchar,
+    wanted_album_len: usize,
+    wanted_artist_ptr: *const c_uchar,
+    wanted_artist_len: usize,
+) -> f64 {
+    let to_str = |ptr: *const c_uchar, len: usize| -> &str {
+        if ptr.is_null() || len == 0 {
+            return "";
+        }
+        std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).unwrap_or("")
+    };
+    let candidate_album = to_str(candidate_album_ptr, candidate_album_len);
+    let candidate_artist = to_str(candidate_artist_ptr, candidate_artist_len);
+    let wanted_album = to_str(wanted_album_ptr, wanted_album_len);
+    let wanted_artist = to_str(wanted_artist_ptr, wanted_artist_len);
+    crate::fuzzy_match::itunes_relevance_score(
+        candidate_album,
+        candidate_artist,
+        wanted_album,
+        wanted_artist,
+    )
+}
+
 fn into_raw_buffer(bytes: Vec<u8>, len_out: *mut usize) -> *mut c_uchar {
     let mut boxed = bytes.into_boxed_slice();
     let ptr = boxed.as_mut_ptr();
