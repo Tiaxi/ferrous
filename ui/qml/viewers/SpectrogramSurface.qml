@@ -169,21 +169,13 @@ Item {
         function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
                                                      startIndex, totalEstimate, sampleRate,
                                                      hopSize, coverage, complete, trackToken) {
-            // Ensure the Repeater has the right number of panes for the
-            // channel count reported by the precomputed worker.
-            if (channelCount > 0 && spectrogramRepeater.count !== channelCount) {
-                const showLabels = root.uiBridge.spectrogramViewMode === 1
-                let next = []
-                for (let i = 0; i < channelCount; ++i) {
-                    next.push({ label: "", showLabel: false })
-                }
-                if (!sameDescriptors(next)) {
-                    root.channelDescriptors = next
-                }
-            }
-
+            // Don't change channel descriptors here — the streaming path
+            // manages descriptors.  Changing them would destroy and recreate
+            // SpectrogramItem delegates, losing all precomputed atlas data.
+            // Just feed to whatever panes currently exist.
+            const paneCount = spectrogramRepeater.count
             for (let ch = 0; ch < channelCount; ++ch) {
-                if (ch >= spectrogramRepeater.count) {
+                if (ch >= paneCount) {
                     break
                 }
                 const pane = spectrogramRepeater.itemAt(ch)

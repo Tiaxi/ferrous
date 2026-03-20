@@ -407,6 +407,8 @@ void SpectrogramItem::feedPrecomputedChunk(
 }
 
 void SpectrogramItem::clearPrecomputed() {
+    std::fprintf(stderr, "[Qt-clearPrecomputed] totalCols=%d ready=%d\n",
+        m_precomputedTotalColumns, m_precomputedReady ? 1 : 0);
     QMutexLocker lock(&m_stateMutex);
     m_precomputedAtlas.clear();
     m_precomputedCoverage.clear();
