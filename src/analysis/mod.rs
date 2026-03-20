@@ -320,11 +320,24 @@ impl AnalysisRuntimeState {
     fn handle_command(&mut self, cmd: AnalysisCommand, ctx: &AnalysisContext<'_>) {
         match cmd {
             AnalysisCommand::SetTrack {
-                path,
+                ref path,
                 reset_spectrogram,
                 track_token,
                 gapless,
-            } => self.handle_track_change(path, reset_spectrogram, gapless, track_token, ctx),
+            } => {
+                let skip = self.precompute_dispatched_path.as_ref() == Some(path);
+                eprintln!(
+                    "[analysis] SetTrack path={:?} token={} gapless={} reset_spec={} precompute_skip={}",
+                    path.file_name().unwrap_or_default(), track_token, gapless, reset_spectrogram, skip,
+                );
+                self.handle_track_change(
+                    path.clone(),
+                    reset_spectrogram,
+                    gapless,
+                    track_token,
+                    ctx,
+                );
+            }
             AnalysisCommand::SetTrackToken(track_token) => {
                 self.active_pcm_track_token = track_token;
                 // Don't set pcm_labels_pending_init here — the subsequent
@@ -357,11 +370,15 @@ impl AnalysisRuntimeState {
                 self.dispatch_spectrogram_job(0.0, ctx);
             }
             AnalysisCommand::Seek(position_seconds) => {
+                eprintln!("[analysis] Seek pos={:.2}", position_seconds);
                 self.dispatch_spectrogram_job(position_seconds, ctx);
             }
             AnalysisCommand::PrecomputeSpectrogram { path, track_token } => {
-                // Set the path/token so dispatch_spectrogram_job can use them,
-                // without touching the waveform/PCM pipeline state.
+                eprintln!(
+                    "[analysis] PrecomputeSpectrogram path={:?} token={}",
+                    path.file_name().unwrap_or_default(),
+                    track_token,
+                );
                 self.precompute_dispatched_path = Some(path.clone());
                 self.active_track_path = Some(path);
                 self.active_track_token = track_token;
@@ -421,8 +438,10 @@ impl AnalysisRuntimeState {
         // already started a job for this exact track, to avoid cancelling an
         // in-flight job and creating a gap from restart.
         if self.precompute_dispatched_path.as_ref() == Some(&path) {
+            eprintln!("[analysis] handle_track_change: SKIPPING spectrogram dispatch (precompute in-flight)");
             self.precompute_dispatched_path = None;
         } else {
+            eprintln!("[analysis] handle_track_change: dispatching spectrogram job from 0.0");
             self.dispatch_spectrogram_job(0.0, ctx);
         }
 
@@ -442,6 +461,7 @@ impl AnalysisRuntimeState {
 
     fn dispatch_spectrogram_job(&self, start_seconds: f64, ctx: &AnalysisContext<'_>) {
         let Some(path) = self.active_track_path.as_ref() else {
+            eprintln!("[analysis] dispatch_spectrogram_job: no active_track_path, skipping");
             return;
         };
         let gen = ctx
@@ -846,10 +866,23 @@ fn spawn_spectrogram_decode_worker(
         .spawn(move || {
             while let Ok(mut job) = job_rx.recv() {
                 // Drain to latest job.
+                let mut drained = 0u32;
                 while let Ok(next_job) = job_rx.try_recv() {
                     job = next_job;
+                    drained += 1;
                 }
+                let start = std::time::Instant::now();
+                eprintln!(
+                    "[spect-worker] START path={:?} gen={} token={} fft={} hop={} ch={} start_s={:.2} drained={}",
+                    job.path.file_name().unwrap_or_default(),
+                    job.generation, job.track_token, job.fft_size, job.hop_size,
+                    job.channel_count, job.start_seconds, drained,
+                );
                 run_spectrogram_decode_job(&job, &event_tx, &active_token, &generation);
+                eprintln!(
+                    "[spect-worker] DONE elapsed={:.1}ms",
+                    start.elapsed().as_secs_f64() * 1000.0,
+                );
             }
         });
 }
@@ -861,8 +894,16 @@ fn run_spectrogram_decode_job(
     generation: &AtomicU64,
 ) {
     let is_stale = |job: &SpectrogramDecodeJob| -> bool {
-        generation.load(Ordering::Relaxed) != job.generation
-            || active_token.load(Ordering::Relaxed) != job.track_token
+        let cur_gen = generation.load(Ordering::Relaxed);
+        let cur_tok = active_token.load(Ordering::Relaxed);
+        let stale = cur_gen != job.generation || cur_tok != job.track_token;
+        if stale {
+            eprintln!(
+                "[spect-worker] STALE gen {}!={} tok {}!={}",
+                cur_gen, job.generation, cur_tok, job.track_token,
+            );
+        }
+        stale
     };
 
     if is_stale(job) {
@@ -873,19 +914,15 @@ fn run_spectrogram_decode_job(
 
     // Estimate total columns from file duration.
     let Some(total_columns_estimate) = estimate_total_columns(&job.path) else {
+        eprintln!("[spect-worker] estimate_total_columns returned None, aborting");
         return;
     };
+    eprintln!(
+        "[spect-worker] total_columns_estimate={} bins={}",
+        total_columns_estimate, bins_per_column
+    );
 
-    // Pass 1: decode from start_seconds to EOF.
-    let start_column = if job.start_seconds > 0.0 {
-        // Rough estimate of which column corresponds to start_seconds.
-        // Will be refined by actual decode.
-        0u32 // The actual column index is computed during decode.
-    } else {
-        0u32
-    };
-    let _ = start_column; // used conceptually
-
+    let pass1_start = std::time::Instant::now();
     let pass1_result = run_spectrogram_decode_pass(
         job,
         event_tx,
@@ -894,6 +931,11 @@ fn run_spectrogram_decode_job(
         job.start_seconds,
         total_columns_estimate,
         bins_per_column,
+    );
+    eprintln!(
+        "[spect-worker] pass1 result={:?} elapsed={:.1}ms",
+        pass1_result,
+        pass1_start.elapsed().as_secs_f64() * 1000.0,
     );
 
     if is_stale(job) {
@@ -1298,6 +1340,10 @@ fn drain_stft_rows_into_chunks(
         if state.chunk_columns >= state.target_chunk_columns {
             let coverage =
                 seconds_from_frames(state.total_covered_samples, u64::from(ctx.effective_rate));
+            eprintln!(
+                "[spect-worker] CHUNK start_col={} cols={} total_est={} cov={:.2}s",
+                state.chunk_start_index, state.chunk_columns, ctx.total_columns_estimate, coverage,
+            );
             let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
                 PrecomputedSpectrogramChunk {
                     track_token: job.track_token,

@@ -4523,12 +4523,18 @@ fn process_playback_event(
             }
             if let Some(pending) = state.pending_waveform_track.take() {
                 if state.playback.current.as_ref() == Some(&pending.path) {
+                    eprintln!(
+                        "[bridge] deferred pending_waveform_track firing → SetTrack token={}",
+                        pending.track_token,
+                    );
                     analysis.command(AnalysisCommand::SetTrack {
                         path: pending.path,
                         reset_spectrogram: pending.reset_spectrogram,
                         track_token: pending.track_token,
                         gapless: false,
                     });
+                } else {
+                    eprintln!("[bridge] deferred pending_waveform_track SKIPPED (path mismatch)",);
                 }
             }
             urgency
@@ -4547,17 +4553,21 @@ fn process_playback_event(
             let is_gapless = matches!(kind, TrackChangeKind::Gapless);
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
             if state.playback.state == PlaybackState::Stopped {
+                eprintln!(
+                    "[bridge] TrackChanged while Stopped → deferred + PrecomputeSpectrogram token={}",
+                    track_token,
+                );
                 state.pending_waveform_track = Some(PendingWaveformTrack {
                     path: path.clone(),
                     reset_spectrogram,
                     track_token,
                 });
-                // Eagerly start pre-computed spectrogram even while
-                // the waveform/PCM path is deferred — the spectrogram
-                // worker opens the file directly and doesn't need
-                // playback to be active.
                 analysis.command(AnalysisCommand::PrecomputeSpectrogram { path, track_token });
             } else {
+                eprintln!(
+                    "[bridge] TrackChanged while {:?} → immediate SetTrack token={}",
+                    state.playback.state, track_token,
+                );
                 state.pending_waveform_track = None;
                 analysis.command(AnalysisCommand::SetTrack {
                     path,
