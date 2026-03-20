@@ -343,32 +343,15 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedTrackToken = trackToken;
     }
 
-    // Resize atlas when dimensions change.
+    // Re-allocate atlas when dimensions change.  Always clear coverage
+    // to avoid showing stale data from the previous track.
     if (m_precomputedTotalColumns != totalEstimate
         || m_precomputedBinsPerColumn != bins) {
-        if (m_precomputedBinsPerColumn != bins) {
-            // Bins changed (FFT size change) — full re-allocation, old data
-            // is incompatible.
-            const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
-            m_precomputedAtlas.resize(static_cast<int>(atlasSize));
-            m_precomputedAtlas.fill(0);
-            m_precomputedCoverage.resize(totalEstimate);
-            m_precomputedCoverage.fill(false);
-        } else {
-            // Only totalEstimate changed (different track duration, same FFT).
-            // Resize but keep existing data/coverage — the worker will
-            // overwrite with new track data from column 0 forward.  This
-            // avoids a visible black gap during the transition because the
-            // old coverage bits remain set until new data overwrites them.
-            const int oldTotal = m_precomputedTotalColumns;
-            const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
-            m_precomputedAtlas.resize(static_cast<int>(atlasSize));
-            m_precomputedCoverage.resize(totalEstimate);
-            // Clear coverage only for newly added columns (if growing).
-            for (int i = oldTotal; i < totalEstimate; ++i) {
-                m_precomputedCoverage.clearBit(i);
-            }
-        }
+        const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
+        m_precomputedAtlas.resize(static_cast<int>(atlasSize));
+        m_precomputedAtlas.fill(0);
+        m_precomputedCoverage.resize(totalEstimate);
+        m_precomputedCoverage.fill(false);
         m_precomputedTotalColumns = totalEstimate;
         m_precomputedBinsPerColumn = bins;
         m_precomputedComplete = false;
