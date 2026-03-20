@@ -432,8 +432,6 @@ void SpectrogramItem::clearPrecomputed() {
 
 void SpectrogramItem::reset() {
     QMutexLocker lock(&m_stateMutex);
-    std::fprintf(stderr, "[Qt-reset] precomputedReady=%d totalCols=%d\n",
-        m_precomputedReady ? 1 : 0, m_precomputedTotalColumns);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     resetSmoothnessProfileLocked();
     resetSeekProfileLocked();
@@ -445,9 +443,15 @@ void SpectrogramItem::reset() {
     m_seedHistoryOnNextAppend = true;
     m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
-    m_binsPerColumn = 0;
-    invalidateMapping();
-    invalidateCanvas();
+
+    // When precomputed mode is active, don't destroy the canvas or
+    // mapping — the canvas will be rebuilt from the atlas on the next
+    // frame.  Destroying it causes a visible gap/flash.
+    if (!m_precomputedReady) {
+        m_binsPerColumn = 0;
+        invalidateMapping();
+        invalidateCanvas();
+    }
     update();
 }
 
