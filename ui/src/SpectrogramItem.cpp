@@ -493,6 +493,11 @@ void SpectrogramItem::appendPackedRows(
     const auto appendStart = std::chrono::steady_clock::now();
 #endif
     QMutexLocker lock(&m_stateMutex);
+    // When precomputed mode is active, ignore streaming rows — they
+    // would fight with the position-indexed atlas rendering.
+    if (m_precomputedReady) {
+        return;
+    }
     if (packedRows.isEmpty() || rowCount <= 0 || binsPerRow <= 0) {
         return;
     }
@@ -664,12 +669,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const int bins = m_precomputedBinsPerColumn;
                 const auto *atlasData = reinterpret_cast<const quint8 *>(m_precomputedAtlas.constData());
                 const QRgb bgColor = kBackgroundColor.rgba();
+                const double gradScale = static_cast<double>(kGradientTableSize) / 255.0;
+
+                // In rolling mode, right-align the visible content.
+                const int pixelOffset = (m_displayMode == 0)
+                    ? std::max(0, canvasW - visibleCols)
+                    : 0;
+
+                // Clear leading black region (rolling mode: left side before data).
+                for (int pixelX = 0; pixelX < pixelOffset; ++pixelX) {
+                    for (int y = 0; y < canvasH; ++y) {
+                        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] = bgColor;
+                    }
+                }
 
                 // Paint each visible column.
-                for (int pixelX = 0; pixelX < canvasW; ++pixelX) {
-                    const int colIdx = leftCol + pixelX;
+                for (int i = 0; i < visibleCols && (pixelOffset + i) < canvasW; ++i) {
+                    const int pixelX = pixelOffset + i;
+                    const int colIdx = leftCol + i;
                     if (colIdx < 0 || colIdx >= m_precomputedTotalColumns
-                        || colIdx > rightCol
                         || !m_precomputedCoverage.testBit(colIdx)) {
                         for (int y = 0; y < canvasH; ++y) {
                             reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] = bgColor;
@@ -678,14 +696,27 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     }
                     const int atlasOffset = colIdx * bins;
                     for (int y = 0; y < canvasH; ++y) {
-                        const int binIndex = (y < static_cast<int>(m_iToBin.size()))
-                            ? m_iToBin[static_cast<size_t>(y)]
+                        // Flip y-axis: y=0 is top (high freq), y=height-1 is bottom (low freq).
+                        const int mappingIdx = canvasH - 1 - y;
+                        const int binIndex = (mappingIdx >= 0 && mappingIdx < static_cast<int>(m_iToBin.size()))
+                            ? m_iToBin[static_cast<size_t>(mappingIdx)]
                             : 0;
-                        const quint8 intensity = (binIndex >= 0 && binIndex < bins)
+                        const quint8 rawIntensity = (binIndex >= 0 && binIndex < bins)
                             ? atlasData[atlasOffset + binIndex]
                             : 0;
+                        // Invert palette: match streaming path (high intensity → low index → bright).
+                        int paletteIndex = kGradientTableSize
+                            - static_cast<int>(std::lround(gradScale * static_cast<double>(rawIntensity)));
+                        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
                         reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] =
-                            m_palette32[static_cast<size_t>(intensity * (kGradientTableSize - 1) / 255)];
+                            m_palette32[static_cast<size_t>(paletteIndex)];
+                    }
+                }
+
+                // Clear trailing black region (centered mode: right side past data).
+                for (int pixelX = pixelOffset + visibleCols; pixelX < canvasW; ++pixelX) {
+                    for (int y = 0; y < canvasH; ++y) {
+                        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] = bgColor;
                     }
                 }
 
