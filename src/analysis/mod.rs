@@ -351,6 +351,7 @@ impl AnalysisRuntimeState {
                 self.dispatch_spectrogram_job(0.0, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
+                eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
                 self.snapshot.spectrogram_view_mode = view_mode;
                 self.spectrogram.set_view_mode(view_mode);
                 self.reset_spectrogram_state();
@@ -841,10 +842,10 @@ fn spawn_spectrogram_decode_worker(
                 }
                 let start = std::time::Instant::now();
                 eprintln!(
-                    "[spect-worker] START path={} gen={} token={} fft={} hop={} ch={} start_s={:.2} drained={drained}",
+                    "[spect-worker] START path={} gen={} token={} fft={} hop={} ch={} view={:?} start_s={:.2} drained={drained}",
                     job.path.file_name().unwrap_or_default().to_string_lossy(),
                     job.generation, job.track_token, job.fft_size, job.hop_size,
-                    job.channel_count, job.start_seconds,
+                    job.channel_count, job.view_mode, job.start_seconds,
                 );
                 run_spectrogram_decode_job(&job, &event_tx, &active_token, &generation);
                 eprintln!(
