@@ -91,6 +91,12 @@ pub struct PlaybackEngine {
     tx: Sender<PlaybackCommand>,
 }
 
+fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot) {
+    snapshot.state = PlaybackState::Stopped;
+    snapshot.position = Duration::ZERO;
+    snapshot.current_bitrate_kbps = None;
+}
+
 impl PlaybackEngine {
     #[must_use]
     pub fn new(
@@ -103,6 +109,38 @@ impl PlaybackEngine {
 
     pub fn command(&self, cmd: PlaybackCommand) {
         let _ = self.tx.send(cmd);
+    }
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use super::{stop_snapshot_at_terminal_eos, PlaybackSnapshot, PlaybackState};
+
+    #[test]
+    fn terminal_eos_stop_preserves_current_track_context_for_replay() {
+        let track = PathBuf::from("/tmp/final.flac");
+        let mut snapshot = PlaybackSnapshot {
+            state: PlaybackState::Playing,
+            position: Duration::from_secs(271),
+            duration: Duration::from_secs(272),
+            current: Some(track.clone()),
+            current_queue_index: Some(9),
+            current_bitrate_kbps: Some(1056),
+            volume: 1.0,
+            ..PlaybackSnapshot::default()
+        };
+
+        stop_snapshot_at_terminal_eos(&mut snapshot);
+
+        assert_eq!(snapshot.state, PlaybackState::Stopped);
+        assert_eq!(snapshot.position, Duration::ZERO);
+        assert_eq!(snapshot.duration, Duration::from_secs(272));
+        assert_eq!(snapshot.current.as_ref(), Some(&track));
+        assert_eq!(snapshot.current_queue_index, Some(9));
+        assert_eq!(snapshot.current_bitrate_kbps, None);
     }
 }
 
@@ -681,8 +719,9 @@ mod backend {
                             if snapshot.state == PlaybackState::Playing
                                 && snapshot.position >= snapshot.duration
                             {
-                                queue_idx += 1;
-                                if let Some(next) = queue.get(queue_idx).cloned() {
+                                let next_queue_idx = queue_idx + 1;
+                                if let Some(next) = queue.get(next_queue_idx).cloned() {
+                                    queue_idx = next_queue_idx;
                                     snapshot.current = Some(next.clone());
                                     snapshot.current_queue_index = Some(queue_idx);
                                     snapshot.position = Duration::ZERO;
@@ -694,9 +733,7 @@ mod backend {
                                         track_token: 0,
                                     });
                                 } else {
-                                    snapshot.state = PlaybackState::Stopped;
-                                    snapshot.position = Duration::ZERO;
-                                    snapshot.current_queue_index = None;
+                                    super::stop_snapshot_at_terminal_eos(&mut snapshot);
                                 }
                             }
                         }
@@ -1625,8 +1662,12 @@ mod backend {
                     }
                     // Normal EOS: end of queue
                     self.buffering_active = false;
-                    self.snapshot.state = PlaybackState::Stopped;
-                    self.snapshot.position = Duration::ZERO;
+                    self.seek_hold = None;
+                    self.startup_gain_ramp = false;
+                    self.startup_ramp_hold_until = None;
+                    self.pending_gapless_duration = None;
+                    let _ = self.playbin.set_state(gst::State::Ready);
+                    super::stop_snapshot_at_terminal_eos(&mut self.snapshot);
                     self.emit_snapshot();
                 }
                 gst::MessageView::Error(err) => {
