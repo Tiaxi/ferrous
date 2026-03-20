@@ -636,19 +636,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             && m_precomputedBinsPerColumn > 0
             && m_precomputedTotalColumns > 0;
 
-        // Debug: log precomputed state periodically.
+        // Debug: log precomputed state periodically (per-instance).
         {
-            static int sDebugCounter = 0;
-            if (++sDebugCounter % 120 == 1) {
+            m_debugPaintCounter++;
+            if (m_debugPaintCounter % 120 == 1) {
                 int coveredCount = 0;
                 for (int i = 0; i < m_precomputedCoverage.size(); ++i) {
                     if (m_precomputedCoverage.testBit(i)) ++coveredCount;
                 }
                 std::fprintf(stderr,
-                    "[Qt-paint] usePre=%d ready=%d bins=%d totalCols=%d pos=%.2f covered=%d/%d streaming_cols=%d\n",
+                    "[Qt-paint@%p] usePre=%d ready=%d bins=%d totalCols=%d pos=%.2f sr=%d hop=%d covered=%d/%d streaming=%d\n",
+                    static_cast<const void *>(this),
                     usePrecomputed ? 1 : 0, m_precomputedReady ? 1 : 0,
                     m_precomputedBinsPerColumn, m_precomputedTotalColumns,
-                    m_positionSeconds, coveredCount, static_cast<int>(m_precomputedCoverage.size()),
+                    m_positionSeconds, m_precomputedSampleRateHz, m_precomputedHopSize,
+                    coveredCount, static_cast<int>(m_precomputedCoverage.size()),
                     static_cast<int>(m_columns.size()));
             }
         }

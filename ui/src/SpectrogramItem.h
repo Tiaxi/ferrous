@@ -179,6 +179,7 @@ private:
     double m_positionSeconds{0.0};
     int m_precomputedLastRightCol{-1};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
+    int m_debugPaintCounter{0};
 
     mutable QMutex m_stateMutex;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

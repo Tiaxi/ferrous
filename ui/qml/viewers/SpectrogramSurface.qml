@@ -50,11 +50,21 @@ Item {
         if (sameDescriptors(next)) {
             return
         }
-        // When the count is unchanged, skip the model replacement to avoid
-        // destroying Repeater delegates which would wipe precomputed atlases.
-        // Label updates are cosmetic and will apply on the next track change.
+        // When the count is unchanged, only allow model replacement if no
+        // pane has precomputed data — replacing the model destroys Repeater
+        // delegates and wipes their precomputed atlases.
         if (next.length === root.channelDescriptors.length) {
-            return
+            let hasPrecomputed = false
+            for (let i = 0; i < spectrogramRepeater.count; ++i) {
+                const pane = spectrogramRepeater.itemAt(i)
+                if (pane && pane.spectrogramItem && pane.spectrogramItem.precomputedReady) {
+                    hasPrecomputed = true
+                    break
+                }
+            }
+            if (hasPrecomputed) {
+                return
+            }
         }
         root.channelDescriptors = next
     }
