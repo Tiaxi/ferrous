@@ -47,9 +47,16 @@ Item {
         if (next.length === 0) {
             next = placeholderDescriptors()
         }
-        if (!sameDescriptors(next)) {
-            root.channelDescriptors = next
+        if (sameDescriptors(next)) {
+            return
         }
+        // When the count is unchanged, skip the model replacement to avoid
+        // destroying Repeater delegates which would wipe precomputed atlases.
+        // Label updates are cosmetic and will apply on the next track change.
+        if (next.length === root.channelDescriptors.length) {
+            return
+        }
+        root.channelDescriptors = next
     }
 
     function schedulePendingPackedFlush() {
