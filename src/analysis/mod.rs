@@ -193,6 +193,9 @@ struct AnalysisRuntimeState {
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
     active_track_stamp: Option<WaveformSourceStamp>,
+    /// Set by `PrecomputeSpectrogram` so `handle_track_change` can skip
+    /// re-dispatching the spectrogram job for the same track.
+    precompute_dispatched_path: Option<PathBuf>,
     waveform_cache: HashMap<PathBuf, WaveformCacheEntry>,
     waveform_cache_lru: VecDeque<PathBuf>,
     waveform_db: Option<Connection>,
@@ -292,6 +295,7 @@ impl AnalysisRuntimeState {
             last_emit: std::time::Instant::now(),
             spectrogram: SpectrogramRuntime::new(8192, 1024, SpectrogramViewMode::Downmix, &[]),
             active_track_token: 0,
+            precompute_dispatched_path: None,
             active_track_path: None,
             active_track_stamp: None,
             waveform_cache: HashMap::new(),
@@ -358,6 +362,7 @@ impl AnalysisRuntimeState {
             AnalysisCommand::PrecomputeSpectrogram { path, track_token } => {
                 // Set the path/token so dispatch_spectrogram_job can use them,
                 // without touching the waveform/PCM pipeline state.
+                self.precompute_dispatched_path = Some(path.clone());
                 self.active_track_path = Some(path);
                 self.active_track_token = track_token;
                 ctx.waveform_decode_active_token
@@ -412,8 +417,14 @@ impl AnalysisRuntimeState {
         }
         self.emit_snapshot(ctx.event_tx, true);
 
-        // Dispatch pre-computed spectrogram job (always from start on track change).
-        self.dispatch_spectrogram_job(0.0, ctx);
+        // Dispatch pre-computed spectrogram job — but skip if PrecomputeSpectrogram
+        // already started a job for this exact track, to avoid cancelling an
+        // in-flight job and creating a gap from restart.
+        if self.precompute_dispatched_path.as_ref() == Some(&path) {
+            self.precompute_dispatched_path = None;
+        } else {
+            self.dispatch_spectrogram_job(0.0, ctx);
+        }
 
         if let Some(peaks) = self.load_cached_waveform(&path) {
             self.snapshot.waveform_peaks = peaks;
