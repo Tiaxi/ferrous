@@ -186,6 +186,9 @@ struct AnalysisRuntimeState {
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
     active_track_stamp: Option<WaveformSourceStamp>,
+    /// Last dispatched spectrogram path+fft — skip re-dispatch on stop→restart.
+    last_spectrogram_path: Option<PathBuf>,
+    last_spectrogram_fft: usize,
     waveform_cache: HashMap<PathBuf, WaveformCacheEntry>,
     waveform_cache_lru: VecDeque<PathBuf>,
     waveform_db: Option<Connection>,
@@ -287,6 +290,8 @@ impl AnalysisRuntimeState {
             active_track_token: 0,
             active_track_path: None,
             active_track_stamp: None,
+            last_spectrogram_path: None,
+            last_spectrogram_fft: 0,
             waveform_cache: HashMap::new(),
             waveform_cache_lru: VecDeque::new(),
             waveform_db: open_waveform_cache_db().ok(),
@@ -348,6 +353,7 @@ impl AnalysisRuntimeState {
                 self.spectrogram.set_fft_size(fft, hop);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
+                self.last_spectrogram_path = None;
                 self.dispatch_spectrogram_job(0.0, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
@@ -410,9 +416,21 @@ impl AnalysisRuntimeState {
         }
         self.emit_snapshot(ctx.event_tx, true);
 
-        // Dispatch pre-computed spectrogram job.
-        eprintln!("[analysis] handle_track_change: dispatching spectrogram job from 0.0");
-        self.dispatch_spectrogram_job(0.0, ctx);
+        // Skip spectrogram re-dispatch if we already computed for this
+        // exact path + FFT configuration (e.g. stop→restart of same track).
+        // The atlas on the Qt side still has the data.
+        let already_dispatched = self.last_spectrogram_path.as_ref() == Some(&path)
+            && self.last_spectrogram_fft == self.spectrogram.fft_size;
+        if already_dispatched {
+            eprintln!(
+                "[analysis] handle_track_change: SKIPPING spectrogram dispatch (same path+fft)"
+            );
+        } else {
+            eprintln!("[analysis] handle_track_change: dispatching spectrogram job from 0.0");
+            self.last_spectrogram_path = Some(path.clone());
+            self.last_spectrogram_fft = self.spectrogram.fft_size;
+            self.dispatch_spectrogram_job(0.0, ctx);
+        }
 
         if let Some(peaks) = self.load_cached_waveform(&path) {
             self.snapshot.waveform_peaks = peaks;
