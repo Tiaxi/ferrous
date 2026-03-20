@@ -490,6 +490,7 @@ Item {
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
         property int spectrogramViewMode: 0
+        property int spectrogramDisplayMode: 0
         property int fftSize: 8192
         property real dbRange: 90
         property bool logScale: false
@@ -522,6 +523,9 @@ Item {
         signal diagnosticsChanged()
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
+        signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
+            int startIndex, int totalEstimate, int sampleRate, int hopSize,
+            real coverage, bool complete, var trackToken)
         signal snapshotChanged()
         function setVolume(value) {}
         function setLibrarySortMode(mode) {}
@@ -530,6 +534,7 @@ Item {
         function rescanLibraryRoot(path) {}
         function removeLibraryRoot(path) {}
         function setSpectrogramViewMode(mode) {}
+        function setSpectrogramDisplayMode(mode) {}
         function setFftSize(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
@@ -1218,10 +1223,14 @@ Item {
     QtObject {
         id: bridge
         property int spectrogramViewMode: 0
+        property int spectrogramDisplayMode: 0
         property real dbRange: 90
         property bool logScale: false
         property bool showFps: false
         property int sampleRateHz: 48000
+        signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
+            int startIndex, int totalEstimate, int sampleRate, int hopSize,
+            real coverage, bool complete, var trackToken)
     }
 
     Viewers.SpectrogramSurface {

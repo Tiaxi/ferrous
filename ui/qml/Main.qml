@@ -191,6 +191,7 @@ Kirigami.ApplicationWindow {
         property real dbRange: 90
         property int fftSize: 8192
         property int spectrogramViewMode: 0
+        property int spectrogramDisplayMode: 0
         property int viewerFullscreenMode: 0
         property bool logScale: false
         property int repeatMode: 0
@@ -245,6 +246,9 @@ Kirigami.ApplicationWindow {
         signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
         signal bridgeError(string message)
+        signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
+            int startIndex, int totalEstimate, int sampleRate, int hopSize,
+            real coverage, bool complete, var trackToken)
         function play() {}
         function pause() {}
         function stop() {}
@@ -254,6 +258,7 @@ Kirigami.ApplicationWindow {
         function setVolume(value) {}
         function setFftSize(value) {}
         function setSpectrogramViewMode(value) {}
+        function setSpectrogramDisplayMode(value) {}
         function setViewerFullscreenMode(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
