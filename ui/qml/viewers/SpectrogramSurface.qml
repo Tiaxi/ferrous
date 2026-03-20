@@ -48,24 +48,6 @@ Item {
             next = placeholderDescriptors()
         }
         if (!sameDescriptors(next)) {
-            // If only the count changed and any pane has precomputed data,
-            // avoid replacing the model — that would destroy and recreate
-            // SpectrogramItem delegates, wiping their precomputed atlas.
-            // Instead, only allow count changes when no precomputed data
-            // is loaded yet.
-            if (next.length !== root.channelDescriptors.length) {
-                let hasPrecomputed = false
-                for (let i = 0; i < spectrogramRepeater.count; ++i) {
-                    const pane = spectrogramRepeater.itemAt(i)
-                    if (pane && pane.spectrogramItem && pane.spectrogramItem.precomputedReady) {
-                        hasPrecomputed = true
-                        break
-                    }
-                }
-                if (hasPrecomputed) {
-                    return
-                }
-            }
             root.channelDescriptors = next
         }
     }
@@ -187,10 +169,21 @@ Item {
         function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
                                                      startIndex, totalEstimate, sampleRate,
                                                      hopSize, coverage, complete, trackToken) {
-            // Don't change channel descriptors here — the streaming path
-            // manages descriptors.  Changing them would destroy and recreate
-            // SpectrogramItem delegates, losing all precomputed atlas data.
-            // Just feed to whatever panes currently exist.
+            // If the chunk has more channels than we have panes, grow the
+            // Repeater model.  This only adds panes (never removes) so it
+            // won't destroy existing delegates with precomputed data.
+            if (channelCount > spectrogramRepeater.count) {
+                let next = []
+                for (let i = 0; i < channelCount; ++i) {
+                    if (i < root.channelDescriptors.length) {
+                        next.push(root.channelDescriptors[i])
+                    } else {
+                        next.push({ label: "", showLabel: false })
+                    }
+                }
+                root.channelDescriptors = next
+            }
+
             const paneCount = spectrogramRepeater.count
             for (let ch = 0; ch < channelCount; ++ch) {
                 if (ch >= paneCount) {
