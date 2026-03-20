@@ -278,6 +278,138 @@ void SpectrogramItem::setMaxColumns(int value) {
     update();
 }
 
+double SpectrogramItem::positionSeconds() const {
+    return m_positionSeconds;
+}
+
+void SpectrogramItem::setPositionSeconds(double value) {
+    if (qFuzzyCompare(m_positionSeconds, value)) {
+        return;
+    }
+    m_positionSeconds = value;
+    emit positionSecondsChanged();
+    if (m_precomputedReady) {
+        update();
+    }
+}
+
+bool SpectrogramItem::precomputedReady() const {
+    return m_precomputedReady;
+}
+
+int SpectrogramItem::displayMode() const {
+    return m_displayMode;
+}
+
+void SpectrogramItem::setDisplayMode(int value) {
+    const int clamped = std::clamp(value, 0, 1);
+    if (m_displayMode == clamped) {
+        return;
+    }
+    m_displayMode = clamped;
+    emit displayModeChanged();
+    if (m_precomputedReady) {
+        m_precomputedLastRightCol = -1;
+        invalidateCanvas();
+        update();
+    }
+}
+
+void SpectrogramItem::feedPrecomputedChunk(
+    const QByteArray &data, int bins, int channelIndex,
+    int columns, int startIndex, int totalEstimate,
+    int sampleRate, int hopSize, bool complete) {
+    QMutexLocker lock(&m_stateMutex);
+
+    if (totalEstimate <= 0 || bins <= 0) {
+        return;
+    }
+
+    // Determine the number of channels from the packed data size.
+    // Packed data: columns × channelCount × bins bytes.
+    const int totalDataSize = data.size();
+    const int channelCount = (columns > 0 && bins > 0)
+        ? std::max(1, totalDataSize / (columns * bins))
+        : 1;
+
+    if (channelIndex < 0 || channelIndex >= channelCount) {
+        return;
+    }
+
+    // On first chunk for a new track: allocate the atlas.
+    if (m_precomputedTotalColumns != totalEstimate || m_precomputedBinsPerColumn != bins) {
+        const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
+        m_precomputedAtlas.resize(static_cast<int>(atlasSize));
+        m_precomputedAtlas.fill(0);
+        m_precomputedCoverage.resize(totalEstimate);
+        m_precomputedCoverage.fill(false);
+        m_precomputedTotalColumns = totalEstimate;
+        m_precomputedBinsPerColumn = bins;
+        m_precomputedComplete = false;
+        m_precomputedLastRightCol = -1;
+    }
+
+    if (sampleRate > 0) {
+        m_precomputedSampleRateHz = sampleRate;
+    }
+    if (hopSize > 0) {
+        m_precomputedHopSize = hopSize;
+    }
+
+    // Extract this channel's bins from the packed multi-channel data.
+    // Packed order: [col0_ch0_bins col0_ch1_bins col1_ch0_bins col1_ch1_bins ...]
+    const int stridePerColumn = channelCount * bins;
+    const int channelOffset = channelIndex * bins;
+
+    if (startIndex >= 0) {
+        const int endIndex = startIndex + columns;
+        const int clampedEnd = std::min(endIndex, m_precomputedTotalColumns);
+        const int validColumns = clampedEnd - startIndex;
+        const auto *srcData = reinterpret_cast<const char *>(data.constData());
+        for (int col = 0; col < validColumns; ++col) {
+            const int srcOff = col * stridePerColumn + channelOffset;
+            const int dstOff = (startIndex + col) * bins;
+            if (srcOff + bins <= totalDataSize && dstOff + bins <= m_precomputedAtlas.size()) {
+                memcpy(m_precomputedAtlas.data() + dstOff, srcData + srcOff, bins);
+            }
+        }
+        for (int i = startIndex; i < clampedEnd; ++i) {
+            m_precomputedCoverage.setBit(i);
+        }
+    }
+
+    if (complete) {
+        m_precomputedComplete = true;
+    }
+
+    const bool wasReady = m_precomputedReady;
+    m_precomputedReady = m_precomputedTotalColumns > 0 && m_precomputedBinsPerColumn > 0;
+
+    invalidateCanvas();
+
+    if (m_precomputedReady && !wasReady) {
+        emit precomputedReadyChanged();
+    }
+    update();
+}
+
+void SpectrogramItem::clearPrecomputed() {
+    QMutexLocker lock(&m_stateMutex);
+    m_precomputedAtlas.clear();
+    m_precomputedCoverage.clear();
+    m_precomputedBinsPerColumn = 0;
+    m_precomputedTotalColumns = 0;
+    m_precomputedComplete = false;
+    m_precomputedLastRightCol = -1;
+    const bool wasReady = m_precomputedReady;
+    m_precomputedReady = false;
+    invalidateCanvas();
+    if (wasReady) {
+        emit precomputedReadyChanged();
+    }
+    update();
+}
+
 void SpectrogramItem::reset() {
     QMutexLocker lock(&m_stateMutex);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -477,7 +609,112 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     {
         QMutexLocker lock(&m_stateMutex);
-        if (!m_columns.empty() && m_binsPerColumn > 0) {
+        const bool usePrecomputed = m_precomputedReady
+            && m_precomputedBinsPerColumn > 0
+            && m_precomputedTotalColumns > 0;
+
+        if (usePrecomputed) {
+            // Position-indexed rendering from pre-computed atlas.
+            // Ensure mapping is built for the precomputed bins.
+            if (m_binsPerColumn != m_precomputedBinsPerColumn) {
+                m_binsPerColumn = m_precomputedBinsPerColumn;
+                invalidateMapping();
+            }
+            const double columnsPerSecond =
+                static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(m_precomputedHopSize);
+            const double columnF = m_positionSeconds * columnsPerSecond;
+
+            int leftCol, rightCol, playheadPixel;
+            if (m_displayMode == 1) {
+                // Centered mode.
+                const int centerCol = static_cast<int>(std::floor(columnF));
+                const int halfWidth = w / 2;
+                leftCol = std::max(0, centerCol - halfWidth);
+                rightCol = std::min(m_precomputedTotalColumns - 1, centerCol + halfWidth);
+                playheadPixel = centerCol - leftCol;
+            } else {
+                // Rolling mode: right edge is "now".
+                rightCol = static_cast<int>(std::floor(columnF));
+                leftCol = std::max(0, rightCol - w + 1);
+                playheadPixel = -1; // no playhead in rolling mode
+            }
+
+            rightCol = std::min(rightCol, m_precomputedTotalColumns - 1);
+            leftCol = std::max(leftCol, 0);
+            const int visibleCols = rightCol - leftCol + 1;
+
+            if (visibleCols > 0) {
+                ensureMapping(h);
+                ensureCanvas(w, h);
+                if (!m_canvas.isNull()) {
+                    // Rebuild canvas from atlas.
+                    const int canvasW = m_canvas.width();
+                    const int canvasH = m_canvas.height();
+                    const int bins = m_precomputedBinsPerColumn;
+                    const auto *atlasData = reinterpret_cast<const quint8 *>(m_precomputedAtlas.constData());
+
+                    for (int pixelX = 0; pixelX < std::min(visibleCols, canvasW); ++pixelX) {
+                        const int colIdx = leftCol + pixelX;
+                        if (colIdx < 0 || colIdx >= m_precomputedTotalColumns) {
+                            // Draw black column.
+                            for (int y = 0; y < canvasH; ++y) {
+                                reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] = kBackgroundColor.rgba();
+                            }
+                            continue;
+                        }
+                        const bool covered = m_precomputedCoverage.testBit(colIdx);
+                        if (!covered) {
+                            for (int y = 0; y < canvasH; ++y) {
+                                reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] = kBackgroundColor.rgba();
+                            }
+                            continue;
+                        }
+                        const int atlasOffset = colIdx * bins;
+                        for (int y = 0; y < canvasH; ++y) {
+                            const int binIndex = (y < static_cast<int>(m_iToBin.size()))
+                                ? m_iToBin[static_cast<size_t>(y)]
+                                : 0;
+                            const quint8 intensity = (binIndex >= 0 && binIndex < bins)
+                                ? atlasData[atlasOffset + binIndex]
+                                : 0;
+                            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] =
+                                m_palette32[static_cast<size_t>(intensity * (kGradientTableSize - 1) / 255)];
+                        }
+                    }
+
+                    // Draw playhead line in centered mode.
+                    if (m_displayMode == 1 && playheadPixel >= 0 && playheadPixel < canvasW) {
+                        const QRgb playheadColor = qRgba(255, 255, 255, 128);
+                        for (int y = 0; y < canvasH; ++y) {
+                            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[playheadPixel] = playheadColor;
+                        }
+                    }
+
+                    resizeDirtyTilesLocked();
+                    markAllTilesDirtyLocked();
+                    hasCanvas = true;
+                    canvasSize = m_canvas.size();
+                    drawCols = std::min(visibleCols, canvasW);
+                    srcStart = 0;
+                    scrollOffset = 0.0;
+                    drawX = 0.0;
+                    latestX = 0;
+                    tileCount = static_cast<int>(m_dirtyTiles.size());
+                    tileImages.reserve(tileCount);
+                    tileDirtyIndexes.reserve(tileCount);
+                    for (int tileIndex = 0; tileIndex < tileCount; ++tileIndex) {
+                        const int tileStart = tileIndex * kCanvasTileWidth;
+                        const int tileWidth = std::min(kCanvasTileWidth, canvasW - tileStart);
+                        if (tileWidth <= 0) {
+                            continue;
+                        }
+                        tileDirtyIndexes.push_back(tileIndex);
+                        tileImages.push_back(m_canvas.copy(tileStart, 0, tileWidth, canvasH));
+                        m_dirtyTiles[static_cast<size_t>(tileIndex)] = 0;
+                    }
+                }
+            }
+        } else if (!m_columns.empty() && m_binsPerColumn > 0) {
             ensureCanvas(w, h);
             if (!m_canvas.isNull() && m_canvasDirty) {
                 rebuildCanvasFromColumns();

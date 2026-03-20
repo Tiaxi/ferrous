@@ -54,6 +54,7 @@ pub enum AnalysisCommand {
     SetSampleRate(u32),
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
+    Seek(f64),
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -111,8 +112,26 @@ pub struct AnalysisSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub struct PrecomputedSpectrogramChunk {
+    pub track_token: u64,
+    /// Packed column data: `column_count` × `channel_count` × `bins_per_column` bytes.
+    /// Within each column, all channels are contiguous.
+    pub columns_u8: Vec<u8>,
+    pub bins_per_column: u16,
+    pub column_count: u16,
+    pub channel_count: u8,
+    pub start_column_index: u32,
+    pub total_columns_estimate: u32,
+    pub sample_rate_hz: u32,
+    pub hop_size: u16,
+    pub coverage_seconds: f32,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum AnalysisEvent {
     Snapshot(AnalysisSnapshot),
+    PrecomputedSpectrogramChunk(PrecomputedSpectrogramChunk),
 }
 
 pub struct AnalysisEngine {
@@ -144,6 +163,18 @@ struct WaveformCacheEntry {
 struct WaveformDecodeJob {
     track_token: u64,
     path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct SpectrogramDecodeJob {
+    track_token: u64,
+    generation: u64,
+    path: PathBuf,
+    fft_size: usize,
+    hop_size: usize,
+    channel_count: usize,
+    start_seconds: f64,
+    view_mode: SpectrogramViewMode,
 }
 
 struct AnalysisRuntimeState {
@@ -195,12 +226,24 @@ impl AnalysisEngine {
             waveform_tx,
             Arc::clone(&waveform_decode_active_token),
         );
+
+        let (spectrogram_job_tx, spectrogram_job_rx) = unbounded::<SpectrogramDecodeJob>();
+        let spectrogram_decode_generation = Arc::new(AtomicU64::new(0));
+        spawn_spectrogram_decode_worker(
+            spectrogram_job_rx,
+            event_tx.clone(),
+            Arc::clone(&waveform_decode_active_token),
+            Arc::clone(&spectrogram_decode_generation),
+        );
+
         spawn_analysis_worker(
             cmd_rx,
             pcm_rx,
             event_tx,
             waveform_job_tx,
             waveform_decode_active_token,
+            spectrogram_job_tx,
+            spectrogram_decode_generation,
         );
 
         (Self { tx: cmd_tx, pcm_tx }, event_rx)
@@ -225,6 +268,8 @@ struct AnalysisContext<'a> {
     event_tx: &'a Sender<AnalysisEvent>,
     waveform_job_tx: &'a Sender<WaveformDecodeJob>,
     waveform_decode_active_token: &'a AtomicU64,
+    spectrogram_job_tx: &'a Sender<SpectrogramDecodeJob>,
+    spectrogram_decode_generation: &'a AtomicU64,
 }
 
 impl AnalysisRuntimeState {
@@ -291,12 +336,17 @@ impl AnalysisRuntimeState {
                 self.spectrogram.set_fft_size(fft, hop);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
+                self.dispatch_spectrogram_job(0.0, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
                 self.snapshot.spectrogram_view_mode = view_mode;
                 self.spectrogram.set_view_mode(view_mode);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
+                self.dispatch_spectrogram_job(0.0, ctx);
+            }
+            AnalysisCommand::Seek(position_seconds) => {
+                self.dispatch_spectrogram_job(position_seconds, ctx);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -346,6 +396,9 @@ impl AnalysisRuntimeState {
         }
         self.emit_snapshot(ctx.event_tx, true);
 
+        // Dispatch pre-computed spectrogram job (always from start on track change).
+        self.dispatch_spectrogram_job(0.0, ctx);
+
         if let Some(peaks) = self.load_cached_waveform(&path) {
             self.snapshot.waveform_peaks = peaks;
             self.snapshot.waveform_coverage_seconds = 0.0;
@@ -358,6 +411,26 @@ impl AnalysisRuntimeState {
         let _ = ctx
             .waveform_job_tx
             .send(WaveformDecodeJob { track_token, path });
+    }
+
+    fn dispatch_spectrogram_job(&self, start_seconds: f64, ctx: &AnalysisContext<'_>) {
+        let Some(path) = self.active_track_path.as_ref() else {
+            return;
+        };
+        let gen = ctx
+            .spectrogram_decode_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let _ = ctx.spectrogram_job_tx.send(SpectrogramDecodeJob {
+            track_token: self.active_track_token,
+            generation: gen,
+            path: path.clone(),
+            fft_size: self.spectrogram.fft_size,
+            hop_size: self.spectrogram.hop_size,
+            channel_count: self.spectrogram.pipelines.len().max(1),
+            start_seconds,
+            view_mode: self.snapshot.spectrogram_view_mode,
+        });
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
@@ -660,12 +733,575 @@ fn spawn_waveform_decode_worker(
         });
 }
 
+const PRECOMPUTED_DB_RANGE: f32 = 90.0;
+
+fn clamp_to_u8(v: usize) -> u8 {
+    u8::try_from(v).unwrap_or(u8::MAX)
+}
+
+fn clamp_to_u16(v: usize) -> u16 {
+    u16::try_from(v).unwrap_or(u16::MAX)
+}
+
+/// Saturating conversion from `f64` to `u32`, clamping to `[0, u32::MAX]`.
+fn f64_to_u32_saturating(v: f64) -> u32 {
+    if v <= 0.0 {
+        return 0;
+    }
+    if v >= f64::from(u32::MAX) {
+        return u32::MAX;
+    }
+    // Value is within u32 range after clamping above.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let r = v as u32;
+    r
+}
+
+/// Saturating conversion from `f64` to `u64`, clamping to `[0, u64::MAX]`.
+fn f64_to_u64_saturating(v: f64) -> u64 {
+    if v <= 0.0 {
+        return 0;
+    }
+    // u64::MAX is not exactly representable in f64, so any f64 >= 2^63 is
+    // close enough to saturate.
+    if v >= 9_223_372_036_854_775_808.0 {
+        return u64::MAX;
+    }
+    // Value is non-negative and below the saturation threshold.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let r = v as u64;
+    r
+}
+
+/// Lossless `usize`-to-`f64` on platforms where `usize` may be wider than
+/// `f64`'s 52-bit mantissa. Precision loss is acceptable for column-index
+/// arithmetic that only needs approximate floating-point division.
+fn usize_to_f64_approx(v: usize) -> f64 {
+    // On 64-bit targets clippy warns about precision loss; suppress because
+    // this is used for spectrogram column estimation where exact precision
+    // is unnecessary.
+    #[allow(clippy::cast_precision_loss)]
+    let r = v as f64;
+    r
+}
+
+/// Lossless `usize`-to-`f32` is impossible on 32/64-bit targets. Precision
+/// loss is acceptable here (channel-count reciprocal, typically <=8).
+fn usize_to_f32_approx(v: usize) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let r = v as f32;
+    r
+}
+
+fn precomputed_to_u8_spectrum(v: f32) -> u8 {
+    let range = f64::from(PRECOMPUTED_DB_RANGE);
+    let db = if v > 0.0 {
+        (10.0 / std::f64::consts::LN_10) * f64::from(v).ln()
+    } else {
+        -200.0
+    };
+    let xdb = (db + range - 63.0).clamp(0.0, range);
+    let scaled = (xdb / range) * 255.0;
+    // Value is clamped to 0.0..=255.0, so truncation and sign loss are impossible.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let result = scaled.round().clamp(0.0, 255.0) as u8;
+    result
+}
+
+fn spawn_spectrogram_decode_worker(
+    job_rx: Receiver<SpectrogramDecodeJob>,
+    event_tx: Sender<AnalysisEvent>,
+    active_token: Arc<AtomicU64>,
+    generation: Arc<AtomicU64>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("ferrous-spectrogram-decode".to_string())
+        .spawn(move || {
+            while let Ok(mut job) = job_rx.recv() {
+                // Drain to latest job.
+                while let Ok(next_job) = job_rx.try_recv() {
+                    job = next_job;
+                }
+                run_spectrogram_decode_job(&job, &event_tx, &active_token, &generation);
+            }
+        });
+}
+
+fn run_spectrogram_decode_job(
+    job: &SpectrogramDecodeJob,
+    event_tx: &Sender<AnalysisEvent>,
+    active_token: &AtomicU64,
+    generation: &AtomicU64,
+) {
+    let is_stale = |job: &SpectrogramDecodeJob| -> bool {
+        generation.load(Ordering::Relaxed) != job.generation
+            || active_token.load(Ordering::Relaxed) != job.track_token
+    };
+
+    if is_stale(job) {
+        return;
+    }
+
+    let bins_per_column = (job.fft_size / 2) + 1;
+
+    // Estimate total columns from file duration.
+    let Some(total_columns_estimate) =
+        estimate_total_columns(&job.path, job.fft_size, job.hop_size)
+    else {
+        return;
+    };
+
+    // Pass 1: decode from start_seconds to EOF.
+    let start_column = if job.start_seconds > 0.0 {
+        // Rough estimate of which column corresponds to start_seconds.
+        // Will be refined by actual decode.
+        0u32 // The actual column index is computed during decode.
+    } else {
+        0u32
+    };
+    let _ = start_column; // used conceptually
+
+    let pass1_result = run_spectrogram_decode_pass(
+        job,
+        event_tx,
+        generation,
+        active_token,
+        job.start_seconds,
+        total_columns_estimate,
+        bins_per_column,
+    );
+
+    if is_stale(job) {
+        return;
+    }
+
+    // Pass 2: if we started mid-track, fill the gap from 0 to start_seconds.
+    if job.start_seconds > 0.0 {
+        if let Some(pass1_start_col) = pass1_result {
+            if pass1_start_col > 0 && !is_stale(job) {
+                let pass2_result = run_spectrogram_decode_pass(
+                    job,
+                    event_tx,
+                    generation,
+                    active_token,
+                    0.0,
+                    total_columns_estimate,
+                    bins_per_column,
+                );
+
+                if is_stale(job) {
+                    return;
+                }
+
+                // If pass2 completed, we have full coverage — send the complete flag.
+                if pass2_result.is_some() {
+                    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                        PrecomputedSpectrogramChunk {
+                            track_token: job.track_token,
+                            columns_u8: Vec::new(),
+                            bins_per_column: clamp_to_u16(bins_per_column),
+                            column_count: 0,
+                            channel_count: clamp_to_u8(job.channel_count),
+                            start_column_index: 0,
+                            total_columns_estimate,
+                            sample_rate_hz: 0,
+                            hop_size: clamp_to_u16(job.hop_size),
+                            coverage_seconds: 0.0,
+                            complete: true,
+                        },
+                    ));
+                }
+                return;
+            }
+        }
+    }
+
+    // Pass 1 covered from start to EOF. If start_seconds == 0, that's the whole track.
+    if job.start_seconds == 0.0 && !is_stale(job) {
+        let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+            PrecomputedSpectrogramChunk {
+                track_token: job.track_token,
+                columns_u8: Vec::new(),
+                bins_per_column: clamp_to_u16(bins_per_column),
+                column_count: 0,
+                channel_count: clamp_to_u8(job.channel_count),
+                start_column_index: 0,
+                total_columns_estimate,
+                sample_rate_hz: 0,
+                hop_size: clamp_to_u16(job.hop_size),
+                coverage_seconds: 0.0,
+                complete: true,
+            },
+        ));
+    }
+}
+
+/// Returns `Some(start_column_index_of_first_output)` on success, `None` on cancellation/error.
+fn run_spectrogram_decode_pass(
+    job: &SpectrogramDecodeJob,
+    event_tx: &Sender<AnalysisEvent>,
+    generation: &AtomicU64,
+    active_token: &AtomicU64,
+    seek_seconds: f64,
+    total_columns_estimate: u32,
+    bins_per_column: usize,
+) -> Option<u32> {
+    let is_stale = || -> bool {
+        generation.load(Ordering::Relaxed) != job.generation
+            || active_token.load(Ordering::Relaxed) != job.track_token
+    };
+
+    if is_stale() {
+        return None;
+    }
+
+    let mut hint = Hint::new();
+    if let Some(ext) = job.path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let file = File::open(&job.path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+
+    let mut format = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?
+        .format;
+
+    let track = format.default_track()?;
+    let track_id = track.id;
+    let native_sample_rate = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
+    let native_channels = track
+        .codec_params
+        .channels
+        .map_or(2, |ch| ch.count().max(1));
+
+    let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
+    let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
+    let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
+
+    let channel_count = match job.view_mode {
+        SpectrogramViewMode::Downmix => 1,
+        SpectrogramViewMode::PerChannel => native_channels,
+    };
+
+    let mut audio_decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .ok()?;
+
+    // Seek if needed.
+    if seek_seconds > 0.0 {
+        use symphonia::core::formats::SeekMode;
+        use symphonia::core::formats::SeekTo;
+        let native_rate_u32 = u32::try_from(native_sample_rate).unwrap_or(u32::MAX);
+        let ts = f64_to_u64_saturating(seek_seconds * f64::from(native_rate_u32));
+        let _ = format.seek(SeekMode::Coarse, SeekTo::TimeStamp { ts, track_id });
+    }
+
+    // Compute the column offset for the seek position.
+    let start_column_index = if seek_seconds > 0.0 {
+        let effective_rate_f64 = f64::from(effective_rate);
+        let hop_f64 = usize_to_f64_approx(job.hop_size);
+        f64_to_u32_saturating((seek_seconds * effective_rate_f64 / hop_f64).floor())
+    } else {
+        0
+    };
+
+    let mut state = SpectrogramDecodeLoopState {
+        stfts: (0..channel_count)
+            .map(|_| StftComputer::new(job.fft_size, job.hop_size))
+            .collect(),
+        sample_buf: None,
+        packet_counter: 0,
+        current_column_index: start_column_index,
+        first_column_index: None,
+        chunk_buf: Vec::new(),
+        chunk_columns: 0,
+        chunk_start_index: start_column_index,
+        target_chunk_columns: 8,
+        total_covered_samples: 0,
+    };
+
+    let ctx = SpectrogramDecodeContext {
+        track_id,
+        divisor,
+        effective_rate,
+        channel_count,
+        bins_per_column,
+        total_columns_estimate,
+    };
+
+    spectrogram_decode_loop(
+        &mut state,
+        job,
+        &mut format,
+        &mut audio_decoder,
+        &ctx,
+        event_tx,
+        &is_stale,
+    );
+
+    state.first_column_index
+}
+
+struct SpectrogramDecodeLoopState {
+    stfts: Vec<StftComputer>,
+    sample_buf: Option<SampleBuffer<f32>>,
+    packet_counter: usize,
+    current_column_index: u32,
+    first_column_index: Option<u32>,
+    chunk_buf: Vec<u8>,
+    chunk_columns: u16,
+    chunk_start_index: u32,
+    target_chunk_columns: u16,
+    total_covered_samples: u64,
+}
+
+struct SpectrogramDecodeContext {
+    track_id: u32,
+    divisor: usize,
+    effective_rate: u32,
+    channel_count: usize,
+    bins_per_column: usize,
+    total_columns_estimate: u32,
+}
+
+fn spectrogram_decode_loop(
+    state: &mut SpectrogramDecodeLoopState,
+    job: &SpectrogramDecodeJob,
+    format: &mut Box<dyn symphonia::core::formats::FormatReader>,
+    audio_decoder: &mut Box<dyn symphonia::core::codecs::Decoder>,
+    ctx: &SpectrogramDecodeContext,
+    event_tx: &Sender<AnalysisEvent>,
+    is_stale: &dyn Fn() -> bool,
+) {
+    loop {
+        if is_stale() {
+            return;
+        }
+
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+            Err(SymphoniaError::ResetRequired | _) => break,
+        };
+
+        if packet.track_id() != ctx.track_id {
+            continue;
+        }
+        state.packet_counter += 1;
+
+        let decoded_audio = match audio_decoder.decode(&packet) {
+            Ok(decoded_audio) => decoded_audio,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(_) => break,
+        };
+
+        let spec = *decoded_audio.spec();
+        let decoded_channels = spec.channels.count().max(1);
+        let decoded_capacity = decoded_audio.capacity();
+        let buf = ensure_sample_buffer(&mut state.sample_buf, decoded_capacity, spec);
+        buf.copy_interleaved_ref(decoded_audio);
+        let samples = buf.samples();
+
+        // De-interleave and optionally downsample.
+        let frames = samples.len() / decoded_channels;
+        let effective_frames = frames / ctx.divisor;
+
+        let per_channel = deinterleave_samples(
+            samples,
+            frames,
+            decoded_channels,
+            ctx.channel_count,
+            ctx.divisor,
+            effective_frames,
+            job.view_mode,
+        );
+
+        state.total_covered_samples += effective_frames as u64;
+
+        // Feed each channel's samples to its StftComputer.
+        for (ch, channel_samples) in per_channel.iter().enumerate() {
+            if let Some(stft) = state.stfts.get_mut(ch) {
+                stft.enqueue_samples(channel_samples, ctx.effective_rate);
+            }
+        }
+
+        // Drain available rows from all channels (aligned).
+        drain_stft_rows_into_chunks(state, job, ctx, event_tx);
+
+        // Yield periodically to avoid starving UI.
+        if state.packet_counter.is_multiple_of(64) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    // Flush remaining columns.
+    if state.chunk_columns > 0 && !is_stale() {
+        let coverage =
+            seconds_from_frames(state.total_covered_samples, u64::from(ctx.effective_rate));
+        let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+            PrecomputedSpectrogramChunk {
+                track_token: job.track_token,
+                columns_u8: std::mem::take(&mut state.chunk_buf),
+                bins_per_column: clamp_to_u16(ctx.bins_per_column),
+                column_count: state.chunk_columns,
+                channel_count: clamp_to_u8(ctx.channel_count),
+                start_column_index: state.chunk_start_index,
+                total_columns_estimate: ctx.total_columns_estimate,
+                sample_rate_hz: ctx.effective_rate,
+                hop_size: clamp_to_u16(job.hop_size),
+                coverage_seconds: coverage,
+                complete: false,
+            },
+        ));
+    }
+}
+
+fn deinterleave_samples(
+    samples: &[f32],
+    frames: usize,
+    decoded_channels: usize,
+    channel_count: usize,
+    divisor: usize,
+    effective_frames: usize,
+    view_mode: SpectrogramViewMode,
+) -> Vec<Vec<f32>> {
+    let mut per_channel: Vec<Vec<f32>> = vec![Vec::with_capacity(effective_frames); channel_count];
+
+    match view_mode {
+        SpectrogramViewMode::Downmix => {
+            let mut downmixed = Vec::with_capacity(effective_frames);
+            let inv_channels = 1.0 / usize_to_f32_approx(decoded_channels);
+            for frame_idx in (0..frames).step_by(divisor) {
+                let base = frame_idx * decoded_channels;
+                let mut sum = 0.0f32;
+                for ch in 0..decoded_channels {
+                    sum += samples[base + ch];
+                }
+                downmixed.push(sum * inv_channels);
+            }
+            per_channel[0] = downmixed;
+        }
+        SpectrogramViewMode::PerChannel => {
+            for frame_idx in (0..frames).step_by(divisor) {
+                let base = frame_idx * decoded_channels;
+                for ch in 0..channel_count.min(decoded_channels) {
+                    per_channel[ch].push(samples[base + ch]);
+                }
+            }
+        }
+    }
+
+    per_channel
+}
+
+fn drain_stft_rows_into_chunks(
+    state: &mut SpectrogramDecodeLoopState,
+    job: &SpectrogramDecodeJob,
+    ctx: &SpectrogramDecodeContext,
+    event_tx: &Sender<AnalysisEvent>,
+) {
+    loop {
+        let mut rows: Vec<Vec<f32>> = Vec::with_capacity(ctx.channel_count);
+        let mut all_have_row = true;
+        for stft in &mut state.stfts {
+            let row = stft.take_rows(1);
+            if row.is_empty() {
+                all_have_row = false;
+                break;
+            }
+            rows.push(row.into_iter().next().unwrap());
+        }
+        if !all_have_row {
+            break;
+        }
+
+        if state.first_column_index.is_none() {
+            state.first_column_index = Some(state.current_column_index);
+            state.chunk_start_index = state.current_column_index;
+        }
+
+        // Quantize each channel's row to u8 and append to chunk buffer.
+        for row in &rows {
+            for &v in row.iter().take(ctx.bins_per_column) {
+                state.chunk_buf.push(precomputed_to_u8_spectrum(v));
+            }
+            // Pad if row is shorter than bins_per_column (shouldn't happen).
+            if row.len() < ctx.bins_per_column {
+                state
+                    .chunk_buf
+                    .extend(std::iter::repeat_n(0u8, ctx.bins_per_column - row.len()));
+            }
+        }
+        state.chunk_columns += 1;
+        state.current_column_index += 1;
+
+        if state.chunk_columns >= state.target_chunk_columns {
+            let coverage =
+                seconds_from_frames(state.total_covered_samples, u64::from(ctx.effective_rate));
+            let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                PrecomputedSpectrogramChunk {
+                    track_token: job.track_token,
+                    columns_u8: std::mem::take(&mut state.chunk_buf),
+                    bins_per_column: clamp_to_u16(ctx.bins_per_column),
+                    column_count: state.chunk_columns,
+                    channel_count: clamp_to_u8(ctx.channel_count),
+                    start_column_index: state.chunk_start_index,
+                    total_columns_estimate: ctx.total_columns_estimate,
+                    sample_rate_hz: ctx.effective_rate,
+                    hop_size: clamp_to_u16(job.hop_size),
+                    coverage_seconds: coverage,
+                    complete: false,
+                },
+            ));
+            state.chunk_start_index = state.current_column_index;
+            state.chunk_columns = 0;
+            // Ramp up chunk size.
+            state.target_chunk_columns = (state.target_chunk_columns * 2).min(256);
+        }
+    }
+}
+
+fn estimate_total_columns(path: &Path, _fft_size: usize, hop_size: usize) -> Option<u32> {
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    let format = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    let track = format.format.default_track()?;
+    let sample_rate = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
+    let n_frames = track.codec_params.n_frames.unwrap_or(sample_rate * 300);
+    let divisor = waveform_sample_rate_divisor(sample_rate);
+    let effective_frames = n_frames / divisor;
+    let total = effective_frames / (hop_size as u64);
+    // Add margin for rounding.
+    Some(u32::try_from((total + 64).min(u64::from(u32::MAX))).unwrap_or(u32::MAX))
+}
+
 fn spawn_analysis_worker(
     cmd_rx: Receiver<AnalysisCommand>,
     pcm_rx: Receiver<AnalysisPcmChunk>,
     event_tx: Sender<AnalysisEvent>,
     waveform_job_tx: Sender<WaveformDecodeJob>,
     waveform_decode_active_token: Arc<AtomicU64>,
+    spectrogram_job_tx: Sender<SpectrogramDecodeJob>,
+    spectrogram_decode_generation: Arc<AtomicU64>,
 ) {
     let _ = std::thread::Builder::new()
         .name("ferrous-analysis".to_string())
@@ -679,6 +1315,8 @@ fn spawn_analysis_worker(
                             event_tx: &event_tx,
                             waveform_job_tx: &waveform_job_tx,
                             waveform_decode_active_token: waveform_decode_active_token.as_ref(),
+                            spectrogram_job_tx: &spectrogram_job_tx,
+                            spectrogram_decode_generation: spectrogram_decode_generation.as_ref(),
                         };
                         state.handle_command(cmd, &ctx);
                     }
@@ -2111,6 +2749,7 @@ mod tests {
         let evt = rx.try_recv().expect("snapshot event");
         match evt {
             AnalysisEvent::Snapshot(s) => assert_eq!(s.waveform_peaks, vec![0.1, 0.2]),
+            _ => panic!("unexpected event variant"),
         }
     }
 
@@ -2149,6 +2788,7 @@ mod tests {
                 assert_eq!(s.spectrogram_channels.len(), 1);
                 assert_eq!(s.spectrogram_channels[0].rows.len(), 1);
             }
+            _ => panic!("unexpected event variant"),
         }
         assert!(pending_channels.is_empty());
     }

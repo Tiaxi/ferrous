@@ -269,6 +269,7 @@ impl ViewerFullscreenMode {
 pub enum BridgeEvent {
     Snapshot(Box<BridgeSnapshot>),
     SearchResults(Box<BridgeSearchResultsFrame>),
+    PrecomputedSpectrogramChunk(crate::analysis::PrecomputedSpectrogramChunk),
     Error(String),
     Stopped,
 }
@@ -1003,7 +1004,7 @@ impl BridgeLoopRuntime {
         let mut urgency = match wake {
             BridgeLoopWake::Command(cmd) => self.handle_command(cmd, event_tx),
             BridgeLoopWake::Playback(event) => self.handle_playback_event(event),
-            BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event),
+            BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event, event_tx),
             BridgeLoopWake::Metadata(event) => self.handle_metadata_event(event),
             BridgeLoopWake::Library(event) => self.handle_library_event(event),
             BridgeLoopWake::SearchResults(frame) => self.handle_search_results(frame),
@@ -1084,12 +1085,24 @@ impl BridgeLoopRuntime {
         urgency
     }
 
-    fn handle_analysis_event(&mut self, event: AnalysisEvent) -> SnapshotUrgency {
-        let urgency = process_analysis_event(event, &mut self.state);
-        if urgency.is_pending() {
-            self.flags.session_dirty = true;
+    fn handle_analysis_event(
+        &mut self,
+        event: AnalysisEvent,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        match event {
+            AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
+                let _ = event_tx.send(BridgeEvent::PrecomputedSpectrogramChunk(chunk));
+                SnapshotUrgency::None
+            }
+            AnalysisEvent::Snapshot(snapshot) => {
+                let urgency = process_analysis_event(snapshot, &mut self.state);
+                if urgency.is_pending() {
+                    self.flags.session_dirty = true;
+                }
+                urgency
+            }
         }
-        urgency
     }
 
     fn handle_metadata_event(&mut self, event: MetadataEvent) -> SnapshotUrgency {
@@ -4550,7 +4563,11 @@ fn process_playback_event(
             }
             SnapshotUrgency::Immediate
         }
-        PlaybackEvent::Seeked => SnapshotUrgency::Heartbeat,
+        PlaybackEvent::Seeked => {
+            let pos_seconds = state.playback.position.as_secs_f64();
+            analysis.command(AnalysisCommand::Seek(pos_seconds));
+            SnapshotUrgency::Heartbeat
+        }
     }
 }
 
@@ -4590,25 +4607,21 @@ fn pump_playback_events(
     changed
 }
 
-fn process_analysis_event(event: AnalysisEvent, state: &mut BridgeState) -> SnapshotUrgency {
-    match event {
-        AnalysisEvent::Snapshot(snapshot) => {
-            if snapshot.spectrogram_seq == 0 && snapshot.spectrogram_channels.is_empty() {
-                state.analysis.spectrogram_channels.clear();
-            } else if !snapshot.spectrogram_channels.is_empty() {
-                state.analysis.spectrogram_channels = snapshot.spectrogram_channels;
-            }
-            state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
-            state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
-            state.analysis.spectrogram_view_mode = snapshot.spectrogram_view_mode;
-            state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
-            state.analysis.waveform_complete = snapshot.waveform_complete;
-            if !snapshot.waveform_peaks.is_empty() {
-                state.analysis.waveform_peaks = snapshot.waveform_peaks;
-            }
-            SnapshotUrgency::Analysis
-        }
+fn process_analysis_event(snapshot: AnalysisSnapshot, state: &mut BridgeState) -> SnapshotUrgency {
+    if snapshot.spectrogram_seq == 0 && snapshot.spectrogram_channels.is_empty() {
+        state.analysis.spectrogram_channels.clear();
+    } else if !snapshot.spectrogram_channels.is_empty() {
+        state.analysis.spectrogram_channels = snapshot.spectrogram_channels;
     }
+    state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
+    state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
+    state.analysis.spectrogram_view_mode = snapshot.spectrogram_view_mode;
+    state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
+    state.analysis.waveform_complete = snapshot.waveform_complete;
+    if !snapshot.waveform_peaks.is_empty() {
+        state.analysis.waveform_peaks = snapshot.waveform_peaks;
+    }
+    SnapshotUrgency::Analysis
 }
 
 fn drain_analysis_events(
@@ -4620,7 +4633,15 @@ fn drain_analysis_events(
         let Ok(event) = analysis_rx.try_recv() else {
             break;
         };
-        urgency = urgency.max(process_analysis_event(event, state));
+        match event {
+            AnalysisEvent::Snapshot(snapshot) => {
+                urgency = urgency.max(process_analysis_event(snapshot, state));
+            }
+            AnalysisEvent::PrecomputedSpectrogramChunk(_) => {
+                // Pre-computed chunks are handled via handle_analysis_event
+                // in the main loop, not in the drain path.
+            }
+        }
     }
     urgency
 }
@@ -6875,6 +6896,7 @@ mod tests {
             .expect("analysis event after resume");
         match evt {
             AnalysisEvent::Snapshot(_) => {}
+            _ => panic!("unexpected event variant"),
         }
     }
 

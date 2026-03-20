@@ -15,18 +15,20 @@ use super::{
     BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
     FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
-use crate::analysis::{SpectrogramChannelLabel, SpectrogramViewMode};
+use crate::analysis::{PrecomputedSpectrogramChunk, SpectrogramChannelLabel, SpectrogramViewMode};
 use crate::library::{IndexedTrack, LibraryTrack};
 use crate::playback::{PlaybackState, RepeatMode};
 use crate::tag_editor;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
+const PRECOMPUTED_SPECTROGRAM_MAGIC: u8 = 0xA2;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_RESET: u8 = 0x02;
 const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
 const ANALYSIS_FLAG_WAVEFORM_COMPLETE: u8 = 0x08;
 const MAX_PENDING_BINARY_EVENTS: usize = 12;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
+const MAX_PENDING_PRECOMPUTED_SPECTROGRAM: usize = 64;
 const MAX_PENDING_LIBRARY_TREES: usize = 1;
 const MAX_PENDING_SEARCH_RESULTS: usize = 2;
 const RELAY_RECV_TIMEOUT: Duration = Duration::from_millis(250);
@@ -128,6 +130,7 @@ struct FfiRuntime {
     queue_section_cache: QueueSectionCache,
     pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
+    pending_precomputed_spectrogram: VecDeque<Vec<u8>>,
     pending_library_trees: VecDeque<LibraryTreeFrame>,
     pending_search_results: VecDeque<SearchResultsFrame>,
     next_tree_version: u32,
@@ -149,6 +152,9 @@ impl FfiRuntime {
             queue_section_cache: QueueSectionCache::default(),
             pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
+            pending_precomputed_spectrogram: VecDeque::with_capacity(
+                MAX_PENDING_PRECOMPUTED_SPECTROGRAM,
+            ),
             pending_library_trees: VecDeque::with_capacity(MAX_PENDING_LIBRARY_TREES),
             pending_search_results: VecDeque::with_capacity(MAX_PENDING_SEARCH_RESULTS),
             next_tree_version: 1,
@@ -162,6 +168,7 @@ impl FfiRuntime {
     fn has_pending_queues(&self) -> bool {
         !self.pending_binary_events.is_empty()
             || !self.pending_analysis_frames.is_empty()
+            || !self.pending_precomputed_spectrogram.is_empty()
             || !self.pending_library_trees.is_empty()
             || !self.pending_search_results.is_empty()
     }
@@ -277,6 +284,24 @@ impl FfiRuntime {
         }
     }
 
+    fn push_precomputed_spectrogram(&mut self, frame: Vec<u8>) {
+        if frame.is_empty() {
+            return;
+        }
+        let was_empty = !self.has_pending_queues();
+        while self.pending_precomputed_spectrogram.len() >= MAX_PENDING_PRECOMPUTED_SPECTROGRAM {
+            self.pending_precomputed_spectrogram.pop_front();
+        }
+        self.pending_precomputed_spectrogram.push_back(frame);
+        if was_empty {
+            self.signal_wakeup_if_needed();
+        }
+    }
+
+    fn pop_precomputed_spectrogram(&mut self) -> Option<Vec<u8>> {
+        self.pending_precomputed_spectrogram.pop_front()
+    }
+
     fn push_library_tree_frame(&mut self, bytes: Vec<u8>) {
         let was_empty = !self.has_pending_queues();
         let mut payload = bytes;
@@ -342,6 +367,9 @@ impl FfiRuntime {
                         latest_queue_snapshot = Some((*snapshot).clone());
                     }
                     latest_snapshot = Some(*snapshot);
+                }
+                BridgeEvent::PrecomputedSpectrogramChunk(chunk) => {
+                    self.push_precomputed_spectrogram(encode_precomputed_spectrogram_chunk(&chunk));
                 }
                 BridgeEvent::Error(message) => {
                     self.push_binary_event(encode_error_event(&message));
@@ -702,6 +730,53 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_analysis_frame(
 /// `ptr` and `len` must describe a buffer previously returned by
 /// [`ferrous_ffi_bridge_pop_analysis_frame`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_analysis_frame(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    drop(Vec::from_raw_parts(ptr, len, len));
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// If `len_out` is non-null, it must be writable for one `usize`.
+pub unsafe extern "C" fn ferrous_ffi_bridge_pop_precomputed_spectrogram(
+    handle: *mut FerrousFfiBridge,
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bridge = &*handle;
+    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
+        return std::ptr::null_mut();
+    };
+    let Some(frame) = runtime.pop_precomputed_spectrogram() else {
+        return std::ptr::null_mut();
+    };
+    let mut boxed = frame.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    let len = boxed.len();
+    std::mem::forget(boxed);
+    if !len_out.is_null() {
+        *len_out = len;
+    }
+    ptr
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer previously returned by
+/// [`ferrous_ffi_bridge_pop_precomputed_spectrogram`] and not yet freed.
+pub unsafe extern "C" fn ferrous_ffi_bridge_free_precomputed_spectrogram(
+    ptr: *mut c_uchar,
+    len: usize,
+) {
     if ptr.is_null() || len == 0 {
         return;
     }
@@ -2023,6 +2098,44 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     out
 }
 
+/// Binary frame layout for precomputed spectrogram chunks:
+/// ```text
+/// [0]      u8   magic = 0xA2
+/// [1..9]   u64  track_token
+/// [9..11]  u16  bins_per_column
+/// [11..13] u16  column_count
+/// [13]     u8   channel_count
+/// [14..18] u32  start_column_index
+/// [18..22] u32  total_columns_estimate
+/// [22..26] u32  sample_rate_hz
+/// [26..28] u16  hop_size
+/// [28..32] f32  coverage_seconds
+/// [32]     u8   complete (0 or 1)
+/// [33..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// ```
+fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
+    let header_len = 33;
+    let data_len = chunk.columns_u8.len();
+    let total_len = header_len + data_len;
+
+    let mut out = Vec::with_capacity(4 + total_len);
+    // Frame length prefix (excluding the 4-byte length itself).
+    out.extend_from_slice(&clamp_u32(total_len).to_le_bytes());
+    out.push(PRECOMPUTED_SPECTROGRAM_MAGIC);
+    out.extend_from_slice(&chunk.track_token.to_le_bytes());
+    out.extend_from_slice(&chunk.bins_per_column.to_le_bytes());
+    out.extend_from_slice(&chunk.column_count.to_le_bytes());
+    out.push(chunk.channel_count);
+    out.extend_from_slice(&chunk.start_column_index.to_le_bytes());
+    out.extend_from_slice(&chunk.total_columns_estimate.to_le_bytes());
+    out.extend_from_slice(&chunk.sample_rate_hz.to_le_bytes());
+    out.extend_from_slice(&chunk.hop_size.to_le_bytes());
+    out.extend_from_slice(&chunk.coverage_seconds.to_le_bytes());
+    out.push(u8::from(chunk.complete));
+    out.extend_from_slice(&chunk.columns_u8);
+    out
+}
+
 fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
     if peaks.len() <= max_points || max_points == 0 {
         return peaks.to_vec();
@@ -2846,6 +2959,7 @@ mod tests {
     #[cfg(unix)]
     fn drain_runtime_queues(runtime: &mut FfiRuntime) {
         while runtime.pop_analysis_frame().is_some() {}
+        while runtime.pop_precomputed_spectrogram().is_some() {}
         while runtime.pop_library_tree_frame().is_some() {}
         while runtime.pop_search_results_frame().is_some() {}
         while runtime.pop_binary_event().is_some() {}

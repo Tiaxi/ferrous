@@ -69,6 +69,25 @@ ScrollView {
                     spacing: 12
 
                     Label {
+                        text: "Display"
+                        Layout.preferredWidth: 120
+                    }
+
+                    ComboBox {
+                        Layout.preferredWidth: 220
+                        model: ["Rolling", "Centered"]
+                        currentIndex: Math.max(0, Math.min(1, root.uiBridge.spectrogramDisplayMode))
+                        onActivated: root.uiBridge.setSpectrogramDisplayMode(currentIndex)
+                    }
+
+                    Item { Layout.fillWidth: true }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    Label {
                         text: "FFT Window"
                         Layout.preferredWidth: 120
                     }

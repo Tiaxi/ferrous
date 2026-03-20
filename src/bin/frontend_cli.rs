@@ -164,6 +164,7 @@ fn drain_bridge_events(bridge: &FrontendBridgeHandle) {
             BridgeEvent::SearchResults(frame) => {
                 println!("search seq={} rows={}", frame.seq, frame.rows.len());
             }
+            BridgeEvent::PrecomputedSpectrogramChunk(_) => {}
             BridgeEvent::Error(err) => {
                 eprintln!("bridge error: {err}");
             }

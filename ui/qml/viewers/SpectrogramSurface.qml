@@ -7,6 +7,7 @@ Item {
     id: root
 
     required property var uiBridge
+    property double positionSeconds: root.uiBridge.positionSeconds
 
     property var channelDescriptors: []
     property var pendingPackedBatches: []
@@ -122,6 +123,7 @@ Item {
         for (let i = 0; i < spectrogramRepeater.count; ++i) {
             const pane = spectrogramRepeater.itemAt(i)
             if (pane && pane.spectrogramItem) {
+                pane.spectrogramItem.clearPrecomputed()
                 pane.spectrogramItem.reset()
             }
         }
@@ -147,6 +149,25 @@ Item {
             seedHistory: seedHistory === true
         })
         schedulePendingPackedFlush()
+    }
+
+    Connections {
+        target: root.uiBridge
+        function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
+                                                     startIndex, totalEstimate, sampleRate,
+                                                     hopSize, coverage, complete, trackToken) {
+            for (let ch = 0; ch < channelCount; ++ch) {
+                if (ch >= spectrogramRepeater.count) {
+                    break
+                }
+                const pane = spectrogramRepeater.itemAt(ch)
+                if (pane && pane.spectrogramItem) {
+                    pane.spectrogramItem.feedPrecomputedChunk(
+                        data, bins, ch, columns, startIndex,
+                        totalEstimate, sampleRate, hopSize, complete)
+                }
+            }
+        }
     }
 
     Component.onCompleted: resetForCurrentMode()
@@ -180,6 +201,8 @@ Item {
                     logScale: root.uiBridge.logScale
                     showFpsOverlay: index === 0 ? root.uiBridge.showFps : false
                     sampleRateHz: root.uiBridge.sampleRateHz
+                    positionSeconds: root.positionSeconds
+                    displayMode: root.uiBridge.spectrogramDisplayMode
                 }
 
                 Rectangle {

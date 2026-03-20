@@ -108,6 +108,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(int fftSize READ fftSize NOTIFY snapshotChanged)
     Q_PROPERTY(int spectrogramViewMode READ spectrogramViewMode NOTIFY snapshotChanged)
+    Q_PROPERTY(int spectrogramDisplayMode READ spectrogramDisplayMode NOTIFY snapshotChanged)
     Q_PROPERTY(int viewerFullscreenMode READ viewerFullscreenMode NOTIFY snapshotChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
@@ -190,6 +191,7 @@ public:
     int sampleRateHz() const;
     int fftSize() const;
     int spectrogramViewMode() const;
+    int spectrogramDisplayMode() const;
     int viewerFullscreenMode() const;
     double dbRange() const;
     bool logScale() const;
@@ -245,6 +247,7 @@ public:
     Q_INVOKABLE void setVolume(double value);
     Q_INVOKABLE void setFftSize(int value);
     Q_INVOKABLE void setSpectrogramViewMode(int value);
+    Q_INVOKABLE void setSpectrogramDisplayMode(int value);
     Q_INVOKABLE void setViewerFullscreenMode(int value);
     Q_INVOKABLE void setDbRange(double value);
     Q_INVOKABLE void setLogScale(bool value);
@@ -311,6 +314,10 @@ signals:
     void playbackChanged();
     void snapshotChanged();
     void analysisChanged();
+    void precomputedSpectrogramChunkReady(
+        const QByteArray &data, int bins, int channelCount, int columns,
+        int startIndex, int totalEstimate, int sampleRate, int hopSize,
+        float coverage, bool complete, quint64 trackToken);
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();
@@ -448,6 +455,7 @@ private:
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
     void processAnalysisBytes(const QByteArray &chunk);
+    void parsePrecomputedSpectrogramFrame(const QByteArray &raw);
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logDiagnostic(const QString &category, const QString &message);
@@ -508,6 +516,7 @@ private:
     int m_sampleRateHz{48000};
     int m_fftSize{8192};
     int m_spectrogramViewMode{0};
+    int m_spectrogramDisplayMode{0};
     int m_viewerFullscreenMode{0};
     double m_dbRange{90.0};
     bool m_logScale{false};

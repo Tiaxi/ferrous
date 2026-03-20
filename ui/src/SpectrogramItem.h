@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QBitArray>
 #include <QByteArray>
 #include <QImage>
 #include <QMetaObject>
@@ -22,6 +23,9 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz WRITE setSampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(int maxColumns READ maxColumns WRITE setMaxColumns NOTIFY maxColumnsChanged)
+    Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
+    Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
+    Q_PROPERTY(int displayMode READ displayMode WRITE setDisplayMode NOTIFY displayModeChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -41,6 +45,20 @@ public:
     int maxColumns() const;
     void setMaxColumns(int value);
 
+    double positionSeconds() const;
+    void setPositionSeconds(double value);
+
+    bool precomputedReady() const;
+
+    int displayMode() const;
+    void setDisplayMode(int value);
+
+    Q_INVOKABLE void feedPrecomputedChunk(
+        const QByteArray &data, int bins, int channelIndex,
+        int columns, int startIndex, int totalEstimate,
+        int sampleRate, int hopSize, bool complete);
+    Q_INVOKABLE void clearPrecomputed();
+
     Q_INVOKABLE void reset();
     Q_INVOKABLE void halt();
     Q_INVOKABLE void appendRows(const QVariantList &rows);
@@ -56,6 +74,9 @@ signals:
     void showFpsOverlayChanged();
     void sampleRateHzChanged();
     void maxColumnsChanged();
+    void positionSecondsChanged();
+    void precomputedReadyChanged();
+    void displayModeChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -143,6 +164,20 @@ private:
     double m_profilePaintMs{0.0};
     quint64 m_sceneGraphGeneration{0};
     QMetaObject::Connection m_animationTickConnection;
+
+    // Pre-computed spectrogram atlas.
+    QByteArray m_precomputedAtlas;
+    QBitArray m_precomputedCoverage;
+    int m_precomputedBinsPerColumn{0};
+    int m_precomputedTotalColumns{0};
+    int m_precomputedSampleRateHz{44100};
+    int m_precomputedHopSize{1024};
+    bool m_precomputedComplete{false};
+    bool m_precomputedReady{false};
+    double m_positionSeconds{0.0};
+    int m_precomputedLastRightCol{-1};
+    int m_displayMode{0}; // 0=Rolling, 1=Centered
+
     mutable QMutex m_stateMutex;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     struct SmoothnessProfileState {

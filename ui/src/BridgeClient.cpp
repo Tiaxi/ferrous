@@ -1572,6 +1572,24 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
     }
     result.analysisCapSaturated = result.processedAnalysisFrames >= kMaxAnalysisFramesPerPass;
 
+    // Drain precomputed spectrogram chunks.
+    constexpr int kMaxPrecomputedPerPass = 4;
+    for (int pci = 0; pci < kMaxPrecomputedPerPass; ++pci) {
+        if (markBudgetExhaustedIfNeeded()) {
+            break;
+        }
+        std::size_t len = 0;
+        std::uint8_t *ptr = ferrous_ffi_bridge_pop_precomputed_spectrogram(m_ffiBridge, &len);
+        if (ptr == nullptr || len == 0) {
+            break;
+        }
+        const QByteArray raw(
+            reinterpret_cast<const char *>(ptr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_precomputed_spectrogram(ptr, len);
+        parsePrecomputedSpectrogramFrame(raw);
+    }
+
     constexpr int kMaxTreeFramesPerPass = 4;
     while (!result.budgetExhausted && result.processedTreeFrames < kMaxTreeFramesPerPass) {
         if (markBudgetExhaustedIfNeeded()) {
@@ -2042,6 +2060,10 @@ int BridgeClient::spectrogramViewMode() const {
     return m_spectrogramViewMode;
 }
 
+int BridgeClient::spectrogramDisplayMode() const {
+    return m_spectrogramDisplayMode;
+}
+
 int BridgeClient::viewerFullscreenMode() const {
     return m_viewerFullscreenMode;
 }
@@ -2363,6 +2385,14 @@ void BridgeClient::setSpectrogramViewMode(int value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramViewMode,
         static_cast<quint8>(clamped)));
+}
+
+void BridgeClient::setSpectrogramDisplayMode(int value) {
+    const int clamped = std::clamp(value, 0, 1);
+    if (m_spectrogramDisplayMode != clamped) {
+        m_spectrogramDisplayMode = clamped;
+        scheduleSnapshotChanged();
+    }
 }
 
 void BridgeClient::setViewerFullscreenMode(int value) {
@@ -4094,6 +4124,74 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         }
     }
 #endif
+}
+
+void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
+    // Frame layout (see encode_precomputed_spectrogram_chunk):
+    // [0..4]   u32  payload_len
+    // [4]      u8   magic = 0xA2
+    // [5..13]  u64  track_token
+    // [13..15] u16  bins_per_column
+    // [15..17] u16  column_count
+    // [17]     u8   channel_count
+    // [18..22] u32  start_column_index
+    // [22..26] u32  total_columns_estimate
+    // [26..30] u32  sample_rate_hz
+    // [30..32] u16  hop_size
+    // [32..36] f32  coverage_seconds
+    // [36]     u8   complete
+    // [37..]   column_data
+    constexpr int kHeaderLen = 37;
+    if (raw.size() < kHeaderLen) {
+        return;
+    }
+    const auto *d = reinterpret_cast<const quint8 *>(raw.constData());
+
+    auto readU16 = [&](int off) -> quint16 {
+        quint16 v;
+        memcpy(&v, d + off, 2);
+        return v;
+    };
+    auto readU32 = [&](int off) -> quint32 {
+        quint32 v;
+        memcpy(&v, d + off, 4);
+        return v;
+    };
+    auto readU64 = [&](int off) -> quint64 {
+        quint64 v;
+        memcpy(&v, d + off, 8);
+        return v;
+    };
+    auto readF32 = [&](int off) -> float {
+        float v;
+        memcpy(&v, d + off, 4);
+        return v;
+    };
+
+    // Skip the 4-byte length prefix.
+    const int base = 4;
+    if (d[base] != 0xA2) {
+        return;
+    }
+    const quint64 trackToken = readU64(base + 1);
+    const int bins = readU16(base + 9);
+    const int columns = readU16(base + 11);
+    const int channelCount = d[base + 13];
+    const int startIndex = static_cast<int>(readU32(base + 14));
+    const int totalEstimate = static_cast<int>(readU32(base + 18));
+    const int sampleRate = static_cast<int>(readU32(base + 22));
+    const int hopSize = readU16(base + 26);
+    const float coverage = readF32(base + 28);
+    const bool complete = d[base + 32] != 0;
+
+    const int dataOffset = kHeaderLen;
+    const int expectedDataLen = columns * channelCount * bins;
+    const QByteArray columnData = raw.mid(dataOffset, expectedDataLen);
+
+    emit precomputedSpectrogramChunkReady(
+        columnData, bins, channelCount, columns,
+        startIndex, totalEstimate, sampleRate, hopSize,
+        coverage, complete, trackToken);
 }
 
 void BridgeClient::scheduleSnapshotChanged() {
