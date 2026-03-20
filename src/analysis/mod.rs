@@ -55,6 +55,13 @@ pub enum AnalysisCommand {
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
     Seek(f64),
+    /// Eagerly start pre-computed spectrogram without affecting the
+    /// waveform/PCM pipeline.  Used when playback is stopped but the
+    /// track path is known.
+    PrecomputeSpectrogram {
+        path: PathBuf,
+        track_token: u64,
+    },
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -347,6 +354,15 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::Seek(position_seconds) => {
                 self.dispatch_spectrogram_job(position_seconds, ctx);
+            }
+            AnalysisCommand::PrecomputeSpectrogram { path, track_token } => {
+                // Set the path/token so dispatch_spectrogram_job can use them,
+                // without touching the waveform/PCM pipeline state.
+                self.active_track_path = Some(path);
+                self.active_track_token = track_token;
+                ctx.waveform_decode_active_token
+                    .store(track_token, Ordering::Relaxed);
+                self.dispatch_spectrogram_job(0.0, ctx);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -845,9 +861,7 @@ fn run_spectrogram_decode_job(
     let bins_per_column = (job.fft_size / 2) + 1;
 
     // Estimate total columns from file duration.
-    let Some(total_columns_estimate) =
-        estimate_total_columns(&job.path, job.fft_size, job.hop_size)
-    else {
+    let Some(total_columns_estimate) = estimate_total_columns(&job.path) else {
         return;
     };
 
@@ -1003,11 +1017,16 @@ fn run_spectrogram_decode_pass(
         let _ = format.seek(SeekMode::Coarse, SeekTo::TimeStamp { ts, track_id });
     }
 
-    // Compute the column offset for the seek position.
+    // After decimation the effective hop is REFERENCE_HOP, so use that
+    // for column-index arithmetic so Qt's columnsPerSecond = rate / REFERENCE_HOP
+    // matches the actual column density regardless of FFT size.
+    let decimation_factor = decimation_factor_for_hop(job.hop_size);
+
+    // Compute the column offset for the seek position using the post-decimation rate.
     let start_column_index = if seek_seconds > 0.0 {
         let effective_rate_f64 = f64::from(effective_rate);
-        let hop_f64 = usize_to_f64_approx(job.hop_size);
-        f64_to_u32_saturating((seek_seconds * effective_rate_f64 / hop_f64).floor())
+        let ref_hop_f64 = usize_to_f64_approx(REFERENCE_HOP);
+        f64_to_u32_saturating((seek_seconds * effective_rate_f64 / ref_hop_f64).floor())
     } else {
         0
     };
@@ -1015,6 +1034,9 @@ fn run_spectrogram_decode_pass(
     let mut state = SpectrogramDecodeLoopState {
         stfts: (0..channel_count)
             .map(|_| StftComputer::new(job.fft_size, job.hop_size))
+            .collect(),
+        decimators: (0..channel_count)
+            .map(|_| SpectrogramDecimator::new(decimation_factor))
             .collect(),
         sample_buf: None,
         packet_counter: 0,
@@ -1051,6 +1073,7 @@ fn run_spectrogram_decode_pass(
 
 struct SpectrogramDecodeLoopState {
     stfts: Vec<StftComputer>,
+    decimators: Vec<SpectrogramDecimator>,
     sample_buf: Option<SampleBuffer<f32>>,
     packet_counter: usize,
     current_column_index: u32,
@@ -1156,7 +1179,7 @@ fn spectrogram_decode_loop(
                 start_column_index: state.chunk_start_index,
                 total_columns_estimate: ctx.total_columns_estimate,
                 sample_rate_hz: ctx.effective_rate,
-                hop_size: clamp_to_u16(job.hop_size),
+                hop_size: clamp_to_u16(REFERENCE_HOP),
                 coverage_seconds: coverage,
                 complete: false,
             },
@@ -1223,17 +1246,35 @@ fn drain_stft_rows_into_chunks(
             break;
         }
 
+        // Push each channel's raw STFT row through its decimator.
+        // The decimator averages N consecutive frames into 1, matching
+        // the streaming path's SpectrogramDecimator behavior.
+        let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(ctx.channel_count);
+        for (ch, row) in rows.into_iter().enumerate() {
+            if let Some(dec) = state.decimators.get_mut(ch) {
+                decimated_rows.push(dec.push(row));
+            } else {
+                decimated_rows.push(Some(row));
+            }
+        }
+
+        // Only emit a column when ALL channels produced a decimated row.
+        let all_decimated = decimated_rows.iter().all(Option::is_some);
+        if !all_decimated {
+            continue;
+        }
+
         if state.first_column_index.is_none() {
             state.first_column_index = Some(state.current_column_index);
             state.chunk_start_index = state.current_column_index;
         }
 
-        // Quantize each channel's row to u8 and append to chunk buffer.
-        for row in &rows {
+        // Quantize each channel's decimated row to u8 and append to chunk buffer.
+        for maybe_row in &decimated_rows {
+            let row = maybe_row.as_ref().unwrap();
             for &v in row.iter().take(ctx.bins_per_column) {
                 state.chunk_buf.push(precomputed_to_u8_spectrum(v));
             }
-            // Pad if row is shorter than bins_per_column (shouldn't happen).
             if row.len() < ctx.bins_per_column {
                 state
                     .chunk_buf
@@ -1256,20 +1297,19 @@ fn drain_stft_rows_into_chunks(
                     start_column_index: state.chunk_start_index,
                     total_columns_estimate: ctx.total_columns_estimate,
                     sample_rate_hz: ctx.effective_rate,
-                    hop_size: clamp_to_u16(job.hop_size),
+                    hop_size: clamp_to_u16(REFERENCE_HOP),
                     coverage_seconds: coverage,
                     complete: false,
                 },
             ));
             state.chunk_start_index = state.current_column_index;
             state.chunk_columns = 0;
-            // Ramp up chunk size.
             state.target_chunk_columns = (state.target_chunk_columns * 2).min(256);
         }
     }
 }
 
-fn estimate_total_columns(path: &Path, _fft_size: usize, hop_size: usize) -> Option<u32> {
+fn estimate_total_columns(path: &Path) -> Option<u32> {
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -1289,7 +1329,8 @@ fn estimate_total_columns(path: &Path, _fft_size: usize, hop_size: usize) -> Opt
     let n_frames = track.codec_params.n_frames.unwrap_or(sample_rate * 300);
     let divisor = waveform_sample_rate_divisor(sample_rate);
     let effective_frames = n_frames / divisor;
-    let total = effective_frames / (hop_size as u64);
+    // After decimation, all FFT sizes produce columns at sample_rate / REFERENCE_HOP.
+    let total = effective_frames / (REFERENCE_HOP as u64);
     // Add margin for rounding.
     Some(u32::try_from((total + 64).min(u64::from(u32::MAX))).unwrap_or(u32::MAX))
 }

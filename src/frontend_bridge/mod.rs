@@ -4548,10 +4548,15 @@ fn process_playback_event(
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
             if state.playback.state == PlaybackState::Stopped {
                 state.pending_waveform_track = Some(PendingWaveformTrack {
-                    path,
+                    path: path.clone(),
                     reset_spectrogram,
                     track_token,
                 });
+                // Eagerly start pre-computed spectrogram even while
+                // the waveform/PCM path is deferred — the spectrogram
+                // worker opens the file directly and doesn't need
+                // playback to be active.
+                analysis.command(AnalysisCommand::PrecomputeSpectrogram { path, track_token });
             } else {
                 state.pending_waveform_track = None;
                 analysis.command(AnalysisCommand::SetTrack {
