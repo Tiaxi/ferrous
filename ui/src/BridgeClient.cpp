@@ -2331,6 +2331,7 @@ void BridgeClient::previous() {
 
 void BridgeClient::seek(double seconds) {
     const double target = std::max(0.0, seconds);
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     SpectrogramSeekTrace::noteSeekIssued(target);
     if (m_profileUiEnabled) {
@@ -2347,7 +2348,8 @@ void BridgeClient::seek(double seconds) {
 #endif
     m_pendingSeek = true;
     m_pendingSeekTargetSeconds = target;
-    m_pendingSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + 900;
+    m_pendingSeekStartedAtMs = nowMs;
+    m_pendingSeekUntilMs = nowMs + 900;
     bool changed = false;
     if (!qFuzzyCompare(m_positionSeconds + 1.0, target + 1.0)) {
         m_positionSeconds = target;
@@ -4530,18 +4532,36 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             applyIncomingPosition = false;
         }
     }
-    if (applyIncomingPosition) {
-        const QString posText = formatSeconds(pos);
+
+    auto applyPlaybackPosition = [&](double nextPos) {
+        const QString posText = formatSeconds(nextPos);
         if (m_positionText != posText) {
             m_positionText = posText;
             changed = true;
             playbackSignalChanged = true;
         }
-        if (std::abs(m_positionSeconds - pos) >= 0.03) {
-            m_positionSeconds = pos;
+        if (std::abs(m_positionSeconds - nextPos) >= 0.03) {
+            m_positionSeconds = nextPos;
             changed = true;
             playbackSignalChanged = true;
         }
+    };
+
+    if (applyIncomingPosition) {
+        if (!m_pendingSeek) {
+            m_pendingSeekStartedAtMs = 0;
+        }
+        applyPlaybackPosition(pos);
+    } else if (nextState == QStringLiteral("Playing")) {
+        const qint64 startedAtMs = m_pendingSeekStartedAtMs > 0
+            ? m_pendingSeekStartedAtMs
+            : nowMs;
+        const double optimisticPos = dur > 0.0
+            ? std::min(dur, std::max(0.0, m_pendingSeekTargetSeconds)
+                + (static_cast<double>(std::max<qint64>(0, nowMs - startedAtMs)) / 1000.0))
+            : std::max(0.0, m_pendingSeekTargetSeconds)
+                + (static_cast<double>(std::max<qint64>(0, nowMs - startedAtMs)) / 1000.0);
+        applyPlaybackPosition(optimisticPos);
     }
 
     const QString durText = formatSeconds(dur);

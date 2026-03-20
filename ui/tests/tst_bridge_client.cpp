@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QImage>
 #include <QSignalSpy>
@@ -45,6 +46,7 @@ private slots:
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
+    void pendingSeekAdvancesPositionOptimisticallyWhilePlaybackSnapshotIsStale();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
@@ -291,6 +293,39 @@ void BridgeClientTest::scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRea
     QVERIFY(!client.m_bridgeWakeNotifier->isEnabled());
 
     isolateBridgeClient(client);
+}
+
+void BridgeClientTest::pendingSeekAdvancesPositionOptimisticallyWhilePlaybackSnapshotIsStale() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_positionSeconds = 60.0;
+    client.m_positionText = QStringLiteral("01:00");
+    client.m_durationSeconds = 180.0;
+    client.m_durationText = QStringLiteral("03:00");
+    client.m_pendingSeek = true;
+    client.m_pendingSeekTargetSeconds = 60.0;
+    client.m_pendingSeekStartedAtMs = QDateTime::currentMSecsSinceEpoch() - 500;
+    client.m_pendingSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + 400;
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/music/track.flac");
+    snapshot.playback.positionSeconds = 12.0;
+    snapshot.playback.durationSeconds = 180.0;
+
+    QVERIFY(client.processBinarySnapshot(snapshot));
+
+    QVERIFY(client.m_pendingSeek);
+    QVERIFY(client.m_positionSeconds >= 60.45);
+    QVERIFY(client.m_positionSeconds <= 60.65);
+    QVERIFY(
+        client.m_positionText == QStringLiteral("01:00")
+        || client.m_positionText == QStringLiteral("01:01"));
+    QVERIFY(client.m_pollPlaybackChanged);
 }
 
 void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {

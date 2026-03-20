@@ -394,6 +394,8 @@ struct BridgeState {
     lastfm: LastFmRuntimeState,
     pending_search_results: Option<BridgeSearchResultsFrame>,
     pending_waveform_track: Option<PendingWaveformTrack>,
+    analysis_track_token: u64,
+    precomputed_spectrogram_complete: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1092,6 +1094,7 @@ impl BridgeLoopRuntime {
     ) -> SnapshotUrgency {
         match event {
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
+                note_precomputed_spectrogram_chunk(&mut self.state, &chunk);
                 let _ = event_tx.send(BridgeEvent::PrecomputedSpectrogramChunk(chunk));
                 SnapshotUrgency::None
             }
@@ -1824,6 +1827,18 @@ fn handle_playback_bridge_command(
     }
 }
 
+fn invalidate_precomputed_spectrogram(state: &mut BridgeState) {
+    state.precomputed_spectrogram_complete = false;
+}
+
+fn apply_analysis_spectrogram_settings(state: &mut BridgeState, analysis: &AnalysisEngine) {
+    invalidate_precomputed_spectrogram(state);
+    analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
+    analysis.command(AnalysisCommand::SetSpectrogramViewMode(
+        state.settings.spectrogram_view_mode,
+    ));
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -1836,14 +1851,7 @@ fn handle_settings_bridge_command(
             context
                 .playback
                 .command(PlaybackCommand::SetVolume(state.settings.volume));
-            context
-                .analysis
-                .command(AnalysisCommand::SetFftSize(state.settings.fft_size));
-            context
-                .analysis
-                .command(AnalysisCommand::SetSpectrogramViewMode(
-                    state.settings.spectrogram_view_mode,
-                ));
+            apply_analysis_spectrogram_settings(state, context.analysis);
             context.lastfm.command(LastFmCommand::SetEnabled(
                 state.settings.integrations.lastfm_scrobbling_enabled,
             ));
@@ -1872,11 +1880,13 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::SetFftSize(size) => {
             let fft = (*size).clamp(512, 8192).next_power_of_two();
             state.settings.fft_size = fft;
+            invalidate_precomputed_spectrogram(state);
             context.analysis.command(AnalysisCommand::SetFftSize(fft));
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetSpectrogramViewMode(view_mode) => {
             state.settings.spectrogram_view_mode = *view_mode;
+            invalidate_precomputed_spectrogram(state);
             context
                 .analysis
                 .command(AnalysisCommand::SetSpectrogramViewMode(*view_mode));
@@ -1970,6 +1980,7 @@ fn handle_bridge_command(
             BridgeAnalysisCommand::SetFftSize(size) => {
                 let fft = size.clamp(512, 8192).next_power_of_two();
                 state.settings.fft_size = fft;
+                invalidate_precomputed_spectrogram(state);
                 *context.settings_dirty = true;
                 context.analysis.command(AnalysisCommand::SetFftSize(fft));
                 true
@@ -4549,6 +4560,8 @@ fn process_playback_event(
             state.analysis.waveform_peaks.clear();
             state.analysis.waveform_coverage_seconds = 0.0;
             state.analysis.waveform_complete = false;
+            state.analysis_track_token = track_token;
+            state.precomputed_spectrogram_complete = false;
             metadata.request(path.clone());
             let is_gapless = matches!(kind, TrackChangeKind::Gapless);
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
@@ -4575,8 +4588,10 @@ fn process_playback_event(
             SnapshotUrgency::Immediate
         }
         PlaybackEvent::Seeked => {
-            let pos_seconds = state.playback.position.as_secs_f64();
-            analysis.command(AnalysisCommand::Seek(pos_seconds));
+            if should_dispatch_analysis_seek(state) {
+                let pos_seconds = state.playback.position.as_secs_f64();
+                analysis.command(AnalysisCommand::Seek(pos_seconds));
+            }
             SnapshotUrgency::Heartbeat
         }
     }
@@ -4635,6 +4650,30 @@ fn process_analysis_event(snapshot: AnalysisSnapshot, state: &mut BridgeState) -
     SnapshotUrgency::Analysis
 }
 
+fn note_precomputed_spectrogram_chunk(
+    state: &mut BridgeState,
+    chunk: &crate::analysis::PrecomputedSpectrogramChunk,
+) {
+    let expected_bins = ((state.settings.fft_size / 2) + 1).min(usize::from(u16::MAX));
+    if usize::from(chunk.bins_per_column) != expected_bins {
+        return;
+    }
+    if state.settings.spectrogram_view_mode == SpectrogramViewMode::Downmix
+        && chunk.channel_count != 1
+    {
+        return;
+    }
+    if chunk.track_token != 0 && chunk.track_token == state.analysis_track_token && chunk.complete {
+        state.precomputed_spectrogram_complete = true;
+    }
+}
+
+fn should_dispatch_analysis_seek(state: &BridgeState) -> bool {
+    state.analysis_track_token != 0
+        && state.playback.current.is_some()
+        && !state.precomputed_spectrogram_complete
+}
+
 fn drain_analysis_events(
     analysis_rx: &Receiver<AnalysisEvent>,
     event_tx: &Sender<BridgeEvent>,
@@ -4650,6 +4689,7 @@ fn drain_analysis_events(
                 urgency = urgency.max(process_analysis_event(snapshot, state));
             }
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
+                note_precomputed_spectrogram_chunk(state, &chunk);
                 let _ = event_tx.send(BridgeEvent::PrecomputedSpectrogramChunk(chunk));
             }
         }
@@ -6713,6 +6753,46 @@ mod tests {
         assert_eq!(snapshot.playback.state, PlaybackState::Stopped);
         assert_eq!(snapshot.playback.current.as_ref(), Some(&track));
         assert_eq!(snapshot.metadata.title, "ferrous_reactive_stopped_metadata");
+    }
+
+    #[test]
+    fn complete_precomputed_chunk_marks_active_track_complete() {
+        let mut state = BridgeState {
+            analysis_track_token: 9,
+            ..BridgeState::default()
+        };
+        let chunk = crate::analysis::PrecomputedSpectrogramChunk {
+            track_token: 9,
+            columns_u8: Vec::new(),
+            bins_per_column: 4097,
+            column_count: 0,
+            channel_count: 1,
+            start_column_index: 0,
+            total_columns_estimate: 32,
+            sample_rate_hz: 44_100,
+            hop_size: 1_024,
+            coverage_seconds: 1.0,
+            complete: true,
+        };
+
+        note_precomputed_spectrogram_chunk(&mut state, &chunk);
+
+        assert!(state.precomputed_spectrogram_complete);
+    }
+
+    #[test]
+    fn analysis_seek_dispatch_is_skipped_once_precomputed_is_complete() {
+        let mut state = BridgeState {
+            analysis_track_token: 11,
+            ..BridgeState::default()
+        };
+        state.playback.current = Some(p("/music/seeked.flac"));
+
+        assert!(should_dispatch_analysis_seek(&state));
+
+        state.precomputed_spectrogram_complete = true;
+
+        assert!(!should_dispatch_analysis_seek(&state));
     }
 
     #[test]
