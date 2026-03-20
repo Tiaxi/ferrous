@@ -48,6 +48,24 @@ Item {
             next = placeholderDescriptors()
         }
         if (!sameDescriptors(next)) {
+            // If only the count changed and any pane has precomputed data,
+            // avoid replacing the model — that would destroy and recreate
+            // SpectrogramItem delegates, wiping their precomputed atlas.
+            // Instead, only allow count changes when no precomputed data
+            // is loaded yet.
+            if (next.length !== root.channelDescriptors.length) {
+                let hasPrecomputed = false
+                for (let i = 0; i < spectrogramRepeater.count; ++i) {
+                    const pane = spectrogramRepeater.itemAt(i)
+                    if (pane && pane.spectrogramItem && pane.spectrogramItem.precomputedReady) {
+                        hasPrecomputed = true
+                        break
+                    }
+                }
+                if (hasPrecomputed) {
+                    return
+                }
+            }
             root.channelDescriptors = next
         }
     }
