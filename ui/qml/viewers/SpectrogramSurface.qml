@@ -7,7 +7,7 @@ Item {
     id: root
 
     required property var uiBridge
-    property double positionSeconds: root.uiBridge.positionSeconds
+    property double positionSeconds: 0
 
     property var channelDescriptors: []
     property var pendingPackedBatches: []

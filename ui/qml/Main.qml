@@ -1077,6 +1077,7 @@ Kirigami.ApplicationWindow {
         visible: parent !== null
         anchors.fill: parent
         uiBridge: root.uiBridge
+        positionSeconds: playbackController.displayedPositionSeconds
     }
 
     Viewers.SpectrogramViewerShell {
