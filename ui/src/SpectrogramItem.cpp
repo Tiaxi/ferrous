@@ -343,17 +343,32 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedTrackToken = trackToken;
     }
 
-    // Allocate or re-allocate atlas only when the dimensions change
-    // (different track duration or FFT size).  Don't wipe on token-only
-    // changes — multiple tokens can arrive for the same track during
-    // startup and wiping would destroy already-computed data.
+    // Resize atlas when dimensions change.
     if (m_precomputedTotalColumns != totalEstimate
         || m_precomputedBinsPerColumn != bins) {
-        const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
-        m_precomputedAtlas.resize(static_cast<int>(atlasSize));
-        m_precomputedAtlas.fill(0);
-        m_precomputedCoverage.resize(totalEstimate);
-        m_precomputedCoverage.fill(false);
+        if (m_precomputedBinsPerColumn != bins) {
+            // Bins changed (FFT size change) — full re-allocation, old data
+            // is incompatible.
+            const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
+            m_precomputedAtlas.resize(static_cast<int>(atlasSize));
+            m_precomputedAtlas.fill(0);
+            m_precomputedCoverage.resize(totalEstimate);
+            m_precomputedCoverage.fill(false);
+        } else {
+            // Only totalEstimate changed (different track duration, same FFT).
+            // Resize but keep existing data/coverage — the worker will
+            // overwrite with new track data from column 0 forward.  This
+            // avoids a visible black gap during the transition because the
+            // old coverage bits remain set until new data overwrites them.
+            const int oldTotal = m_precomputedTotalColumns;
+            const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
+            m_precomputedAtlas.resize(static_cast<int>(atlasSize));
+            m_precomputedCoverage.resize(totalEstimate);
+            // Clear coverage only for newly added columns (if growing).
+            for (int i = oldTotal; i < totalEstimate; ++i) {
+                m_precomputedCoverage.clearBit(i);
+            }
+        }
         m_precomputedTotalColumns = totalEstimate;
         m_precomputedBinsPerColumn = bins;
         m_precomputedComplete = false;
