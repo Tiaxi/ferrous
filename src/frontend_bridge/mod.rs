@@ -4553,16 +4553,24 @@ fn process_playback_event(
             let is_gapless = matches!(kind, TrackChangeKind::Gapless);
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
             if state.playback.state == PlaybackState::Stopped {
+                // Only dispatch PrecomputeSpectrogram if the path actually
+                // changed — multiple TrackChanged events can arrive for the
+                // same file with different tokens during startup.
+                let path_changed = state
+                    .pending_waveform_track
+                    .as_ref()
+                    .map_or(true, |pending| pending.path != path);
                 eprintln!(
-                    "[bridge] TrackChanged while Stopped → deferred + PrecomputeSpectrogram token={}",
-                    track_token,
+                    "[bridge] TrackChanged while Stopped → deferred token={track_token} path_changed={path_changed}",
                 );
                 state.pending_waveform_track = Some(PendingWaveformTrack {
                     path: path.clone(),
                     reset_spectrogram,
                     track_token,
                 });
-                analysis.command(AnalysisCommand::PrecomputeSpectrogram { path, track_token });
+                if path_changed {
+                    analysis.command(AnalysisCommand::PrecomputeSpectrogram { path, track_token });
+                }
             } else {
                 eprintln!(
                     "[bridge] TrackChanged while {:?} → immediate SetTrack token={}",

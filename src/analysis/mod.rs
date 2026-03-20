@@ -327,8 +327,8 @@ impl AnalysisRuntimeState {
             } => {
                 let skip = self.precompute_dispatched_path.as_ref() == Some(path);
                 eprintln!(
-                    "[analysis] SetTrack path={:?} token={} gapless={} reset_spec={} precompute_skip={}",
-                    path.file_name().unwrap_or_default(), track_token, gapless, reset_spectrogram, skip,
+                    "[analysis] SetTrack path={} token={track_token} gapless={gapless} reset_spec={reset_spectrogram} precompute_skip={skip}",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
                 );
                 self.handle_track_change(
                     path.clone(),
@@ -370,14 +370,13 @@ impl AnalysisRuntimeState {
                 self.dispatch_spectrogram_job(0.0, ctx);
             }
             AnalysisCommand::Seek(position_seconds) => {
-                eprintln!("[analysis] Seek pos={:.2}", position_seconds);
+                eprintln!("[analysis] Seek pos={position_seconds:.2}");
                 self.dispatch_spectrogram_job(position_seconds, ctx);
             }
             AnalysisCommand::PrecomputeSpectrogram { path, track_token } => {
                 eprintln!(
-                    "[analysis] PrecomputeSpectrogram path={:?} token={}",
-                    path.file_name().unwrap_or_default(),
-                    track_token,
+                    "[analysis] PrecomputeSpectrogram path={} token={track_token}",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
                 );
                 self.precompute_dispatched_path = Some(path.clone());
                 self.active_track_path = Some(path);
@@ -873,10 +872,10 @@ fn spawn_spectrogram_decode_worker(
                 }
                 let start = std::time::Instant::now();
                 eprintln!(
-                    "[spect-worker] START path={:?} gen={} token={} fft={} hop={} ch={} start_s={:.2} drained={}",
-                    job.path.file_name().unwrap_or_default(),
+                    "[spect-worker] START path={} gen={} token={} fft={} hop={} ch={} start_s={:.2} drained={drained}",
+                    job.path.file_name().unwrap_or_default().to_string_lossy(),
                     job.generation, job.track_token, job.fft_size, job.hop_size,
-                    job.channel_count, job.start_seconds, drained,
+                    job.channel_count, job.start_seconds,
                 );
                 run_spectrogram_decode_job(&job, &event_tx, &active_token, &generation);
                 eprintln!(
@@ -918,8 +917,7 @@ fn run_spectrogram_decode_job(
         return;
     };
     eprintln!(
-        "[spect-worker] total_columns_estimate={} bins={}",
-        total_columns_estimate, bins_per_column
+        "[spect-worker] total_columns_estimate={total_columns_estimate} bins={bins_per_column}"
     );
 
     let pass1_start = std::time::Instant::now();

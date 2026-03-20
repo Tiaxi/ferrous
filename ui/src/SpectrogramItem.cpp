@@ -332,15 +332,16 @@ void SpectrogramItem::feedPrecomputedChunk(
         return;
     }
 
-    // Clear atlas when track changes (different token).
-    const bool trackChanged = (trackToken != 0 && trackToken != m_precomputedTrackToken);
-    if (trackChanged) {
+    // Always track the latest token.
+    if (trackToken != 0) {
         m_precomputedTrackToken = trackToken;
     }
 
-    // Allocate or re-allocate atlas on track change or size change.
-    if (trackChanged
-        || m_precomputedTotalColumns != totalEstimate
+    // Allocate or re-allocate atlas only when the dimensions change
+    // (different track duration or FFT size).  Don't wipe on token-only
+    // changes — multiple tokens can arrive for the same track during
+    // startup and wiping would destroy already-computed data.
+    if (m_precomputedTotalColumns != totalEstimate
         || m_precomputedBinsPerColumn != bins) {
         const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
         m_precomputedAtlas.resize(static_cast<int>(atlasSize));
