@@ -360,11 +360,15 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedLastRightCol = -1;
     }
 
-    if (sampleRate > 0) {
-        m_precomputedSampleRateHz = sampleRate;
-    }
-    if (hopSize > 0) {
-        m_precomputedHopSize = hopSize;
+    // Only update rate/hop from chunks that carry actual column data.
+    // "Complete" signal chunks have columns=0 and may carry stale hop values.
+    if (columns > 0) {
+        if (sampleRate > 0) {
+            m_precomputedSampleRateHz = sampleRate;
+        }
+        if (hopSize > 0) {
+            m_precomputedHopSize = hopSize;
+        }
     }
 
     // Extract this channel's bins from the packed multi-channel data.

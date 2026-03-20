@@ -940,7 +940,7 @@ fn run_spectrogram_decode_job(
                             start_column_index: 0,
                             total_columns_estimate,
                             sample_rate_hz: 0,
-                            hop_size: clamp_to_u16(job.hop_size),
+                            hop_size: clamp_to_u16(REFERENCE_HOP),
                             coverage_seconds: 0.0,
                             complete: true,
                         },
