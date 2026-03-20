@@ -317,6 +317,12 @@ void SpectrogramItem::feedPrecomputedChunk(
     quint64 trackToken) {
     QMutexLocker lock(&m_stateMutex);
 
+    std::fprintf(stderr,
+        "[Qt-feed] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d atlasCols=%d\n",
+        channelIndex, columns, startIndex, totalEstimate, bins,
+        sampleRate, hopSize, static_cast<unsigned long long>(trackToken),
+        m_precomputedReady ? 1 : 0, m_precomputedTotalColumns);
+
     if (totalEstimate <= 0 || bins <= 0) {
         return;
     }
@@ -420,6 +426,8 @@ void SpectrogramItem::clearPrecomputed() {
 
 void SpectrogramItem::reset() {
     QMutexLocker lock(&m_stateMutex);
+    std::fprintf(stderr, "[Qt-reset] precomputedReady=%d totalCols=%d\n",
+        m_precomputedReady ? 1 : 0, m_precomputedTotalColumns);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     resetSmoothnessProfileLocked();
     resetSeekProfileLocked();
@@ -625,6 +633,23 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         const bool usePrecomputed = m_precomputedReady
             && m_precomputedBinsPerColumn > 0
             && m_precomputedTotalColumns > 0;
+
+        // Debug: log precomputed state periodically.
+        {
+            static int sDebugCounter = 0;
+            if (++sDebugCounter % 120 == 1) {
+                int coveredCount = 0;
+                for (int i = 0; i < m_precomputedCoverage.size(); ++i) {
+                    if (m_precomputedCoverage.testBit(i)) ++coveredCount;
+                }
+                std::fprintf(stderr,
+                    "[Qt-paint] usePre=%d ready=%d bins=%d totalCols=%d pos=%.2f covered=%d/%d streaming_cols=%d\n",
+                    usePrecomputed ? 1 : 0, m_precomputedReady ? 1 : 0,
+                    m_precomputedBinsPerColumn, m_precomputedTotalColumns,
+                    m_positionSeconds, coveredCount, static_cast<int>(m_precomputedCoverage.size()),
+                    static_cast<int>(m_columns.size()));
+            }
+        }
 
         if (usePrecomputed) {
             // Position-indexed rendering from pre-computed atlas.

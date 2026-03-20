@@ -1574,6 +1574,7 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
 
     // Drain precomputed spectrogram chunks.
     constexpr int kMaxPrecomputedPerPass = 4;
+    int precomputedPopped = 0;
     for (int pci = 0; pci < kMaxPrecomputedPerPass; ++pci) {
         if (markBudgetExhaustedIfNeeded()) {
             break;
@@ -1583,11 +1584,15 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         if (ptr == nullptr || len == 0) {
             break;
         }
+        precomputedPopped++;
         const QByteArray raw(
             reinterpret_cast<const char *>(ptr),
             static_cast<qsizetype>(len));
         ferrous_ffi_bridge_free_precomputed_spectrogram(ptr, len);
         parsePrecomputedSpectrogramFrame(raw);
+    }
+    if (precomputedPopped > 0) {
+        std::fprintf(stderr, "[Qt-drain] popped %d precomputed frames\n", precomputedPopped);
     }
 
     constexpr int kMaxTreeFramesPerPass = 4;
