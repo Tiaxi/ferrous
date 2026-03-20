@@ -56,7 +56,8 @@ public:
     Q_INVOKABLE void feedPrecomputedChunk(
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
-        int sampleRate, int hopSize, bool complete);
+        int sampleRate, int hopSize, bool complete,
+        quint64 trackToken = 0);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -172,6 +173,7 @@ private:
     int m_precomputedTotalColumns{0};
     int m_precomputedSampleRateHz{44100};
     int m_precomputedHopSize{1024};
+    quint64 m_precomputedTrackToken{0};
     bool m_precomputedComplete{false};
     bool m_precomputedReady{false};
     double m_positionSeconds{0.0};

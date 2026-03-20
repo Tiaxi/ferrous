@@ -190,7 +190,8 @@ Item {
                 if (pane && pane.spectrogramItem) {
                     pane.spectrogramItem.feedPrecomputedChunk(
                         data, bins, ch, columns, startIndex,
-                        totalEstimate, sampleRate, hopSize, complete)
+                        totalEstimate, sampleRate, hopSize, complete,
+                        trackToken)
                 }
             }
         }

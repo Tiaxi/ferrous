@@ -313,7 +313,8 @@ void SpectrogramItem::setDisplayMode(int value) {
 void SpectrogramItem::feedPrecomputedChunk(
     const QByteArray &data, int bins, int channelIndex,
     int columns, int startIndex, int totalEstimate,
-    int sampleRate, int hopSize, bool complete) {
+    int sampleRate, int hopSize, bool complete,
+    quint64 trackToken) {
     QMutexLocker lock(&m_stateMutex);
 
     if (totalEstimate <= 0 || bins <= 0) {
@@ -331,8 +332,16 @@ void SpectrogramItem::feedPrecomputedChunk(
         return;
     }
 
-    // On first chunk for a new track: allocate the atlas.
-    if (m_precomputedTotalColumns != totalEstimate || m_precomputedBinsPerColumn != bins) {
+    // Clear atlas when track changes (different token).
+    const bool trackChanged = (trackToken != 0 && trackToken != m_precomputedTrackToken);
+    if (trackChanged) {
+        m_precomputedTrackToken = trackToken;
+    }
+
+    // Allocate or re-allocate atlas on track change or size change.
+    if (trackChanged
+        || m_precomputedTotalColumns != totalEstimate
+        || m_precomputedBinsPerColumn != bins) {
         const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
         m_precomputedAtlas.resize(static_cast<int>(atlasSize));
         m_precomputedAtlas.fill(0);
@@ -398,6 +407,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedTotalColumns = 0;
     m_precomputedComplete = false;
     m_precomputedLastRightCol = -1;
+    m_precomputedTrackToken = 0;
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
     invalidateCanvas();
