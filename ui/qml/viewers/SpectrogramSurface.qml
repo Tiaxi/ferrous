@@ -123,8 +123,21 @@ Item {
         for (let i = 0; i < spectrogramRepeater.count; ++i) {
             const pane = spectrogramRepeater.itemAt(i)
             if (pane && pane.spectrogramItem) {
-                pane.spectrogramItem.clearPrecomputed()
+                // Don't clear precomputed data here — the streaming path
+                // resets frequently, but the precomputed atlas has its own
+                // lifecycle managed by the backend worker.  Clearing it
+                // here would cause the precomputed spectrogram to flash
+                // and disappear every time the streaming path resets.
                 pane.spectrogramItem.reset()
+            }
+        }
+    }
+
+    function clearPrecomputedForTrackChange() {
+        for (let i = 0; i < spectrogramRepeater.count; ++i) {
+            const pane = spectrogramRepeater.itemAt(i)
+            if (pane && pane.spectrogramItem) {
+                pane.spectrogramItem.clearPrecomputed()
             }
         }
     }
@@ -156,6 +169,19 @@ Item {
         function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
                                                      startIndex, totalEstimate, sampleRate,
                                                      hopSize, coverage, complete, trackToken) {
+            // Ensure the Repeater has the right number of panes for the
+            // channel count reported by the precomputed worker.
+            if (channelCount > 0 && spectrogramRepeater.count !== channelCount) {
+                const showLabels = root.uiBridge.spectrogramViewMode === 1
+                let next = []
+                for (let i = 0; i < channelCount; ++i) {
+                    next.push({ label: "", showLabel: false })
+                }
+                if (!sameDescriptors(next)) {
+                    root.channelDescriptors = next
+                }
+            }
+
             for (let ch = 0; ch < channelCount; ++ch) {
                 if (ch >= spectrogramRepeater.count) {
                     break
