@@ -1205,7 +1205,7 @@ impl BridgeLoopRuntime {
             &self.metadata,
             &mut self.state,
         );
-        let analysis_urgency = drain_analysis_events(&self.analysis_rx, &mut self.state);
+        let analysis_urgency = drain_analysis_events(&self.analysis_rx, event_tx, &mut self.state);
         let metadata_urgency = drain_metadata_events(&self.metadata_rx, &mut self.state);
         let library_urgency = drain_library_events(
             &self.library_rx,
@@ -4637,6 +4637,7 @@ fn process_analysis_event(snapshot: AnalysisSnapshot, state: &mut BridgeState) -
 
 fn drain_analysis_events(
     analysis_rx: &Receiver<AnalysisEvent>,
+    event_tx: &Sender<BridgeEvent>,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     let mut urgency = SnapshotUrgency::None;
@@ -4648,9 +4649,8 @@ fn drain_analysis_events(
             AnalysisEvent::Snapshot(snapshot) => {
                 urgency = urgency.max(process_analysis_event(snapshot, state));
             }
-            AnalysisEvent::PrecomputedSpectrogramChunk(_) => {
-                // Pre-computed chunks are handled via handle_analysis_event
-                // in the main loop, not in the drain path.
+            AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
+                let _ = event_tx.send(BridgeEvent::PrecomputedSpectrogramChunk(chunk));
             }
         }
     }
@@ -4660,7 +4660,8 @@ fn drain_analysis_events(
 #[cfg(test)]
 #[allow(dead_code)]
 fn pump_analysis_events(analysis_rx: &Receiver<AnalysisEvent>, state: &mut BridgeState) -> bool {
-    drain_analysis_events(analysis_rx, state).is_pending()
+    let (event_tx, _event_rx) = bounded::<BridgeEvent>(8);
+    drain_analysis_events(analysis_rx, &event_tx, state).is_pending()
 }
 
 fn process_metadata_event(event: MetadataEvent, state: &mut BridgeState) -> SnapshotUrgency {
@@ -6712,6 +6713,75 @@ mod tests {
         assert_eq!(snapshot.playback.state, PlaybackState::Stopped);
         assert_eq!(snapshot.playback.current.as_ref(), Some(&track));
         assert_eq!(snapshot.metadata.title, "ferrous_reactive_stopped_metadata");
+    }
+
+    #[test]
+    fn analysis_wake_forwards_following_precomputed_chunks_from_drain_path() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let _ = runtime.drain_pending_updates(&event_tx);
+        runtime.flags.pending_snapshot = SnapshotUrgency::None;
+        while event_rx.try_recv().is_ok() {}
+
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
+        runtime.analysis_rx = analysis_rx;
+
+        let first = crate::analysis::PrecomputedSpectrogramChunk {
+            track_token: 7,
+            columns_u8: vec![1, 2],
+            bins_per_column: 1,
+            column_count: 2,
+            channel_count: 1,
+            start_column_index: 0,
+            total_columns_estimate: 4,
+            sample_rate_hz: 44_100,
+            hop_size: 1_024,
+            coverage_seconds: 0.05,
+            complete: false,
+        };
+        let second = crate::analysis::PrecomputedSpectrogramChunk {
+            track_token: 7,
+            columns_u8: vec![3, 4],
+            bins_per_column: 1,
+            column_count: 2,
+            channel_count: 1,
+            start_column_index: 2,
+            total_columns_estimate: 4,
+            sample_rate_hz: 44_100,
+            hop_size: 1_024,
+            coverage_seconds: 0.10,
+            complete: false,
+        };
+
+        analysis_tx
+            .send(AnalysisEvent::PrecomputedSpectrogramChunk(second.clone()))
+            .expect("queue follow-up precomputed chunk");
+
+        runtime.handle_wake(
+            BridgeLoopWake::Analysis(AnalysisEvent::PrecomputedSpectrogramChunk(first.clone())),
+            &event_tx,
+        );
+
+        match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(BridgeEvent::PrecomputedSpectrogramChunk(chunk)) => {
+                assert_eq!(chunk.start_column_index, first.start_column_index);
+                assert_eq!(chunk.column_count, first.column_count);
+                assert_eq!(chunk.columns_u8, first.columns_u8);
+            }
+            other => panic!("expected first precomputed chunk, got {other:?}"),
+        }
+
+        match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(BridgeEvent::PrecomputedSpectrogramChunk(chunk)) => {
+                assert_eq!(chunk.start_column_index, second.start_column_index);
+                assert_eq!(chunk.column_count, second.column_count);
+                assert_eq!(chunk.columns_u8, second.columns_u8);
+            }
+            other => panic!("expected drained precomputed chunk, got {other:?}"),
+        }
+
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
