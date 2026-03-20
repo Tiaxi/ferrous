@@ -55,13 +55,6 @@ pub enum AnalysisCommand {
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
     Seek(f64),
-    /// Eagerly start pre-computed spectrogram without affecting the
-    /// waveform/PCM pipeline.  Used when playback is stopped but the
-    /// track path is known.
-    PrecomputeSpectrogram {
-        path: PathBuf,
-        track_token: u64,
-    },
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -193,9 +186,6 @@ struct AnalysisRuntimeState {
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
     active_track_stamp: Option<WaveformSourceStamp>,
-    /// Set by `PrecomputeSpectrogram` so `handle_track_change` can skip
-    /// re-dispatching the spectrogram job for the same track.
-    precompute_dispatched_path: Option<PathBuf>,
     waveform_cache: HashMap<PathBuf, WaveformCacheEntry>,
     waveform_cache_lru: VecDeque<PathBuf>,
     waveform_db: Option<Connection>,
@@ -295,7 +285,6 @@ impl AnalysisRuntimeState {
             last_emit: std::time::Instant::now(),
             spectrogram: SpectrogramRuntime::new(8192, 1024, SpectrogramViewMode::Downmix, &[]),
             active_track_token: 0,
-            precompute_dispatched_path: None,
             active_track_path: None,
             active_track_stamp: None,
             waveform_cache: HashMap::new(),
@@ -325,9 +314,8 @@ impl AnalysisRuntimeState {
                 track_token,
                 gapless,
             } => {
-                let skip = self.precompute_dispatched_path.as_ref() == Some(path);
                 eprintln!(
-                    "[analysis] SetTrack path={} token={track_token} gapless={gapless} reset_spec={reset_spectrogram} precompute_skip={skip}",
+                    "[analysis] SetTrack path={} token={track_token} gapless={gapless} reset_spec={reset_spectrogram}",
                     path.file_name().unwrap_or_default().to_string_lossy(),
                 );
                 self.handle_track_change(
@@ -372,18 +360,6 @@ impl AnalysisRuntimeState {
             AnalysisCommand::Seek(position_seconds) => {
                 eprintln!("[analysis] Seek pos={position_seconds:.2}");
                 self.dispatch_spectrogram_job(position_seconds, ctx);
-            }
-            AnalysisCommand::PrecomputeSpectrogram { path, track_token } => {
-                eprintln!(
-                    "[analysis] PrecomputeSpectrogram path={} token={track_token}",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                );
-                self.precompute_dispatched_path = Some(path.clone());
-                self.active_track_path = Some(path);
-                self.active_track_token = track_token;
-                ctx.waveform_decode_active_token
-                    .store(track_token, Ordering::Relaxed);
-                self.dispatch_spectrogram_job(0.0, ctx);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -433,16 +409,9 @@ impl AnalysisRuntimeState {
         }
         self.emit_snapshot(ctx.event_tx, true);
 
-        // Dispatch pre-computed spectrogram job — but skip if PrecomputeSpectrogram
-        // already started a job for this exact track, to avoid cancelling an
-        // in-flight job and creating a gap from restart.
-        if self.precompute_dispatched_path.as_ref() == Some(&path) {
-            eprintln!("[analysis] handle_track_change: SKIPPING spectrogram dispatch (precompute in-flight)");
-            self.precompute_dispatched_path = None;
-        } else {
-            eprintln!("[analysis] handle_track_change: dispatching spectrogram job from 0.0");
-            self.dispatch_spectrogram_job(0.0, ctx);
-        }
+        // Dispatch pre-computed spectrogram job.
+        eprintln!("[analysis] handle_track_change: dispatching spectrogram job from 0.0");
+        self.dispatch_spectrogram_job(0.0, ctx);
 
         if let Some(peaks) = self.load_cached_waveform(&path) {
             self.snapshot.waveform_peaks = peaks;
