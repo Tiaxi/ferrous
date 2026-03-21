@@ -84,7 +84,9 @@ pub enum PlaybackEvent {
         kind: TrackChangeKind,
         track_token: u64,
     },
-    Seeked,
+    Seeked {
+        position: Duration,
+    },
 }
 
 pub struct PlaybackEngine {
@@ -169,19 +171,19 @@ mod tests {
         last
     }
 
-    fn saw_seeked_event(
+    fn recv_seeked_event(
         rx: &crossbeam_channel::Receiver<PlaybackEvent>,
         timeout: Duration,
-    ) -> bool {
+    ) -> Option<Duration> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
-                if matches!(evt, PlaybackEvent::Seeked) {
-                    return true;
+                if let PlaybackEvent::Seeked { position } = evt {
+                    return Some(position);
                 }
             }
         }
-        false
+        None
     }
 
     #[test]
@@ -314,7 +316,10 @@ mod tests {
         engine.command(PlaybackCommand::Play);
         engine.command(PlaybackCommand::Seek(Duration::from_secs(999)));
 
-        assert!(saw_seeked_event(&rx, Duration::from_millis(300)));
+        assert_eq!(
+            recv_seeked_event(&rx, Duration::from_millis(300)),
+            Some(Duration::from_secs(180))
+        );
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.duration, Duration::from_secs(180));
         assert_eq!(snap.position, Duration::from_secs(180));
@@ -687,7 +692,9 @@ mod backend {
                         }
                         PlaybackCommand::Seek(pos) => {
                             snapshot.position = pos.min(snapshot.duration);
-                            let _ = event_tx.send(PlaybackEvent::Seeked);
+                            let _ = event_tx.send(PlaybackEvent::Seeked {
+                                position: snapshot.position,
+                            });
                         }
                         PlaybackCommand::SetVolume(vol) => {
                             snapshot.volume = vol.clamp(0.0, 1.0);
@@ -1454,7 +1461,9 @@ mod backend {
                 Instant::now() + Duration::from_millis(220),
                 self.snapshot.position,
             ));
-            let _ = self.event_tx.send(PlaybackEvent::Seeked);
+            let _ = self.event_tx.send(PlaybackEvent::Seeked {
+                position: self.snapshot.position,
+            });
         }
 
         fn set_volume(&mut self, volume: f32) {

@@ -185,7 +185,8 @@ Item {
         target: root.uiBridge
         function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
                                                      startIndex, totalEstimate, sampleRate,
-                                                     hopSize, coverage, complete, bufferReset, trackToken) {
+                                                     hopSize, coverage, complete, bufferReset,
+                                                     clearHistory, trackToken) {
             // If the chunk has more channels than we have panes, grow the
             // Repeater model.  This only adds panes (never removes) so it
             // won't destroy existing delegates with precomputed data.
@@ -211,7 +212,7 @@ Item {
                     pane.spectrogramItem.feedPrecomputedChunk(
                         data, bins, ch, columns, startIndex,
                         totalEstimate, sampleRate, hopSize, complete,
-                        bufferReset, trackToken)
+                        bufferReset, trackToken, clearHistory)
                 }
             }
         }
@@ -249,6 +250,7 @@ Item {
                     showFpsOverlay: index === 0 ? root.uiBridge.showFps : false
                     sampleRateHz: root.uiBridge.sampleRateHz
                     positionSeconds: root.positionSeconds
+                    playing: (root.uiBridge.playbackState || "") === "Playing"
                     displayMode: root.uiBridge.spectrogramDisplayMode
                 }
 

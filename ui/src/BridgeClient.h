@@ -317,7 +317,8 @@ signals:
     void precomputedSpectrogramChunkReady(
         const QByteArray &data, int bins, int channelCount, int columns,
         int startIndex, int totalEstimate, int sampleRate, int hopSize,
-        float coverage, bool complete, bool bufferReset, quint64 trackToken);
+        float coverage, bool complete, bool bufferReset, bool clearHistory,
+        quint64 trackToken);
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();

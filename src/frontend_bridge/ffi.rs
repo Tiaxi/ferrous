@@ -2117,10 +2117,11 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [28..32] f32  coverage_seconds
 /// [32]     u8   complete (0 or 1)
 /// [33]     u8   buffer_reset (0 or 1)
-/// [34..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [34]     u8   clear_history (0 or 1)
+/// [35..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 34;
+    let header_len = 35;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -2139,6 +2140,7 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.extend_from_slice(&chunk.coverage_seconds.to_le_bytes());
     out.push(u8::from(chunk.complete));
     out.push(u8::from(chunk.buffer_reset));
+    out.push(u8::from(chunk.clear_history));
     out.extend_from_slice(&chunk.columns_u8);
     out
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QImage>
 #include <QMetaObject>
 #include <QMutex>
@@ -23,6 +24,7 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(int sampleRateHz READ sampleRateHz WRITE setSampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(int maxColumns READ maxColumns WRITE setMaxColumns NOTIFY maxColumnsChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
+    Q_PROPERTY(bool playing READ isPlaying WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
     Q_PROPERTY(int displayMode READ displayMode WRITE setDisplayMode NOTIFY displayModeChanged)
 
@@ -47,6 +49,9 @@ public:
     double positionSeconds() const;
     void setPositionSeconds(double value);
 
+    bool isPlaying() const;
+    void setPlaying(bool value);
+
     bool precomputedReady() const;
 
     int displayMode() const;
@@ -56,7 +61,8 @@ public:
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
         int sampleRate, int hopSize, bool complete,
-        bool bufferReset, quint64 trackToken = 0);
+        bool bufferReset, quint64 trackToken = 0,
+        bool clearHistoryOnReset = false);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -75,6 +81,7 @@ signals:
     void sampleRateHzChanged();
     void maxColumnsChanged();
     void positionSecondsChanged();
+    void playingChanged();
     void precomputedReadyChanged();
     void displayModeChanged();
 
@@ -92,6 +99,30 @@ private:
     void ensureMapping(int height);
     void invalidateCanvas();
     void ensureCanvas(int width, int height);
+    void applyPrecomputedResetLocked(
+        int startIndex,
+        int bins,
+        quint64 trackToken,
+        bool clearHistoryOnReset);
+    double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
+    void setPositionAnchorLocked(double value, std::chrono::steady_clock::time_point now);
+    void syncPositionAnchorLocked(std::chrono::steady_clock::time_point now);
+    void rebuildPrecomputedCanvasLocked(
+        int width,
+        int height,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode);
+    bool advancePrecomputedCanvasLocked(
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode);
+    void drawPrecomputedColumnAtLocked(
+        int x,
+        qint64 displayIndex,
+        bool rollingMode,
+        const std::array<quint8, 256> &dbRemap);
+    std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
     void resizeDirtyTilesLocked();
@@ -164,13 +195,19 @@ private:
     double m_profilePaintMs{0.0};
     quint64 m_sceneGraphGeneration{0};
     QMetaObject::Connection m_animationTickConnection;
+    QMetaObject::Connection m_windowVisibilityConnection;
 
     // Ring-buffer spectrogram storage.
     QByteArray m_ringBuffer;          // capacity * bins_per_column bytes
+    std::vector<qint32> m_ringColumnId; // per write-order slot: track column index, or -1
+    std::vector<qint64> m_ringSequenceId; // per slot: write sequence stored there, or -1
+    std::vector<quint64> m_ringTrackToken; // per slot: track token stored there, or 0
+    QHash<quint64, QHash<qint32, qint64>> m_trackColumnToSeqByToken;
     int m_ringCapacity{0};            // number of column slots
-    qint64 m_ringWriteSeq{0};         // monotonic: sequence number of next write
-    qint64 m_ringOldestSeq{0};        // sequence number of oldest valid column
-    qint64 m_trackEpochSeq{0};        // sequence number = time 0.0s of current track
+    qint64 m_ringWriteSeq{0};         // next write-order sequence number
+    qint64 m_ringOldestSeq{0};        // oldest write-order sequence still retained
+    qint64 m_trackEpochSeq{0};        // legacy reset bookkeeping
+    qint64 m_rollingEpoch{0};         // maps track columns to rolling write-order history
     int m_precomputedBinsPerColumn{0};
     int m_precomputedTotalColumnsEstimate{0};
     int m_precomputedSampleRateHz{44100};
@@ -178,7 +215,24 @@ private:
     quint64 m_precomputedTrackToken{0};
     bool m_precomputedReady{false};
     double m_positionSeconds{0.0};
+    double m_positionAnchorSeconds{0.0};
+    std::chrono::steady_clock::time_point m_positionAnchorUpdatedAt{};
+    bool m_positionAnchorInitialized{false};
+    bool m_playing{false};
+    bool m_positionJumpHoldActive{false};
+    double m_positionJumpHoldSeconds{0.0};
+    std::chrono::steady_clock::time_point m_positionJumpHoldStartedAt{};
+    bool m_precomputedResetPending{false};
+    int m_precomputedPendingResetStartIndex{0};
+    int m_precomputedPendingResetBins{0};
+    quint64 m_precomputedPendingResetTrackToken{0};
+    bool m_precomputedPendingResetClearHistory{false};
+    qint64 m_precomputedLastDisplaySeq{-1};
     int m_precomputedLastRightCol{-1};
+    qint64 m_precomputedCanvasDisplayLeft{0};
+    qint64 m_precomputedCanvasDisplayRight{-1};
+    bool m_precomputedCanvasRolling{false};
+    bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     int m_debugPaintCounter{0};
 

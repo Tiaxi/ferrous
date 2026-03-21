@@ -46,7 +46,7 @@ private slots:
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
-    void pendingSeekAdvancesPositionOptimisticallyWhilePlaybackSnapshotIsStale();
+    void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
@@ -295,7 +295,7 @@ void BridgeClientTest::scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRea
     isolateBridgeClient(client);
 }
 
-void BridgeClientTest::pendingSeekAdvancesPositionOptimisticallyWhilePlaybackSnapshotIsStale() {
+void BridgeClientTest::pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives() {
     BridgeClient client;
     isolateBridgeClient(client);
 
@@ -320,12 +320,9 @@ void BridgeClientTest::pendingSeekAdvancesPositionOptimisticallyWhilePlaybackSna
     QVERIFY(client.processBinarySnapshot(snapshot));
 
     QVERIFY(client.m_pendingSeek);
-    QVERIFY(client.m_positionSeconds >= 60.45);
-    QVERIFY(client.m_positionSeconds <= 60.65);
-    QVERIFY(
-        client.m_positionText == QStringLiteral("01:00")
-        || client.m_positionText == QStringLiteral("01:01"));
-    QVERIFY(client.m_pollPlaybackChanged);
+    QCOMPARE(client.m_positionSeconds, 60.0);
+    QCOMPARE(client.m_positionText, QStringLiteral("01:00"));
+    QVERIFY(!client.m_pollPlaybackChanged);
 }
 
 void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {

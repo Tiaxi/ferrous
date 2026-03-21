@@ -9,6 +9,7 @@ QtObject {
     property bool seekPressed: false
 
     property real displayedPositionSeconds: 0
+    property real spectrogramPositionSeconds: 0
     property bool positionSmoothingPrimed: false
     property real positionSmoothingAnchorSeconds: 0
     property int positionSmoothingAnimationMs: 0
@@ -162,6 +163,7 @@ QtObject {
             }
             root.positionSmoothingAnimationMs = 0
             root.displayedPositionSeconds = incomingPosition
+            root.spectrogramPositionSeconds = incomingPosition
             root.positionSmoothingPrimed = false
             root.positionSmoothingAnchorSeconds = incomingPosition
             root.positionSmoothingLastMs = nowMs
@@ -169,6 +171,7 @@ QtObject {
         } else if (!root.positionSmoothingPrimed || trackChanged) {
             root.positionSmoothingAnimationMs = 0
             root.displayedPositionSeconds = incomingPosition
+            root.spectrogramPositionSeconds = incomingPosition
             root.positionSmoothingPrimed = true
             root.positionSmoothingAnchorSeconds = incomingPosition
             root.positionSmoothingLastMs = nowMs
@@ -178,15 +181,17 @@ QtObject {
                 ? Math.max(120, Math.min(1200, nowMs - root.positionSmoothingLastMs))
                 : 1000
             const drift = incomingPosition - root.displayedPositionSeconds
+            root.spectrogramPositionSeconds = incomingPosition
             if (Math.abs(drift) > 0.20) {
                 root.positionSmoothingAnimationMs = 0
                 root.displayedPositionSeconds = incomingPosition
             } else {
                 root.positionSmoothingAnimationMs = cadenceMs
                 const predictedTarget = incomingPosition + (cadenceMs / 1000.0)
-                root.displayedPositionSeconds = duration > 0
+                const nextPosition = duration > 0
                     ? Math.min(duration, Math.max(0.0, predictedTarget))
                     : Math.max(0.0, predictedTarget)
+                root.displayedPositionSeconds = nextPosition
             }
             root.positionSmoothingAnchorSeconds = incomingPosition
             root.positionSmoothingLastMs = nowMs
@@ -198,6 +203,7 @@ QtObject {
 
     function initializeFromBridge() {
         root.displayedPositionSeconds = root.uiBridge.positionSeconds
+        root.spectrogramPositionSeconds = root.uiBridge.positionSeconds
         root.syncMutedVolumeState()
         root.positionSmoothingPrimed = root.uiBridge.playbackState === "Playing"
         root.positionSmoothingAnchorSeconds = root.uiBridge.positionSeconds

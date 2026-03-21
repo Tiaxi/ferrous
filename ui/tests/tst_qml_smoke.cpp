@@ -15,6 +15,7 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
@@ -372,11 +373,20 @@ private slots:
     void spectrogramItemSurvivesRepeatedIncrementalTextureReplacement();
     void spectrogramWrappedHistoryStaysContinuousAcrossTileBoundary();
     void spectrogramChunkedResetBurstSeedsHistoryAcrossChunks();
+    void spectrogramMetadataOnlyResetWaitsForDataChunk();
+    void spectrogramRollingSeekKeepsHistoryContinuous();
+    void spectrogramLargePositionJumpWaitsForResetHandoff();
+    void spectrogramGaplessTrackChangePreservesRollingHistory();
+    void spectrogramNaturalTrackResetPreservesRollingHistory();
+    void spectrogramManualTrackResetClearsRollingHistory();
+    void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
     void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
     void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
     void spectrogramQueuedDrainConsumesReadyRows();
     void spectrogramHaltDropsPendingMotion();
     void diagnosticsLogUsesLowercaseAppDir();
+    void playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate();
+    void playbackControllerPlaybackUpdateDoesNotPredictSpectrogramForward();
     void spectrogramSeekProfileFlagsStalledPostSeekWindow();
     void spectrogramSmoothnessProfileFlagsGapHeavyWindow();
     void waveformProgressInvalidatesOnlyTailSpan();
@@ -525,7 +535,7 @@ Item {
         signal imageFileDetailsChanged(string path)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
-            real coverage, bool complete, var trackToken)
+            real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken)
         signal snapshotChanged()
         function setVolume(value) {}
         function setLibrarySortMode(mode) {}
@@ -1230,7 +1240,7 @@ Item {
         property int sampleRateHz: 48000
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
-            real coverage, bool complete, var trackToken)
+            real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken)
     }
 
     Viewers.SpectrogramSurface {
@@ -1265,6 +1275,562 @@ Item {
 
     QTRY_VERIFY(surface->property("pendingPackedBatches").toList().isEmpty());
     QVERIFY(!surface->property("pendingPackedFlushScheduled").toBool());
+}
+
+void QmlSmokeTest::playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 12.0);
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 12.0);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommitted",
+        Q_ARG(QVariant, QVariant::fromValue(48.0))));
+
+    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 48.0);
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 12.0);
+}
+
+void QmlSmokeTest::playbackControllerPlaybackUpdateDoesNotPredictSpectrogramForward() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTest::qWait(130);
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("positionSeconds", 12.12);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 12.12);
+}
+
+void QmlSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 512;
+    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    for (int i = 0; i < initialChunk.size(); ++i) {
+        initialChunk[i] = static_cast<char>(20 + i);
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        4,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    const qint64 rollingEpochBeforeReset = item.m_rollingEpoch;
+    const qint64 writeSeqBeforeReset = item.m_ringWriteSeq;
+    QVERIFY(writeSeqBeforeReset > 0);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        128,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    QVERIFY(item.m_precomputedResetPending);
+    QCOMPARE(item.m_rollingEpoch, rollingEpochBeforeReset);
+    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeReset);
+
+    QByteArray seekChunk(binsPerColumn, '\0');
+    for (int i = 0; i < seekChunk.size(); ++i) {
+        seekChunk[i] = static_cast<char>(100 + i);
+    }
+    item.feedPrecomputedChunk(
+        seekChunk,
+        binsPerColumn,
+        0,
+        1,
+        128,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        11);
+
+    QVERIFY(!item.m_precomputedResetPending);
+    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeReset - 128);
+    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeReset + 1);
+    QCOMPARE(item.m_ringSequenceId[static_cast<size_t>(writeSeqBeforeReset % item.m_ringCapacity)],
+        writeSeqBeforeReset);
+    QCOMPARE(
+        item.m_ringColumnId[static_cast<size_t>(writeSeqBeforeReset % item.m_ringCapacity)],
+        128);
+}
+
+void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 1024;
+    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    for (int i = 0; i < initialChunk.size(); ++i) {
+        initialChunk[i] = static_cast<char>(10 + i);
+    }
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        4,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    const qint64 writeSeqBeforeSeek = item.m_ringWriteSeq;
+    QCOMPARE(writeSeqBeforeSeek, 4);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        400,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    QByteArray seekChunk(2 * binsPerColumn, '\0');
+    for (int i = 0; i < seekChunk.size(); ++i) {
+        seekChunk[i] = static_cast<char>(100 + i);
+    }
+    item.feedPrecomputedChunk(
+        seekChunk,
+        binsPerColumn,
+        0,
+        2,
+        400,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        11);
+
+    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeSeek + 2);
+    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeSeek - 400);
+    QCOMPARE(item.m_ringSequenceId[0], 0);
+    QCOMPARE(item.m_ringColumnId[0], 0);
+    QCOMPARE(item.m_ringSequenceId[1], 1);
+    QCOMPARE(item.m_ringColumnId[1], 1);
+    QCOMPARE(item.m_ringSequenceId[2], 2);
+    QCOMPARE(item.m_ringColumnId[2], 2);
+    QCOMPARE(item.m_ringSequenceId[3], 3);
+    QCOMPARE(item.m_ringColumnId[3], 3);
+    QCOMPARE(item.m_ringSequenceId[4], 4);
+    QCOMPARE(item.m_ringColumnId[4], 400);
+    QCOMPARE(item.m_ringSequenceId[5], 5);
+    QCOMPARE(item.m_ringColumnId[5], 401);
+}
+
+void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 1024;
+    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        4,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+    item.setPositionSeconds(1.0);
+    item.setPlaying(true);
+
+    item.setPositionSeconds(120.0);
+    QVERIFY(item.m_positionJumpHoldActive);
+    QVERIFY(std::abs(item.m_positionSeconds - 1.0) < 0.0001);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        512,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    QByteArray seekChunk(binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        seekChunk,
+        binsPerColumn,
+        0,
+        1,
+        512,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        11);
+
+    const double expectedSeconds = (512.0 * 1024.0) / 48000.0;
+    QVERIFY(!item.m_positionJumpHoldActive);
+    QVERIFY(std::abs(item.m_positionSeconds - expectedSeconds) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 1024;
+    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        4,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    const qint64 writeSeqBeforeGapless = item.m_ringWriteSeq;
+    QCOMPARE(writeSeqBeforeGapless, 4);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        12);
+
+    QCOMPARE(item.m_precomputedTrackToken, 12ULL);
+    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeGapless);
+    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeGapless);
+
+    QByteArray nextTrackChunk(2 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        nextTrackChunk,
+        binsPerColumn,
+        0,
+        2,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        12);
+
+    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeGapless + 2);
+    QCOMPARE(item.m_ringSequenceId[4], 4);
+    QCOMPARE(item.m_ringColumnId[4], 0);
+    QCOMPARE(item.m_ringTrackToken[4], 12ULL);
+    QCOMPARE(item.m_ringSequenceId[5], 5);
+    QCOMPARE(item.m_ringColumnId[5], 1);
+    QCOMPARE(item.m_ringTrackToken[5], 12ULL);
+}
+
+void QmlSmokeTest::spectrogramNaturalTrackResetPreservesRollingHistory() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 1024;
+    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        4,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    const qint64 writeSeqBeforeReset = item.m_ringWriteSeq;
+    QCOMPARE(writeSeqBeforeReset, 4);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        12);
+
+    QVERIFY(item.m_precomputedResetPending);
+    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeReset);
+
+    QByteArray nextTrackChunk(2 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        nextTrackChunk,
+        binsPerColumn,
+        0,
+        2,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        12);
+
+    QVERIFY(!item.m_precomputedResetPending);
+    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeReset);
+    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeReset + 2);
+    QCOMPARE(item.m_ringSequenceId[4], 4);
+    QCOMPARE(item.m_ringColumnId[4], 0);
+    QCOMPARE(item.m_ringTrackToken[4], 12ULL);
+    QCOMPARE(item.m_ringSequenceId[5], 5);
+    QCOMPARE(item.m_ringColumnId[5], 1);
+    QCOMPARE(item.m_ringTrackToken[5], 12ULL);
+}
+
+void QmlSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 1024;
+    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        4,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11,
+        true);
+
+    QCOMPARE(item.m_ringWriteSeq, 4);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        12,
+        true);
+
+    QVERIFY(item.m_precomputedResetPending);
+    QVERIFY(item.m_precomputedPendingResetClearHistory);
+    QCOMPARE(item.m_ringWriteSeq, 4);
+
+    QByteArray nextTrackChunk(2 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        nextTrackChunk,
+        binsPerColumn,
+        0,
+        2,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        12);
+
+    QVERIFY(!item.m_precomputedResetPending);
+    QCOMPARE(item.m_ringWriteSeq, 2);
+    QCOMPARE(item.m_ringOldestSeq, 0);
+    QCOMPARE(item.m_rollingEpoch, 0);
+    QCOMPARE(item.m_precomputedTrackToken, 12ULL);
+    QCOMPARE(item.m_ringSequenceId[0], 0);
+    QCOMPARE(item.m_ringColumnId[0], 0);
+    QCOMPARE(item.m_ringTrackToken[0], 12ULL);
+    QCOMPARE(item.m_ringSequenceId[1], 1);
+    QCOMPARE(item.m_ringColumnId[1], 1);
+    QCOMPARE(item.m_ringTrackToken[1], 12ULL);
+}
+
+void QmlSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setPlaying(true);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 512;
+    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        4,
+        0,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        256,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        true,
+        11);
+
+    QByteArray seekChunk(binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        seekChunk,
+        binsPerColumn,
+        0,
+        1,
+        256,
+        totalEstimate,
+        48'000,
+        1'024,
+        false,
+        false,
+        11);
+
+    const double expectedSeconds = (256.0 * 1024.0) / 48000.0;
+    QVERIFY(std::abs(item.m_positionAnchorSeconds - expectedSeconds) < 0.0001);
+    QVERIFY(std::abs(item.m_positionSeconds - expectedSeconds) < 0.0001);
 }
 
 void QmlSmokeTest::spectrogramSeedsOnlyFirstResetBurstIntoHistory() {

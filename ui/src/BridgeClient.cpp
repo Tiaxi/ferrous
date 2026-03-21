@@ -2350,19 +2350,6 @@ void BridgeClient::seek(double seconds) {
     m_pendingSeekTargetSeconds = target;
     m_pendingSeekStartedAtMs = nowMs;
     m_pendingSeekUntilMs = nowMs + 900;
-    bool changed = false;
-    if (!qFuzzyCompare(m_positionSeconds + 1.0, target + 1.0)) {
-        m_positionSeconds = target;
-        changed = true;
-    }
-    const QString targetText = formatSeconds(target);
-    if (m_positionText != targetText) {
-        m_positionText = targetText;
-        changed = true;
-    }
-    if (changed) {
-        scheduleSnapshotChanged();
-    }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSeek, target));
 }
 
@@ -4148,8 +4135,9 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [32..36] f32  coverage_seconds
     // [36]     u8   complete
     // [37]     u8   buffer_reset
-    // [38..]   column_data
-    constexpr int kHeaderLen = 38;
+    // [38]     u8   clear_history
+    // [39..]   column_data
+    constexpr int kHeaderLen = 39;
     if (raw.size() < kHeaderLen) {
         return;
     }
@@ -4192,6 +4180,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const float coverage = readF32(base + 28);
     const bool complete = d[base + 32] != 0;
     const bool bufferReset = d[base + 33] != 0;
+    const bool clearHistory = d[base + 34] != 0;
 
     const int dataOffset = kHeaderLen;
     const int expectedDataLen = columns * channelCount * bins;
@@ -4200,7 +4189,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     emit precomputedSpectrogramChunkReady(
         columnData, bins, channelCount, columns,
         startIndex, totalEstimate, sampleRate, hopSize,
-        coverage, complete, bufferReset, trackToken);
+        coverage, complete, bufferReset, clearHistory, trackToken);
 }
 
 void BridgeClient::scheduleSnapshotChanged() {
@@ -4554,16 +4543,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             m_pendingSeekStartedAtMs = 0;
         }
         applyPlaybackPosition(pos);
-    } else if (nextState == QStringLiteral("Playing")) {
-        const qint64 startedAtMs = m_pendingSeekStartedAtMs > 0
-            ? m_pendingSeekStartedAtMs
-            : nowMs;
-        const double optimisticPos = dur > 0.0
-            ? std::min(dur, std::max(0.0, m_pendingSeekTargetSeconds)
-                + (static_cast<double>(std::max<qint64>(0, nowMs - startedAtMs)) / 1000.0))
-            : std::max(0.0, m_pendingSeekTargetSeconds)
-                + (static_cast<double>(std::max<qint64>(0, nowMs - startedAtMs)) / 1000.0);
-        applyPlaybackPosition(optimisticPos);
     }
 
     const QString durText = formatSeconds(dur);

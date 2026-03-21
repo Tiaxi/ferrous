@@ -248,7 +248,7 @@ Kirigami.ApplicationWindow {
         signal bridgeError(string message)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
-            real coverage, bool complete, var trackToken)
+            real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken)
         function play() {}
         function pause() {}
         function stop() {}
@@ -1082,7 +1082,7 @@ Kirigami.ApplicationWindow {
         visible: parent !== null
         anchors.fill: parent
         uiBridge: root.uiBridge
-        positionSeconds: playbackController.displayedPositionSeconds
+        positionSeconds: playbackController.spectrogramPositionSeconds
     }
 
     Viewers.SpectrogramViewerShell {

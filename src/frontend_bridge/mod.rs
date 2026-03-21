@@ -4587,10 +4587,11 @@ fn process_playback_event(
             }
             SnapshotUrgency::Immediate
         }
-        PlaybackEvent::Seeked => {
+        PlaybackEvent::Seeked { position } => {
             if state.analysis_track_token != 0 && state.playback.current.is_some() {
-                let pos_seconds = state.playback.position.as_secs_f64();
-                analysis.command(AnalysisCommand::PositionUpdate(pos_seconds));
+                state.playback.position = position;
+                let pos_seconds = position.as_secs_f64();
+                analysis.command(AnalysisCommand::SeekPosition(pos_seconds));
             }
             SnapshotUrgency::Heartbeat
         }
@@ -4626,7 +4627,7 @@ fn pump_playback_events(
         let Ok(event) = playback_rx.try_recv() else {
             break;
         };
-        let event_changed = !matches!(event, PlaybackEvent::Seeked);
+        let event_changed = !matches!(event, PlaybackEvent::Seeked { .. });
         let _ = process_playback_event(event, analysis, metadata, state);
         changed |= event_changed;
     }
@@ -6757,6 +6758,7 @@ mod tests {
             coverage_seconds: 1.0,
             complete: true,
             buffer_reset: false,
+            clear_history: false,
         };
         note_precomputed_spectrogram_chunk(&mut state, &chunk);
     }
@@ -6786,6 +6788,7 @@ mod tests {
             coverage_seconds: 0.05,
             complete: false,
             buffer_reset: false,
+            clear_history: false,
         };
         let second = crate::analysis::PrecomputedSpectrogramChunk {
             track_token: 7,
@@ -6800,6 +6803,7 @@ mod tests {
             coverage_seconds: 0.10,
             complete: false,
             buffer_reset: false,
+            clear_history: false,
         };
 
         analysis_tx
@@ -6958,15 +6962,20 @@ mod tests {
         let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
 
         let mut state = BridgeState::default();
+        state.playback.current = Some(p("/music/a.flac"));
+        state.analysis_track_token = 1;
         state.analysis.waveform_peaks = vec![0.2, 0.4, 0.6];
         state.metadata.title = "Track A".to_string();
         state.metadata.artist = "Artist A".to_string();
 
         playback_tx
-            .send(PlaybackEvent::Seeked)
+            .send(PlaybackEvent::Seeked {
+                position: Duration::from_secs(42),
+            })
             .expect("send seeked event");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         assert!(!changed);
+        assert_eq!(state.playback.position, Duration::from_secs(42));
         assert_eq!(state.analysis.waveform_peaks, vec![0.2, 0.4, 0.6]);
         assert_eq!(state.metadata.title, "Track A");
         assert_eq!(state.metadata.artist, "Artist A");

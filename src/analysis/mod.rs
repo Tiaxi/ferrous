@@ -55,6 +55,7 @@ pub enum AnalysisCommand {
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
     PositionUpdate(f64),
+    SeekPosition(f64),
     WaveformProgress {
         track_token: u64,
         peaks: Vec<f32>,
@@ -136,6 +137,9 @@ pub struct PrecomputedSpectrogramChunk {
     /// When true, the C++ ring buffer should be cleared and the epoch reset.
     /// Emitted after a hard seek outside the buffered range.
     pub buffer_reset: bool,
+    /// When true, the UI should discard previous-track history instead of
+    /// preserving rolling continuity across the reset handoff.
+    pub clear_history: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +189,7 @@ enum SpectrogramWorkerCommand {
         hop_size: usize,
         channel_count: usize,
         start_seconds: f64,
+        clear_history_on_reset: bool,
         view_mode: SpectrogramViewMode,
         display_mode: SpectrogramDisplayMode,
     },
@@ -196,6 +201,9 @@ enum SpectrogramWorkerCommand {
         path: PathBuf,
     },
     PositionUpdate {
+        position_seconds: f64,
+    },
+    Seek {
         position_seconds: f64,
     },
     #[allow(dead_code)]
@@ -377,7 +385,7 @@ impl AnalysisRuntimeState {
                 self.spectrogram.set_fft_size(fft, hop);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                self.start_spectrogram_session(0.0, ctx);
+                self.start_spectrogram_session(0.0, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
                 eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
@@ -385,11 +393,15 @@ impl AnalysisRuntimeState {
                 self.spectrogram.set_view_mode(view_mode);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                self.start_spectrogram_session(0.0, ctx);
+                self.start_spectrogram_session(0.0, true, ctx);
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
                 eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
                 Self::update_spectrogram_position(position_seconds, ctx);
+            }
+            AnalysisCommand::SeekPosition(position_seconds) => {
+                eprintln!("[analysis] SeekPosition pos={position_seconds:.2}");
+                Self::seek_spectrogram_position(position_seconds, ctx);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -452,7 +464,7 @@ impl AnalysisRuntimeState {
         } else {
             // Normal track change: start a fresh decode session.
             eprintln!("[analysis] handle_track_change: dispatching NewTrack from 0.0");
-            self.start_spectrogram_session(0.0, ctx);
+            self.start_spectrogram_session(0.0, reset_spectrogram, ctx);
         }
 
         if let Some(peaks) = self.load_cached_waveform(&path) {
@@ -469,7 +481,12 @@ impl AnalysisRuntimeState {
             .send(WaveformDecodeJob { track_token, path });
     }
 
-    fn start_spectrogram_session(&self, start_seconds: f64, ctx: &AnalysisContext<'_>) {
+    fn start_spectrogram_session(
+        &self,
+        start_seconds: f64,
+        clear_history_on_reset: bool,
+        ctx: &AnalysisContext<'_>,
+    ) {
         let Some(path) = self.active_track_path.as_ref() else {
             eprintln!("[analysis] start_spectrogram_session: no active_track_path, skipping");
             return;
@@ -488,6 +505,7 @@ impl AnalysisRuntimeState {
                 hop_size: self.spectrogram.hop_size,
                 channel_count: self.spectrogram.pipelines.len().max(1),
                 start_seconds,
+                clear_history_on_reset,
                 view_mode: self.snapshot.spectrogram_view_mode,
                 display_mode: self.display_mode,
             });
@@ -497,6 +515,12 @@ impl AnalysisRuntimeState {
         let _ = ctx
             .spectrogram_cmd_tx
             .send(SpectrogramWorkerCommand::PositionUpdate { position_seconds });
+    }
+
+    fn seek_spectrogram_position(position_seconds: f64, ctx: &AnalysisContext<'_>) {
+        let _ = ctx
+            .spectrogram_cmd_tx
+            .send(SpectrogramWorkerCommand::Seek { position_seconds });
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
@@ -1002,6 +1026,7 @@ fn run_spectrogram_session(
         hop_size,
         channel_count,
         start_seconds,
+        clear_history_on_reset,
         view_mode,
         display_mode,
     } = initial_cmd
@@ -1127,6 +1152,7 @@ fn run_spectrogram_session(
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
+            clear_history: clear_history_on_reset,
         },
     ));
 
@@ -1216,6 +1242,7 @@ fn run_spectrogram_session(
                     coverage_seconds: 0.0,
                     complete: false,
                     buffer_reset: false,
+                    clear_history: false,
                 },
             ));
 
@@ -1459,12 +1486,16 @@ fn process_session_commands(
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
 ) -> Option<SessionAction> {
     let mut latest_position: Option<f64> = None;
+    let mut latest_seek: Option<f64> = None;
 
-    // Drain all pending commands, take latest PositionUpdate.
+    // Drain all pending commands, take the latest seek/position update.
     while let Ok(cmd) = cmd_rx.try_recv() {
         match cmd {
             SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
                 latest_position = Some(position_seconds);
+            }
+            SpectrogramWorkerCommand::Seek { position_seconds } => {
+                latest_seek = Some(position_seconds);
             }
             SpectrogramWorkerCommand::NewTrack { .. } => {
                 return Some(SessionAction::NewSession(cmd));
@@ -1489,6 +1520,11 @@ fn process_session_commands(
         }
     }
 
+    if let Some(position_seconds) = latest_seek {
+        session.target_position_seconds = position_seconds;
+        return Some(SessionAction::SeekRequired { position_seconds });
+    }
+
     // Process position update — check if seek is needed.
     if let Some(position_seconds) = latest_position {
         session.target_position_seconds = position_seconds;
@@ -1499,7 +1535,7 @@ fn process_session_commands(
             return Some(SessionAction::SeekRequired { position_seconds });
         }
         let forward_gap = target_col.saturating_sub(session.columns_produced);
-        let far_forward_threshold = session.lookahead_columns * 3;
+        let far_forward_threshold = session.lookahead_columns;
         if forward_gap > far_forward_threshold {
             // Far forward seek needed.
             return Some(SessionAction::SeekRequired { position_seconds });
@@ -1521,10 +1557,14 @@ fn handle_single_command(
                 return SessionAction::SeekRequired { position_seconds };
             }
             let forward_gap = target_col.saturating_sub(session.columns_produced);
-            if forward_gap > session.lookahead_columns * 3 {
+            if forward_gap > session.lookahead_columns {
                 return SessionAction::SeekRequired { position_seconds };
             }
             SessionAction::Continue
+        }
+        SpectrogramWorkerCommand::Seek { position_seconds } => {
+            session.target_position_seconds = position_seconds;
+            SessionAction::SeekRequired { position_seconds }
         }
         SpectrogramWorkerCommand::NewTrack { .. } => SessionAction::NewSession(cmd),
         SpectrogramWorkerCommand::GaplessTransition { track_token, path } => {
@@ -1564,8 +1604,10 @@ fn handle_session_seek(
 ) -> Option<SpectrogramWorkerCommand> {
     eprintln!("[spect-worker] SEEK to {position_seconds:.2}s");
 
-    // Flush any pending chunk.
-    session_flush_chunk(session, event_tx);
+    // Drop any partially accumulated pre-seek chunk. Emitting it after a seek
+    // makes the UI paint old-timeline columns just before the reset arrives.
+    session.chunk_buf.clear();
+    session.chunk_columns = 0;
 
     // Pre-seek warmup.
     let fft_warmup_seconds =
@@ -1614,6 +1656,7 @@ fn handle_session_seek(
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
+            clear_history: false,
         },
     ));
 
@@ -1716,6 +1759,7 @@ fn session_drain_stft_rows(
                     coverage_seconds: coverage,
                     complete: false,
                     buffer_reset: false,
+                    clear_history: false,
                 },
             ));
             session.chunk_start_index = session.columns_produced;
@@ -1747,6 +1791,7 @@ fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<
                 coverage_seconds: coverage,
                 complete: false,
                 buffer_reset: false,
+                clear_history: false,
             },
         ));
         session.chunk_columns = 0;
@@ -3694,5 +3739,52 @@ mod tests {
 
         assert_eq!(state.pcm_labels, stereo_labels);
         assert!(!state.pcm_labels_pending_init);
+    }
+
+    #[test]
+    fn explicit_seek_command_forces_seek_even_inside_lookahead() {
+        let mut session = SpectrogramSessionState {
+            track_token: 1,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 2.0,
+            columns_produced: 256,
+            session_start_column: 0,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: Vec::new(),
+            chunk_columns: 0,
+            chunk_start_index: 256,
+            target_chunk_columns: 1,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_burst: 0,
+            decode_rate_limit: 2.0,
+            lookahead_columns: 512,
+            pending_gapless: None,
+        };
+
+        match handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::Seek {
+                position_seconds: 3.0,
+            },
+        ) {
+            SessionAction::SeekRequired { position_seconds } => {
+                assert_eq!(position_seconds, 3.0);
+            }
+            _ => panic!("expected explicit seek to force a seek"),
+        }
     }
 }
