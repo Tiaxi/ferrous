@@ -389,7 +389,7 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
                 eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
-                self.update_spectrogram_position(position_seconds, ctx);
+                Self::update_spectrogram_position(position_seconds, ctx);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -443,10 +443,12 @@ impl AnalysisRuntimeState {
             // Gapless transition: tell the decode worker to seamlessly continue
             // with the new file without resetting the ring buffer.
             eprintln!("[analysis] handle_track_change: gapless transition");
-            let _ = ctx.spectrogram_cmd_tx.send(SpectrogramWorkerCommand::GaplessTransition {
-                track_token,
-                path: path.clone(),
-            });
+            let _ = ctx
+                .spectrogram_cmd_tx
+                .send(SpectrogramWorkerCommand::GaplessTransition {
+                    track_token,
+                    path: path.clone(),
+                });
         } else {
             // Normal track change: start a fresh decode session.
             eprintln!("[analysis] handle_track_change: dispatching NewTrack from 0.0");
@@ -476,23 +478,25 @@ impl AnalysisRuntimeState {
             .spectrogram_decode_generation
             .fetch_add(1, Ordering::Relaxed)
             + 1;
-        let _ = ctx.spectrogram_cmd_tx.send(SpectrogramWorkerCommand::NewTrack {
-            track_token: self.active_track_token,
-            generation: gen,
-            path: path.clone(),
-            fft_size: self.spectrogram.fft_size,
-            hop_size: self.spectrogram.hop_size,
-            channel_count: self.spectrogram.pipelines.len().max(1),
-            start_seconds,
-            view_mode: self.snapshot.spectrogram_view_mode,
-            display_mode: self.display_mode,
-        });
+        let _ = ctx
+            .spectrogram_cmd_tx
+            .send(SpectrogramWorkerCommand::NewTrack {
+                track_token: self.active_track_token,
+                generation: gen,
+                path: path.clone(),
+                fft_size: self.spectrogram.fft_size,
+                hop_size: self.spectrogram.hop_size,
+                channel_count: self.spectrogram.pipelines.len().max(1),
+                start_seconds,
+                view_mode: self.snapshot.spectrogram_view_mode,
+                display_mode: self.display_mode,
+            });
     }
 
-    fn update_spectrogram_position(&self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
-        let _ = ctx.spectrogram_cmd_tx.send(SpectrogramWorkerCommand::PositionUpdate {
-            position_seconds,
-        });
+    fn update_spectrogram_position(position_seconds: f64, ctx: &AnalysisContext<'_>) {
+        let _ = ctx
+            .spectrogram_cmd_tx
+            .send(SpectrogramWorkerCommand::PositionUpdate { position_seconds });
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
@@ -863,6 +867,7 @@ fn usize_to_f32_approx(v: usize) -> f32 {
 ///
 /// For BH4 window: sum(w) = N × a0 (a0 = 0.35875).
 /// Peak bin magnitude = sum(w) / 2, power = (N × a0 / 2)².
+#[allow(clippy::cast_precision_loss)]
 fn stft_peak_power_db(fft_size: usize) -> f64 {
     20.0 * (fft_size as f64 * 0.35875 / 2.0).log10()
 }
@@ -917,7 +922,7 @@ fn spectrogram_worker_loop(
         match cmd {
             SpectrogramWorkerCommand::NewTrack { .. } => {
                 next_cmd =
-                    run_spectrogram_session(cmd, cmd_rx, event_tx, active_token, generation);
+                    run_spectrogram_session(&cmd, cmd_rx, event_tx, active_token, generation);
                 if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
                     break;
                 }
@@ -981,14 +986,15 @@ enum SessionAction {
 
 /// Runs a spectrogram decode session for a single track (or sequence of gapless tracks).
 /// Returns `Some(cmd)` if interrupted by a NewTrack/Stop, `None` if session ended naturally.
+#[allow(clippy::too_many_lines)]
 fn run_spectrogram_session(
-    initial_cmd: SpectrogramWorkerCommand,
+    initial_cmd: &SpectrogramWorkerCommand,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &Sender<AnalysisEvent>,
     active_token: &AtomicU64,
     generation: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
-    let SpectrogramWorkerCommand::NewTrack {
+    let &SpectrogramWorkerCommand::NewTrack {
         track_token,
         generation: gen,
         ref path,
@@ -1022,11 +1028,9 @@ fn run_spectrogram_session(
         return None;
     };
 
-    let divisor =
-        usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
+    let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
     let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
-    let effective_rate =
-        u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
+    let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
     let actual_channel_count = match view_mode {
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
@@ -1053,23 +1057,24 @@ fn run_spectrogram_session(
 
     // Pre-seek warmup: seek fft_size samples earlier so the STFT produces
     // its first output at exactly the requested position.
-    let fft_warmup_seconds =
-        usize_to_f64_approx(fft_size) / f64::from(effective_rate);
+    let fft_warmup_seconds = usize_to_f64_approx(fft_size) / f64::from(effective_rate);
     let actual_seek_seconds = (start_seconds - fft_warmup_seconds).max(0.0);
     let warmup_columns = if start_seconds > fft_warmup_seconds {
-        f64_to_u64_saturating(
-            (start_seconds - actual_seek_seconds) * cols_per_second,
-        )
+        f64_to_u64_saturating((start_seconds - actual_seek_seconds) * cols_per_second)
     } else {
         0
     };
 
     if actual_seek_seconds > 0.0 {
-        seek_symphonia(&mut format, track_id, native_sample_rate, actual_seek_seconds);
+        seek_symphonia(
+            &mut format,
+            track_id,
+            native_sample_rate,
+            actual_seek_seconds,
+        );
     }
 
-    let start_column =
-        f64_to_u64_saturating((start_seconds * cols_per_second).floor());
+    let start_column = f64_to_u64_saturating((start_seconds * cols_per_second).floor());
 
     let mut session = SpectrogramSessionState {
         track_token,
@@ -1141,126 +1146,118 @@ fn run_spectrogram_session(
             generation,
         );
 
-        match result {
-            Some(cmd) => {
-                // Interrupted by a NewTrack or Stop command.
-                eprintln!(
-                    "[spect-worker] SESSION END (interrupted) elapsed={:.1}ms cols_produced={}",
-                    start.elapsed().as_secs_f64() * 1000.0,
-                    session.columns_produced.saturating_sub(start_column),
-                );
+        if let Some(cmd) = result {
+            // Interrupted by a NewTrack or Stop command.
+            eprintln!(
+                "[spect-worker] SESSION END (interrupted) elapsed={:.1}ms cols_produced={}",
+                start.elapsed().as_secs_f64() * 1000.0,
+                session.columns_produced.saturating_sub(start_column),
+            );
+            return Some(cmd);
+        }
+
+        // EOF reached — check for pending gapless transition.
+        if let Some((new_token, new_path)) = session.pending_gapless.take() {
+            eprintln!(
+                "[spect-worker] GAPLESS TRANSITION to {} token={new_token}",
+                new_path.file_name().unwrap_or_default().to_string_lossy(),
+            );
+
+            // Flush any pending chunk from the old track.
+            session_flush_chunk(&mut session, event_tx);
+
+            // Open new file.
+            let Some((new_format, new_decoder, new_track_id, new_native_rate, _)) =
+                open_symphonia_file(&new_path)
+            else {
+                eprintln!("[spect-worker] gapless: failed to open new file");
+                break;
+            };
+
+            let new_total =
+                estimate_total_columns(&new_path).unwrap_or(session.total_columns_estimate);
+            let new_divisor =
+                usize::try_from(waveform_sample_rate_divisor(new_native_rate)).unwrap_or(1);
+
+            // Update session for new track.
+            session.track_token = new_token;
+            session.total_columns_estimate = new_total;
+            session.total_covered_samples = 0;
+            session.session_start_column = session.columns_produced;
+            session.divisor = new_divisor;
+
+            // Reset STFT state (avoid cross-track spectral leakage)
+            // but keep monotonic sequence counter.
+            let dec_factor = decimation_factor_for_hop(session.hop_size);
+            session.stfts = (0..session.channel_count)
+                .map(|_| StftComputer::new(session.fft_size, session.hop_size))
+                .collect();
+            session.decimators = (0..session.channel_count)
+                .map(|_| SpectrogramDecimator::new(dec_factor))
+                .collect();
+            session.chunk_buf.clear();
+            session.chunk_columns = 0;
+            session.chunk_start_index = session.columns_produced;
+            session.target_chunk_columns = 8;
+
+            // Send metadata chunk for new track — NOT a buffer_reset.
+            // trackToken change without buffer_reset signals gapless.
+            let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                PrecomputedSpectrogramChunk {
+                    track_token: new_token,
+                    columns_u8: Vec::new(),
+                    bins_per_column: clamp_to_u16(session.bins_per_column),
+                    column_count: 0,
+                    channel_count: clamp_to_u8(session.channel_count),
+                    start_column_index: u64_to_u32_saturating(session.columns_produced),
+                    total_columns_estimate: new_total,
+                    sample_rate_hz: session.effective_rate,
+                    hop_size: clamp_to_u16(REFERENCE_HOP),
+                    coverage_seconds: 0.0,
+                    complete: false,
+                    buffer_reset: false,
+                },
+            ));
+
+            format = new_format;
+            audio_decoder = new_decoder;
+            warmup_remaining = 0;
+            // Continue the outer loop with the new file.
+            // We need to update track_id for the decode loop.
+            // Since track_id is immutable in the current scope,
+            // we re-enter the decode loop with the new value.
+            let result2 = session_decode_loop(
+                &mut session,
+                &mut format,
+                &mut audio_decoder,
+                new_track_id,
+                &mut warmup_remaining,
+                cmd_rx,
+                event_tx,
+                active_token,
+                generation,
+            );
+            if let Some(cmd) = result2 {
                 return Some(cmd);
             }
-            None => {
-                // EOF reached — check for pending gapless transition.
-                if let Some((new_token, new_path)) = session.pending_gapless.take() {
-                    eprintln!(
-                        "[spect-worker] GAPLESS TRANSITION to {} token={new_token}",
-                        new_path.file_name().unwrap_or_default().to_string_lossy(),
-                    );
-
-                    // Flush any pending chunk from the old track.
-                    session_flush_chunk(&mut session, event_tx);
-
-                    // Open new file.
-                    let Some((new_format, new_decoder, new_track_id, new_native_rate, _)) =
-                        open_symphonia_file(&new_path)
-                    else {
-                        eprintln!("[spect-worker] gapless: failed to open new file");
-                        break;
-                    };
-
-                    let new_total = estimate_total_columns(&new_path)
-                        .unwrap_or(session.total_columns_estimate);
-                    let new_divisor = usize::try_from(
-                        waveform_sample_rate_divisor(new_native_rate),
-                    )
-                    .unwrap_or(1);
-
-                    // Update session for new track.
-                    session.track_token = new_token;
-                    session.total_columns_estimate = new_total;
-                    session.total_covered_samples = 0;
-                    session.session_start_column = session.columns_produced;
-                    session.divisor = new_divisor;
-
-                    // Reset STFT state (avoid cross-track spectral leakage)
-                    // but keep monotonic sequence counter.
-                    let dec_factor = decimation_factor_for_hop(session.hop_size);
-                    session.stfts = (0..session.channel_count)
-                        .map(|_| StftComputer::new(session.fft_size, session.hop_size))
-                        .collect();
-                    session.decimators = (0..session.channel_count)
-                        .map(|_| SpectrogramDecimator::new(dec_factor))
-                        .collect();
-                    session.chunk_buf.clear();
-                    session.chunk_columns = 0;
-                    session.chunk_start_index = session.columns_produced;
-                    session.target_chunk_columns = 8;
-
-                    // Send metadata chunk for new track — NOT a buffer_reset.
-                    // trackToken change without buffer_reset signals gapless.
-                    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
-                        PrecomputedSpectrogramChunk {
-                            track_token: new_token,
-                            columns_u8: Vec::new(),
-                            bins_per_column: clamp_to_u16(session.bins_per_column),
-                            column_count: 0,
-                            channel_count: clamp_to_u8(session.channel_count),
-                            start_column_index: u64_to_u32_saturating(
-                                session.columns_produced,
-                            ),
-                            total_columns_estimate: new_total,
-                            sample_rate_hz: session.effective_rate,
-                            hop_size: clamp_to_u16(REFERENCE_HOP),
-                            coverage_seconds: 0.0,
-                            complete: false,
-                            buffer_reset: false,
-                        },
-                    ));
-
-                    format = new_format;
-                    audio_decoder = new_decoder;
-                    // track_id for the next iteration of the loop:
-                    let _new_track_id = new_track_id;
-                    warmup_remaining = 0;
-                    // Continue the outer loop with the new file.
-                    // We need to update track_id for the decode loop.
-                    // Since track_id is immutable in the current scope,
-                    // we re-enter the decode loop with the new value.
-                    let result2 = session_decode_loop(
-                        &mut session,
-                        &mut format,
-                        &mut audio_decoder,
-                        new_track_id,
-                        &mut warmup_remaining,
-                        cmd_rx,
-                        event_tx,
-                        active_token,
-                        generation,
-                    );
-                    if let Some(cmd) = result2 {
-                        return Some(cmd);
-                    }
-                    // If EOF again, loop back to check for another gapless.
-                    continue;
-                }
-
-                // No pending gapless — session ends.
-                session_flush_chunk(&mut session, event_tx);
-                eprintln!(
-                    "[spect-worker] SESSION END (EOF) elapsed={:.1}ms cols_produced={}",
-                    start.elapsed().as_secs_f64() * 1000.0,
-                    session.columns_produced.saturating_sub(start_column),
-                );
-                return None;
-            }
+            // If EOF again, loop back to check for another gapless.
+            continue;
         }
+
+        // No pending gapless — session ends.
+        session_flush_chunk(&mut session, event_tx);
+        eprintln!(
+            "[spect-worker] SESSION END (EOF) elapsed={:.1}ms cols_produced={}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            session.columns_produced.saturating_sub(start_column),
+        );
+        return None;
     }
     None
 }
 
 /// Inner decode loop. Returns `Some(cmd)` if interrupted, `None` on EOF.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn session_decode_loop(
     session: &mut SpectrogramSessionState,
     format: &mut Box<dyn symphonia::core::formats::FormatReader>,
@@ -1279,9 +1276,7 @@ fn session_decode_loop(
     // channel). Generation is only incremented by start_spectrogram_session
     // which is called for non-gapless track changes.
     let session_gen = session.gen;
-    let is_stale = || -> bool {
-        generation.load(Ordering::Relaxed) != session_gen
-    };
+    let is_stale = || -> bool { generation.load(Ordering::Relaxed) != session_gen };
 
     loop {
         if is_stale() {
@@ -1312,9 +1307,8 @@ fn session_decode_loop(
         }
 
         // 2. Check lead — park if sufficiently ahead (unless gapless pending).
-        let target_column = f64_to_u64_saturating(
-            session.target_position_seconds * session.cols_per_second,
-        );
+        let target_column =
+            f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
         let lead = session.columns_produced.saturating_sub(target_column);
 
         if lead >= session.lookahead_columns
@@ -1323,14 +1317,54 @@ fn session_decode_loop(
         {
             // Park: block until a command arrives.
             match cmd_rx.recv() {
-                Ok(cmd) => {
-                    if let Some(action) = handle_single_command(session, cmd) {
-                        match action {
+                Ok(cmd) => match handle_single_command(session, cmd) {
+                    SessionAction::Continue => continue,
+                    SessionAction::Stop => {
+                        return Some(SpectrogramWorkerCommand::Stop);
+                    }
+                    SessionAction::NewSession(cmd) => return Some(cmd),
+                    SessionAction::SeekRequired { position_seconds } => {
+                        return handle_session_seek(
+                            session,
+                            position_seconds,
+                            format,
+                            audio_decoder,
+                            track_id,
+                            warmup_remaining,
+                            cmd_rx,
+                            event_tx,
+                            active_token,
+                            generation,
+                        );
+                    }
+                },
+                Err(_) => return None,
+            }
+        }
+
+        // 3. Rate throttle (rolling mode only, after burst).
+        if session.post_reset_burst > 0 {
+            session.post_reset_burst -= 1;
+        } else if session.decode_rate_limit.is_finite() {
+            let max_cols_per_wall_sec = session.decode_rate_limit * session.cols_per_second;
+            if max_cols_per_wall_sec > 0.0 {
+                let elapsed = session.session_start_time.elapsed().as_secs_f64();
+                let cols_since_start = session
+                    .columns_produced
+                    .saturating_sub(session.session_start_column);
+                #[allow(clippy::cast_precision_loss)]
+                let expected_elapsed = cols_since_start as f64 / max_cols_per_wall_sec;
+                if expected_elapsed > elapsed {
+                    let sleep_dur = Duration::from_secs_f64((expected_elapsed - elapsed).min(0.5));
+                    match cmd_rx.recv_timeout(sleep_dur) {
+                        Ok(cmd) => match handle_single_command(session, cmd) {
                             SessionAction::Continue => continue,
                             SessionAction::Stop => {
                                 return Some(SpectrogramWorkerCommand::Stop);
                             }
-                            SessionAction::NewSession(cmd) => return Some(cmd),
+                            SessionAction::NewSession(cmd) => {
+                                return Some(cmd);
+                            }
                             SessionAction::SeekRequired { position_seconds } => {
                                 return handle_session_seek(
                                     session,
@@ -1345,67 +1379,7 @@ fn session_decode_loop(
                                     generation,
                                 );
                             }
-                        }
-                    }
-                    continue;
-                }
-                Err(_) => return None,
-            }
-        }
-
-        // 3. Rate throttle (rolling mode only, after burst).
-        if session.post_reset_burst > 0 {
-            session.post_reset_burst -= 1;
-        } else if session.decode_rate_limit.is_finite() {
-            let max_cols_per_wall_sec =
-                session.decode_rate_limit * session.cols_per_second;
-            if max_cols_per_wall_sec > 0.0 {
-                let elapsed = session.session_start_time.elapsed().as_secs_f64();
-                let cols_since_start = session
-                    .columns_produced
-                    .saturating_sub(session.session_start_column);
-                #[allow(clippy::cast_precision_loss)]
-                let expected_elapsed =
-                    cols_since_start as f64 / max_cols_per_wall_sec;
-                if expected_elapsed > elapsed {
-                    let sleep_dur = Duration::from_secs_f64(
-                        (expected_elapsed - elapsed).min(0.5),
-                    );
-                    match cmd_rx.recv_timeout(sleep_dur) {
-                        Ok(cmd) => {
-                            if let Some(action) =
-                                handle_single_command(session, cmd)
-                            {
-                                match action {
-                                    SessionAction::Continue => continue,
-                                    SessionAction::Stop => {
-                                        return Some(
-                                            SpectrogramWorkerCommand::Stop,
-                                        );
-                                    }
-                                    SessionAction::NewSession(cmd) => {
-                                        return Some(cmd);
-                                    }
-                                    SessionAction::SeekRequired {
-                                        position_seconds,
-                                    } => {
-                                        return handle_session_seek(
-                                            session,
-                                            position_seconds,
-                                            format,
-                                            audio_decoder,
-                                            track_id,
-                                            warmup_remaining,
-                                            cmd_rx,
-                                            event_tx,
-                                            active_token,
-                                            generation,
-                                        );
-                                    }
-                                }
-                            }
-                            continue;
-                        }
+                        },
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                         Err(_) => return None,
                     }
@@ -1416,9 +1390,7 @@ fn session_decode_loop(
         // 4. Decode next packet.
         let packet = match format.next_packet() {
             Ok(packet) => packet,
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == ErrorKind::UnexpectedEof =>
-            {
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
                 break;
             }
             Err(SymphoniaError::ResetRequired | _) => break,
@@ -1431,9 +1403,7 @@ fn session_decode_loop(
 
         let decoded_audio = match audio_decoder.decode(&packet) {
             Ok(decoded_audio) => decoded_audio,
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == ErrorKind::UnexpectedEof =>
-            {
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
                 break;
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
@@ -1443,11 +1413,7 @@ fn session_decode_loop(
         let spec = *decoded_audio.spec();
         let decoded_channels = spec.channels.count().max(1);
         let decoded_capacity = decoded_audio.capacity();
-        let buf = ensure_sample_buffer(
-            &mut session.sample_buf,
-            decoded_capacity,
-            spec,
-        );
+        let buf = ensure_sample_buffer(&mut session.sample_buf, decoded_capacity, spec);
         buf.copy_interleaved_ref(decoded_audio);
         let samples = buf.samples();
 
@@ -1495,38 +1461,31 @@ fn process_session_commands(
     let mut latest_position: Option<f64> = None;
 
     // Drain all pending commands, take latest PositionUpdate.
-    loop {
-        match cmd_rx.try_recv() {
-            Ok(cmd) => match cmd {
-                SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
-                    latest_position = Some(position_seconds);
-                }
-                SpectrogramWorkerCommand::NewTrack { .. } => {
-                    return Some(SessionAction::NewSession(cmd));
-                }
-                SpectrogramWorkerCommand::GaplessTransition {
-                    track_token,
-                    path,
-                } => {
-                    session.pending_gapless = Some((track_token, path));
-                }
-                SpectrogramWorkerCommand::SetDisplayMode(mode) => {
-                    session.display_mode = mode;
-                    session.decode_rate_limit =
-                        if mode == SpectrogramDisplayMode::Rolling {
-                            std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
-                                .ok()
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(2.0)
-                        } else {
-                            f64::INFINITY
-                        };
-                }
-                SpectrogramWorkerCommand::Stop => {
-                    return Some(SessionAction::Stop);
-                }
-            },
-            Err(_) => break,
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
+                latest_position = Some(position_seconds);
+            }
+            SpectrogramWorkerCommand::NewTrack { .. } => {
+                return Some(SessionAction::NewSession(cmd));
+            }
+            SpectrogramWorkerCommand::GaplessTransition { track_token, path } => {
+                session.pending_gapless = Some((track_token, path));
+            }
+            SpectrogramWorkerCommand::SetDisplayMode(mode) => {
+                session.display_mode = mode;
+                session.decode_rate_limit = if mode == SpectrogramDisplayMode::Rolling {
+                    std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
+                        .ok()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(2.0)
+                } else {
+                    f64::INFINITY
+                };
+            }
+            SpectrogramWorkerCommand::Stop => {
+                return Some(SessionAction::Stop);
+            }
         }
     }
 
@@ -1534,8 +1493,7 @@ fn process_session_commands(
     if let Some(position_seconds) = latest_position {
         session.target_position_seconds = position_seconds;
 
-        let target_col =
-            f64_to_u64_saturating(position_seconds * session.cols_per_second);
+        let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
         if target_col < session.session_start_column {
             // Backward seek needed.
             return Some(SessionAction::SeekRequired { position_seconds });
@@ -1554,50 +1512,44 @@ fn process_session_commands(
 fn handle_single_command(
     session: &mut SpectrogramSessionState,
     cmd: SpectrogramWorkerCommand,
-) -> Option<SessionAction> {
+) -> SessionAction {
     match cmd {
         SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
             session.target_position_seconds = position_seconds;
-            let target_col =
-                f64_to_u64_saturating(position_seconds * session.cols_per_second);
+            let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
             if target_col < session.session_start_column {
-                return Some(SessionAction::SeekRequired { position_seconds });
+                return SessionAction::SeekRequired { position_seconds };
             }
             let forward_gap = target_col.saturating_sub(session.columns_produced);
             if forward_gap > session.lookahead_columns * 3 {
-                return Some(SessionAction::SeekRequired { position_seconds });
+                return SessionAction::SeekRequired { position_seconds };
             }
-            Some(SessionAction::Continue)
+            SessionAction::Continue
         }
-        SpectrogramWorkerCommand::NewTrack { .. } => {
-            Some(SessionAction::NewSession(cmd))
-        }
-        SpectrogramWorkerCommand::GaplessTransition {
-            track_token,
-            path,
-        } => {
+        SpectrogramWorkerCommand::NewTrack { .. } => SessionAction::NewSession(cmd),
+        SpectrogramWorkerCommand::GaplessTransition { track_token, path } => {
             session.pending_gapless = Some((track_token, path));
-            Some(SessionAction::Continue)
+            SessionAction::Continue
         }
         SpectrogramWorkerCommand::SetDisplayMode(mode) => {
             session.display_mode = mode;
-            session.decode_rate_limit =
-                if mode == SpectrogramDisplayMode::Rolling {
-                    std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
-                        .ok()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(2.0)
-                } else {
-                    f64::INFINITY
-                };
-            Some(SessionAction::Continue)
+            session.decode_rate_limit = if mode == SpectrogramDisplayMode::Rolling {
+                std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(2.0)
+            } else {
+                f64::INFINITY
+            };
+            SessionAction::Continue
         }
-        SpectrogramWorkerCommand::Stop => Some(SessionAction::Stop),
+        SpectrogramWorkerCommand::Stop => SessionAction::Stop,
     }
 }
 
 /// Handles a seek within the current session by resetting STFT state and
 /// repositioning the file reader.
+#[allow(clippy::too_many_arguments)]
 fn handle_session_seek(
     session: &mut SpectrogramSessionState,
     position_seconds: f64,
@@ -1621,8 +1573,8 @@ fn handle_session_seek(
     let actual_seek_seconds = (position_seconds - fft_warmup_seconds).max(0.0);
 
     // Compute native rate from effective rate × divisor.
-    let native_rate = u64::from(session.effective_rate)
-        * u64::try_from(session.divisor).unwrap_or(1);
+    let native_rate =
+        u64::from(session.effective_rate) * u64::try_from(session.divisor).unwrap_or(1);
     seek_symphonia(format, track_id, native_rate, actual_seek_seconds);
     audio_decoder.reset();
 
@@ -1635,9 +1587,7 @@ fn handle_session_seek(
         .map(|_| SpectrogramDecimator::new(decimation_factor))
         .collect();
 
-    let new_column = f64_to_u64_saturating(
-        (position_seconds * session.cols_per_second).floor(),
-    );
+    let new_column = f64_to_u64_saturating((position_seconds * session.cols_per_second).floor());
     session.columns_produced = new_column;
     session.session_start_column = new_column;
     session.chunk_buf.clear();
@@ -1668,9 +1618,7 @@ fn handle_session_seek(
     ));
 
     *warmup_remaining = if position_seconds > fft_warmup_seconds {
-        f64_to_u64_saturating(
-            (position_seconds - actual_seek_seconds) * session.cols_per_second,
-        )
+        f64_to_u64_saturating((position_seconds - actual_seek_seconds) * session.cols_per_second)
     } else {
         0
     };
@@ -1710,8 +1658,7 @@ fn session_drain_stft_rows(
         }
 
         // Push through decimators.
-        let mut decimated_rows: Vec<Option<Vec<f32>>> =
-            Vec::with_capacity(session.channel_count);
+        let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(session.channel_count);
         for (ch, row) in rows.into_iter().enumerate() {
             if let Some(dec) = session.decimators.get_mut(ch) {
                 decimated_rows.push(dec.push(row));
@@ -1735,7 +1682,9 @@ fn session_drain_stft_rows(
         for maybe_row in &decimated_rows {
             let row = maybe_row.as_ref().unwrap();
             for &v in row.iter().take(session.bins_per_column) {
-                session.chunk_buf.push(precomputed_to_u8_spectrum(v, session.fft_size));
+                session
+                    .chunk_buf
+                    .push(precomputed_to_u8_spectrum(v, session.fft_size));
             }
             if row.len() < session.bins_per_column {
                 session.chunk_buf.extend(std::iter::repeat_n(
@@ -1752,8 +1701,7 @@ fn session_drain_stft_rows(
                 session.total_covered_samples,
                 u64::from(session.effective_rate),
             );
-            let start_col_u32 =
-                u64_to_u32_saturating(session.chunk_start_index);
+            let start_col_u32 = u64_to_u32_saturating(session.chunk_start_index);
             let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
                 PrecomputedSpectrogramChunk {
                     track_token: session.track_token,
@@ -1773,16 +1721,12 @@ fn session_drain_stft_rows(
             session.chunk_start_index = session.columns_produced;
             session.chunk_columns = 0;
             // Ramp up chunk size: 1 → 2 → 4 → … → 256
-            session.target_chunk_columns =
-                (session.target_chunk_columns * 2).min(256);
+            session.target_chunk_columns = (session.target_chunk_columns * 2).min(256);
         }
     }
 }
 
-fn session_flush_chunk(
-    session: &mut SpectrogramSessionState,
-    event_tx: &Sender<AnalysisEvent>,
-) {
+fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<AnalysisEvent>) {
     if session.chunk_columns > 0 {
         let coverage = seconds_from_frames(
             session.total_covered_samples,
@@ -1810,6 +1754,7 @@ fn session_flush_chunk(
 }
 
 /// Opens a Symphonia file and returns the format reader, decoder, and track info.
+#[allow(clippy::type_complexity)]
 fn open_symphonia_file(
     path: &Path,
 ) -> Option<(
@@ -1824,10 +1769,7 @@ fn open_symphonia_file(
         hint.with_extension(ext);
     }
     let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(
-        Box::new(file),
-        MediaSourceStreamOptions::default(),
-    );
+    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let format = symphonia::default::get_probe()
         .format(
             &hint,
@@ -1839,8 +1781,7 @@ fn open_symphonia_file(
         .format;
     let track = format.default_track()?;
     let track_id = track.id;
-    let native_sample_rate =
-        u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
+    let native_sample_rate = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
     let native_channels = track
         .codec_params
         .channels
@@ -1865,10 +1806,8 @@ fn seek_symphonia(
 ) {
     use symphonia::core::formats::SeekMode;
     use symphonia::core::formats::SeekTo;
-    let native_rate_u32 =
-        u32::try_from(native_sample_rate).unwrap_or(u32::MAX);
-    let ts =
-        f64_to_u64_saturating(seek_seconds * f64::from(native_rate_u32));
+    let native_rate_u32 = u32::try_from(native_sample_rate).unwrap_or(u32::MAX);
+    let ts = f64_to_u64_saturating(seek_seconds * f64::from(native_rate_u32));
     let _ = format.seek(SeekMode::Coarse, SeekTo::TimeStamp { ts, track_id });
 }
 
@@ -1885,14 +1824,12 @@ fn deinterleave_samples(
     effective_frames: usize,
     view_mode: SpectrogramViewMode,
 ) -> Vec<Vec<f32>> {
-    let mut per_channel: Vec<Vec<f32>> =
-        vec![Vec::with_capacity(effective_frames); channel_count];
+    let mut per_channel: Vec<Vec<f32>> = vec![Vec::with_capacity(effective_frames); channel_count];
 
     match view_mode {
         SpectrogramViewMode::Downmix => {
             let mut downmixed = Vec::with_capacity(effective_frames);
-            let inv_channels =
-                1.0 / usize_to_f32_approx(decoded_channels);
+            let inv_channels = 1.0 / usize_to_f32_approx(decoded_channels);
             for frame_idx in (0..frames).step_by(divisor) {
                 let base = frame_idx * decoded_channels;
                 let mut sum = 0.0f32;
@@ -1922,10 +1859,7 @@ fn estimate_total_columns(path: &Path) -> Option<u32> {
         hint.with_extension(ext);
     }
     let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(
-        Box::new(file),
-        MediaSourceStreamOptions::default(),
-    );
+    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let format = symphonia::default::get_probe()
         .format(
             &hint,
@@ -1935,17 +1869,12 @@ fn estimate_total_columns(path: &Path) -> Option<u32> {
         )
         .ok()?;
     let track = format.format.default_track()?;
-    let sample_rate =
-        u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
-    let n_frames =
-        track.codec_params.n_frames.unwrap_or(sample_rate * 300);
+    let sample_rate = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
+    let n_frames = track.codec_params.n_frames.unwrap_or(sample_rate * 300);
     let divisor = waveform_sample_rate_divisor(sample_rate);
     let effective_frames = n_frames / divisor;
     let total = effective_frames / (REFERENCE_HOP as u64);
-    Some(
-        u32::try_from((total + 64).min(u64::from(u32::MAX)))
-            .unwrap_or(u32::MAX),
-    )
+    Some(u32::try_from((total + 64).min(u64::from(u32::MAX))).unwrap_or(u32::MAX))
 }
 
 fn spawn_analysis_worker(

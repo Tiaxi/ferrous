@@ -1878,6 +1878,7 @@ fn push_u16_string(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(&bytes[..usize::from(len)]);
 }
 
+#[allow(clippy::too_many_lines)]
 fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState) -> AnalysisDelta {
     let waveform_changed = s.analysis.waveform_peaks != emit_state.last_waveform_peaks;
     let waveform_coverage_millis = waveform_coverage_millis(s.analysis.waveform_coverage_seconds);
@@ -1905,50 +1906,51 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     let spectrogram_seq = s.analysis.spectrogram_seq;
     let spectrogram_delta =
         usize_from_u64(spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq));
-    let spectrogram_channels_u8 =
-        if spectrogram_reset && !s.analysis.spectrogram_channels.is_empty() {
-            s.analysis
-                .spectrogram_channels
-                .iter()
-                .map(|channel| EncodedSpectrogramChannel {
-                    label: channel.label,
-                    rows_u8: channel
-                        .rows
-                        .iter()
-                        .map(|row| {
-                            row.iter()
-                                .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size as usize))
-                                .collect::<Vec<u8>>()
-                        })
-                        .collect(),
-                })
-                .collect()
-        } else if spectrogram_delta > 0 && !s.analysis.spectrogram_channels.is_empty() {
-            let frame_count = s
-                .analysis
-                .spectrogram_channels
-                .first()
-                .map_or(0, |channel| channel.rows.len());
-            let tail = spectrogram_delta.min(frame_count);
-            let start = frame_count.saturating_sub(tail);
-            s.analysis
-                .spectrogram_channels
-                .iter()
-                .map(|channel| EncodedSpectrogramChannel {
-                    label: channel.label,
-                    rows_u8: channel.rows[start..]
-                        .iter()
-                        .map(|row| {
-                            row.iter()
-                                .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size as usize))
-                                .collect::<Vec<u8>>()
-                        })
-                        .collect(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+    let spectrogram_channels_u8 = if spectrogram_reset
+        && !s.analysis.spectrogram_channels.is_empty()
+    {
+        s.analysis
+            .spectrogram_channels
+            .iter()
+            .map(|channel| EncodedSpectrogramChannel {
+                label: channel.label,
+                rows_u8: channel
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size))
+                            .collect::<Vec<u8>>()
+                    })
+                    .collect(),
+            })
+            .collect()
+    } else if spectrogram_delta > 0 && !s.analysis.spectrogram_channels.is_empty() {
+        let frame_count = s
+            .analysis
+            .spectrogram_channels
+            .first()
+            .map_or(0, |channel| channel.rows.len());
+        let tail = spectrogram_delta.min(frame_count);
+        let start = frame_count.saturating_sub(tail);
+        s.analysis
+            .spectrogram_channels
+            .iter()
+            .map(|channel| EncodedSpectrogramChannel {
+                label: channel.label,
+                rows_u8: channel.rows[start..]
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size))
+                            .collect::<Vec<u8>>()
+                    })
+                    .collect(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if !spectrogram_reset || !s.analysis.spectrogram_channels.is_empty() {
         emit_state.last_spectrogram_seq = spectrogram_seq;
     }
@@ -1977,6 +1979,7 @@ fn to_u8_norm(v: f32) -> u8 {
     round_clamped_to_u8(f64::from(clamped) * 255.0)
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn to_u8_spectrum(v: f32, db_range: f32, fft_size: usize) -> u8 {
     let range = f64::from(db_range.clamp(50.0, 150.0));
     let db = if v > 0.0 {
