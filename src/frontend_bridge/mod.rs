@@ -4508,48 +4508,7 @@ fn process_playback_event(
 ) -> SnapshotUrgency {
     match event {
         PlaybackEvent::Snapshot(snapshot) => {
-            let next_state = snapshot.state;
-            let mut urgency = SnapshotUrgency::None;
-            if state.playback != snapshot {
-                urgency = playback_snapshot_urgency(&state.playback, &snapshot);
-                state.playback = snapshot;
-            }
-            if next_state == PlaybackState::Stopped {
-                if !state.analysis.waveform_peaks.is_empty() {
-                    state.analysis.waveform_peaks.clear();
-                    state.analysis.waveform_coverage_seconds = 0.0;
-                    state.analysis.waveform_complete = false;
-                    urgency = SnapshotUrgency::Immediate;
-                }
-                return urgency;
-            }
-            if let Some(pending) = state.pending_waveform_track.take() {
-                if state.playback.current.as_ref() == Some(&pending.path) {
-                    eprintln!(
-                        "[bridge] deferred pending_waveform_track firing → SetTrack token={}",
-                        pending.track_token,
-                    );
-                    analysis.command(AnalysisCommand::SetTrack {
-                        path: pending.path,
-                        reset_spectrogram: pending.reset_spectrogram,
-                        track_token: pending.track_token,
-                        gapless: false,
-                    });
-                } else {
-                    eprintln!("[bridge] deferred pending_waveform_track SKIPPED (path mismatch)",);
-                }
-            }
-            // Forward current playback position so the spectrogram decode
-            // worker knows how far playback has progressed and can keep its
-            // lookahead window moving forward.
-            if next_state == PlaybackState::Playing
-                && state.analysis_track_token != 0
-                && state.playback.current.is_some()
-            {
-                let pos_seconds = state.playback.position.as_secs_f64();
-                analysis.command(AnalysisCommand::PositionUpdate(pos_seconds));
-            }
-            urgency
+            process_playback_snapshot_event(snapshot, analysis, state)
         }
         PlaybackEvent::TrackChanged {
             path,
@@ -4596,6 +4555,74 @@ fn process_playback_event(
             SnapshotUrgency::Heartbeat
         }
     }
+}
+
+fn process_playback_snapshot_event(
+    snapshot: PlaybackSnapshot,
+    analysis: &AnalysisEngine,
+    state: &mut BridgeState,
+) -> SnapshotUrgency {
+    let next_state = snapshot.state;
+    let previous_playback = state.playback.clone();
+    let mut urgency = SnapshotUrgency::None;
+    if state.playback != snapshot {
+        urgency = playback_snapshot_urgency(&state.playback, &snapshot);
+        state.playback = snapshot;
+    }
+    if next_state == PlaybackState::Stopped {
+        if !state.analysis.waveform_peaks.is_empty() {
+            state.analysis.waveform_peaks.clear();
+            state.analysis.waveform_coverage_seconds = 0.0;
+            state.analysis.waveform_complete = false;
+            urgency = SnapshotUrgency::Immediate;
+        }
+        return urgency;
+    }
+    if let Some(pending) = state.pending_waveform_track.take() {
+        if state.playback.current.as_ref() == Some(&pending.path) {
+            eprintln!(
+                "[bridge] deferred pending_waveform_track firing → SetTrack token={}",
+                pending.track_token,
+            );
+            analysis.command(AnalysisCommand::SetTrack {
+                path: pending.path,
+                reset_spectrogram: pending.reset_spectrogram,
+                track_token: pending.track_token,
+                gapless: false,
+            });
+        } else {
+            eprintln!("[bridge] deferred pending_waveform_track SKIPPED (path mismatch)",);
+        }
+    }
+    let replayed_same_track_from_stop = previous_playback.state == PlaybackState::Stopped
+        && next_state == PlaybackState::Playing
+        && previous_playback.current.is_some()
+        && previous_playback.current == state.playback.current
+        && state.pending_waveform_track.is_none()
+        && state.analysis_track_token != 0;
+    if replayed_same_track_from_stop {
+        let pos_seconds = state.playback.position.as_secs_f64();
+        eprintln!(
+            "[bridge] stopped->playing replay → RestartCurrentTrack token={}",
+            state.analysis_track_token,
+        );
+        analysis.command(AnalysisCommand::RestartCurrentTrack {
+            position_seconds: pos_seconds,
+            clear_history: true,
+        });
+    }
+    // Forward current playback position so the spectrogram decode worker
+    // knows how far playback has progressed and can keep its lookahead
+    // window moving forward.
+    if next_state == PlaybackState::Playing
+        && state.analysis_track_token != 0
+        && state.playback.current.is_some()
+        && !replayed_same_track_from_stop
+    {
+        let pos_seconds = state.playback.position.as_secs_f64();
+        analysis.command(AnalysisCommand::PositionUpdate(pos_seconds));
+    }
+    urgency
 }
 
 fn drain_playback_events(
@@ -7034,6 +7061,42 @@ mod tests {
             .expect("analysis event after resume");
         match evt {
             AnalysisEvent::Snapshot(_) => {}
+            _ => panic!("unexpected event variant"),
+        }
+    }
+
+    #[test]
+    fn stopped_replay_restarts_spectrogram_on_resume() {
+        let (analysis, analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+
+        let path = p("/music/replay.flac");
+        let mut state = BridgeState::default();
+        state.playback.state = PlaybackState::Stopped;
+        state.playback.current = Some(path.clone());
+        state.playback.position = Duration::ZERO;
+        state.analysis_track_token = 7;
+
+        let mut snapshot = state.playback.clone();
+        snapshot.state = PlaybackState::Playing;
+        snapshot.current = Some(path);
+        snapshot.position = Duration::ZERO;
+        playback_tx
+            .send(PlaybackEvent::Snapshot(snapshot))
+            .expect("send replay snapshot");
+
+        let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        assert!(changed);
+        assert!(state.pending_waveform_track.is_none());
+
+        let evt = analysis_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("analysis event after replay resume");
+        match evt {
+            AnalysisEvent::Snapshot(snapshot) => {
+                assert!(snapshot.spectrogram_channels.is_empty());
+            }
             _ => panic!("unexpected event variant"),
         }
     }

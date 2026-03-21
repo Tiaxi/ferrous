@@ -54,6 +54,10 @@ pub enum AnalysisCommand {
     SetSampleRate(u32),
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
+    RestartCurrentTrack {
+        position_seconds: f64,
+        clear_history: bool,
+    },
     PositionUpdate(f64),
     SeekPosition(f64),
     WaveformProgress {
@@ -394,6 +398,17 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 self.start_spectrogram_session(0.0, true, ctx);
+            }
+            AnalysisCommand::RestartCurrentTrack {
+                position_seconds,
+                clear_history,
+            } => {
+                eprintln!(
+                    "[analysis] RestartCurrentTrack pos={position_seconds:.2} clear_history={clear_history}"
+                );
+                self.reset_spectrogram_state();
+                self.emit_snapshot(ctx.event_tx, true);
+                self.start_spectrogram_session(position_seconds, clear_history, ctx);
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
                 eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
