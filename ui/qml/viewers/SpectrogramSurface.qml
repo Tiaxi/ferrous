@@ -185,7 +185,7 @@ Item {
         target: root.uiBridge
         function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
                                                      startIndex, totalEstimate, sampleRate,
-                                                     hopSize, coverage, complete, trackToken) {
+                                                     hopSize, coverage, complete, bufferReset, trackToken) {
             // If the chunk has more channels than we have panes, grow the
             // Repeater model.  This only adds panes (never removes) so it
             // won't destroy existing delegates with precomputed data.
@@ -211,7 +211,7 @@ Item {
                     pane.spectrogramItem.feedPrecomputedChunk(
                         data, bins, ch, columns, startIndex,
                         totalEstimate, sampleRate, hopSize, complete,
-                        trackToken)
+                        bufferReset, trackToken)
                 }
             }
         }

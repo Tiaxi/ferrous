@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QBitArray>
 #include <QByteArray>
 #include <QImage>
 #include <QMetaObject>
@@ -57,7 +56,7 @@ public:
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
         int sampleRate, int hopSize, bool complete,
-        quint64 trackToken = 0);
+        bool bufferReset, quint64 trackToken = 0);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -124,7 +123,7 @@ private:
     QVariantMap debugSmoothnessProfileStateLocked() const;
 #endif
 
-    double m_dbRange{90.0};
+    double m_dbRange{132.0};
     bool m_logScale{false};
     int m_sampleRateHz{48000};
     int m_maxColumns{640};
@@ -166,15 +165,17 @@ private:
     quint64 m_sceneGraphGeneration{0};
     QMetaObject::Connection m_animationTickConnection;
 
-    // Pre-computed spectrogram atlas.
-    QByteArray m_precomputedAtlas;
-    QBitArray m_precomputedCoverage;
+    // Ring-buffer spectrogram storage.
+    QByteArray m_ringBuffer;          // capacity * bins_per_column bytes
+    int m_ringCapacity{0};            // number of column slots
+    qint64 m_ringWriteSeq{0};         // monotonic: sequence number of next write
+    qint64 m_ringOldestSeq{0};        // sequence number of oldest valid column
+    qint64 m_trackEpochSeq{0};        // sequence number = time 0.0s of current track
     int m_precomputedBinsPerColumn{0};
-    int m_precomputedTotalColumns{0};
+    int m_precomputedTotalColumnsEstimate{0};
     int m_precomputedSampleRateHz{44100};
     int m_precomputedHopSize{1024};
     quint64 m_precomputedTrackToken{0};
-    bool m_precomputedComplete{false};
     bool m_precomputedReady{false};
     double m_positionSeconds{0.0};
     int m_precomputedLastRightCol{-1};

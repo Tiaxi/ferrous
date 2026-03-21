@@ -317,7 +317,7 @@ signals:
     void precomputedSpectrogramChunkReady(
         const QByteArray &data, int bins, int channelCount, int columns,
         int startIndex, int totalEstimate, int sampleRate, int hopSize,
-        float coverage, bool complete, quint64 trackToken);
+        float coverage, bool complete, bool bufferReset, quint64 trackToken);
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();
@@ -518,7 +518,7 @@ private:
     int m_spectrogramViewMode{0};
     int m_spectrogramDisplayMode{0};
     int m_viewerFullscreenMode{0};
-    double m_dbRange{90.0};
+    double m_dbRange{132.0};
     bool m_logScale{false};
     int m_repeatMode{0};
     bool m_shuffleEnabled{false};

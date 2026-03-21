@@ -4147,8 +4147,9 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [30..32] u16  hop_size
     // [32..36] f32  coverage_seconds
     // [36]     u8   complete
-    // [37..]   column_data
-    constexpr int kHeaderLen = 37;
+    // [37]     u8   buffer_reset
+    // [38..]   column_data
+    constexpr int kHeaderLen = 38;
     if (raw.size() < kHeaderLen) {
         return;
     }
@@ -4190,6 +4191,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const int hopSize = readU16(base + 26);
     const float coverage = readF32(base + 28);
     const bool complete = d[base + 32] != 0;
+    const bool bufferReset = d[base + 33] != 0;
 
     const int dataOffset = kHeaderLen;
     const int expectedDataLen = columns * channelCount * bins;
@@ -4198,7 +4200,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     emit precomputedSpectrogramChunkReady(
         columnData, bins, channelCount, columns,
         startIndex, totalEstimate, sampleRate, hopSize,
-        coverage, complete, trackToken);
+        coverage, complete, bufferReset, trackToken);
 }
 
 void BridgeClient::scheduleSnapshotChanged() {

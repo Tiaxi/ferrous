@@ -29,17 +29,8 @@ constexpr qint64 kSeekTraceWindowMs = 1800;
 constexpr qint64 kSmoothnessWindowMs = 2000;
 constexpr qint64 kSmoothnessIdleMs = 450;
 #endif
-const QColor kBackgroundColor(0x0b, 0x0b, 0x0f);
+const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
-constexpr std::array<std::array<int, 3>, 7> kGradientColors16{{
-    {{65535, 65535, 65535}},
-    {{65535, 65535, 65535}},
-    {{65535, 63479, 0}},
-    {{62194, 13878, 0}},
-    {{45232, 0, 23387}},
-    {{12336, 0, 29555}},
-    {{1027, 256, 18247}},
-}};
 
 double linearInterpolate(double y1, double y2, double mu) {
     return y1 * (1.0 - mu) + y2 * mu;
@@ -198,7 +189,7 @@ double SpectrogramItem::dbRange() const {
 
 void SpectrogramItem::setDbRange(double value) {
     QMutexLocker lock(&m_stateMutex);
-    const double clamped = std::clamp(value, 50.0, 120.0);
+    const double clamped = std::clamp(value, 50.0, 150.0);
     if (std::abs(m_dbRange - clamped) < 0.001) {
         return;
     }
@@ -313,53 +304,63 @@ void SpectrogramItem::setDisplayMode(int value) {
 void SpectrogramItem::feedPrecomputedChunk(
     const QByteArray &data, int bins, int channelIndex,
     int columns, int startIndex, int totalEstimate,
-    int sampleRate, int hopSize, bool complete,
-    quint64 trackToken) {
+    int sampleRate, int hopSize, bool /*complete*/,
+    bool bufferReset, quint64 trackToken) {
     QMutexLocker lock(&m_stateMutex);
 
     std::fprintf(stderr,
-        "[Qt-feed] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d atlasCols=%d\n",
+        "[Qt-feed] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d reset=%d\n",
         channelIndex, columns, startIndex, totalEstimate, bins,
         sampleRate, hopSize, static_cast<unsigned long long>(trackToken),
-        m_precomputedReady ? 1 : 0, m_precomputedTotalColumns);
+        m_precomputedReady ? 1 : 0, bufferReset ? 1 : 0);
 
     if (totalEstimate <= 0 || bins <= 0) {
         return;
     }
 
     // Determine the number of channels from the packed data size.
-    // Packed data: columns × channelCount × bins bytes.
+    // For metadata-only chunks (columns==0, e.g. buffer_reset), channelCount
+    // is unknown from data alone, so we allow any channelIndex through for
+    // the epoch/reset handling below, and guard only the data-writing section.
     const int totalDataSize = data.size();
     const int channelCount = (columns > 0 && bins > 0)
         ? std::max(1, totalDataSize / (columns * bins))
-        : 1;
+        : 0;  // 0 = unknown, don't gate on it
 
-    if (channelIndex < 0 || channelIndex >= channelCount) {
+    if (channelCount > 0 && (channelIndex < 0 || channelIndex >= channelCount)) {
         return;
     }
 
-    // Always track the latest token.
+    // Handle buffer_reset: clear ring buffer and update epoch.
+    // m_trackEpochSeq maps track column 0 to a ring sequence number.
+    // Since the worker may start decoding from an arbitrary column
+    // (e.g. after a seek to column startIndex), the epoch must offset
+    // so that  epoch + startIndex == m_ringWriteSeq  (where new data
+    // will be written).
+    if (bufferReset) {
+        m_ringOldestSeq = m_ringWriteSeq;  // effectively empty
+        m_trackEpochSeq = m_ringWriteSeq
+            - static_cast<qint64>(startIndex);
+        m_precomputedLastRightCol = -1;
+        // Force ring buffer reallocation on next data chunk so that
+        // the byte-size matches the (potentially new) bins_per_column
+        // (e.g. after FFT size change: 257 bins → 2049 bins).
+        m_ringBuffer.clear();
+        m_ringCapacity = 0;
+    } else if (trackToken != 0 && trackToken != m_precomputedTrackToken) {
+        // Gapless transition: track token changed without buffer_reset.
+        // Keep existing ring buffer data, just update the epoch.
+        m_trackEpochSeq = m_ringWriteSeq;
+    }
+
     if (trackToken != 0) {
         m_precomputedTrackToken = trackToken;
     }
 
-    // Re-allocate atlas when dimensions change.  Always clear coverage
-    // to avoid showing stale data from the previous track.
-    if (m_precomputedTotalColumns != totalEstimate
-        || m_precomputedBinsPerColumn != bins) {
-        const qint64 atlasSize = static_cast<qint64>(totalEstimate) * bins;
-        m_precomputedAtlas.resize(static_cast<int>(atlasSize));
-        m_precomputedAtlas.fill(0);
-        m_precomputedCoverage.resize(totalEstimate);
-        m_precomputedCoverage.fill(false);
-        m_precomputedTotalColumns = totalEstimate;
-        m_precomputedBinsPerColumn = bins;
-        m_precomputedComplete = false;
-        m_precomputedLastRightCol = -1;
-    }
+    m_precomputedBinsPerColumn = bins;
+    m_precomputedTotalColumnsEstimate = totalEstimate;
 
     // Only update rate/hop from chunks that carry actual column data.
-    // "Complete" signal chunks have columns=0 and may carry stale hop values.
     if (columns > 0) {
         if (sampleRate > 0) {
             m_precomputedSampleRateHz = sampleRate;
@@ -369,37 +370,94 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
     }
 
-    // Extract this channel's bins from the packed multi-channel data.
-    // Packed order: [col0_ch0_bins col0_ch1_bins col1_ch0_bins col1_ch1_bins ...]
-    const int stridePerColumn = channelCount * bins;
-    const int channelOffset = channelIndex * bins;
-
-    if (startIndex >= 0) {
-        const int endIndex = startIndex + columns;
-        const int clampedEnd = std::min(endIndex, m_precomputedTotalColumns);
-        const int validColumns = clampedEnd - startIndex;
-        const auto *srcData = reinterpret_cast<const char *>(data.constData());
-        for (int col = 0; col < validColumns; ++col) {
-            const int srcOff = col * stridePerColumn + channelOffset;
-            const int dstOff = (startIndex + col) * bins;
-            if (srcOff + bins <= totalDataSize && dstOff + bins <= m_precomputedAtlas.size()) {
-                memcpy(m_precomputedAtlas.data() + dstOff, srcData + srcOff, bins);
-            }
+    // Dynamically size the ring buffer based on widget width and display mode.
+    if (columns > 0 && bins > 0) {
+        const double colsPerSecond =
+            static_cast<double>(m_precomputedSampleRateHz)
+            / static_cast<double>(m_precomputedHopSize);
+        const int screenWidth = std::max(static_cast<int>(width()), 1920);
+        const int extraSeconds = 10;
+        int neededCapacity;
+        if (m_displayMode == 1) {
+            // Centered: need history + future visible half + margin.
+            neededCapacity = screenWidth
+                + screenWidth / 2
+                + static_cast<int>(extraSeconds * colsPerSecond);
+        } else {
+            // Rolling: need screen width of history + lookahead.
+            neededCapacity = screenWidth
+                + static_cast<int>(extraSeconds * colsPerSecond);
         }
-        for (int i = startIndex; i < clampedEnd; ++i) {
-            m_precomputedCoverage.setBit(i);
+        // Add some margin.
+        neededCapacity = std::max(neededCapacity, 1024);
+
+        // Check if we need to (re)allocate: either more columns, or
+        // bins_per_column changed (e.g. FFT size switch).
+        const qint64 neededBytes =
+            static_cast<qint64>(neededCapacity) * bins;
+        const bool mustRealloc =
+            neededBytes > m_ringBuffer.size()
+            || neededCapacity > m_ringCapacity;
+
+        if (mustRealloc) {
+            QByteArray newBuf(static_cast<int>(neededBytes), '\0');
+
+            // Copy existing valid columns — but only if the bin count
+            // hasn't changed (layout is incompatible otherwise).
+            const bool binsMatch =
+                m_ringCapacity > 0
+                && m_ringBuffer.size()
+                    == static_cast<qint64>(m_ringCapacity) * bins;
+            if (binsMatch && m_ringWriteSeq > m_ringOldestSeq) {
+                const qint64 validCount =
+                    std::min(m_ringWriteSeq - m_ringOldestSeq,
+                             static_cast<qint64>(m_ringCapacity));
+                for (qint64 seq = m_ringWriteSeq - validCount;
+                     seq < m_ringWriteSeq; ++seq) {
+                    const int oldSlot =
+                        static_cast<int>(seq % m_ringCapacity);
+                    const int newSlot =
+                        static_cast<int>(seq % neededCapacity);
+                    memcpy(newBuf.data() + newSlot * bins,
+                           m_ringBuffer.constData() + oldSlot * bins,
+                           static_cast<size_t>(bins));
+                }
+            }
+            m_ringBuffer = std::move(newBuf);
+            m_ringCapacity = neededCapacity;
         }
     }
 
-    if (complete) {
-        m_precomputedComplete = true;
+    // Write columns into the ring buffer.
+    if (columns > 0 && m_ringCapacity > 0) {
+        const int stridePerColumn = channelCount * bins;
+        const int channelOffset = channelIndex * bins;
+        const auto *srcData =
+            reinterpret_cast<const char *>(data.constData());
+
+        for (int col = 0; col < columns; ++col) {
+            const int srcOff = col * stridePerColumn + channelOffset;
+            if (srcOff + bins > totalDataSize) {
+                break;
+            }
+            const int slot =
+                static_cast<int>(m_ringWriteSeq % m_ringCapacity);
+            memcpy(m_ringBuffer.data() + slot * bins,
+                   srcData + srcOff,
+                   static_cast<size_t>(bins));
+            m_ringWriteSeq++;
+            // Evict oldest if full.
+            if (m_ringWriteSeq - m_ringOldestSeq > m_ringCapacity) {
+                m_ringOldestSeq = m_ringWriteSeq - m_ringCapacity;
+            }
+        }
     }
 
     const bool wasReady = m_precomputedReady;
-    m_precomputedReady = m_precomputedTotalColumns > 0 && m_precomputedBinsPerColumn > 0;
+    m_precomputedReady =
+        m_precomputedTotalColumnsEstimate > 0
+        && m_precomputedBinsPerColumn > 0;
 
-    // Don't call invalidateCanvas() — the atlas is separate from the canvas.
-    // Just force a repaint so the canvas is rebuilt from the atlas on the next frame.
     m_precomputedLastRightCol = -1;
 
     if (m_precomputedReady && !wasReady) {
@@ -409,14 +467,16 @@ void SpectrogramItem::feedPrecomputedChunk(
 }
 
 void SpectrogramItem::clearPrecomputed() {
-    std::fprintf(stderr, "[Qt-clearPrecomputed] totalCols=%d ready=%d\n",
-        m_precomputedTotalColumns, m_precomputedReady ? 1 : 0);
+    std::fprintf(stderr, "[Qt-clearPrecomputed] ringCap=%d ready=%d\n",
+        m_ringCapacity, m_precomputedReady ? 1 : 0);
     QMutexLocker lock(&m_stateMutex);
-    m_precomputedAtlas.clear();
-    m_precomputedCoverage.clear();
+    m_ringBuffer.clear();
+    m_ringCapacity = 0;
+    m_ringOldestSeq = 0;
+    m_ringWriteSeq = 0;
+    m_trackEpochSeq = 0;
     m_precomputedBinsPerColumn = 0;
-    m_precomputedTotalColumns = 0;
-    m_precomputedComplete = false;
+    m_precomputedTotalColumnsEstimate = 0;
     m_precomputedLastRightCol = -1;
     m_precomputedTrackToken = 0;
     const bool wasReady = m_precomputedReady;
@@ -640,29 +700,26 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         QMutexLocker lock(&m_stateMutex);
         const bool usePrecomputed = m_precomputedReady
             && m_precomputedBinsPerColumn > 0
-            && m_precomputedTotalColumns > 0;
+            && m_precomputedTotalColumnsEstimate > 0;
 
         // Debug: log precomputed state periodically (per-instance).
         {
             m_debugPaintCounter++;
             if (m_debugPaintCounter % 120 == 1) {
-                int coveredCount = 0;
-                for (int i = 0; i < m_precomputedCoverage.size(); ++i) {
-                    if (m_precomputedCoverage.testBit(i)) ++coveredCount;
-                }
+                const qint64 validCount = m_ringWriteSeq - m_ringOldestSeq;
                 std::fprintf(stderr,
-                    "[Qt-paint@%p] usePre=%d ready=%d bins=%d totalCols=%d pos=%.2f sr=%d hop=%d covered=%d/%d streaming=%d\n",
+                    "[Qt-paint@%p] usePre=%d ready=%d bins=%d totalEst=%d pos=%.2f sr=%d hop=%d ringValid=%lld/%d streaming=%d\n",
                     static_cast<const void *>(this),
                     usePrecomputed ? 1 : 0, m_precomputedReady ? 1 : 0,
-                    m_precomputedBinsPerColumn, m_precomputedTotalColumns,
+                    m_precomputedBinsPerColumn, m_precomputedTotalColumnsEstimate,
                     m_positionSeconds, m_precomputedSampleRateHz, m_precomputedHopSize,
-                    coveredCount, static_cast<int>(m_precomputedCoverage.size()),
+                    static_cast<long long>(validCount), m_ringCapacity,
                     static_cast<int>(m_columns.size()));
             }
         }
 
         if (usePrecomputed) {
-            // Position-indexed rendering from pre-computed atlas.
+            // Position-indexed rendering from ring buffer.
             // Ensure mapping is built for the precomputed bins.
             if (m_binsPerColumn != m_precomputedBinsPerColumn) {
                 m_binsPerColumn = m_precomputedBinsPerColumn;
@@ -678,11 +735,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // Centered mode: playhead at center, data on both sides.
                 const int halfWidth = w / 2;
                 leftCol = std::max(0, nowCol - halfWidth);
-                rightCol = std::min(m_precomputedTotalColumns - 1, nowCol + halfWidth);
+                rightCol = std::min(m_precomputedTotalColumnsEstimate - 1, nowCol + halfWidth);
                 playheadPixel = nowCol - leftCol;
             } else {
                 // Rolling mode: right edge is "now".
-                rightCol = std::min(nowCol, m_precomputedTotalColumns - 1);
+                rightCol = std::min(nowCol, m_precomputedTotalColumnsEstimate - 1);
                 leftCol = std::max(0, rightCol - w + 1);
                 playheadPixel = -1;
             }
@@ -713,9 +770,45 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const int canvasW = m_canvas.width();
                 const int canvasH = m_canvas.height();
                 const int bins = m_precomputedBinsPerColumn;
-                const auto *atlasData = reinterpret_cast<const quint8 *>(m_precomputedAtlas.constData());
+                const auto *ringData = reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
                 const QRgb bgColor = kBackgroundColor.rgba();
                 const double gradScale = static_cast<double>(kGradientTableSize) / 255.0;
+
+                // Precompute dB-range remap LUT.
+                // Ring buffer stores u8 quantized at a fixed 132 dB range,
+                // normalised for FFT size + Blackman-Harris window energy.
+                // Re-map to the user's current dB display range, then apply
+                // variable gamma correction.  pow(x, 2−x) smoothly varies
+                // the effective gamma from 2.0 at silence to 1.0 at full
+                // scale.  This strongly suppresses the noise floor while
+                // keeping the loud end nearly linear, giving maximum
+                // contrast between quiet and loud content.
+                static constexpr double kBakedDbRange = 132.0;
+                // BH4 peak power: 20·log₁₀(N·a₀/2), a₀ = 0.35875.
+                const int fftSize = (bins - 1) * 2;
+                const double peakDb = 20.0
+                    * std::log10(std::max(1.0,
+                        static_cast<double>(fftSize) * 0.35875 / 2.0));
+                const double userDbRange = std::clamp(m_dbRange, 50.0, 150.0);
+                quint8 dbRemap[256];
+                for (int i = 0; i < 256; ++i) {
+                    const double db = (static_cast<double>(i) / 255.0)
+                        * kBakedDbRange - kBakedDbRange + peakDb;
+                    const double xdb = std::clamp(
+                        db + userDbRange - peakDb, 0.0, userDbRange);
+                    const double normalized = xdb / userDbRange;
+                    // Variable gamma: pow(x, 2 − B·x), B=1.3.
+                    // At x≈0 the exponent is 2.0 (strong noise suppression).
+                    // At x=1  the exponent is 0.7 (above-linear boost for loud).
+                    // Crossover at x≈0.77: below = suppressed, above = boosted.
+                    static constexpr double kB = 1.3;
+                    const double gamma = (normalized > 0.0)
+                        ? std::pow(normalized, 2.0 - kB * normalized)
+                        : 0.0;
+                    const double remapped = gamma * 255.0;
+                    dbRemap[i] = static_cast<quint8>(std::clamp(
+                        static_cast<int>(std::lround(remapped)), 0, 255));
+                }
 
                 // In rolling mode, right-align the visible content.
                 const int pixelOffset = (m_displayMode == 0)
@@ -733,26 +826,49 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 for (int i = 0; i < visibleCols && (pixelOffset + i) < canvasW; ++i) {
                     const int pixelX = pixelOffset + i;
                     const int colIdx = leftCol + i;
-                    if (colIdx < 0 || colIdx >= m_precomputedTotalColumns
-                        || !m_precomputedCoverage.testBit(colIdx)) {
+                    const qint64 absSeq = m_trackEpochSeq + colIdx;
+                    if (colIdx < 0 || colIdx >= m_precomputedTotalColumnsEstimate
+                        || absSeq < m_ringOldestSeq || absSeq >= m_ringWriteSeq) {
                         for (int y = 0; y < canvasH; ++y) {
                             reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] = bgColor;
                         }
                         continue;
                     }
-                    const int atlasOffset = colIdx * bins;
+                    const int slot = static_cast<int>(absSeq % m_ringCapacity);
+                    const int baseOff = slot * bins;
+                    const int mapSize = static_cast<int>(m_iToBin.size());
                     for (int y = 0; y < canvasH; ++y) {
                         // Flip y-axis: y=0 is top (high freq), y=height-1 is bottom (low freq).
-                        const int mappingIdx = canvasH - 1 - y;
-                        const int binIndex = (mappingIdx >= 0 && mappingIdx < static_cast<int>(m_iToBin.size()))
-                            ? m_iToBin[static_cast<size_t>(mappingIdx)]
-                            : 0;
-                        const quint8 rawIntensity = (binIndex >= 0 && binIndex < bins)
-                            ? atlasData[atlasOffset + binIndex]
-                            : 0;
-                        // Invert palette: match streaming path (high intensity → low index → bright).
+                        const int mi = canvasH - 1 - y;
+                        // Compute the bin range this pixel represents,
+                        // matching the streaming path's max-over-range
+                        // behaviour (spectrogramGetValue).
+                        int binLo, binHi;
+                        if (mi >= 0 && mi < mapSize) {
+                            const int bc = m_iToBin[static_cast<size_t>(mi)];
+                            const int bp = (mi > 0)
+                                ? m_iToBin[static_cast<size_t>(mi - 1)] : bc;
+                            const int bn = (mi + 1 < mapSize)
+                                ? m_iToBin[static_cast<size_t>(mi + 1)] : bc;
+                            binLo = bp + (bc - bp) / 2;
+                            binHi = bc + (bn - bc) / 2;
+                            if (binLo == bp && bp != bc) binLo = bc;
+                            if (binHi == bn && bn != bc) binHi = bc;
+                            if (binLo > binHi) std::swap(binLo, binHi);
+                            binLo = std::clamp(binLo, 0, bins - 1);
+                            binHi = std::clamp(binHi, 0, bins - 1);
+                        } else {
+                            binLo = binHi = 0;
+                        }
+                        quint8 rawMax = 0;
+                        for (int b = binLo; b <= binHi; ++b) {
+                            const quint8 v = ringData[baseOff + b];
+                            if (v > rawMax) rawMax = v;
+                        }
+                        const quint8 intensity = dbRemap[rawMax];
+                        // Invert palette: match streaming path (high intensity -> low index -> bright).
                         int paletteIndex = kGradientTableSize
-                            - static_cast<int>(std::lround(gradScale * static_cast<double>(rawIntensity)));
+                            - static_cast<int>(std::lround(gradScale * static_cast<double>(intensity)));
                         paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
                         reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[pixelX] =
                             m_palette32[static_cast<size_t>(paletteIndex)];
@@ -1077,32 +1193,50 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
 }
 
 void SpectrogramItem::rebuildPalette() {
-    constexpr double scale = 255.0 / 65535.0;
-    constexpr int numSegments = static_cast<int>(kGradientColors16.size()) - 1;
+    // SoX spectrogram default palette (from spectrogram.c, perm=0).
+    // Procedural sin/cos curves produce:
+    //   Black → Dark Blue → Purple → Magenta → Red → Orange → Yellow → White
+    // This matches Adobe Audition 3.0's spectral display gradient.
+    //
+    // Our palette array: index 0 = brightest (x=1), index N-1 = darkest (x=0).
+
     for (int i = 0; i < kGradientTableSize; ++i) {
-        const double position = static_cast<double>(i) / static_cast<double>(kGradientTableSize);
-        const double m = static_cast<double>(numSegments) * position;
-        const int n = std::clamp(static_cast<int>(std::floor(m)), 0, numSegments);
-        const double f = std::clamp(m - static_cast<double>(n), 0.0, 1.0);
-        const int n1 = std::min(numSegments, n + 1);
+        // x: 1.0 at index 0 (loud/bright), 0.0 at last index (quiet/dark).
+        const double x = 1.0
+            - static_cast<double>(i) / static_cast<double>(kGradientTableSize - 1);
 
-        const int r = static_cast<int>(
-            (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][0]) * scale)
-            + f * ((static_cast<double>(kGradientColors16[static_cast<size_t>(n1)][0]) * scale)
-                   - (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][0]) * scale)));
-        const int g = static_cast<int>(
-            (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][1]) * scale)
-            + f * ((static_cast<double>(kGradientColors16[static_cast<size_t>(n1)][1]) * scale)
-                   - (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][1]) * scale)));
-        const int b = static_cast<int>(
-            (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][2]) * scale)
-            + f * ((static_cast<double>(kGradientColors16[static_cast<size_t>(n1)][2]) * scale)
-                   - (static_cast<double>(kGradientColors16[static_cast<size_t>(n)][2]) * scale)));
+        // c0 (red): sin ramp from x=0.13 to x=0.73, then saturated.
+        double c0;
+        if (x < 0.13)
+            c0 = 0.0;
+        else if (x < 0.73)
+            c0 = std::sin((x - 0.13) / 0.60 * M_PI / 2.0);
+        else
+            c0 = 1.0;
 
+        // c1 (green): sin ramp from x=0.60 to x=0.91, then saturated.
+        double c1;
+        if (x < 0.60)
+            c1 = 0.0;
+        else if (x < 0.91)
+            c1 = std::sin((x - 0.60) / 0.31 * M_PI / 2.0);
+        else
+            c1 = 1.0;
+
+        // c2 (blue): half-sine from 0 to 0.60, gap, linear ramp 0.78-1.0.
+        double c2;
+        if (x < 0.60)
+            c2 = 0.5 * std::sin(x / 0.60 * M_PI);
+        else if (x < 0.78)
+            c2 = 0.0;
+        else
+            c2 = (x - 0.78) / 0.22;
+
+        // perm=0: R=c[0], G=c[1], B=c[2] (no channel swapping).
         m_palette32[static_cast<size_t>(i)] = qRgb(
-            std::clamp(r, 0, 255),
-            std::clamp(g, 0, 255),
-            std::clamp(b, 0, 255));
+            std::clamp(static_cast<int>(0.5 + 255.0 * c0), 0, 255),
+            std::clamp(static_cast<int>(0.5 + 255.0 * c1), 0, 255),
+            std::clamp(static_cast<int>(0.5 + 255.0 * c2), 0, 255));
     }
 }
 
@@ -1476,8 +1610,13 @@ std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) con
     std::vector<quint8> out;
     out.reserve(static_cast<size_t>(row.size()));
 
-    const double dbRange = std::clamp(m_dbRange, 50.0, 120.0);
+    const double dbRange = std::clamp(m_dbRange, 50.0, 150.0);
     const double dbScale = 10.0 / std::log(10.0);
+    // BH4 peak power normalisation: 20·log₁₀(N·a₀/2).
+    const int fftSize = (m_binsPerColumn > 1) ? (m_binsPerColumn - 1) * 2 : 2048;
+    const double peakDb = 20.0
+        * std::log10(std::max(1.0,
+            static_cast<double>(fftSize) * 0.35875 / 2.0));
 
     for (const QVariant &value : row) {
         const double v = value.toDouble();
@@ -1486,7 +1625,7 @@ std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) con
             idx = static_cast<int>(v);
         } else {
             const double db = v > 0.0 ? (dbScale * std::log(v)) : -200.0;
-            const double xdb = std::clamp(db + dbRange - 63.0, 0.0, dbRange);
+            const double xdb = std::clamp(db + dbRange - peakDb, 0.0, dbRange);
             idx = static_cast<int>(std::lround((xdb / dbRange) * 255.0));
         }
         out.push_back(static_cast<quint8>(std::clamp(idx, 0, 255)));

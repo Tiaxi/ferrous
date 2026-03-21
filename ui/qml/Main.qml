@@ -188,7 +188,7 @@ Kirigami.ApplicationWindow {
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
         property bool spectrogramReset: false
-        property real dbRange: 90
+        property real dbRange: 132
         property int fftSize: 8192
         property int spectrogramViewMode: 0
         property int spectrogramDisplayMode: 0

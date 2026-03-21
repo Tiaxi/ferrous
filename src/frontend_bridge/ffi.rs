@@ -1917,7 +1917,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
                         .iter()
                         .map(|row| {
                             row.iter()
-                                .map(|v| to_u8_spectrum(*v, s.settings.db_range))
+                                .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size as usize))
                                 .collect::<Vec<u8>>()
                         })
                         .collect(),
@@ -1940,7 +1940,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
                         .iter()
                         .map(|row| {
                             row.iter()
-                                .map(|v| to_u8_spectrum(*v, s.settings.db_range))
+                                .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size as usize))
                                 .collect::<Vec<u8>>()
                         })
                         .collect(),
@@ -1977,14 +1977,16 @@ fn to_u8_norm(v: f32) -> u8 {
     round_clamped_to_u8(f64::from(clamped) * 255.0)
 }
 
-fn to_u8_spectrum(v: f32, db_range: f32) -> u8 {
-    let range = f64::from(db_range.clamp(50.0, 120.0));
+fn to_u8_spectrum(v: f32, db_range: f32, fft_size: usize) -> u8 {
+    let range = f64::from(db_range.clamp(50.0, 150.0));
     let db = if v > 0.0 {
         (10.0 / std::f64::consts::LN_10) * f64::from(v).ln()
     } else {
         -200.0
     };
-    let xdb = (db + range - 63.0).clamp(0.0, range);
+    // Normalise for FFT size + BH4 window energy: 20·log₁₀(N·a₀/2).
+    let peak_db = 20.0 * (fft_size as f64 * 0.35875 / 2.0).log10();
+    let xdb = (db + range - peak_db).clamp(0.0, range);
     round_clamped_to_u8((xdb / range) * 255.0)
 }
 
@@ -2111,10 +2113,11 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [26..28] u16  hop_size
 /// [28..32] f32  coverage_seconds
 /// [32]     u8   complete (0 or 1)
-/// [33..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [33]     u8   buffer_reset (0 or 1)
+/// [34..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 33;
+    let header_len = 34;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -2132,6 +2135,7 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.extend_from_slice(&chunk.hop_size.to_le_bytes());
     out.extend_from_slice(&chunk.coverage_seconds.to_le_bytes());
     out.push(u8::from(chunk.complete));
+    out.push(u8::from(chunk.buffer_reset));
     out.extend_from_slice(&chunk.columns_u8);
     out
 }
@@ -2245,7 +2249,7 @@ mod tests {
                 fft_size: 2048,
                 spectrogram_view_mode: SpectrogramViewMode::Downmix,
                 viewer_fullscreen_mode: ViewerFullscreenMode::WholeScreen,
-                db_range: 90.0,
+                db_range: 132.0,
                 display: super::super::BridgeDisplaySettings {
                     log_scale: false,
                     show_fps: false,

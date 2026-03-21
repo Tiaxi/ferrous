@@ -119,7 +119,7 @@ ScrollView {
                         id: dbRangeSlider
                         Layout.fillWidth: true
                         from: 50
-                        to: 120
+                        to: 150
                         stepSize: 1
                         value: root.uiBridge.dbRange
                         onMoved: root.uiBridge.setDbRange(value)

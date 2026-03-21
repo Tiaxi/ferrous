@@ -25,7 +25,7 @@ enum CliCommandOutcome {
 fn run_interactive_cli(bridge: &FrontendBridgeHandle) {
     println!("Ferrous UI bootstrap");
     println!(
-        "Commands: play, pause, stop, next, prev, vol <0..1>, seek <secs>, dbrange <50..120>, log <0|1>, repeat <0|1|2>, shuffle <0|1>, snap, quit"
+        "Commands: play, pause, stop, next, prev, vol <0..1>, seek <secs>, dbrange <50..150>, log <0|1>, repeat <0|1|2>, shuffle <0|1>, snap, quit"
     );
 
     loop {

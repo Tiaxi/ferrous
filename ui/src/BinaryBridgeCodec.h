@@ -155,7 +155,7 @@ struct DecodedSettings {
     int fftSize{8192};
     int spectrogramViewMode{0};
     int viewerFullscreenMode{0};
-    float dbRange{90.0f};
+    float dbRange{132.0f};
     bool logScale{false};
     bool showFps{false};
     int librarySortMode{0};
