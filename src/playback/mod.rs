@@ -1452,6 +1452,35 @@ mod backend {
         }
 
         fn seek(&mut self, pos: Duration) {
+            // If about-to-finish has already advanced the queue past what the
+            // UI considers the current track, revert the queue and reset the
+            // pipeline so the seek applies to the correct (displayed) track.
+            // Without this, seeking near the end of a track can land on the
+            // next track's audio while the UI still shows the previous one.
+            if self.cancel_pending_gapless_advance() {
+                if let Some(ref path) = self.snapshot.current.clone() {
+                    if let Some(uri) = file_uri(path) {
+                        self.soft_mute();
+                        let _ = self.playbin.set_state(gst::State::Null);
+                        let _ = self.playbin.set_state(gst::State::Ready);
+                        self.playbin.set_property("uri", &uri);
+                        let was_playing = self.snapshot.state == PlaybackState::Playing;
+                        if was_playing {
+                            let _ = self.playbin.set_state(gst::State::Playing);
+                            self.playbin.set_property("volume", 0.0_f64);
+                            self.startup_gain_ramp = true;
+                            self.startup_ramp_hold_until = if is_raw_surround_file(path) {
+                                Some(Instant::now() + Duration::from_millis(80))
+                            } else {
+                                None
+                            };
+                        } else if self.snapshot.state == PlaybackState::Paused {
+                            let _ = self.playbin.set_state(gst::State::Paused);
+                        }
+                    }
+                }
+            }
+
             let nanos = u64::try_from(pos.as_nanos().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
             let target = gst::ClockTime::from_nseconds(nanos);
             let seek_flags = seek_flags_for_path(self.snapshot.current.as_deref());
@@ -1464,6 +1493,35 @@ mod backend {
             let _ = self.event_tx.send(PlaybackEvent::Seeked {
                 position: self.snapshot.position,
             });
+        }
+
+        /// If the about-to-finish handler has advanced the queue past the
+        /// track that the snapshot (UI) considers current, revert the queue
+        /// index and clear all pending gapless/EOS state.  Returns `true`
+        /// when the pipeline needs a full reset to cancel the pre-rolled
+        /// next stream.
+        fn cancel_pending_gapless_advance(&mut self) -> bool {
+            let diverged = if let Ok(mut state) = self.queue_state.lock() {
+                let queue_path = state.current();
+                let snapshot_path = self.snapshot.current.as_ref();
+                match (queue_path, snapshot_path) {
+                    (Some(qp), Some(sp)) if qp != *sp => {
+                        if let Some(idx) = self.snapshot.current_queue_index {
+                            state.set_current(idx);
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if diverged {
+                self.pending_eos_track_switch
+                    .store(false, Ordering::Release);
+                self.pending_gapless_duration = None;
+            }
+            diverged
         }
 
         fn set_volume(&mut self, volume: f32) {
@@ -2751,6 +2809,61 @@ mod backend {
             queue.set_shuffle_enabled(true);
             assert_eq!(queue.next_natural().as_ref(), Some(&b));
             assert!(queue.next_natural().is_none());
+        }
+
+        /// When about-to-finish has advanced the queue (e.g. from A→B) but
+        /// the snapshot still thinks A is current, seeking with a mid-track
+        /// position must NOT trigger a false gapless handoff.  Reverting
+        /// the queue index should make handoff detection silent again.
+        #[test]
+        fn seek_after_about_to_finish_reverts_queue_and_suppresses_handoff() {
+            let a = PathBuf::from("/tmp/seek_revert_a.flac");
+            let b = PathBuf::from("/tmp/seek_revert_b.flac");
+            let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
+            {
+                let mut q = queue_state.lock().unwrap();
+                q.set_queue(vec![a.clone(), b.clone()]);
+            }
+
+            // Simulate about-to-finish advancing the queue from A to B.
+            {
+                let mut q = queue_state.lock().unwrap();
+                let next = q.next_natural();
+                assert_eq!(next.as_ref(), Some(&b));
+                assert_eq!(q.current().as_ref(), Some(&b));
+            }
+
+            // Snapshot still thinks A is current (UI hasn't caught up).
+            let mut snapshot = PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                position: Duration::from_secs(30), // mid-track seek target
+                duration: Duration::from_secs(180),
+                current: Some(a.clone()),
+                current_queue_index: Some(0),
+                ..PlaybackSnapshot::default()
+            };
+
+            // With position > 2s, handoff detection should NOT fire even
+            // though queue diverged — this is the bug scenario.
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot);
+            assert_eq!(emitted, None, "handoff must not fire at mid-track position");
+            assert_eq!(
+                snapshot.current.as_ref(),
+                Some(&a),
+                "snapshot should remain on track A"
+            );
+
+            // Revert queue to match the snapshot (what cancel_pending_gapless_advance does).
+            {
+                let mut q = queue_state.lock().unwrap();
+                q.set_current(0);
+                assert_eq!(q.current().as_ref(), Some(&a));
+            }
+
+            // After revert, handoff detection should still be silent
+            // (queue and snapshot agree on track A).
+            let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot);
+            assert_eq!(emitted, None, "handoff must not fire after queue revert");
         }
     }
 
