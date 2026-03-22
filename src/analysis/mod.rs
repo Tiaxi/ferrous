@@ -1378,8 +1378,36 @@ fn session_decode_loop(
         }
     }
 
-    // EOF reached.
-    None
+    // EOF reached — park and keep handling commands so backward seeks
+    // still work after the decoder has consumed the entire file.
+    loop {
+        let session_gen = session.gen;
+        if generation.load(Ordering::Relaxed) != session_gen {
+            return None;
+        }
+        match cmd_rx.recv() {
+            Ok(cmd) => match handle_single_command(session, cmd) {
+                SessionAction::Continue => {}
+                SessionAction::Stop => return Some(SpectrogramWorkerCommand::Stop),
+                SessionAction::NewSession(cmd) => return Some(cmd),
+                SessionAction::SeekRequired { position_seconds } => {
+                    return handle_session_seek(
+                        session,
+                        position_seconds,
+                        format,
+                        audio_decoder,
+                        track_id,
+                        warmup_remaining,
+                        cmd_rx,
+                        event_tx,
+                        active_token,
+                        generation,
+                    );
+                }
+            },
+            Err(_) => return None,
+        }
+    }
 }
 
 fn process_session_commands(
