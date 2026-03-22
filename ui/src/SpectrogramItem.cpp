@@ -477,6 +477,12 @@ void SpectrogramItem::feedPrecomputedChunk(
         // Gapless transition: preserve the rolling history, but remap the
         // new track's timeline onto the current write head so the next
         // track appends seamlessly instead of flashing blank.
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        const auto transitionFeedStart = Clock::now();
+        const qint64 preRingWriteSeq = m_ringWriteSeq;
+        const qint64 preRollingEpoch = m_rollingEpoch;
+        const double preAnchor = m_positionAnchorSeconds;
+#endif
         if (m_displayMode == 0) {
             m_rollingEpoch = m_ringWriteSeq - static_cast<qint64>(startIndex);
         }
@@ -490,6 +496,27 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
         invalidateCanvas();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        m_debugLastTransitionFeedAt = transitionFeedStart;
+        {
+            const qint64 validCount = std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq);
+            FERROUS_SPECTROGRAM_LOGF(
+                stderr,
+                "[Qt-gapless-transition] chIdx=%d oldTok=%llu newTok=%llu startIdx=%d "
+                "ringWriteSeq=%lld rollingEpoch=%lld->%lld anchor=%.3f->%.3f "
+                "ringValid=%lld/%d totalEst=%d\n",
+                channelIndex,
+                static_cast<unsigned long long>(m_precomputedTrackToken),
+                static_cast<unsigned long long>(trackToken),
+                startIndex,
+                static_cast<long long>(preRingWriteSeq),
+                static_cast<long long>(preRollingEpoch),
+                static_cast<long long>(m_rollingEpoch),
+                preAnchor, m_positionAnchorSeconds,
+                static_cast<long long>(validCount), m_ringCapacity,
+                m_precomputedTotalColumnsEstimate);
+        }
+#endif
     }
 
     if (trackToken != 0 && !(bufferReset && columns <= 0)) {
@@ -979,6 +1006,38 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         const bool usePrecomputed = m_precomputedReady
             && m_precomputedBinsPerColumn > 0
             && m_precomputedTotalColumnsEstimate > 0;
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        // Detect significant position jumps between paint frames — the
+        // exact moment a gapless transition becomes visible to the user.
+        {
+            const double posDelta = renderPositionSeconds - m_debugPrevRenderPos;
+            const bool tokenChanged = m_precomputedTrackToken != m_debugPrevTrackToken
+                && m_debugPrevTrackToken != 0;
+            if (tokenChanged || posDelta < -1.0 || posDelta > 2.0) {
+                const qint64 validCount = std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq);
+                const auto msSinceTransitionFeed =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        renderNow - m_debugLastTransitionFeedAt).count();
+                FERROUS_SPECTROGRAM_LOGF(
+                    stderr,
+                    "[Qt-transition-frame@%p] prevPos=%.3f pos=%.3f delta=%.3f "
+                    "prevTok=%llu tok=%llu ringValid=%lld/%d totalEst=%d "
+                    "anchor=%.3f usePre=%d usSinceFeed=%lld\n",
+                    static_cast<const void *>(this),
+                    m_debugPrevRenderPos, renderPositionSeconds, posDelta,
+                    static_cast<unsigned long long>(m_debugPrevTrackToken),
+                    static_cast<unsigned long long>(m_precomputedTrackToken),
+                    static_cast<long long>(validCount), m_ringCapacity,
+                    m_precomputedTotalColumnsEstimate,
+                    m_positionAnchorSeconds,
+                    usePrecomputed ? 1 : 0,
+                    static_cast<long long>(msSinceTransitionFeed));
+            }
+            m_debugPrevRenderPos = renderPositionSeconds;
+            m_debugPrevTrackToken = m_precomputedTrackToken;
+        }
+#endif
 
         // Debug: log precomputed state periodically (per-instance).
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

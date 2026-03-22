@@ -238,6 +238,10 @@ private:
 
     mutable QMutex m_stateMutex;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    double m_debugPrevRenderPos{0.0};
+    quint64 m_debugPrevTrackToken{0};
+    std::chrono::steady_clock::time_point m_debugLastTransitionFeedAt{};
+
     struct SmoothnessProfileState {
         bool active{false};
         bool incidentDetected{false};

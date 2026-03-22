@@ -437,6 +437,9 @@ impl AnalysisRuntimeState {
         track_token: u64,
         ctx: &AnalysisContext<'_>,
     ) {
+        #[cfg(feature = "profiling-logs")]
+        let _track_change_start = std::time::Instant::now();
+
         self.active_track_token = track_token;
         // For gapless transitions the PCM stream is continuous — the
         // playback module did NOT update the shared PCM tap atomic, so
@@ -480,6 +483,11 @@ impl AnalysisRuntimeState {
         let _ = ctx
             .waveform_job_tx
             .send(WaveformDecodeJob { track_token, path });
+
+        profile_eprintln!(
+            "[analysis] handle_track_change: completed in {:.2}ms",
+            _track_change_start.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 
     fn start_spectrogram_session(
@@ -1056,6 +1064,11 @@ fn run_spectrogram_session(
         profile_eprintln!("[spect-worker] failed to open file, aborting session");
         None
     })?;
+
+    profile_eprintln!(
+        "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns_estimate}",
+        _start.elapsed().as_secs_f64() * 1000.0,
+    );
 
     let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
     let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
