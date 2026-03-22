@@ -1686,7 +1686,12 @@ fn process_session_commands(
 
         let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
         if session.suppress_backward_seek {
-            session.suppress_backward_seek = false;
+            // Keep suppressing until a position update lands at or past
+            // session_start_column.  The offset-adjusted position can
+            // lag a few columns behind for multiple heartbeats.
+            if target_col >= session.session_start_column {
+                session.suppress_backward_seek = false;
+            }
         } else if target_col < session.session_start_column {
             // Backward seek needed.
             return Some(SessionAction::SeekRequired { position_seconds });
@@ -1711,7 +1716,9 @@ fn handle_single_command(
             session.target_position_seconds = position_seconds;
             let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
             if session.suppress_backward_seek {
-                session.suppress_backward_seek = false;
+                if target_col >= session.session_start_column {
+                    session.suppress_backward_seek = false;
+                }
             } else if target_col < session.session_start_column {
                 return SessionAction::SeekRequired { position_seconds };
             }

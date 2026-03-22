@@ -491,6 +491,14 @@ void SpectrogramItem::feedPrecomputedChunk(
             const auto now = Clock::now();
             m_gaplessPositionOffset =
                 currentRenderPositionSecondsLocked(now);
+            // Clear any jump hold that was activated by a
+            // setPositionSeconds(0.0) arriving before the offset was
+            // set.  Without this, the hold expires after 2 seconds
+            // and snaps the anchor to 0.0 in the wrong coordinate
+            // space, freezing the display.
+            if (m_positionJumpHoldActive) {
+                m_positionJumpHoldActive = false;
+            }
         }
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
