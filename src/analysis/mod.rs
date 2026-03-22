@@ -1045,16 +1045,17 @@ fn run_spectrogram_session(
     );
 
     let bins_per_column = (fft_size / 2) + 1;
-    let total_columns_estimate = estimate_total_columns(path).or({
-        profile_eprintln!("[spect-worker] estimate_total_columns returned None, aborting");
+    let (
+        mut format,
+        mut audio_decoder,
+        track_id,
+        native_sample_rate,
+        native_channels,
+        total_columns_estimate,
+    ) = open_symphonia_file(path).or_else(|| {
+        profile_eprintln!("[spect-worker] failed to open file, aborting session");
         None
     })?;
-
-    let (mut format, mut audio_decoder, track_id, native_sample_rate, native_channels) =
-        open_symphonia_file(path).or_else(|| {
-            profile_eprintln!("[spect-worker] failed to open file");
-            None
-        })?;
 
     let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
     let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
@@ -1731,6 +1732,10 @@ fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<
 
 /// Opens a Symphonia file and returns the format reader, decoder, and track info.
 #[allow(clippy::type_complexity)]
+/// Open an audio file with symphonia, returning the format reader,
+/// decoder, track info, and an estimated total column count.  A single
+/// file open + probe avoids the double-open latency that is visible on
+/// network-mounted storage during gapless transitions.
 fn open_symphonia_file(
     path: &Path,
 ) -> Option<(
@@ -1739,6 +1744,7 @@ fn open_symphonia_file(
     u32,
     u64,
     usize,
+    u32,
 )> {
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -1762,6 +1768,15 @@ fn open_symphonia_file(
         .codec_params
         .channels
         .map_or(2, |ch| ch.count().max(1));
+    let n_frames = track
+        .codec_params
+        .n_frames
+        .unwrap_or(native_sample_rate * 300);
+    let divisor = waveform_sample_rate_divisor(native_sample_rate);
+    let effective_frames = n_frames / divisor;
+    let total_columns =
+        u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
+            .unwrap_or(u32::MAX);
     let audio_decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .ok()?;
@@ -1771,6 +1786,7 @@ fn open_symphonia_file(
         track_id,
         native_sample_rate,
         native_channels,
+        total_columns,
     ))
 }
 
@@ -1827,30 +1843,6 @@ fn deinterleave_samples(
     }
 
     per_channel
-}
-
-fn estimate_total_columns(path: &Path) -> Option<u32> {
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
-    let format = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .ok()?;
-    let track = format.format.default_track()?;
-    let sample_rate = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
-    let n_frames = track.codec_params.n_frames.unwrap_or(sample_rate * 300);
-    let divisor = waveform_sample_rate_divisor(sample_rate);
-    let effective_frames = n_frames / divisor;
-    let total = effective_frames / (REFERENCE_HOP as u64);
-    Some(u32::try_from((total + 64).min(u64::from(u32::MAX))).unwrap_or(u32::MAX))
 }
 
 fn spawn_analysis_worker(
