@@ -296,7 +296,10 @@ double SpectrogramItem::positionSeconds() const {
 
 void SpectrogramItem::setPositionSeconds(double value) {
     using Clock = std::chrono::steady_clock;
-    const double clamped = std::max(0.0, value);
+    // Apply gapless offset: translates the new track's GStreamer
+    // position (which resets to 0) into the spectrogram's continuous
+    // coordinate space.
+    const double clamped = std::max(0.0, value + m_gaplessPositionOffset);
     bool changed = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -477,21 +480,20 @@ void SpectrogramItem::feedPrecomputedChunk(
         && trackToken != m_precomputedTrackToken
         && !bufferReset
         && !appliedReset) {
-        // Gapless transition: preserve the rolling history, but remap the
-        // new track's timeline onto the current write head so the next
-        // track appends seamlessly instead of flashing blank.
-        // Gapless rolling transition: do NOT change the epoch or
-        // position anchor.  The old position model keeps advancing.
-        // New columns are written at ringWriteSeq, and the display
-        // naturally encounters them as displaySeq (= oldEpoch + nowCol)
-        // increments toward ringWriteSeq.  This produces zero-jump
-        // continuity — no phase correction or epoch remap needed.
-        //
-        // The setPositionSeconds(0.0) from GStreamer triggers a jump
-        // hold which preserves the old anchor.  When the hold expires,
-        // handleWindowAfterAnimating remaps the epoch to maintain
-        // display continuity while switching to the new coordinate
-        // space.
+        // Gapless rolling transition: accumulate a position offset so
+        // the GStreamer position (which resets to 0) gets translated
+        // into the spectrogram's continuous coordinate space.  This
+        // makes setPositionSeconds(0.0) arrive as setPosition(331.18)
+        // — no large jump, no hold, no epoch remap, no phase
+        // discontinuity.  The position model and ring buffer stay
+        // perfectly continuous.
+        if (m_displayMode == 0) {
+            const auto now = Clock::now();
+            m_gaplessPositionOffset =
+                currentRenderPositionSecondsLocked(now);
+        }
+        m_precomputedLastRightCol = -1;
+        m_precomputedLastDisplaySeq = -1;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         m_debugLastTransitionFeedAt = Clock::now();
         {
@@ -499,8 +501,8 @@ void SpectrogramItem::feedPrecomputedChunk(
             FERROUS_SPECTROGRAM_LOGF(
                 stderr,
                 "[Qt-gapless-transition] chIdx=%d oldTok=%llu newTok=%llu startIdx=%d "
-                "ringWriteSeq=%lld epoch=%lld anchor=%.3f "
-                "ringValid=%lld/%d totalEst=%d (no epoch/anchor change)\n",
+                "ringWriteSeq=%lld epoch=%lld anchor=%.3f offset=%.3f "
+                "ringValid=%lld/%d totalEst=%d\n",
                 channelIndex,
                 static_cast<unsigned long long>(m_precomputedTrackToken),
                 static_cast<unsigned long long>(trackToken),
@@ -508,6 +510,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                 static_cast<long long>(m_ringWriteSeq),
                 static_cast<long long>(m_rollingEpoch),
                 m_positionAnchorSeconds,
+                m_gaplessPositionOffset,
                 static_cast<long long>(validCount), m_ringCapacity,
                 m_precomputedTotalColumnsEstimate);
         }
@@ -712,6 +715,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
     m_precomputedTrackToken = 0;
+    m_gaplessPositionOffset = 0.0;
     m_positionJumpHoldActive = false;
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
@@ -728,6 +732,9 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     quint64 trackToken,
     bool clearHistoryOnReset) {
     Q_UNUSED(trackToken);
+    // A reset (seek or manual track change) breaks the continuous
+    // gapless coordinate space — clear the accumulated offset.
+    m_gaplessPositionOffset = 0.0;
     const bool preserveRollingHistory =
         !clearHistoryOnReset &&
         m_displayMode == 0
@@ -2213,28 +2220,6 @@ void SpectrogramItem::handleWindowAfterAnimating() {
         const double holdElapsedSeconds =
             std::chrono::duration<double>(now - m_positionJumpHoldStartedAt).count();
         if (holdElapsedSeconds >= kPositionJumpHoldTimeoutSeconds) {
-            // Remap the rolling epoch so displaySeq stays the same
-            // when the anchor switches coordinate spaces.  This keeps
-            // the display continuous across gapless transitions where
-            // the old anchor ran in the previous track's time and the
-            // held position is in the new track's time.
-            if (m_displayMode == 0
-                && m_precomputedSampleRateHz > 0
-                && m_precomputedHopSize > 0) {
-                const double colsPerSec =
-                    static_cast<double>(m_precomputedSampleRateHz)
-                    / static_cast<double>(m_precomputedHopSize);
-                const double currentPos =
-                    currentRenderPositionSecondsLocked(now);
-                const int oldNowCol =
-                    static_cast<int>(std::floor(currentPos * colsPerSec));
-                const qint64 currentDisplaySeq =
-                    m_rollingEpoch + static_cast<qint64>(oldNowCol);
-                const int newNowCol = static_cast<int>(
-                    std::floor(m_positionJumpHoldSeconds * colsPerSec));
-                m_rollingEpoch = currentDisplaySeq
-                    - static_cast<qint64>(newNowCol);
-            }
             setPositionAnchorLocked(m_positionJumpHoldSeconds, now);
             m_positionJumpHoldActive = false;
         }

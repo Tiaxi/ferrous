@@ -234,6 +234,7 @@ private:
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
+    double m_gaplessPositionOffset{0.0};
     int m_debugPaintCounter{0};
 
     mutable QMutex m_stateMutex;
