@@ -1247,6 +1247,9 @@ fn session_decode_loop(
         let lead = session.columns_produced.saturating_sub(target_column);
 
         if lead >= session.lookahead_columns && session.post_reset_burst == 0 {
+            // Flush any buffered columns before parking so the UI can
+            // display all decoded data while we wait.
+            session_flush_chunk(session, event_tx);
             // Park: block until a command arrives.
             match cmd_rx.recv() {
                 Ok(cmd) => match handle_single_command(session, cmd) {
@@ -1382,8 +1385,10 @@ fn session_decode_loop(
         }
     }
 
-    // EOF reached — park and keep handling commands so backward seeks
+    // EOF reached — flush remaining columns so the UI has all decoded
+    // data, then park and keep handling commands so backward seeks
     // still work after the decoder has consumed the entire file.
+    session_flush_chunk(session, event_tx);
     loop {
         let session_gen = session.gen;
         if generation.load(Ordering::Relaxed) != session_gen {
