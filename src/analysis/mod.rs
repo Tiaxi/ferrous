@@ -238,6 +238,14 @@ struct AnalysisRuntimeState {
     /// cross-track format changes (e.g. 5.1 → stereo) are accepted.
     pcm_labels_pending_init: bool,
     active_pcm_track_token: u64,
+    /// Cumulative offset added to playback positions before forwarding
+    /// to the spectrogram worker.  Translates the new track's position
+    /// (which resets to 0) into the worker's continuous coordinate
+    /// space so `PositionUpdate(0.0)` doesn't trigger a backward seek.
+    spectrogram_position_offset: f64,
+    /// Last raw position forwarded to the spectrogram worker, used to
+    /// compute the offset at gapless transitions.
+    last_spectrogram_position: f64,
     profile_enabled: bool,
     prof_last: std::time::Instant,
     prof_pcm: usize,
@@ -345,6 +353,8 @@ impl AnalysisRuntimeState {
             prof_ticks: 0,
             prof_in_samples: 0,
             prof_out_samples: 0,
+            spectrogram_position_offset: 0.0,
+            last_spectrogram_position: 0.0,
         }
     }
 
@@ -413,11 +423,11 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
                 profile_eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
-                Self::update_spectrogram_position(position_seconds, ctx);
+                self.update_spectrogram_position(position_seconds, ctx);
             }
             AnalysisCommand::SeekPosition(position_seconds) => {
                 profile_eprintln!("[analysis] SeekPosition pos={position_seconds:.2}");
-                Self::seek_spectrogram_position(position_seconds, ctx);
+                self.seek_spectrogram_position(position_seconds, ctx);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -474,8 +484,15 @@ impl AnalysisRuntimeState {
             // Continue the existing decode session with the new file.
             // The generation counter is NOT incremented, so the running
             // session's is_stale() check won't trigger.
+            //
+            // Accumulate position offset: GStreamer's position resets to 0
+            // for the new track, but the worker's coordinate space is
+            // continuous.  Adding the last known position ensures
+            // PositionUpdate(0.0) becomes PositionUpdate(331.x).
+            self.spectrogram_position_offset += self.last_spectrogram_position;
             profile_eprintln!(
-                "[analysis] handle_track_change: dispatching ContinueWithFile gapless={gapless}",
+                "[analysis] handle_track_change: dispatching ContinueWithFile gapless={gapless} offset={:.2}",
+                self.spectrogram_position_offset,
             );
             let _ = ctx
                 .spectrogram_cmd_tx
@@ -484,6 +501,9 @@ impl AnalysisRuntimeState {
                     track_token,
                 });
         } else {
+            // Non-gapless: reset the offset since a new session starts
+            // with fresh coordinates.
+            self.spectrogram_position_offset = 0.0;
             // Start a fresh precomputed session.  Natural and manual
             // transitions suppress the initial reset so the UI can
             // preserve rolling history even if the previous session
@@ -547,16 +567,22 @@ impl AnalysisRuntimeState {
             });
     }
 
-    fn update_spectrogram_position(position_seconds: f64, ctx: &AnalysisContext<'_>) {
+    fn update_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
+        self.last_spectrogram_position = position_seconds;
+        let adjusted = position_seconds + self.spectrogram_position_offset;
         let _ = ctx
             .spectrogram_cmd_tx
-            .send(SpectrogramWorkerCommand::PositionUpdate { position_seconds });
+            .send(SpectrogramWorkerCommand::PositionUpdate {
+                position_seconds: adjusted,
+            });
     }
 
-    fn seek_spectrogram_position(position_seconds: f64, ctx: &AnalysisContext<'_>) {
-        let _ = ctx
-            .spectrogram_cmd_tx
-            .send(SpectrogramWorkerCommand::Seek { position_seconds });
+    fn seek_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
+        self.last_spectrogram_position = position_seconds;
+        let adjusted = position_seconds + self.spectrogram_position_offset;
+        let _ = ctx.spectrogram_cmd_tx.send(SpectrogramWorkerCommand::Seek {
+            position_seconds: adjusted,
+        });
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
