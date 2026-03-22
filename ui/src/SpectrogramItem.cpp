@@ -1099,9 +1099,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(m_precomputedHopSize);
             const double clampedPositionSeconds =
                 std::max(0.0, renderPositionSeconds);
-            const double columnF = clampedPositionSeconds * columnsPerSecond;
+            double columnF = clampedPositionSeconds * columnsPerSecond;
             const int nowCol = static_cast<int>(std::floor(columnF));
-            const double columnPhase = std::clamp(columnF - std::floor(columnF), 0.0, 0.999);
+            double columnPhase = std::clamp(columnF - std::floor(columnF), 0.0, 0.999);
 
             qint64 displayLeft, displayRight;
             int playheadPixel;
@@ -1129,6 +1129,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 displayRight = std::min(displaySeq, m_ringWriteSeq - 1);
                 displayLeft = std::max(m_ringOldestSeq, displayRight - w + 1);
                 playheadPixel = -1;
+            }
+
+            // When the playback position has scrolled past the last
+            // decoded column (e.g. the decoder reached EOF a bit before
+            // the track actually ends), clamp the effective column and
+            // phase to the rightmost available data.  Without this, the
+            // canvas shifts into empty space and the spectrogram appears
+            // to freeze for the remaining duration.
+            if (rollingMode) {
+                const qint64 displaySeqUnclamped =
+                    m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0));
+                if (displaySeqUnclamped > m_ringWriteSeq && m_ringWriteSeq > 0) {
+                    columnF = static_cast<double>(m_ringWriteSeq - m_rollingEpoch);
+                    columnPhase = 0.0;
+                }
             }
 
             const int visibleCols = std::min(
