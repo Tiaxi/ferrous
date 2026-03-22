@@ -1172,6 +1172,12 @@ fn run_spectrogram_session(
         generation,
     );
 
+    // Flush any partially accumulated chunk so the final columns are not
+    // lost — this matters both for EOF and for interruption (gapless
+    // transitions), where the last few seconds of spectrogram data would
+    // otherwise be silently discarded.
+    session_flush_chunk(&mut session, event_tx);
+
     if let Some(cmd) = result {
         // Interrupted by a NewTrack or Stop command.
         profile_eprintln!(
@@ -1181,8 +1187,6 @@ fn run_spectrogram_session(
         );
         return Some(cmd);
     }
-
-    session_flush_chunk(&mut session, event_tx);
     profile_eprintln!(
         "[spect-worker] SESSION END (EOF) elapsed={:.1}ms cols_produced={}",
         _start.elapsed().as_secs_f64() * 1000.0,
