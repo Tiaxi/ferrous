@@ -4578,8 +4578,10 @@ fn process_playback_snapshot_event(
         }
         return urgency;
     }
+    let mut fired_pending_track_change = false;
     if let Some(pending) = state.pending_waveform_track.take() {
         if state.playback.current.as_ref() == Some(&pending.path) {
+            fired_pending_track_change = true;
             eprintln!(
                 "[bridge] deferred pending_waveform_track firing → SetTrack token={}",
                 pending.track_token,
@@ -4598,6 +4600,7 @@ fn process_playback_snapshot_event(
         && next_state == PlaybackState::Playing
         && previous_playback.current.is_some()
         && previous_playback.current == state.playback.current
+        && !fired_pending_track_change
         && state.pending_waveform_track.is_none()
         && state.analysis_track_token != 0;
     if replayed_same_track_from_stop {
@@ -7063,6 +7066,9 @@ mod tests {
             AnalysisEvent::Snapshot(_) => {}
             _ => panic!("unexpected event variant"),
         }
+        assert!(analysis_rx
+            .recv_timeout(Duration::from_millis(120))
+            .is_err());
     }
 
     #[test]

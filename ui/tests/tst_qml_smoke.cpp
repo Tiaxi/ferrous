@@ -376,6 +376,7 @@ private slots:
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
+    void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
@@ -1579,6 +1580,31 @@ void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
     const double expectedSeconds = (512.0 * 1024.0) / 48000.0;
     QVERIFY(!item.m_positionJumpHoldActive);
     QVERIFY(std::abs(item.m_positionSeconds - expectedSeconds) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward() {
+    SpectrogramItem item;
+
+    item.setPositionSeconds(0.0);
+    item.setPlaying(true);
+
+    QTest::qWait(70);
+    item.setPositionSeconds(0.05);
+    const double anchoredPosition = item.positionSeconds();
+    QVERIFY2(
+        anchoredPosition >= 0.05,
+        qPrintable(QStringLiteral("expected anchor to move forward, got %1")
+            .arg(anchoredPosition, 0, 'f', 3)));
+
+    QTest::qWait(70);
+    item.setPositionSeconds(0.02);
+
+    QVERIFY2(
+        item.positionSeconds() >= anchoredPosition - 0.001,
+        qPrintable(QStringLiteral(
+            "lagging playback heartbeat moved anchor backward from %1 to %2")
+            .arg(anchoredPosition, 0, 'f', 3)
+            .arg(item.positionSeconds(), 0, 'f', 3)));
 }
 
 void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {

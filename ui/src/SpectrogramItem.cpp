@@ -22,6 +22,7 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
+constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
@@ -311,11 +312,24 @@ void SpectrogramItem::setPositionSeconds(double value) {
             }
             return;
         }
-        if (m_positionAnchorInitialized && std::abs(m_positionSeconds - clamped) < 0.0001) {
+        const bool regressedDuringPlayback =
+            m_playing
+            && m_positionAnchorInitialized
+            && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
+        const double effectivePosition =
+            regressedDuringPlayback ? currentPosition : clamped;
+        if (m_positionAnchorInitialized
+            && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
             return;
         }
         m_positionJumpHoldActive = false;
-        setPositionAnchorLocked(clamped, now);
+        // Playback snapshots are informational heartbeats, not authoritative
+        // reverse seeks. During startup the backend can report a slightly
+        // stale position (0.00, 0.02, 0.05...) after the local render clock
+        // has already advanced, which would otherwise nudge the spectrogram
+        // backward. Keep the playback anchor monotonic here and let explicit
+        // seek/reset paths handle real backward jumps.
+        setPositionAnchorLocked(effectivePosition, now);
         changed = true;
     }
     if (changed) {
