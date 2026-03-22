@@ -1452,6 +1452,9 @@ mod backend {
         }
 
         fn seek(&mut self, pos: Duration) {
+            let nanos = u64::try_from(pos.as_nanos().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
+            let target = gst::ClockTime::from_nseconds(nanos);
+
             // If about-to-finish has already advanced the queue past what the
             // UI considers the current track, revert the queue and reset the
             // pipeline so the seek applies to the correct (displayed) track.
@@ -1464,6 +1467,16 @@ mod backend {
                         let _ = self.playbin.set_state(gst::State::Null);
                         let _ = self.playbin.set_state(gst::State::Ready);
                         self.playbin.set_property("uri", &uri);
+
+                        // Transition to Paused first so the pipeline
+                        // prerolls and can accept the seek.  For local
+                        // files this is sub-millisecond.
+                        let _ = self.playbin.set_state(gst::State::Paused);
+                        let _ = self.playbin.state(Some(gst::ClockTime::from_mseconds(500)));
+
+                        let seek_flags = seek_flags_for_path(self.snapshot.current.as_deref());
+                        let _ = self.playbin.seek_simple(seek_flags, target);
+
                         let was_playing = self.snapshot.state == PlaybackState::Playing;
                         if was_playing {
                             let _ = self.playbin.set_state(gst::State::Playing);
@@ -1474,15 +1487,21 @@ mod backend {
                             } else {
                                 None
                             };
-                        } else if self.snapshot.state == PlaybackState::Paused {
-                            let _ = self.playbin.set_state(gst::State::Paused);
                         }
+
+                        self.snapshot.position = pos.min(self.snapshot.duration);
+                        self.seek_hold = Some((
+                            Instant::now() + Duration::from_millis(220),
+                            self.snapshot.position,
+                        ));
+                        let _ = self.event_tx.send(PlaybackEvent::Seeked {
+                            position: self.snapshot.position,
+                        });
+                        return;
                     }
                 }
             }
 
-            let nanos = u64::try_from(pos.as_nanos().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
-            let target = gst::ClockTime::from_nseconds(nanos);
             let seek_flags = seek_flags_for_path(self.snapshot.current.as_deref());
             let _ = self.playbin.seek_simple(seek_flags, target);
             self.snapshot.position = pos.min(self.snapshot.duration);
