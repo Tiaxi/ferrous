@@ -4525,16 +4525,19 @@ fn process_playback_event(
             let is_gapless = matches!(kind, TrackChangeKind::Gapless);
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
             if state.playback.state == PlaybackState::Stopped {
-                eprintln!("[bridge] TrackChanged while Stopped → deferred token={track_token}",);
+                profile_eprintln!(
+                    "[bridge] TrackChanged while Stopped → deferred token={track_token}",
+                );
                 state.pending_waveform_track = Some(PendingWaveformTrack {
                     path,
                     reset_spectrogram,
                     track_token,
                 });
             } else {
-                eprintln!(
+                profile_eprintln!(
                     "[bridge] TrackChanged while {:?} → immediate SetTrack token={}",
-                    state.playback.state, track_token,
+                    state.playback.state,
+                    track_token,
                 );
                 state.pending_waveform_track = None;
                 analysis.command(AnalysisCommand::SetTrack {
@@ -4582,7 +4585,7 @@ fn process_playback_snapshot_event(
     if let Some(pending) = state.pending_waveform_track.take() {
         if state.playback.current.as_ref() == Some(&pending.path) {
             fired_pending_track_change = true;
-            eprintln!(
+            profile_eprintln!(
                 "[bridge] deferred pending_waveform_track firing → SetTrack token={}",
                 pending.track_token,
             );
@@ -4593,7 +4596,7 @@ fn process_playback_snapshot_event(
                 gapless: false,
             });
         } else {
-            eprintln!("[bridge] deferred pending_waveform_track SKIPPED (path mismatch)",);
+            profile_eprintln!("[bridge] deferred pending_waveform_track SKIPPED (path mismatch)",);
         }
     }
     let replayed_same_track_from_stop = previous_playback.state == PlaybackState::Stopped
@@ -4605,7 +4608,7 @@ fn process_playback_snapshot_event(
         && state.analysis_track_token != 0;
     if replayed_same_track_from_stop {
         let pos_seconds = state.playback.position.as_secs_f64();
-        eprintln!(
+        profile_eprintln!(
             "[bridge] stopped->playing replay → RestartCurrentTrack token={}",
             state.analysis_track_token,
         );

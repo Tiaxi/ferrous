@@ -349,7 +349,7 @@ impl AnalysisRuntimeState {
                 track_token,
                 gapless,
             } => {
-                eprintln!(
+                profile_eprintln!(
                     "[analysis] SetTrack path={} token={track_token} gapless={gapless} reset_spec={reset_spectrogram}",
                     path.file_name().unwrap_or_default().to_string_lossy(),
                 );
@@ -386,7 +386,7 @@ impl AnalysisRuntimeState {
                 self.start_spectrogram_session(0.0, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
-                eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
+                profile_eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
                 self.snapshot.spectrogram_view_mode = view_mode;
                 self.spectrogram.set_view_mode(view_mode);
                 self.reset_spectrogram_state();
@@ -397,7 +397,7 @@ impl AnalysisRuntimeState {
                 position_seconds,
                 clear_history,
             } => {
-                eprintln!(
+                profile_eprintln!(
                     "[analysis] RestartCurrentTrack pos={position_seconds:.2} clear_history={clear_history}"
                 );
                 self.reset_spectrogram_state();
@@ -405,11 +405,11 @@ impl AnalysisRuntimeState {
                 self.start_spectrogram_session(position_seconds, true, clear_history, ctx);
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
-                eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
+                profile_eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
                 Self::update_spectrogram_position(position_seconds, ctx);
             }
             AnalysisCommand::SeekPosition(position_seconds) => {
-                eprintln!("[analysis] SeekPosition pos={position_seconds:.2}");
+                profile_eprintln!("[analysis] SeekPosition pos={position_seconds:.2}");
                 Self::seek_spectrogram_position(position_seconds, ctx);
             }
             AnalysisCommand::WaveformProgress {
@@ -463,7 +463,7 @@ impl AnalysisRuntimeState {
         // Start a fresh precomputed session for every track change. Natural and
         // gapless transitions suppress the initial reset so the UI can preserve
         // rolling history even if the previous session already ended at EOF.
-        eprintln!(
+        profile_eprintln!(
             "[analysis] handle_track_change: dispatching NewTrack from 0.0 reset={reset_spectrogram} gapless={gapless}",
         );
         self.start_spectrogram_session(0.0, reset_spectrogram, reset_spectrogram, ctx);
@@ -490,7 +490,9 @@ impl AnalysisRuntimeState {
         ctx: &AnalysisContext<'_>,
     ) {
         let Some(path) = self.active_track_path.as_ref() else {
-            eprintln!("[analysis] start_spectrogram_session: no active_track_path, skipping");
+            profile_eprintln!(
+                "[analysis] start_spectrogram_session: no active_track_path, skipping"
+            );
             return;
         };
         let gen = ctx
@@ -1024,7 +1026,7 @@ fn run_spectrogram_session(
         ref path,
         fft_size,
         hop_size,
-        channel_count,
+        channel_count: _channel_count,
         start_seconds,
         emit_initial_reset,
         clear_history_on_reset,
@@ -1035,22 +1037,23 @@ fn run_spectrogram_session(
         return None;
     };
 
-    let start = std::time::Instant::now();
-    eprintln!(
+    let _start = std::time::Instant::now();
+    profile_eprintln!(
         "[spect-worker] SESSION START path={} gen={gen} token={track_token} fft={fft_size} hop={hop_size} ch={channel_count} view={view_mode:?} display={display_mode:?} start_s={start_seconds:.2}",
         path.file_name().unwrap_or_default().to_string_lossy(),
+        channel_count = _channel_count,
     );
 
     let bins_per_column = (fft_size / 2) + 1;
     let Some(total_columns_estimate) = estimate_total_columns(path) else {
-        eprintln!("[spect-worker] estimate_total_columns returned None, aborting");
+        profile_eprintln!("[spect-worker] estimate_total_columns returned None, aborting");
         return None;
     };
 
     let Some((mut format, mut audio_decoder, track_id, native_sample_rate, native_channels)) =
         open_symphonia_file(path)
     else {
-        eprintln!("[spect-worker] failed to open file");
+        profile_eprintln!("[spect-worker] failed to open file");
         return None;
     };
 
@@ -1172,18 +1175,18 @@ fn run_spectrogram_session(
 
     if let Some(cmd) = result {
         // Interrupted by a NewTrack or Stop command.
-        eprintln!(
+        profile_eprintln!(
             "[spect-worker] SESSION END (interrupted) elapsed={:.1}ms cols_produced={}",
-            start.elapsed().as_secs_f64() * 1000.0,
+            _start.elapsed().as_secs_f64() * 1000.0,
             session.columns_produced.saturating_sub(start_column),
         );
         return Some(cmd);
     }
 
     session_flush_chunk(&mut session, event_tx);
-    eprintln!(
+    profile_eprintln!(
         "[spect-worker] SESSION END (EOF) elapsed={:.1}ms cols_produced={}",
-        start.elapsed().as_secs_f64() * 1000.0,
+        _start.elapsed().as_secs_f64() * 1000.0,
         session.columns_produced.saturating_sub(start_column),
     );
     None
@@ -1494,7 +1497,7 @@ fn handle_session_seek(
     active_token: &AtomicU64,
     generation: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
-    eprintln!("[spect-worker] SEEK to {position_seconds:.2}s");
+    profile_eprintln!("[spect-worker] SEEK to {position_seconds:.2}s");
 
     // Drop any partially accumulated pre-seek chunk. Emitting it after a seek
     // makes the UI paint old-timeline columns just before the reset arrives.

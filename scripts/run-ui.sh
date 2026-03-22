@@ -18,6 +18,7 @@ DO_RUN=1
 NUKE_DB=0
 NUKE_SESSION=0
 NUKE_THUMBNAILS=0
+CLEAR_DIAGNOSTICS_LOG=0
 ENABLE_COREDUMP=0
 ENABLE_PROFILE_LOGS=0
 APP_ARGS=()
@@ -86,8 +87,15 @@ nuke_thumbnail_cache() {
     fi
 }
 
+clear_diagnostics_log() {
+    local data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+    local diagnostics_path="${data_home}/ferrous/diagnostics.log"
+
+    remove_file_target "${diagnostics_path}" "diagnostics log"
+}
+
 run_requested_cleanup() {
-    if [[ ${NUKE_DB} -eq 0 && ${NUKE_SESSION} -eq 0 && ${NUKE_THUMBNAILS} -eq 0 ]]; then
+    if [[ ${NUKE_DB} -eq 0 && ${NUKE_SESSION} -eq 0 && ${NUKE_THUMBNAILS} -eq 0 && ${CLEAR_DIAGNOSTICS_LOG} -eq 0 ]]; then
         return
     fi
 
@@ -101,6 +109,9 @@ run_requested_cleanup() {
     if [[ ${NUKE_THUMBNAILS} -eq 1 ]]; then
         nuke_thumbnail_cache
     fi
+    if [[ ${CLEAR_DIAGNOSTICS_LOG} -eq 1 ]]; then
+        clear_diagnostics_log
+    fi
 }
 
 usage() {
@@ -111,10 +122,14 @@ Options:
   --no-configure    Skip cmake configure step
   --no-build        Skip cmake build step
   --no-run          Only configure/build; do not launch UI
-  --profile-logs    Build with FERROUS_ENABLE_PROFILE_LOGS=ON and export FERROUS_PROFILE_UI=1 on launch
+  --spectrogram-instrumentation
+                    Build with FERROUS_ENABLE_PROFILE_LOGS=ON and export FERROUS_PROFILE_UI=1 on launch
+  --profile-logs    Alias for --spectrogram-instrumentation
   --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
   --nuke-session    Delete saved playlist/session (${XDG_CONFIG_HOME:-\$HOME/.config}/ferrous/session.json)
   --nuke-thumbnails Delete Ferrous library thumbnail cache (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
+  --clear-diagnostics-log
+                    Delete Ferrous diagnostics log (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/diagnostics.log)
   --nuke-all        Equivalent to --nuke-db --nuke-session --nuke-thumbnails
   --coredump        Enable unlimited core dump size and print coredumpctl hints
   -h, --help        Show this help
@@ -140,7 +155,7 @@ while [[ $# -gt 0 ]]; do
         --no-run)
             DO_RUN=0
             ;;
-        --profile-logs)
+        --spectrogram-instrumentation|--profile-logs)
             ENABLE_PROFILE_LOGS=1
             ;;
         --nuke-db)
@@ -151,6 +166,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --nuke-thumbnails)
             NUKE_THUMBNAILS=1
+            ;;
+        --clear-diagnostics-log)
+            CLEAR_DIAGNOSTICS_LOG=1
             ;;
         --nuke-all)
             NUKE_DB=1
@@ -211,7 +229,7 @@ fi
 if [[ ${DO_RUN} -eq 1 ]]; then
     if [[ ${ENABLE_PROFILE_LOGS} -eq 1 ]]; then
         export FERROUS_PROFILE_UI="${FERROUS_PROFILE_UI:-1}"
-        echo "UI profiling logs enabled (FERROUS_PROFILE_UI=${FERROUS_PROFILE_UI})."
+        echo "Spectrogram instrumentation/profiling enabled (FERROUS_PROFILE_UI=${FERROUS_PROFILE_UI})."
     fi
     if [[ ${ENABLE_COREDUMP} -eq 1 ]]; then
         ulimit -c unlimited || true

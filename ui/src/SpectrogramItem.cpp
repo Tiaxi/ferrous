@@ -18,6 +18,14 @@
 #include <cmath>
 #include <cstdio>
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+#define FERROUS_SPECTROGRAM_LOGF(...) std::fprintf(__VA_ARGS__)
+#else
+#define FERROUS_SPECTROGRAM_LOGF(...) \
+    do {                              \
+    } while (false)
+#endif
+
 namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
@@ -397,7 +405,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     using Clock = std::chrono::steady_clock;
     QMutexLocker lock(&m_stateMutex);
 
-    std::fprintf(stderr,
+    FERROUS_SPECTROGRAM_LOGF(stderr,
         "[Qt-feed] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d reset=%d clear=%d\n",
         channelIndex, columns, startIndex, totalEstimate, bins,
         sampleRate, hopSize, static_cast<unsigned long long>(trackToken),
@@ -659,7 +667,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 }
 
 void SpectrogramItem::clearPrecomputed() {
-    std::fprintf(stderr, "[Qt-clearPrecomputed] ringCap=%d ready=%d\n",
+    FERROUS_SPECTROGRAM_LOGF(stderr, "[Qt-clearPrecomputed] ringCap=%d ready=%d\n",
         m_ringCapacity, m_precomputedReady ? 1 : 0);
     QMutexLocker lock(&m_stateMutex);
     m_ringBuffer.clear();
@@ -898,7 +906,7 @@ void SpectrogramItem::appendPackedRows(
         const int backlog = static_cast<int>(m_pendingColumns.size());
         if ((appendMs >= 2.0 || backlog >= 96)
             && shouldLogProfileSpike(&m_profileLastAppendSpike, now)) {
-            std::fprintf(
+            FERROUS_SPECTROGRAM_LOGF(
                 stderr,
                 "[ui-spectrogram] append rows=%d bins=%d copy_ms=%.3f backlog=%d cols=%zu\n",
                 appended,
@@ -973,20 +981,28 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             && m_precomputedTotalColumnsEstimate > 0;
 
         // Debug: log precomputed state periodically (per-instance).
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         {
             m_debugPaintCounter++;
             if (m_debugPaintCounter % 120 == 1) {
                 const qint64 validCount = std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq);
-                std::fprintf(stderr,
+                FERROUS_SPECTROGRAM_LOGF(
+                    stderr,
                     "[Qt-paint@%p] usePre=%d ready=%d bins=%d totalEst=%d pos=%.2f sr=%d hop=%d ringValid=%lld/%d streaming=%d\n",
                     static_cast<const void *>(this),
-                    usePrecomputed ? 1 : 0, m_precomputedReady ? 1 : 0,
-                    m_precomputedBinsPerColumn, m_precomputedTotalColumnsEstimate,
-                    renderPositionSeconds, m_precomputedSampleRateHz, m_precomputedHopSize,
-                    static_cast<long long>(validCount), m_ringCapacity,
+                    usePrecomputed ? 1 : 0,
+                    m_precomputedReady ? 1 : 0,
+                    m_precomputedBinsPerColumn,
+                    m_precomputedTotalColumnsEstimate,
+                    renderPositionSeconds,
+                    m_precomputedSampleRateHz,
+                    m_precomputedHopSize,
+                    static_cast<long long>(validCount),
+                    m_ringCapacity,
                     static_cast<int>(m_columns.size()));
             }
         }
+#endif
 
         if (usePrecomputed) {
             if (m_binsPerColumn != m_precomputedBinsPerColumn) {
@@ -1339,7 +1355,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         m_profilePaints += 1;
         m_profilePaintMs += paintMs;
         if (paintMs >= 4.0 && shouldLogProfileSpike(&m_profileLastPaintSpike, paintEnd)) {
-            std::fprintf(
+            FERROUS_SPECTROGRAM_LOGF(
                 stderr,
                 "[ui-spectrogram] paint_spike ms=%.3f pending=%zu cols=%zu bins=%d size=%dx%d\n",
                 paintMs,
@@ -1351,7 +1367,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
         const double elapsed = std::chrono::duration<double>(paintEnd - m_profileLast).count();
         if (elapsed >= 1.0) {
-            std::fprintf(
+            FERROUS_SPECTROGRAM_LOGF(
                 stderr,
                 "[ui-spectrogram] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f cols=%zu bins=%d\n",
                 static_cast<unsigned long long>(m_profilePaints),
@@ -2160,7 +2176,7 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     if (m_profileEnabled
         && elapsed >= 0.025
         && shouldLogProfileSpike(&m_profileLastFrameGapSpike, now)) {
-        std::fprintf(
+        FERROUS_SPECTROGRAM_LOGF(
             stderr,
             "[ui-spectrogram] frame_gap ms=%.3f pending=%zu phase=%.3f fps=%d advanced=%d\n",
             elapsed * 1000.0,
@@ -2275,7 +2291,7 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
         const double rowsPerSecond = targetRowsPerSecondLocked();
         m_smoothnessProfile.incidentDetected = true;
         m_smoothnessProfile.incidentReported = true;
-        std::fprintf(
+        FERROUS_SPECTROGRAM_LOGF(
             stderr,
             "[ui-spectrogram] smoothness_hitch_detected sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d paint_spikes=%d max_gap_ms=%.3f advanced=%d\n",
             m_sampleRateHz,
@@ -2359,7 +2375,7 @@ void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *
     summary.insert(QStringLiteral("incidentDetected"), m_smoothnessProfile.incidentDetected);
     m_smoothnessProfile.lastSummary = summary;
 
-    std::fprintf(
+    FERROUS_SPECTROGRAM_LOGF(
         stderr,
         "[ui-spectrogram] smoothness_window reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d paint_spikes=%d max_gap_ms=%.3f max_paint_ms=%.3f avg_paint_ms=%.3f incident=%d\n",
         reason,
@@ -2509,7 +2525,7 @@ void SpectrogramItem::noteSeekProfileFrameLocked(
         const double rowsPerSecond = targetRowsPerSecondLocked();
         m_seekProfile.incidentDetected = true;
         m_seekProfile.incidentReported = true;
-        std::fprintf(
+        FERROUS_SPECTROGRAM_LOGF(
             stderr,
             "[ui-spectrogram] seek_hitch_detected gen=%llu target_s=%.3f sample_rate_hz=%d rows_per_second=%.3f gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d advanced=%d\n",
             static_cast<unsigned long long>(m_seekProfile.generation),
@@ -2573,7 +2589,7 @@ void SpectrogramItem::finalizeSeekProfileLocked(qint64 nowMs, const char *reason
     summary.insert(QStringLiteral("incidentDetected"), m_seekProfile.incidentDetected);
     m_seekProfile.lastSummary = summary;
 
-    std::fprintf(
+    FERROUS_SPECTROGRAM_LOGF(
         stderr,
         "[ui-spectrogram] seek_hitch_window gen=%llu target_s=%.3f reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d incident=%d\n",
         static_cast<unsigned long long>(m_seekProfile.generation),

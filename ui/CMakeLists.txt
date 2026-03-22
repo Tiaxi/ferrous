@@ -9,7 +9,7 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-option(FERROUS_ENABLE_PROFILE_LOGS "Compile profiling log output into binaries" OFF)
+option(FERROUS_ENABLE_PROFILE_LOGS "Compile spectrogram instrumentation and profiling log output into binaries" OFF)
 option(FERROUS_WARNINGS_AS_ERRORS "Fail UI builds on compiler warnings" ON)
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)

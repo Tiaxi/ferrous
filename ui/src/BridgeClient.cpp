@@ -49,9 +49,13 @@
             logDiagnostic(category, message);             \
         }                                                 \
     } while (false)
+#define FERROUS_SPECTROGRAM_LOGF(...) std::fprintf(__VA_ARGS__)
 #else
 #define FERROUS_PROFILE_LOG_DIAGNOSTIC(category, message) \
     do {                                                  \
+    } while (false)
+#define FERROUS_SPECTROGRAM_LOGF(...) \
+    do {                              \
     } while (false)
 #endif
 
@@ -1592,7 +1596,7 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         parsePrecomputedSpectrogramFrame(raw);
     }
     if (precomputedPopped > 0) {
-        std::fprintf(stderr, "[Qt-drain] popped %d precomputed frames\n", precomputedPopped);
+        FERROUS_SPECTROGRAM_LOGF(stderr, "[Qt-drain] popped %d precomputed frames\n", precomputedPopped);
     }
 
     constexpr int kMaxTreeFramesPerPass = 4;
