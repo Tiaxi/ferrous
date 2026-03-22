@@ -461,6 +461,7 @@ private:
     void flushGlobalSearchQuery();
     void logDiagnostic(const QString &category, const QString &message);
     void appendDiagnosticLine(const QString &line);
+    void flushPendingDiagnosticDiskLines();
     void rebuildDiagnosticsText();
     static QString resolveDiagnosticsLogPath();
     void clearSpectrogramDeltaState();
@@ -592,6 +593,7 @@ private:
     QString m_diagnosticsText;
     QString m_diagnosticsLogPath;
     QStringList m_diagnosticsLines;
+    QStringList m_pendingDiagnosticsDiskLines;
     QString m_libraryLastError;
     QString m_pendingAddRootPath;
     qint64 m_pendingAddRootIssuedMs{0};
@@ -609,6 +611,7 @@ private:
     qint64 m_pendingSeekUntilMs{0};
     int m_pendingQueueSelection{-1};
     qint64 m_pendingQueueSelectionUntilMs{0};
+    QTimer m_diagnosticsFlushTimer;
     QTimer m_snapshotNotifyTimer;
     QTimer m_globalSearchDebounceTimer;
     QTimer m_searchApplyDispatchTimer;

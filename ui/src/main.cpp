@@ -64,17 +64,27 @@ private:
 #endif
 
     void appendLine(const QString &tag, const QByteArray &lineBytes) {
+        appendLines(tag, QList<QByteArray>{lineBytes});
+    }
+
+    void appendLines(const QString &tag, const QList<QByteArray> &lineBytesList) {
         if (m_logPath.isEmpty()) {
             return;
         }
-        QString line = QString::fromUtf8(lineBytes).trimmed();
-        if (line.isEmpty()) {
+        QStringList lines;
+        lines.reserve(lineBytesList.size());
+        for (const QByteArray &lineBytes : lineBytesList) {
+            const QString line = QString::fromUtf8(lineBytes).trimmed();
+            if (line.isEmpty()) {
+                continue;
+            }
+            const QString timestamp = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+            lines.push_back(QStringLiteral("[%1] [%2] %3").arg(timestamp, tag, line));
+        }
+        if (lines.isEmpty()) {
             return;
         }
-
-        const QString timestamp = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
-        const QString fullLine = QStringLiteral("[%1] [%2] %3").arg(timestamp, tag, line);
-        const bool written = DiagnosticsLog::appendLine(m_logPath, fullLine);
+        const bool written = DiagnosticsLog::appendLines(m_logPath, lines);
         (void)written;
     }
 
@@ -167,14 +177,17 @@ private:
                 }
 
                 pending.append(buffer.data(), static_cast<int>(readBytes));
+                QList<QByteArray> completedLines;
                 while (true) {
                     const int newline = pending.indexOf('\n');
                     if (newline < 0) {
                         break;
                     }
-                    const QByteArray line = pending.left(newline);
+                    completedLines.push_back(pending.left(newline));
                     pending.remove(0, newline + 1);
-                    appendLine(tag, line);
+                }
+                if (!completedLines.isEmpty()) {
+                    appendLines(tag, completedLines);
                 }
             }
 

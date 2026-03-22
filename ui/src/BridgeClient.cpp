@@ -774,6 +774,13 @@ BridgeClient::BridgeClient(QObject *parent)
 #endif
     m_fileBrowserName = detectFileBrowserNameHeuristic();
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
+    m_diagnosticsFlushTimer.setSingleShot(true);
+    m_diagnosticsFlushTimer.setInterval(readEnvMillis("FERROUS_DIAGNOSTICS_FLUSH_MS", 25));
+    connect(
+        &m_diagnosticsFlushTimer,
+        &QTimer::timeout,
+        this,
+        &BridgeClient::flushPendingDiagnosticDiskLines);
     reloadDiagnosticsFromDisk();
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("BridgeClient started"));
 
@@ -879,6 +886,8 @@ BridgeClient::BridgeClient(QObject *parent)
 
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
+    m_diagnosticsFlushTimer.stop();
+    flushPendingDiagnosticDiskLines();
     if (m_bridgeWakeNotifier != nullptr) {
         m_bridgeWakeNotifier->setEnabled(false);
         delete m_bridgeWakeNotifier;
@@ -3500,6 +3509,8 @@ void BridgeClient::shutdown() {
 }
 
 void BridgeClient::clearDiagnostics() {
+    m_diagnosticsFlushTimer.stop();
+    m_pendingDiagnosticsDiskLines.clear();
     m_diagnosticsLines.clear();
     m_diagnosticsText.clear();
     if (!m_diagnosticsLogPath.isEmpty()) {
@@ -3510,6 +3521,7 @@ void BridgeClient::clearDiagnostics() {
 }
 
 void BridgeClient::reloadDiagnosticsFromDisk() {
+    flushPendingDiagnosticDiskLines();
     QStringList lines;
     if (!m_diagnosticsLogPath.isEmpty()) {
         QFile file(m_diagnosticsLogPath);
@@ -3544,8 +3556,10 @@ void BridgeClient::logDiagnostic(const QString &category, const QString &message
     if (m_diagnosticsLogPath.isEmpty()) {
         return;
     }
-    const bool written = DiagnosticsLog::appendLine(m_diagnosticsLogPath, line);
-    (void)written;
+    m_pendingDiagnosticsDiskLines.push_back(line);
+    if (!m_diagnosticsFlushTimer.isActive()) {
+        m_diagnosticsFlushTimer.start();
+    }
 }
 
 void BridgeClient::appendDiagnosticLine(const QString &line) {
@@ -3559,6 +3573,16 @@ void BridgeClient::appendDiagnosticLine(const QString &line) {
             m_diagnosticsLines.begin(),
             m_diagnosticsLines.begin() + removeCount);
     }
+}
+
+void BridgeClient::flushPendingDiagnosticDiskLines() {
+    if (m_diagnosticsLogPath.isEmpty() || m_pendingDiagnosticsDiskLines.isEmpty()) {
+        return;
+    }
+    const QStringList lines = std::move(m_pendingDiagnosticsDiskLines);
+    m_pendingDiagnosticsDiskLines.clear();
+    const bool written = DiagnosticsLog::appendLines(m_diagnosticsLogPath, lines);
+    (void)written;
 }
 
 void BridgeClient::rebuildDiagnosticsText() {

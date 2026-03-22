@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDateTime>
+#include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QSignalSpy>
@@ -46,6 +47,8 @@ private slots:
     void stoppedTrackChangeClearsPendingSpectrogramDelta();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
+    void diagnosticsWritesBatchOffHotPath();
+    void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
@@ -293,6 +296,69 @@ void BridgeClientTest::scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRea
     QVERIFY(!client.m_bridgeWakeNotifier->isEnabled());
 
     isolateBridgeClient(client);
+}
+
+void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+
+    client.m_diagnosticsFlushTimer.stop();
+    client.m_diagnosticsLogPath = logPath;
+    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsLines.clear();
+    QFile::remove(logPath);
+
+    client.logDiagnostic(QStringLiteral("ui"), QStringLiteral("first line"));
+    client.logDiagnostic(QStringLiteral("ui"), QStringLiteral("second line"));
+
+    QVERIFY(client.m_diagnosticsFlushTimer.isActive());
+    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 2);
+    QVERIFY(!QFileInfo::exists(logPath));
+
+    QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+
+    QFile file(logPath);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contents = QString::fromUtf8(file.readAll());
+    QVERIFY(contents.contains(QStringLiteral("[ui] first line")));
+    QVERIFY(contents.contains(QStringLiteral("[ui] second line")));
+}
+
+void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+
+    client.m_diagnosticsFlushTimer.stop();
+    client.m_diagnosticsLogPath = logPath;
+    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsLines.clear();
+    QFile::remove(logPath);
+
+    client.logDiagnostic(QStringLiteral("ui"), QStringLiteral("stale line"));
+    client.logDiagnostic(QStringLiteral("ui"), QStringLiteral("stale line 2"));
+    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 2);
+
+    client.clearDiagnostics();
+
+    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 1);
+    QVERIFY(client.m_diagnosticsFlushTimer.isActive());
+
+    QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+
+    QFile file(logPath);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QStringList lines =
+        QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QCOMPARE(lines.size(), 1);
+    QVERIFY(lines.first().contains(QStringLiteral("[ui] diagnostics cleared")));
 }
 
 void BridgeClientTest::pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives() {

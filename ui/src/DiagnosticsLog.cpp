@@ -91,7 +91,14 @@ QString defaultLogPath() {
 }
 
 bool appendLine(const QString &logPath, const QString &line) {
-    if (logPath.trimmed().isEmpty() || line.isEmpty()) {
+    if (line.isEmpty()) {
+        return false;
+    }
+    return appendLines(logPath, QStringList{line});
+}
+
+bool appendLines(const QString &logPath, const QStringList &lines) {
+    if (logPath.trimmed().isEmpty() || lines.isEmpty()) {
         return false;
     }
 
@@ -112,8 +119,13 @@ bool appendLine(const QString &logPath, const QString &line) {
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         return false;
     }
-    file.write(line.toUtf8());
-    file.write("\n", 1);
+    for (const QString &line : lines) {
+        if (line.isEmpty()) {
+            continue;
+        }
+        file.write(line.toUtf8());
+        file.write("\n", 1);
+    }
     return true;
 }
 
