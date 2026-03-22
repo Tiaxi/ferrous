@@ -1400,9 +1400,13 @@ fn session_decode_loop(
     }
 
     // EOF reached — flush remaining columns so the UI has all decoded
-    // data, then park and keep handling commands so backward seeks
-    // still work after the decoder has consumed the entire file.
+    // data, then emit silence padding to cover the gap between the
+    // decoder's EOF and the estimated track end.  Without padding,
+    // the spectrogram freezes for the last ~1-2 seconds of the track
+    // (symphonia's EOF is typically slightly before the declared
+    // duration) and then jumps at the gapless transition.
     session_flush_chunk(session, event_tx);
+    session_emit_eof_padding(session, event_tx);
     loop {
         let session_gen = session.gen;
         if generation.load(Ordering::Relaxed) != session_gen {
@@ -1741,6 +1745,58 @@ fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<
         ));
         session.chunk_columns = 0;
     }
+}
+
+/// Emit silence columns to pad from the decoder's EOF to the estimated
+/// track end.  Symphonia's EOF is typically a few dozen columns before
+/// the declared frame count, leaving a gap where the ring buffer has
+/// no data.  Without padding, the spectrogram freezes and then jumps
+/// at the gapless transition.
+fn session_emit_eof_padding(
+    session: &mut SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+) {
+    let target = u64::from(session.total_columns_estimate);
+    if session.columns_produced >= target {
+        return;
+    }
+    let shortfall = target - session.columns_produced;
+    // Cap at a reasonable amount — if the shortfall is huge, the
+    // estimate was bogus and padding would just waste memory.
+    let pad_columns = shortfall.min(256) as u16;
+    if pad_columns == 0 {
+        return;
+    }
+    let bytes_per_column = session.bins_per_column * session.channel_count;
+    let data = vec![0u8; usize::from(pad_columns) * bytes_per_column];
+    let start_col = u64_to_u32_saturating(session.columns_produced);
+    let coverage = seconds_from_frames(
+        session.total_covered_samples,
+        u64::from(session.effective_rate),
+    );
+    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+        PrecomputedSpectrogramChunk {
+            track_token: session.track_token,
+            columns_u8: data,
+            bins_per_column: clamp_to_u16(session.bins_per_column),
+            column_count: pad_columns,
+            channel_count: clamp_to_u8(session.channel_count),
+            start_column_index: start_col,
+            total_columns_estimate: session.total_columns_estimate,
+            sample_rate_hz: session.effective_rate,
+            hop_size: clamp_to_u16(REFERENCE_HOP),
+            coverage_seconds: coverage,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+        },
+    ));
+    session.columns_produced += u64::from(pad_columns);
+    session.chunk_start_index = session.columns_produced;
+    profile_eprintln!(
+        "[spect-worker] EOF padding: emitted {pad_columns} silence columns, total now {}",
+        session.columns_produced,
+    );
 }
 
 /// Opens a Symphonia file and returns the format reader, decoder, and track info.
