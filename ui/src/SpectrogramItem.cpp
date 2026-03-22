@@ -495,7 +495,13 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
-        invalidateCanvas();
+        // Do NOT call invalidateCanvas() here: in rolling mode the epoch
+        // remap maps the new track's start onto the current write head, so
+        // the display range shifts by at most a few columns.  The normal
+        // advancePrecomputedCanvasLocked path handles this incrementally.
+        // Destroying the canvas would force a full rebuild of all visible
+        // columns, causing a visible micro-hitch at every gapless
+        // transition.
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         m_debugLastTransitionFeedAt = transitionFeedStart;
         {
