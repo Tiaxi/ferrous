@@ -480,68 +480,34 @@ void SpectrogramItem::feedPrecomputedChunk(
         // Gapless transition: preserve the rolling history, but remap the
         // new track's timeline onto the current write head so the next
         // track appends seamlessly instead of flashing blank.
+        // Gapless rolling transition: do NOT change the epoch or
+        // position anchor.  The old position model keeps advancing.
+        // New columns are written at ringWriteSeq, and the display
+        // naturally encounters them as displaySeq (= oldEpoch + nowCol)
+        // increments toward ringWriteSeq.  This produces zero-jump
+        // continuity — no phase correction or epoch remap needed.
+        //
+        // The setPositionSeconds(0.0) from GStreamer triggers a jump
+        // hold which preserves the old anchor.  When the hold expires,
+        // handleWindowAfterAnimating remaps the epoch to maintain
+        // display continuity while switching to the new coordinate
+        // space.
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        const auto transitionFeedStart = Clock::now();
-        const qint64 preRingWriteSeq = m_ringWriteSeq;
-        const qint64 preRollingEpoch = m_rollingEpoch;
-        const double preAnchor = m_positionAnchorSeconds;
-#endif
-        if (m_displayMode == 0) {
-            m_rollingEpoch = m_ringWriteSeq - static_cast<qint64>(startIndex);
-        }
-        if (m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
-            // Compute the new track's nominal position.
-            const double columnsPerSecond =
-                static_cast<double>(m_precomputedSampleRateHz)
-                / static_cast<double>(m_precomputedHopSize);
-            const double nominalPositionSeconds =
-                static_cast<double>(startIndex) / columnsPerSecond;
-            // Preserve the sub-column phase from the current render
-            // position so the fractional scroll offset is continuous
-            // across the transition.  Without this, the phase
-            // discontinuity (~0.2–0.5 px) produces a visible
-            // micro-stutter in the rolling spectrogram.
-            const auto now = Clock::now();
-            const double currentColumnF =
-                currentRenderPositionSecondsLocked(now) * columnsPerSecond;
-            const double currentPhase =
-                currentColumnF - std::floor(currentColumnF);
-            const double newColumnF = nominalPositionSeconds * columnsPerSecond;
-            const double newPhase = newColumnF - std::floor(newColumnF);
-            const double phaseCorrectionColumns = currentPhase - newPhase;
-            const double correctedPositionSeconds =
-                nominalPositionSeconds + phaseCorrectionColumns / columnsPerSecond;
-
-            m_positionJumpHoldActive = false;
-            setPositionAnchorLocked(
-                std::max(0.0, correctedPositionSeconds), now);
-        }
-        m_precomputedLastRightCol = -1;
-        m_precomputedLastDisplaySeq = -1;
-        // Do NOT call invalidateCanvas() here: in rolling mode the epoch
-        // remap maps the new track's start onto the current write head, so
-        // the display range shifts by at most a few columns.  The normal
-        // advancePrecomputedCanvasLocked path handles this incrementally.
-        // Destroying the canvas would force a full rebuild of all visible
-        // columns, causing a visible micro-hitch at every gapless
-        // transition.
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        m_debugLastTransitionFeedAt = transitionFeedStart;
+        m_debugLastTransitionFeedAt = Clock::now();
         {
             const qint64 validCount = std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq);
             FERROUS_SPECTROGRAM_LOGF(
                 stderr,
                 "[Qt-gapless-transition] chIdx=%d oldTok=%llu newTok=%llu startIdx=%d "
-                "ringWriteSeq=%lld rollingEpoch=%lld->%lld anchor=%.3f->%.3f "
-                "ringValid=%lld/%d totalEst=%d\n",
+                "ringWriteSeq=%lld epoch=%lld anchor=%.3f "
+                "ringValid=%lld/%d totalEst=%d (no epoch/anchor change)\n",
                 channelIndex,
                 static_cast<unsigned long long>(m_precomputedTrackToken),
                 static_cast<unsigned long long>(trackToken),
                 startIndex,
-                static_cast<long long>(preRingWriteSeq),
-                static_cast<long long>(preRollingEpoch),
+                static_cast<long long>(m_ringWriteSeq),
                 static_cast<long long>(m_rollingEpoch),
-                preAnchor, m_positionAnchorSeconds,
+                m_positionAnchorSeconds,
                 static_cast<long long>(validCount), m_ringCapacity,
                 m_precomputedTotalColumnsEstimate);
         }
@@ -2247,6 +2213,28 @@ void SpectrogramItem::handleWindowAfterAnimating() {
         const double holdElapsedSeconds =
             std::chrono::duration<double>(now - m_positionJumpHoldStartedAt).count();
         if (holdElapsedSeconds >= kPositionJumpHoldTimeoutSeconds) {
+            // Remap the rolling epoch so displaySeq stays the same
+            // when the anchor switches coordinate spaces.  This keeps
+            // the display continuous across gapless transitions where
+            // the old anchor ran in the previous track's time and the
+            // held position is in the new track's time.
+            if (m_displayMode == 0
+                && m_precomputedSampleRateHz > 0
+                && m_precomputedHopSize > 0) {
+                const double colsPerSec =
+                    static_cast<double>(m_precomputedSampleRateHz)
+                    / static_cast<double>(m_precomputedHopSize);
+                const double currentPos =
+                    currentRenderPositionSecondsLocked(now);
+                const int oldNowCol =
+                    static_cast<int>(std::floor(currentPos * colsPerSec));
+                const qint64 currentDisplaySeq =
+                    m_rollingEpoch + static_cast<qint64>(oldNowCol);
+                const int newNowCol = static_cast<int>(
+                    std::floor(m_positionJumpHoldSeconds * colsPerSec));
+                m_rollingEpoch = currentDisplaySeq
+                    - static_cast<qint64>(newNowCol);
+            }
             setPositionAnchorLocked(m_positionJumpHoldSeconds, now);
             m_positionJumpHoldActive = false;
         }

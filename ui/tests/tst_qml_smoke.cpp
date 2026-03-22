@@ -1646,7 +1646,10 @@ void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
 
     QCOMPARE(item.m_precomputedTrackToken, 12ULL);
     QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeGapless);
-    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeGapless);
+    // Epoch stays unchanged during gapless transitions — the old
+    // position model keeps advancing and the jump hold expiry remaps
+    // the epoch to maintain display continuity.
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(0));
 
     QByteArray nextTrackChunk(2 * binsPerColumn, '\0');
     item.feedPrecomputedChunk(
