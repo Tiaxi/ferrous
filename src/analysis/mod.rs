@@ -1045,17 +1045,16 @@ fn run_spectrogram_session(
     );
 
     let bins_per_column = (fft_size / 2) + 1;
-    let Some(total_columns_estimate) = estimate_total_columns(path) else {
+    let total_columns_estimate = estimate_total_columns(path).or({
         profile_eprintln!("[spect-worker] estimate_total_columns returned None, aborting");
-        return None;
-    };
+        None
+    })?;
 
-    let Some((mut format, mut audio_decoder, track_id, native_sample_rate, native_channels)) =
-        open_symphonia_file(path)
-    else {
-        profile_eprintln!("[spect-worker] failed to open file");
-        return None;
-    };
+    let (mut format, mut audio_decoder, track_id, native_sample_rate, native_channels) =
+        open_symphonia_file(path).or_else(|| {
+            profile_eprintln!("[spect-worker] failed to open file");
+            None
+        })?;
 
     let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
     let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
