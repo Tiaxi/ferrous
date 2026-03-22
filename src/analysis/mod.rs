@@ -1294,15 +1294,6 @@ fn session_decode_loop(
         // 3. Rate throttle (rolling mode only, after burst).
         if session.post_reset_burst > 0 {
             session.post_reset_burst -= 1;
-            if session.post_reset_burst == 0 {
-                // Reset the rate limiter's baseline so the burst columns
-                // don't count against the rate budget.  Without this, the
-                // limiter sees ~31 columns in ~3ms and sleeps for ~350ms
-                // to bring the average to 2×, halving the lead and causing
-                // periodic hitches as the display catches the write head.
-                session.session_start_time = std::time::Instant::now();
-                session.session_start_column = session.columns_produced;
-            }
         } else if session.decode_rate_limit.is_finite() {
             let max_cols_per_wall_sec = session.decode_rate_limit * session.cols_per_second;
             if max_cols_per_wall_sec > 0.0 {
