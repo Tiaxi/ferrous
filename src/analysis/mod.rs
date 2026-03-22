@@ -1102,6 +1102,12 @@ struct SpectrogramSessionState {
 
     // Position tracking
     target_position_seconds: f64,
+    /// Suppresses backward-seek detection for one command cycle after a
+    /// `ContinueWithFile` file switch.  The offset-adjusted position
+    /// can be a few columns behind the reset `session_start_column`
+    /// due to timing discrepancy between the last position update and
+    /// the decoder's actual position.
+    suppress_backward_seek: bool,
     /// Absolute column index of the next column to be produced (monotonic within session).
     columns_produced: u64,
     /// Column index where the current decode segment started (after last seek/reset).
@@ -1251,6 +1257,7 @@ fn run_spectrogram_session(
         cols_per_second,
         divisor,
         target_position_seconds: start_seconds,
+        suppress_backward_seek: false,
         columns_produced: start_column,
         session_start_column: start_column,
         stfts: (0..actual_channel_count)
@@ -1348,6 +1355,7 @@ fn run_spectrogram_session(
                     session.target_chunk_columns = 1;
                     session.session_start_time = std::time::Instant::now();
                     session.session_start_column = session.columns_produced;
+                    session.suppress_backward_seek = true;
                     profile_eprintln!("[spect-worker] file switch OK, continuing session");
                     continue; // re-enter session_decode_loop
                 }
@@ -1677,7 +1685,9 @@ fn process_session_commands(
         session.target_position_seconds = position_seconds;
 
         let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
-        if target_col < session.session_start_column {
+        if session.suppress_backward_seek {
+            session.suppress_backward_seek = false;
+        } else if target_col < session.session_start_column {
             // Backward seek needed.
             return Some(SessionAction::SeekRequired { position_seconds });
         }
@@ -1700,7 +1710,9 @@ fn handle_single_command(
         SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
             session.target_position_seconds = position_seconds;
             let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
-            if target_col < session.session_start_column {
+            if session.suppress_backward_seek {
+                session.suppress_backward_seek = false;
+            } else if target_col < session.session_start_column {
                 return SessionAction::SeekRequired { position_seconds };
             }
             let forward_gap = target_col.saturating_sub(session.columns_produced);
@@ -3895,6 +3907,7 @@ mod tests {
             cols_per_second: 46.875,
             divisor: 1,
             target_position_seconds: 2.0,
+            suppress_backward_seek: false,
             columns_produced: 256,
             session_start_column: 0,
             stfts: Vec::new(),
@@ -4004,6 +4017,7 @@ mod tests {
             cols_per_second: 46.875,
             divisor: 1,
             target_position_seconds: 2.0,
+            suppress_backward_seek: false,
             columns_produced: 256,
             session_start_column: 0,
             stfts: Vec::new(),
@@ -4053,6 +4067,7 @@ mod tests {
             cols_per_second: 46.875,
             divisor: 1,
             target_position_seconds: 2.0,
+            suppress_backward_seek: false,
             columns_produced: 256,
             session_start_column: 0,
             stfts: Vec::new(),
