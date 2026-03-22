@@ -1134,11 +1134,20 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 playheadPixel = -1;
             }
 
-            // Note: the spectrogram worker emits silence padding columns
-            // after EOF to cover the gap between the decoder's EOF and
-            // the track's declared duration.  This ensures the ring
-            // buffer always has data past the playback position, so no
-            // scroll clamping is needed here.
+            // When the playback position has scrolled past the last
+            // decoded column (e.g. the decoder reached EOF a bit before
+            // the track actually ends), clamp the effective column and
+            // phase to the rightmost available data.  Without this, the
+            // canvas shifts into empty space and the spectrogram appears
+            // to freeze for the remaining duration.
+            if (rollingMode) {
+                const qint64 displaySeqUnclamped =
+                    m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0));
+                if (displaySeqUnclamped > m_ringWriteSeq && m_ringWriteSeq > 0) {
+                    columnF = static_cast<double>(m_ringWriteSeq - m_rollingEpoch);
+                    columnPhase = 0.0;
+                }
+            }
 
             const int visibleCols = std::min(
                 w,
