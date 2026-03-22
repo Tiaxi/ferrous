@@ -1134,20 +1134,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 playheadPixel = -1;
             }
 
-            // When the playback position has scrolled past the last
-            // decoded column (e.g. the decoder reached EOF a bit before
-            // the track actually ends), clamp the effective column and
-            // phase to the rightmost available data.  Without this, the
-            // canvas shifts into empty space and the spectrogram appears
-            // to freeze for the remaining duration.
-            if (rollingMode) {
-                const qint64 displaySeqUnclamped =
-                    m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0));
-                if (displaySeqUnclamped > m_ringWriteSeq && m_ringWriteSeq > 0) {
-                    columnF = static_cast<double>(m_ringWriteSeq - m_rollingEpoch);
-                    columnPhase = 0.0;
-                }
-            }
+            // The decoder covers the full track minus ~2 columns at
+            // EOF (STFT window effect).  Don't clamp the scroll — at
+            // most 1-2 background pixels appear at the right edge for
+            // a few frames, which is imperceptible.  Clamping caused a
+            // visible backward-snap stutter when the playback position
+            // intermittently crossed the ring write head.
 
             const int visibleCols = std::min(
                 w,
