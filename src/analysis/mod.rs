@@ -579,10 +579,13 @@ impl AnalysisRuntimeState {
 
     fn seek_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         self.last_spectrogram_position = position_seconds;
-        let adjusted = position_seconds + self.spectrogram_position_offset;
-        let _ = ctx.spectrogram_cmd_tx.send(SpectrogramWorkerCommand::Seek {
-            position_seconds: adjusted,
-        });
+        // An explicit seek breaks the continuous gapless timeline.
+        // Reset the offset so the worker seeks within the current
+        // file's coordinate space, not the accumulated one.
+        self.spectrogram_position_offset = 0.0;
+        let _ = ctx
+            .spectrogram_cmd_tx
+            .send(SpectrogramWorkerCommand::Seek { position_seconds });
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
