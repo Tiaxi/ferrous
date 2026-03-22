@@ -487,11 +487,31 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_rollingEpoch = m_ringWriteSeq - static_cast<qint64>(startIndex);
         }
         if (m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
-            const double transitionPositionSeconds =
-                static_cast<double>(startIndex * m_precomputedHopSize)
-                / static_cast<double>(m_precomputedSampleRateHz);
+            // Compute the new track's nominal position.
+            const double columnsPerSecond =
+                static_cast<double>(m_precomputedSampleRateHz)
+                / static_cast<double>(m_precomputedHopSize);
+            const double nominalPositionSeconds =
+                static_cast<double>(startIndex) / columnsPerSecond;
+            // Preserve the sub-column phase from the current render
+            // position so the fractional scroll offset is continuous
+            // across the transition.  Without this, the phase
+            // discontinuity (~0.2–0.5 px) produces a visible
+            // micro-stutter in the rolling spectrogram.
+            const auto now = Clock::now();
+            const double currentColumnF =
+                currentRenderPositionSecondsLocked(now) * columnsPerSecond;
+            const double currentPhase =
+                currentColumnF - std::floor(currentColumnF);
+            const double newColumnF = nominalPositionSeconds * columnsPerSecond;
+            const double newPhase = newColumnF - std::floor(newColumnF);
+            const double phaseCorrectionColumns = currentPhase - newPhase;
+            const double correctedPositionSeconds =
+                nominalPositionSeconds + phaseCorrectionColumns / columnsPerSecond;
+
             m_positionJumpHoldActive = false;
-            setPositionAnchorLocked(transitionPositionSeconds, Clock::now());
+            setPositionAnchorLocked(
+                std::max(0.0, correctedPositionSeconds), now);
         }
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
