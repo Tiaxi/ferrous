@@ -30,14 +30,7 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
-// Tolerance for accepting a GStreamer position heartbeat that is
-// slightly behind the local interpolation clock.  With ~40ms heartbeat
-// cadence and typical clock jitter, the GStreamer position can be up
-// to ~20ms behind the interpolated value.  A tight tolerance (like
-// 1ms) causes the anchor to drift ahead of reality on every heartbeat,
-// producing visible saw-tooth hitching.  60ms accommodates normal
-// jitter while still suppressing genuinely stale startup values.
-constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.060;
+constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
@@ -331,22 +324,23 @@ void SpectrogramItem::setPositionSeconds(double value) {
             m_playing
             && m_positionAnchorInitialized
             && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
-        if (regressedDuringPlayback) {
-            // Genuinely stale heartbeat (>60ms behind interpolation).
-            // Ignore it entirely — don't push the anchor forward, which
-            // would cause cumulative drift.
-            return;
-        }
+        // Soft PLL: for small errors (normal heartbeat jitter ~10-20ms),
+        // blend toward the GStreamer position to smooth jitter while
+        // still converging to prevent drift.  For large errors (initial
+        // position set, post-seek correction), use the value directly.
+        const double error = clamped - currentPosition;
+        constexpr double kServoAlpha = 0.25;
+        constexpr double kServoMaxErrorSeconds = 0.15;
+        const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
+        const double effectivePosition = regressedDuringPlayback
+            ? currentPosition
+            : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
         if (m_positionAnchorInitialized
-            && std::abs(m_positionSeconds - clamped) < 0.0001) {
+            && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
             return;
         }
         m_positionJumpHoldActive = false;
-        // Accept the GStreamer position as authoritative. Small backward
-        // movements within the tolerance window (~20ms from clock jitter)
-        // are sub-pixel and invisible; they keep the anchor synchronized
-        // with the actual playback position instead of drifting ahead.
-        setPositionAnchorLocked(clamped, now);
+        setPositionAnchorLocked(effectivePosition, now);
         changed = true;
     }
     if (changed) {
