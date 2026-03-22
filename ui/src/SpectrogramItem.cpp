@@ -30,7 +30,14 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
-constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
+// Tolerance for accepting a GStreamer position heartbeat that is
+// slightly behind the local interpolation clock.  With ~40ms heartbeat
+// cadence and typical clock jitter, the GStreamer position can be up
+// to ~20ms behind the interpolated value.  A tight tolerance (like
+// 1ms) causes the anchor to drift ahead of reality on every heartbeat,
+// producing visible saw-tooth hitching.  60ms accommodates normal
+// jitter while still suppressing genuinely stale startup values.
+constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.060;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
@@ -324,20 +331,22 @@ void SpectrogramItem::setPositionSeconds(double value) {
             m_playing
             && m_positionAnchorInitialized
             && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
-        const double effectivePosition =
-            regressedDuringPlayback ? currentPosition : clamped;
+        if (regressedDuringPlayback) {
+            // Genuinely stale heartbeat (>60ms behind interpolation).
+            // Ignore it entirely — don't push the anchor forward, which
+            // would cause cumulative drift.
+            return;
+        }
         if (m_positionAnchorInitialized
-            && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
+            && std::abs(m_positionSeconds - clamped) < 0.0001) {
             return;
         }
         m_positionJumpHoldActive = false;
-        // Playback snapshots are informational heartbeats, not authoritative
-        // reverse seeks. During startup the backend can report a slightly
-        // stale position (0.00, 0.02, 0.05...) after the local render clock
-        // has already advanced, which would otherwise nudge the spectrogram
-        // backward. Keep the playback anchor monotonic here and let explicit
-        // seek/reset paths handle real backward jumps.
-        setPositionAnchorLocked(effectivePosition, now);
+        // Accept the GStreamer position as authoritative. Small backward
+        // movements within the tolerance window (~20ms from clock jitter)
+        // are sub-pixel and invisible; they keep the anchor synchronized
+        // with the actual playback position instead of drifting ahead.
+        setPositionAnchorLocked(clamped, now);
         changed = true;
     }
     if (changed) {
