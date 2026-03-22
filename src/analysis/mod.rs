@@ -1339,12 +1339,15 @@ fn run_spectrogram_session(
                     session.total_columns_estimate = new_est;
                     warmup_remaining = 0;
                     // Reset chunk target so the first columns from the
-                    // new file are emitted promptly.  Do NOT set
-                    // post_reset_burst: the rate limiter runs
-                    // continuously from the established baseline, and
-                    // a burst would dump ~31 chunks onto the GUI thread
-                    // in one frame, causing a visible hitch.
+                    // new file are emitted promptly.  Reset the rate
+                    // limiter baseline to clear accumulated "credit"
+                    // from parking during the previous track's
+                    // lookahead — without this, the rate limiter
+                    // permits a sprint of ~300 columns, flooding the
+                    // GUI thread.
                     session.target_chunk_columns = 1;
+                    session.session_start_time = std::time::Instant::now();
+                    session.session_start_column = session.columns_produced;
                     profile_eprintln!("[spect-worker] file switch OK, continuing session");
                     continue; // re-enter session_decode_loop
                 }
