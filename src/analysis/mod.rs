@@ -1338,8 +1338,12 @@ fn run_spectrogram_session(
                     session.track_token = track_token;
                     session.total_columns_estimate = new_est;
                     warmup_remaining = 0;
-                    // Small burst to rebuild lead after the file switch.
-                    session.post_reset_burst = 16;
+                    // Reset chunk target so the first columns from the
+                    // new file are emitted promptly.  Do NOT set
+                    // post_reset_burst: the rate limiter runs
+                    // continuously from the established baseline, and
+                    // a burst would dump ~31 chunks onto the GUI thread
+                    // in one frame, causing a visible hitch.
                     session.target_chunk_columns = 1;
                     profile_eprintln!("[spect-worker] file switch OK, continuing session");
                     continue; // re-enter session_decode_loop
