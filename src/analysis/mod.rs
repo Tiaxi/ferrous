@@ -833,9 +833,25 @@ impl AnalysisRuntimeState {
 
     fn seek_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         self.last_spectrogram_position = position_seconds;
-        // An explicit seek breaks the continuous gapless timeline.
-        // Reset the offset so the worker seeks within the current
-        // file's coordinate space, not the accumulated one.
+
+        // In centered mode the full track is (or will be) decoded into the
+        // ring buffer.  A seek just moves the display window — no need to
+        // restart the worker session or clear the ring.  Only forward the
+        // position update so the worker's target_position_seconds stays
+        // current (rate-limiter / headroom bookkeeping).
+        if self.display_mode == SpectrogramDisplayMode::Centered {
+            let adjusted = position_seconds + self.spectrogram_position_offset;
+            let _ = ctx
+                .spectrogram_cmd_tx
+                .send(SpectrogramWorkerCommand::PositionUpdate {
+                    position_seconds: adjusted,
+                });
+            return;
+        }
+
+        // Rolling mode: an explicit seek breaks the continuous gapless
+        // timeline.  Reset the offset so the worker seeks within the
+        // current file's coordinate space, not the accumulated one.
         self.spectrogram_position_offset = 0.0;
         let _ = ctx
             .spectrogram_cmd_tx

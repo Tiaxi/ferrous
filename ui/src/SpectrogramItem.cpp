@@ -1206,8 +1206,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // displayLeft/displayRight to only advance.  This lets
                 // advancePrecomputedCanvasLocked handle every 1-column step
                 // smoothly instead of falling back to full rebuilds.
-                // Reset on buffer-reset (seek / track change).
-                if (m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
+                // Allow backward jumps larger than 2 columns (seeks).
+                const bool isSeekJump =
+                    m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
+                    && displayLeft < m_precomputedCanvasDisplayLeft - 2;
+                if (!isSeekJump
+                    && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
                     displayLeft = std::max(displayLeft, m_precomputedCanvasDisplayLeft);
                     displayRight = std::max(displayRight, m_precomputedCanvasDisplayRight);
                 }
