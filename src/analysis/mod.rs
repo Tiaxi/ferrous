@@ -181,7 +181,7 @@ const MAX_STAGED_COLUMNS: u32 = 128;
 
 /// Off-screen staged spectrogram data for a likely gapless successor.
 /// Produced by a background staging thread, consumed at commit time in
-/// `handle_track_change(gapless=true)`.
+/// `handle_track_change` (gapless path).
 struct StagedSpectrogramData {
     path: PathBuf,
     columns_u8: Vec<u8>,
@@ -781,7 +781,7 @@ impl AnalysisRuntimeState {
     /// so staging preflight can compare candidate files against the live
     /// worker session.  Called from `start_spectrogram_session` (covers all
     /// restart paths) and from `handle_track_change` (covers gapless where
-    /// the worker may internally fall back from ContinueWithFile to NewTrack).
+    /// the worker may internally fall back from `ContinueWithFile` to `NewTrack`).
     fn update_session_compat_params(&mut self, path: &Path) {
         if let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(path) {
             let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
@@ -803,7 +803,7 @@ impl AnalysisRuntimeState {
         clear_history_on_reset: bool,
         ctx: &AnalysisContext<'_>,
     ) {
-        let Some(path) = self.active_track_path.as_ref().cloned() else {
+        let Some(path) = self.active_track_path.clone() else {
             profile_eprintln!(
                 "[analysis] start_spectrogram_session: no active_track_path, skipping"
             );
@@ -1263,7 +1263,12 @@ fn precomputed_to_u8_spectrum(v: f32, fft_size: usize) -> u8 {
 /// Off-screen staging decode: produces the first `MAX_STAGED_COLUMNS`
 /// columns of a candidate track into an `Arc<Mutex<Option<StagedSpectrogramData>>>`.
 /// Runs on a short-lived thread; checks `cancel` every 64 packets.
-#[allow(clippy::too_many_arguments)]
+// Arc params are moved into the staging thread — pass-by-value is intentional.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value
+)]
 fn run_staged_decode(
     mut format: Box<dyn symphonia::core::formats::FormatReader>,
     mut audio_decoder: Box<dyn symphonia::core::codecs::Decoder>,
@@ -1302,16 +1307,14 @@ fn run_staged_decode(
         }
 
         // Read and decode a packet.
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(_) => break, // EOF or error
+        let Ok(packet) = format.next_packet() else {
+            break; // EOF or error
         };
         if packet.track_id() != track_id {
             continue;
         }
-        let decoded = match audio_decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(_) => continue,
+        let Ok(decoded) = audio_decoder.decode(&packet) else {
+            continue;
         };
 
         let spec = decoded.spec();
@@ -1390,7 +1393,7 @@ fn run_staged_decode(
         }
 
         packet_counter += 1;
-        if packet_counter % 64 == 0 && cancel.load(Ordering::Relaxed) {
+        if packet_counter.is_multiple_of(64) && cancel.load(Ordering::Relaxed) {
             profile_eprintln!("[staging] cancelled after {column_count} columns");
             return;
         }
@@ -1609,7 +1612,7 @@ struct SpectrogramSessionState {
 
     /// Stored `ContinueWithFile` command to apply when the current file
     /// reaches EOF.  Set by command processing, consumed at EOF.
-    /// Fields: (path, track_token, skip_columns).
+    /// Fields: `(path, track_token, skip_columns)`.
     pending_continue: Option<(PathBuf, u64, u32)>,
 }
 
@@ -5266,5 +5269,289 @@ mod tests {
         session_flush_chunk(&mut session, &event_tx, &cols_out);
         // After flush, the atomic should reflect columns_produced.
         assert_eq!(cols_out.load(Ordering::Relaxed), 320);
+    }
+
+    // ---------------------------------------------------------------
+    // Centered mode behavior tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn apply_display_mode_centered_sets_unlimited_rate_and_lookahead() {
+        let mut session = SpectrogramSessionState {
+            track_token: 1,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 0.0,
+            suppress_backward_seek: false,
+            columns_produced: 0,
+            session_start_column: 0,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: Vec::new(),
+            chunk_columns: 0,
+            chunk_start_index: 0,
+            target_chunk_columns: 1,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_unthrottled_columns: 0,
+            decode_rate_limit: 2.0,
+            lookahead_columns: 512,
+            skip_output_columns: 0,
+            pending_continue: None,
+        };
+
+        assert!(session.decode_rate_limit.is_finite());
+        assert_eq!(session.lookahead_columns, 512);
+
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Centered);
+
+        assert!(session.decode_rate_limit.is_infinite());
+        assert_eq!(session.lookahead_columns, u64::MAX);
+        assert_eq!(session.display_mode, SpectrogramDisplayMode::Centered);
+    }
+
+    #[test]
+    fn apply_display_mode_rolling_restores_finite_rate_and_lookahead() {
+        let mut session = SpectrogramSessionState {
+            track_token: 1,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 0.0,
+            suppress_backward_seek: false,
+            columns_produced: 0,
+            session_start_column: 0,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: Vec::new(),
+            chunk_columns: 0,
+            chunk_start_index: 0,
+            target_chunk_columns: 1,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_unthrottled_columns: 0,
+            decode_rate_limit: f64::INFINITY,
+            lookahead_columns: u64::MAX,
+            skip_output_columns: 0,
+            pending_continue: None,
+        };
+
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
+
+        assert!(session.decode_rate_limit.is_finite());
+        assert!(session.lookahead_columns < u64::MAX);
+        assert_eq!(session.display_mode, SpectrogramDisplayMode::Rolling);
+    }
+
+    #[test]
+    fn centered_gapless_dispatches_new_track_with_reset() {
+        // In centered mode, gapless transitions should start a fresh
+        // NewTrack session (not ContinueWithFile) with buffer_reset so
+        // the UI gets 0-based column indices and a clean ring.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track_a.flac"));
+        state.active_track_token = 1;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(5000);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_track_change(
+            PathBuf::from("/tmp/track_b.flac"),
+            false, // reset_spectrogram
+            true,  // gapless
+            2,     // track_token
+            &ctx,
+        );
+
+        // Should dispatch NewTrack (not ContinueWithFile) because
+        // centered mode needs 0-based column indices.
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(
+                cmd,
+                SpectrogramWorkerCommand::NewTrack {
+                    emit_initial_reset: true,
+                    clear_history_on_reset: true,
+                    ..
+                }
+            ),
+            "centered gapless should dispatch NewTrack with reset, got {cmd:?}"
+        );
+
+        // Position offset should be reset for fresh coordinate space.
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
+    fn centered_seek_sends_position_update_not_seek() {
+        // In centered mode, seeks should not restart the worker session.
+        // The full track is already decoded; just update the position.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.seek_spectrogram_position(60.0, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
+            "centered seek should send PositionUpdate, got {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn rolling_seek_sends_seek_command() {
+        // In rolling mode, seeks must restart the worker session.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.seek_spectrogram_position(60.0, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::Seek { .. }),
+            "rolling seek should send Seek, got {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn rolling_gapless_dispatches_continue_with_file() {
+        // In rolling mode, gapless transitions use ContinueWithFile
+        // for seamless scrolling continuity.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.active_track_path = Some(PathBuf::from("/tmp/track_a.flac"));
+        state.active_track_token = 1;
+        state.last_spectrogram_position = 200.0;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(5000);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_track_change(
+            PathBuf::from("/tmp/track_b.flac"),
+            false, // reset_spectrogram
+            true,  // gapless
+            2,     // track_token
+            &ctx,
+        );
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::ContinueWithFile { .. }),
+            "rolling gapless should dispatch ContinueWithFile, got {cmd:?}"
+        );
+
+        // Position offset should accumulate.
+        assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn set_display_mode_command_updates_runtime_and_worker() {
+        let mut state = AnalysisRuntimeState::new();
+        assert_eq!(state.display_mode, SpectrogramDisplayMode::Rolling);
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &ctx,
+        );
+
+        assert_eq!(state.display_mode, SpectrogramDisplayMode::Centered);
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            SpectrogramWorkerCommand::SetDisplayMode(SpectrogramDisplayMode::Centered)
+        ));
     }
 }
