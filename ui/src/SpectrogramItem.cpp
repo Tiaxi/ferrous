@@ -1310,9 +1310,20 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 drawCols = std::min(m_canvasFilledCols, canvasSize.width());
                 srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
                 scrollOffset = columnPhase;
-                drawX = rollingMode
-                    ? static_cast<double>(w - drawCols) - columnPhase
-                    : 0.0;
+                if (rollingMode) {
+                    drawX = static_cast<double>(w - drawCols) - columnPhase;
+                } else {
+                    // Centered mode: use sub-pixel scrolling only in the
+                    // middle region where the spectrogram actually scrolls.
+                    // At the start (displayLeft == 0) and end (displayRight
+                    // == total-1) the image is static and the playhead moves
+                    // across it — sub-pixel offset would cause twitching.
+                    const bool centeredScrolling =
+                        displayLeft > 0
+                        && displayRight < static_cast<qint64>(
+                            m_precomputedTotalColumnsEstimate) - 1;
+                    drawX = centeredScrolling ? -columnPhase : 0.0;
+                }
                 latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
                 tileCount = static_cast<int>(m_dirtyTiles.size());
                 const bool refreshAllTiles = node->tileTextures.size() != tileCount;
