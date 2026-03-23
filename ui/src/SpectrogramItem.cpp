@@ -453,6 +453,15 @@ void SpectrogramItem::feedPrecomputedChunk(
         return;
     }
 
+    // If this widget has no ring and receives data (not a reset), it was
+    // created/recycled after the reset went to a different widget instance.
+    // Apply an implicit reset so the widget can accept the arriving data.
+    bool appliedImplicitReset = false;
+    if (!bufferReset && columns > 0 && m_ringCapacity == 0 && !m_precomputedResetPending) {
+        applyPrecomputedResetLocked(startIndex, bins, trackToken, true);
+        appliedImplicitReset = true;
+    }
+
     bool appliedReset = false;
     if (bufferReset && columns <= 0) {
         // Delay the reset handoff until the first data-bearing post-seek
@@ -504,7 +513,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         && m_precomputedTrackToken != 0
         && trackToken != m_precomputedTrackToken
         && !bufferReset
-        && !appliedReset) {
+        && !appliedReset
+        && !appliedImplicitReset) {
         // New track token — reset per-track max column index so it
         // reflects the new track's range, not the old one's.
         m_precomputedMaxColumnIndex = -1;
