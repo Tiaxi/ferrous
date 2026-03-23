@@ -104,6 +104,8 @@ private:
         int bins,
         quint64 trackToken,
         bool clearHistoryOnReset);
+    qint64 currentRollingDisplayRightLocked(std::chrono::steady_clock::time_point now) const;
+    void truncateRollingTailLocked(qint64 newWriteSeq);
     double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
     void setPositionAnchorLocked(double value, std::chrono::steady_clock::time_point now);
     void syncPositionAnchorLocked(std::chrono::steady_clock::time_point now);

@@ -504,14 +504,16 @@ impl AnalysisRuntimeState {
             // Non-gapless: reset the offset since a new session starts
             // with fresh coordinates.
             self.spectrogram_position_offset = 0.0;
-            // Start a fresh precomputed session.  Natural and manual
-            // transitions suppress the initial reset so the UI can
-            // preserve rolling history even if the previous session
-            // already ended at EOF.
+            // Start a fresh precomputed session. Emit a reset marker for
+            // every non-gapless transition so the UI can distinguish a
+            // true reset from a gapless handoff. Manual track changes clear
+            // history; natural advances keep the already visible history.
+            let emit_initial_reset = true;
+            let clear_history_on_reset = reset_spectrogram;
             profile_eprintln!(
-                "[analysis] handle_track_change: dispatching NewTrack from 0.0 reset={reset_spectrogram} gapless={gapless}",
+                "[analysis] handle_track_change: dispatching NewTrack from 0.0 emit_reset={emit_initial_reset} clear_history={clear_history_on_reset} gapless={gapless}",
             );
-            self.start_spectrogram_session(0.0, reset_spectrogram, reset_spectrogram, ctx);
+            self.start_spectrogram_session(0.0, emit_initial_reset, clear_history_on_reset, ctx);
         }
 
         if let Some(peaks) = self.load_cached_waveform(&path) {
@@ -4006,7 +4008,17 @@ mod tests {
         let cmd = spectrogram_cmd_rx
             .recv_timeout(Duration::from_millis(50))
             .expect("spectrogram command");
-        assert!(matches!(cmd, SpectrogramWorkerCommand::NewTrack { .. }));
+        match cmd {
+            SpectrogramWorkerCommand::NewTrack {
+                emit_initial_reset,
+                clear_history_on_reset,
+                ..
+            } => {
+                assert!(emit_initial_reset);
+                assert!(!clear_history_on_reset);
+            }
+            other => panic!("expected NewTrack, got {other:?}"),
+        }
         // Generation must have been incremented.
         assert_eq!(spectrogram_decode_generation.load(Ordering::Relaxed), 1);
     }

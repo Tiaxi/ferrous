@@ -1441,13 +1441,13 @@ void QmlSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
         11);
 
     QVERIFY(!item.m_precomputedResetPending);
-    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeReset - 128);
-    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeReset + 1);
-    QCOMPARE(item.m_ringSequenceId[static_cast<size_t>(writeSeqBeforeReset % item.m_ringCapacity)],
-        writeSeqBeforeReset);
-    QCOMPARE(
-        item.m_ringColumnId[static_cast<size_t>(writeSeqBeforeReset % item.m_ringCapacity)],
-        128);
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(-128));
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(2));
+    QCOMPARE(item.m_ringSequenceId[0], static_cast<qint64>(0));
+    QCOMPARE(item.m_ringColumnId[0], 0);
+    QCOMPARE(item.m_ringSequenceId[1], static_cast<qint64>(1));
+    QCOMPARE(item.m_ringColumnId[1], 128);
+    QCOMPARE(item.m_ringSequenceId[2], static_cast<qint64>(-1));
 }
 
 void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
@@ -1457,7 +1457,7 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
 
     constexpr int binsPerColumn = 8;
     constexpr int totalEstimate = 1024;
-    QByteArray initialChunk(4 * binsPerColumn, '\0');
+    QByteArray initialChunk(12 * binsPerColumn, '\0');
     for (int i = 0; i < initialChunk.size(); ++i) {
         initialChunk[i] = static_cast<char>(10 + i);
     }
@@ -1465,7 +1465,7 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
         initialChunk,
         binsPerColumn,
         0,
-        4,
+        12,
         0,
         totalEstimate,
         48'000,
@@ -1475,7 +1475,8 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
         11);
 
     const qint64 writeSeqBeforeSeek = item.m_ringWriteSeq;
-    QCOMPARE(writeSeqBeforeSeek, 4);
+    QCOMPARE(writeSeqBeforeSeek, 12);
+    item.setPositionSeconds((8.0 * 1024.0) / 48'000.0);
 
     item.feedPrecomputedChunk(
         QByteArray(),
@@ -1507,20 +1508,19 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
         false,
         11);
 
-    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeSeek + 2);
-    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeSeek - 400);
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(11));
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(-392));
     QCOMPARE(item.m_ringSequenceId[0], 0);
     QCOMPARE(item.m_ringColumnId[0], 0);
     QCOMPARE(item.m_ringSequenceId[1], 1);
     QCOMPARE(item.m_ringColumnId[1], 1);
-    QCOMPARE(item.m_ringSequenceId[2], 2);
-    QCOMPARE(item.m_ringColumnId[2], 2);
-    QCOMPARE(item.m_ringSequenceId[3], 3);
-    QCOMPARE(item.m_ringColumnId[3], 3);
-    QCOMPARE(item.m_ringSequenceId[4], 4);
-    QCOMPARE(item.m_ringColumnId[4], 400);
-    QCOMPARE(item.m_ringSequenceId[5], 5);
-    QCOMPARE(item.m_ringColumnId[5], 401);
+    QCOMPARE(item.m_ringSequenceId[8], 8);
+    QCOMPARE(item.m_ringColumnId[8], 8);
+    QCOMPARE(item.m_ringSequenceId[9], 9);
+    QCOMPARE(item.m_ringColumnId[9], 400);
+    QCOMPARE(item.m_ringSequenceId[10], 10);
+    QCOMPARE(item.m_ringColumnId[10], 401);
+    QCOMPARE(item.m_ringSequenceId[11], static_cast<qint64>(-1));
 }
 
 void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
@@ -1729,14 +1729,18 @@ void QmlSmokeTest::spectrogramNaturalTrackResetPreservesRollingHistory() {
         12);
 
     QVERIFY(!item.m_precomputedResetPending);
-    QCOMPARE(item.m_rollingEpoch, writeSeqBeforeReset);
-    QCOMPARE(item.m_ringWriteSeq, writeSeqBeforeReset + 2);
-    QCOMPARE(item.m_ringSequenceId[4], 4);
-    QCOMPARE(item.m_ringColumnId[4], 0);
-    QCOMPARE(item.m_ringTrackToken[4], 12ULL);
-    QCOMPARE(item.m_ringSequenceId[5], 5);
-    QCOMPARE(item.m_ringColumnId[5], 1);
-    QCOMPARE(item.m_ringTrackToken[5], 12ULL);
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(0));
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(3));
+    QCOMPARE(item.m_ringSequenceId[0], 0);
+    QCOMPARE(item.m_ringColumnId[0], 0);
+    QCOMPARE(item.m_ringTrackToken[0], 11ULL);
+    QCOMPARE(item.m_ringSequenceId[1], 1);
+    QCOMPARE(item.m_ringColumnId[1], 0);
+    QCOMPARE(item.m_ringTrackToken[1], 12ULL);
+    QCOMPARE(item.m_ringSequenceId[2], 2);
+    QCOMPARE(item.m_ringColumnId[2], 1);
+    QCOMPARE(item.m_ringTrackToken[2], 12ULL);
+    QCOMPARE(item.m_ringSequenceId[3], static_cast<qint64>(-1));
 }
 
 void QmlSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {

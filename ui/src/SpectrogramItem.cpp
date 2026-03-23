@@ -761,14 +761,89 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_trackColumnToSeqByToken.clear();
         m_ringCapacity = 0;
     } else {
-        // Preserve the existing rolling history and remap the reset target
-        // to the current write head so the new content appends directly to
-        // what is already on screen instead of blanking the widget.
-        m_rollingEpoch = m_ringWriteSeq - static_cast<qint64>(startIndex);
+        // Preserve only the history that has actually been shown on screen.
+        // Any speculative lookahead beyond the current playback head is stale
+        // after a seek/non-gapless reset; keeping it and remapping to the
+        // write head makes the spectrogram jump forward and "speed up".
+        const auto now = std::chrono::steady_clock::now();
+        const qint64 displayRight = currentRollingDisplayRightLocked(now);
+        truncateRollingTailLocked(displayRight + 1);
+        m_rollingEpoch = displayRight - static_cast<qint64>(startIndex);
     }
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
     invalidateCanvas();
+}
+
+qint64 SpectrogramItem::currentRollingDisplayRightLocked(
+    std::chrono::steady_clock::time_point now) const {
+    if (m_ringWriteSeq <= 0) {
+        return 0;
+    }
+    if (m_precomputedSampleRateHz <= 0 || m_precomputedHopSize <= 0) {
+        return std::clamp(m_ringWriteSeq - 1, m_ringOldestSeq, m_ringWriteSeq - 1);
+    }
+    const double colsPerSecond =
+        static_cast<double>(m_precomputedSampleRateHz)
+        / static_cast<double>(m_precomputedHopSize);
+    const double renderPositionSeconds =
+        std::max(0.0, currentRenderPositionSecondsLocked(now));
+    const qint64 nowCol = static_cast<qint64>(std::floor(renderPositionSeconds * colsPerSecond));
+    const qint64 displaySeq = m_rollingEpoch + std::max<qint64>(nowCol, 0);
+    return std::clamp(displaySeq, m_ringOldestSeq, m_ringWriteSeq - 1);
+}
+
+void SpectrogramItem::truncateRollingTailLocked(qint64 newWriteSeq) {
+    if (m_ringCapacity <= 0) {
+        m_ringWriteSeq = 0;
+        m_ringOldestSeq = 0;
+        return;
+    }
+
+    const qint64 clampedWriteSeq = std::clamp(newWriteSeq, m_ringOldestSeq, m_ringWriteSeq);
+    if (clampedWriteSeq >= m_ringWriteSeq) {
+        return;
+    }
+
+    for (qint64 seq = clampedWriteSeq; seq < m_ringWriteSeq; ++seq) {
+        const int slot = static_cast<int>(seq % m_ringCapacity);
+        if (slot < 0 || slot >= m_ringCapacity) {
+            continue;
+        }
+        if (!m_ringSequenceId.empty()
+            && m_ringSequenceId[static_cast<size_t>(slot)] == seq) {
+            const qint32 trackCol = !m_ringColumnId.empty()
+                ? m_ringColumnId[static_cast<size_t>(slot)]
+                : -1;
+            const quint64 trackToken = !m_ringTrackToken.empty()
+                ? m_ringTrackToken[static_cast<size_t>(slot)]
+                : 0;
+            if (trackCol >= 0) {
+                auto tokenIt = m_trackColumnToSeqByToken.find(trackToken);
+                if (tokenIt != m_trackColumnToSeqByToken.end()
+                    && tokenIt->value(trackCol, -1) == seq) {
+                    tokenIt->remove(trackCol);
+                    if (tokenIt->isEmpty()) {
+                        m_trackColumnToSeqByToken.erase(tokenIt);
+                    }
+                }
+            }
+        }
+        if (!m_ringColumnId.empty()) {
+            m_ringColumnId[static_cast<size_t>(slot)] = -1;
+        }
+        if (!m_ringSequenceId.empty()) {
+            m_ringSequenceId[static_cast<size_t>(slot)] = -1;
+        }
+        if (!m_ringTrackToken.empty()) {
+            m_ringTrackToken[static_cast<size_t>(slot)] = 0;
+        }
+    }
+
+    m_ringWriteSeq = clampedWriteSeq;
+    if (m_ringOldestSeq > m_ringWriteSeq) {
+        m_ringOldestSeq = m_ringWriteSeq;
+    }
 }
 
 double SpectrogramItem::currentRenderPositionSecondsLocked(
@@ -1103,10 +1178,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 displayLeft = std::max<qint64>(0, displayRight - static_cast<qint64>(w) + 1);
                 playheadPixel = nowCol - static_cast<int>(displayLeft);
             } else {
-                // Rolling mode preserves the visual history as a continuous
-                // write-order strip. A seek remaps the current track column
-                // to the latest write head so the new content appends
-                // directly to the old history instead of leaving a gap.
+                // Rolling mode preserves the visible history as a continuous
+                // write-order strip. Resets pin the new timeline to the
+                // current visual head and discard stale lookahead so the
+                // spectrogram keeps scrolling at playback speed.
                 rollingMode = true;
                 const qint64 displaySeq =
                     m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0));
