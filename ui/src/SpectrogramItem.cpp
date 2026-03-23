@@ -686,6 +686,9 @@ void SpectrogramItem::feedPrecomputedChunk(
                 m_ringTrackToken[static_cast<size_t>(slot)] = effectiveTrackToken;
             }
             m_trackColumnToSeqByToken[effectiveTrackToken].insert(trackCol, m_ringWriteSeq);
+            if (trackCol > m_precomputedMaxColumnIndex) {
+                m_precomputedMaxColumnIndex = trackCol;
+            }
             m_ringWriteSeq++;
         }
         m_ringOldestSeq = std::max<qint64>(0, m_ringWriteSeq - m_ringCapacity);
@@ -736,6 +739,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_ringWriteSeq = 0;
     m_trackEpochSeq = 0;
     m_rollingEpoch = 0;
+    m_precomputedMaxColumnIndex = -1;
     m_precomputedBinsPerColumn = 0;
     m_precomputedTotalColumnsEstimate = 0;
     m_precomputedResetPending = false;
@@ -1197,12 +1201,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (m_displayMode == 1) {
                 // Centered mode: playhead at center, data on both sides.
+                // Use the actual decoded column count when it exceeds the
+                // metadata estimate (the estimate can be off by hundreds
+                // of columns due to container overhead / padding).
                 rollingMode = false;
                 const int halfWidth = w / 2;
+                const qint64 totalCols = std::max(
+                    static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                    static_cast<qint64>(m_precomputedMaxColumnIndex) + 1);
                 displayLeft = std::max(static_cast<qint64>(0),
                     static_cast<qint64>(nowCol) - halfWidth);
                 displayRight = std::min(
-                    static_cast<qint64>(m_precomputedTotalColumnsEstimate - 1),
+                    totalCols - 1,
                     displayLeft + static_cast<qint64>(w) - 1);
                 displayLeft = std::max<qint64>(0, displayRight - static_cast<qint64>(w) + 1);
 
@@ -1325,10 +1335,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     // At the start (displayLeft == 0) and end (displayRight
                     // == total-1) the image is static and the playhead moves
                     // across it — sub-pixel offset would cause twitching.
+                    const qint64 totalColsForScroll = std::max(
+                        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                        static_cast<qint64>(m_precomputedMaxColumnIndex) + 1);
                     const bool centeredScrolling =
                         displayLeft > 0
-                        && displayRight < static_cast<qint64>(
-                            m_precomputedTotalColumnsEstimate) - 1;
+                        && displayRight < totalColsForScroll - 1;
                     drawX = centeredScrolling ? -columnPhase : 0.0;
                 }
                 latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
