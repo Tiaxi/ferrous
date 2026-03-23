@@ -211,7 +211,7 @@ private:
     qint64 m_ringOldestSeq{0};        // oldest write-order sequence still retained
     qint64 m_trackEpochSeq{0};        // legacy reset bookkeeping
     qint64 m_rollingEpoch{0};         // maps track columns to rolling write-order history
-    qint32 m_precomputedMaxColumnIndex{-1}; // highest track column written to ring
+    qint32 m_precomputedMaxColumnIndex{-1}; // highest column for current token
     int m_precomputedBinsPerColumn{0};
     int m_precomputedTotalColumnsEstimate{0};
     int m_precomputedSampleRateHz{44100};

@@ -484,6 +484,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         && trackToken != m_precomputedTrackToken
         && !bufferReset
         && !appliedReset) {
+        // New track token — reset per-track max column index so it
+        // reflects the new track's range, not the old one's.
+        m_precomputedMaxColumnIndex = -1;
+
         // Gapless rolling transition: accumulate a position offset so
         // the GStreamer position (which resets to 0) gets translated
         // into the spectrogram's continuous coordinate space.  This
