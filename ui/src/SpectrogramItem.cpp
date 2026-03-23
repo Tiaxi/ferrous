@@ -772,10 +772,13 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     bool clearHistoryOnReset) {
     Q_UNUSED(trackToken);
     // A reset (seek or manual track change) breaks the continuous
-    // gapless coordinate space — clear the accumulated offset and
-    // per-track column tracking.
+    // gapless coordinate space — clear the accumulated offset,
+    // per-track column tracking, and canvas display range so the
+    // centered-mode monotonic clamp doesn't stick at old positions.
     m_gaplessPositionOffset = 0.0;
     m_precomputedMaxColumnIndex = -1;
+    m_precomputedCanvasDisplayLeft = 0;
+    m_precomputedCanvasDisplayRight = -1;
     const bool preserveRollingHistory =
         !clearHistoryOnReset &&
         m_displayMode == 0
