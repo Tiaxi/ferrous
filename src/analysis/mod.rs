@@ -183,7 +183,6 @@ const MAX_STAGED_COLUMNS: u32 = 128;
 /// Produced by a background staging thread, consumed at commit time in
 /// `handle_track_change` (gapless path).
 struct StagedSpectrogramData {
-    path: PathBuf,
     columns_u8: Vec<u8>,
     column_count: u32,
     bins_per_column: u16,
@@ -598,7 +597,6 @@ impl AnalysisRuntimeState {
         let data: Arc<Mutex<Option<StagedSpectrogramData>>> = Arc::new(Mutex::new(None));
         let cancel_clone = Arc::clone(&cancel);
         let data_clone = Arc::clone(&data);
-        let path_clone = path.clone();
 
         profile_eprintln!(
             "[analysis] staging thread starting for {} (rate={cand_effective_rate} ch={cand_channel_count})",
@@ -620,7 +618,6 @@ impl AnalysisRuntimeState {
                     divisor,
                     bins_per_column,
                     total_est,
-                    path_clone,
                     data_clone,
                     cancel_clone,
                 );
@@ -1281,7 +1278,6 @@ fn run_staged_decode(
     divisor: usize,
     bins_per_column: usize,
     total_columns_estimate: u32,
-    path: PathBuf,
     output: Arc<Mutex<Option<StagedSpectrogramData>>>,
     cancel: Arc<AtomicBool>,
 ) {
@@ -1415,7 +1411,6 @@ fn run_staged_decode(
 
     if let Ok(mut guard) = output.lock() {
         *guard = Some(StagedSpectrogramData {
-            path,
             columns_u8,
             column_count,
             bins_per_column: clamp_to_u16(bins_per_column),
@@ -2677,6 +2672,7 @@ fn deinterleave_samples(
     per_channel
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_analysis_worker(
     cmd_rx: Receiver<AnalysisCommand>,
     pcm_rx: Receiver<AnalysisPcmChunk>,
@@ -5175,7 +5171,6 @@ mod tests {
     fn take_staged_data_returns_none_on_path_mismatch() {
         let mut state = AnalysisRuntimeState::new();
         let data_inner = StagedSpectrogramData {
-            path: PathBuf::from("/tmp/a.flac"),
             columns_u8: vec![1, 2, 3],
             column_count: 1,
             bins_per_column: 3,
@@ -5203,7 +5198,6 @@ mod tests {
     fn take_staged_data_returns_data_on_path_match() {
         let mut state = AnalysisRuntimeState::new();
         let data_inner = StagedSpectrogramData {
-            path: PathBuf::from("/tmp/a.flac"),
             columns_u8: vec![1, 2, 3],
             column_count: 1,
             bins_per_column: 3,
