@@ -737,7 +737,9 @@ impl AnalysisRuntimeState {
             self.cancel_staged_continuation();
             self.spectrogram_position_offset = 0.0;
             profile_eprintln!("[analysis] handle_track_change: centered gapless → fresh NewTrack",);
-            self.start_spectrogram_session(0.0, false, false, ctx);
+            // emit_initial_reset + clear_history so the UI clears the ring,
+            // canvas range, and max column index from the previous track.
+            self.start_spectrogram_session(0.0, true, true, ctx);
         } else {
             // Non-gapless: cancel any stale staged continuation.
             self.cancel_staged_continuation();
