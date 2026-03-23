@@ -323,8 +323,12 @@ void SpectrogramItem::setPositionSeconds(double value) {
             }
             return;
         }
+        // In rolling mode, ignore small backward heartbeat jitter to avoid
+        // scroll stutter.  In centered mode, backward jumps are real seeks
+        // that must be applied — the spectrogram stays in the ring buffer.
         const bool regressedDuringPlayback =
-            m_playing
+            m_displayMode == 0
+            && m_playing
             && m_positionAnchorInitialized
             && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
         // Soft PLL: for small errors (normal heartbeat jitter ~10-20ms),
