@@ -479,6 +479,12 @@ void SpectrogramItem::feedPrecomputedChunk(
         && (m_precomputedPendingResetTrackToken == 0
             || trackToken == 0
             || trackToken == m_precomputedPendingResetTrackToken)) {
+        FERROUS_SPECTROGRAM_LOGF(stderr,
+            "[Qt-deferred-reset] pendingTok=%llu dataTok=%llu clear=%d writeSeqBefore=%lld\n",
+            static_cast<unsigned long long>(m_precomputedPendingResetTrackToken),
+            static_cast<unsigned long long>(trackToken),
+            m_precomputedPendingResetClearHistory ? 1 : 0,
+            static_cast<long long>(m_ringWriteSeq));
         applyPrecomputedResetLocked(
             m_precomputedPendingResetStartIndex,
             m_precomputedPendingResetBins,
@@ -495,6 +501,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     if (trackToken != 0
+        && m_precomputedTrackToken != 0
         && trackToken != m_precomputedTrackToken
         && !bufferReset
         && !appliedReset) {
@@ -710,6 +717,14 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_ringWriteSeq++;
         }
         m_ringOldestSeq = std::max<qint64>(0, m_ringWriteSeq - m_ringCapacity);
+        FERROUS_SPECTROGRAM_LOGF(stderr,
+            "[Qt-ring] tok=%llu writeSeq=%lld oldestSeq=%lld cap=%d valid=%lld maxCol=%d\n",
+            static_cast<unsigned long long>(trackToken),
+            static_cast<long long>(m_ringWriteSeq),
+            static_cast<long long>(m_ringOldestSeq),
+            m_ringCapacity,
+            static_cast<long long>(m_ringWriteSeq - m_ringOldestSeq),
+            static_cast<int>(m_precomputedMaxColumnIndex));
     }
 
     const bool wasReady = m_precomputedReady;
