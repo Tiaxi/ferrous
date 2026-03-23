@@ -1131,7 +1131,9 @@ struct SpectrogramSessionState {
 
     // Rate throttling
     session_start_time: std::time::Instant,
-    post_reset_burst: u32,
+    /// Number of columns to decode immediately after a reset/handoff before
+    /// re-enabling rolling-mode throttling and lookahead parking.
+    post_reset_unthrottled_columns: u32,
     decode_rate_limit: f64,
     lookahead_columns: u64,
 
@@ -1279,7 +1281,7 @@ fn run_spectrogram_session(
         target_chunk_columns: 1, // Start with 1 for fastest first-pixel
         total_covered_samples: 0,
         session_start_time: std::time::Instant::now(),
-        post_reset_burst: 16,
+        post_reset_unthrottled_columns: post_reset_unthrottled_columns(display_mode),
         decode_rate_limit,
         lookahead_columns,
         pending_continue: None,
@@ -1360,11 +1362,12 @@ fn run_spectrogram_session(
                     session.target_chunk_columns = 1;
                     session.session_start_time = std::time::Instant::now();
                     session.session_start_column = session.columns_produced;
-                    session.post_reset_burst = post_gapless_continue_burst(session.display_mode);
+                    session.post_reset_unthrottled_columns =
+                        post_reset_unthrottled_columns(session.display_mode);
                     session.suppress_backward_seek = true;
                     profile_eprintln!(
-                        "[spect-worker] file switch OK, continuing session burst={}",
-                        session.post_reset_burst
+                        "[spect-worker] file switch OK, continuing session unthrottled_cols={}",
+                        session.post_reset_unthrottled_columns
                     );
                     continue; // re-enter session_decode_loop
                 }
@@ -1460,7 +1463,7 @@ fn session_decode_loop(
             f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
         let lead = session.columns_produced.saturating_sub(target_column);
 
-        if lead >= session.lookahead_columns && session.post_reset_burst == 0 {
+        if lead >= session.lookahead_columns && !post_reset_window_active(session) {
             // In centered mode the parked rows can become immediately visible,
             // so flush them before sleeping. Rolling mode only needs data at
             // the playback head, so keep partial lookahead chunks buffered to
@@ -1493,10 +1496,8 @@ fn session_decode_loop(
             }
         }
 
-        // 3. Rate throttle (rolling mode only, after burst).
-        if session.post_reset_burst > 0 {
-            session.post_reset_burst -= 1;
-        } else if session.decode_rate_limit.is_finite() {
+        // 3. Rate throttle (rolling mode only, after the post-reset window).
+        if !post_reset_window_active(session) && session.decode_rate_limit.is_finite() {
             let max_cols_per_wall_sec = session.decode_rate_limit * session.cols_per_second;
             if max_cols_per_wall_sec > 0.0 {
                 let elapsed = session.session_start_time.elapsed().as_secs_f64();
@@ -1815,7 +1816,7 @@ fn handle_session_seek(
     session.target_chunk_columns = 1; // Fast first-pixel after seek
     session.total_covered_samples = 0;
     session.session_start_time = std::time::Instant::now();
-    session.post_reset_burst = 16;
+    session.post_reset_unthrottled_columns = post_reset_unthrottled_columns(session.display_mode);
     session.target_position_seconds = position_seconds;
 
     // Emit buffer_reset chunk.
@@ -1873,15 +1874,21 @@ fn next_target_chunk_columns(current: u16, display_mode: SpectrogramDisplayMode)
         .min(max_target_chunk_columns(display_mode))
 }
 
-fn post_gapless_continue_burst(display_mode: SpectrogramDisplayMode) -> u32 {
+fn post_reset_unthrottled_columns(display_mode: SpectrogramDisplayMode) -> u32 {
     match display_mode {
-        // A natural gapless handoff starts with little or no future data from
-        // the new track in the rolling ring. Give the decoder a short
-        // unthrottled burst so the visible head does not catch the write head
-        // and stall until the next chunk lands.
-        SpectrogramDisplayMode::Rolling => 16,
+        // Keep rolling mode unthrottled until it has emitted the first full
+        // 64-column chunk after the 1/2/4/8/16/32 ramp. Stopping earlier lets
+        // the display catch the write head before that first full chunk lands.
+        SpectrogramDisplayMode::Rolling => 1 + 2 + 4 + 8 + 16 + 32 + 64,
         SpectrogramDisplayMode::Centered => 0,
     }
+}
+
+fn post_reset_window_active(session: &SpectrogramSessionState) -> bool {
+    session
+        .columns_produced
+        .saturating_sub(session.session_start_column)
+        < u64::from(session.post_reset_unthrottled_columns)
 }
 
 fn session_drain_stft_rows(
@@ -3977,7 +3984,7 @@ mod tests {
             target_chunk_columns: 1,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
-            post_reset_burst: 0,
+            post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             pending_continue: None,
@@ -4021,15 +4028,59 @@ mod tests {
     }
 
     #[test]
-    fn gapless_continue_burst_is_only_enabled_in_rolling_mode() {
+    fn post_reset_unthrottled_columns_cover_first_rolling_full_chunk() {
         assert_eq!(
-            post_gapless_continue_burst(SpectrogramDisplayMode::Rolling),
-            16
+            post_reset_unthrottled_columns(SpectrogramDisplayMode::Rolling),
+            127
         );
         assert_eq!(
-            post_gapless_continue_burst(SpectrogramDisplayMode::Centered),
+            post_reset_unthrottled_columns(SpectrogramDisplayMode::Centered),
             0
         );
+    }
+
+    #[test]
+    fn post_reset_window_tracks_decoded_columns() {
+        let mut session = SpectrogramSessionState {
+            track_token: 7,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 2.0,
+            suppress_backward_seek: false,
+            columns_produced: 400,
+            session_start_column: 400,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: Vec::new(),
+            chunk_columns: 0,
+            chunk_start_index: 400,
+            target_chunk_columns: 1,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_unthrottled_columns: post_reset_unthrottled_columns(
+                SpectrogramDisplayMode::Rolling,
+            ),
+            decode_rate_limit: 2.0,
+            lookahead_columns: 512,
+            pending_continue: None,
+        };
+
+        assert!(post_reset_window_active(&session));
+        session.columns_produced = session.session_start_column + 126;
+        assert!(post_reset_window_active(&session));
+        session.columns_produced = session.session_start_column + 127;
+        assert!(!post_reset_window_active(&session));
     }
 
     #[test]
@@ -4062,7 +4113,7 @@ mod tests {
             target_chunk_columns: 1,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
-            post_reset_burst: 0,
+            post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             pending_continue: None,
@@ -4114,7 +4165,7 @@ mod tests {
             target_chunk_columns: 64,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
-            post_reset_burst: 0,
+            post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             pending_continue: None,
@@ -4158,7 +4209,7 @@ mod tests {
             target_chunk_columns: 64,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
-            post_reset_burst: 0,
+            post_reset_unthrottled_columns: 0,
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: 512,
             pending_continue: None,
@@ -4282,7 +4333,7 @@ mod tests {
             target_chunk_columns: 1,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
-            post_reset_burst: 0,
+            post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             pending_continue: None,
@@ -4332,7 +4383,7 @@ mod tests {
             target_chunk_columns: 1,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
-            post_reset_burst: 0,
+            post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             pending_continue: Some((PathBuf::from("/tmp/old.flac"), 10)),
