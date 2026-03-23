@@ -1851,6 +1851,22 @@ fn handle_session_seek(
     )
 }
 
+fn max_target_chunk_columns(display_mode: SpectrogramDisplayMode) -> u16 {
+    match display_mode {
+        // Rolling mode is latency-sensitive and the chunk payload is copied
+        // through the UI bridge on the GUI thread. Capping the ramp here keeps
+        // post-transition updates smooth instead of reintroducing 256-column bursts.
+        SpectrogramDisplayMode::Rolling => 64,
+        SpectrogramDisplayMode::Centered => 256,
+    }
+}
+
+fn next_target_chunk_columns(current: u16, display_mode: SpectrogramDisplayMode) -> u16 {
+    current
+        .saturating_mul(2)
+        .min(max_target_chunk_columns(display_mode))
+}
+
 fn session_drain_stft_rows(
     session: &mut SpectrogramSessionState,
     warmup_remaining: &mut u64,
@@ -1935,8 +1951,9 @@ fn session_drain_stft_rows(
             ));
             session.chunk_start_index = session.columns_produced;
             session.chunk_columns = 0;
-            // Ramp up chunk size: 1 → 2 → 4 → … → 256
-            session.target_chunk_columns = (session.target_chunk_columns * 2).min(256);
+            // Ramp up chunk size in rolling mode only to a latency-friendly cap.
+            session.target_chunk_columns =
+                next_target_chunk_columns(session.target_chunk_columns, session.display_mode);
         }
     }
 }
@@ -1966,6 +1983,7 @@ fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<
             },
         ));
         session.chunk_columns = 0;
+        session.chunk_start_index = session.columns_produced;
     }
 }
 
@@ -3949,6 +3967,82 @@ mod tests {
             }
             _ => panic!("expected explicit seek to force a seek"),
         }
+    }
+
+    #[test]
+    fn rolling_mode_caps_chunk_growth_for_ui_smoothness() {
+        assert_eq!(
+            next_target_chunk_columns(1, SpectrogramDisplayMode::Rolling),
+            2
+        );
+        assert_eq!(
+            next_target_chunk_columns(32, SpectrogramDisplayMode::Rolling),
+            64
+        );
+        assert_eq!(
+            next_target_chunk_columns(64, SpectrogramDisplayMode::Rolling),
+            64
+        );
+        assert_eq!(
+            next_target_chunk_columns(128, SpectrogramDisplayMode::Centered),
+            256
+        );
+        assert_eq!(
+            next_target_chunk_columns(256, SpectrogramDisplayMode::Centered),
+            256
+        );
+    }
+
+    #[test]
+    fn session_flush_chunk_advances_start_index_for_following_chunk() {
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let mut session = SpectrogramSessionState {
+            track_token: 7,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 2.0,
+            suppress_backward_seek: false,
+            columns_produced: 320,
+            session_start_column: 0,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: vec![1, 2, 3, 4],
+            chunk_columns: 1,
+            chunk_start_index: 256,
+            target_chunk_columns: 1,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_burst: 0,
+            decode_rate_limit: 2.0,
+            lookahead_columns: 512,
+            pending_continue: None,
+        };
+
+        session_flush_chunk(&mut session, &event_tx);
+
+        let chunk = event_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("flushed chunk");
+        match chunk {
+            AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
+                assert_eq!(chunk.start_column_index, 256);
+                assert_eq!(chunk.column_count, 1);
+            }
+            other => panic!("expected precomputed chunk, got {other:?}"),
+        }
+        assert_eq!(session.chunk_columns, 0);
+        assert_eq!(session.chunk_start_index, 320);
     }
 
     #[test]
