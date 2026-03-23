@@ -3,8 +3,8 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -67,6 +67,17 @@ pub enum AnalysisCommand {
         complete: bool,
         done: bool,
     },
+    /// Prepare staged spectrogram data for a likely gapless successor.
+    /// Sent from about-to-finish (~2 s before track end, same-format only).
+    /// The analysis runtime checks format compatibility and spawns an
+    /// off-screen staging thread if the candidate matches the active session.
+    PrepareGaplessContinuation {
+        path: PathBuf,
+    },
+    /// Cancel any in-progress staged continuation.  Sent when the gapless
+    /// prediction becomes invalid (seek near EOF, manual track change,
+    /// queue mutation, stop).
+    CancelStagedContinuation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -163,6 +174,32 @@ const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
 const BASE_VISUAL_DELAY_MS: i32 = 0;
 const REFERENCE_HOP: usize = 1024;
+/// Maximum columns decoded by the staging thread.  128 columns ≈ 3 s at
+/// 44.1 kHz / 1024 hop.  Memory: ~128 × 1025 bytes × channels ≈ 130–260 KB.
+const MAX_STAGED_COLUMNS: u32 = 128;
+
+/// Off-screen staged spectrogram data for a likely gapless successor.
+/// Produced by a background staging thread, consumed at commit time in
+/// `handle_track_change(gapless=true)`.
+struct StagedSpectrogramData {
+    path: PathBuf,
+    columns_u8: Vec<u8>,
+    column_count: u32,
+    bins_per_column: u16,
+    channel_count: u8,
+    total_columns_estimate: u32,
+    sample_rate_hz: u32,
+    hop_size: u16,
+    coverage_seconds: f32,
+}
+
+/// Tracks an in-flight staging operation.  The staging thread writes into
+/// `data` when complete; the analysis runtime takes it at commit or cancel.
+struct StagedContinuation {
+    path: PathBuf,
+    data: Arc<Mutex<Option<StagedSpectrogramData>>>,
+    cancel: Arc<AtomicBool>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WaveformSourceStamp {
@@ -210,6 +247,13 @@ enum SpectrogramWorkerCommand {
     ContinueWithFile {
         path: PathBuf,
         track_token: u64,
+        /// Number of output columns to silently discard after the file
+        /// switch.  Used when a staging thread has already pre-decoded
+        /// those columns off-screen and flushed them to the UI at commit
+        /// time.  The STFT still processes all samples (preserving state
+        /// continuity) but the quantised output is not emitted until this
+        /// many columns have been produced.
+        skip_columns: u32,
     },
     #[allow(dead_code)]
     SetDisplayMode(SpectrogramDisplayMode),
@@ -246,6 +290,14 @@ struct AnalysisRuntimeState {
     /// Last raw position forwarded to the spectrogram worker, used to
     /// compute the offset at gapless transitions.
     last_spectrogram_position: f64,
+    /// Compatibility params for the active spectrogram worker session.
+    /// Updated on every session start and track change so the staging
+    /// preflight can compare candidate files against the live session.
+    active_session_effective_rate: u32,
+    active_session_channel_count: usize,
+    active_session_divisor: usize,
+    /// Off-screen staged spectrogram data for the next track.
+    staged_continuation: Option<StagedContinuation>,
     profile_enabled: bool,
     prof_last: std::time::Instant,
     prof_pcm: usize,
@@ -278,11 +330,13 @@ impl AnalysisEngine {
 
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
         let spectrogram_decode_generation = Arc::new(AtomicU64::new(0));
+        let worker_columns_produced = Arc::new(AtomicU64::new(0));
         spawn_spectrogram_decode_worker(
             spectrogram_cmd_rx,
             event_tx.clone(),
             Arc::clone(&waveform_decode_active_token),
             Arc::clone(&spectrogram_decode_generation),
+            Arc::clone(&worker_columns_produced),
         );
 
         spawn_analysis_worker(
@@ -293,6 +347,7 @@ impl AnalysisEngine {
             waveform_decode_active_token,
             spectrogram_cmd_tx,
             spectrogram_decode_generation,
+            worker_columns_produced,
         );
 
         (Self { tx: cmd_tx, pcm_tx }, event_rx)
@@ -319,6 +374,10 @@ struct AnalysisContext<'a> {
     waveform_decode_active_token: &'a AtomicU64,
     spectrogram_cmd_tx: &'a Sender<SpectrogramWorkerCommand>,
     spectrogram_decode_generation: &'a AtomicU64,
+    /// The spectrogram worker's authoritative `columns_produced` counter.
+    /// Written by the worker at each chunk emission and EOF flush; read by
+    /// the analysis runtime at commit time for exact boundary alignment.
+    worker_columns_produced: &'a AtomicU64,
 }
 
 impl AnalysisRuntimeState {
@@ -355,6 +414,10 @@ impl AnalysisRuntimeState {
             prof_out_samples: 0,
             spectrogram_position_offset: 0.0,
             last_spectrogram_position: 0.0,
+            active_session_effective_rate: 0,
+            active_session_channel_count: 0,
+            active_session_divisor: 1,
+            staged_continuation: None,
         }
     }
 
@@ -385,6 +448,7 @@ impl AnalysisRuntimeState {
                 // for gapless transitions to keep channel state continuous).
             }
             AnalysisCommand::ResetSpectrogram => {
+                self.cancel_staged_continuation();
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
             }
@@ -395,6 +459,7 @@ impl AnalysisRuntimeState {
                 }
             }
             AnalysisCommand::SetFftSize(size) => {
+                self.cancel_staged_continuation();
                 let fft = size.clamp(512, 8192).next_power_of_two();
                 let hop = (fft / 8).max(64);
                 self.spectrogram.set_fft_size(fft, hop);
@@ -403,6 +468,7 @@ impl AnalysisRuntimeState {
                 self.start_spectrogram_session(0.0, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
+                self.cancel_staged_continuation();
                 profile_eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
                 self.snapshot.spectrogram_view_mode = view_mode;
                 self.spectrogram.set_view_mode(view_mode);
@@ -414,6 +480,7 @@ impl AnalysisRuntimeState {
                 position_seconds,
                 clear_history,
             } => {
+                self.cancel_staged_continuation();
                 profile_eprintln!(
                     "[analysis] RestartCurrentTrack pos={position_seconds:.2} clear_history={clear_history}"
                 );
@@ -443,7 +510,114 @@ impl AnalysisRuntimeState {
                 done,
                 ctx.event_tx,
             ),
+            AnalysisCommand::PrepareGaplessContinuation { path } => {
+                self.handle_prepare_gapless_continuation(path, ctx);
+            }
+            AnalysisCommand::CancelStagedContinuation => {
+                self.cancel_staged_continuation();
+            }
         }
+    }
+
+    /// Cancel any in-progress staged continuation, if present.
+    fn cancel_staged_continuation(&mut self) {
+        if let Some(staged) = self.staged_continuation.take() {
+            staged.cancel.store(true, Ordering::Release);
+            profile_eprintln!("[analysis] staged continuation cancelled");
+        }
+    }
+
+    /// Take staged data if it matches the given path; cancel the staging thread.
+    fn take_staged_data_if_matching(&mut self, path: &Path) -> Option<StagedSpectrogramData> {
+        let staged = self.staged_continuation.take()?;
+        staged.cancel.store(true, Ordering::Release);
+        if staged.path != *path {
+            profile_eprintln!(
+                "[analysis] staged path mismatch: staged={} requested={}",
+                staged.path.display(),
+                path.display(),
+            );
+            return None;
+        }
+        let mut guard = staged.data.lock().ok()?;
+        guard.take()
+    }
+
+    /// Spawn an off-screen staging thread to pre-decode the first columns
+    /// of a likely gapless successor.  Called from `about-to-finish`.
+    fn handle_prepare_gapless_continuation(&mut self, path: PathBuf, _ctx: &AnalysisContext<'_>) {
+        // Cancel any prior staging.
+        self.cancel_staged_continuation();
+
+        // Open the candidate file and check format compatibility.
+        let Some((format, decoder, track_id, native_sr, native_ch, total_est)) =
+            open_symphonia_file(&path)
+        else {
+            profile_eprintln!(
+                "[analysis] staged: cannot open candidate {}",
+                path.display(),
+            );
+            return;
+        };
+
+        let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
+        let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
+        let cand_effective_rate = u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
+        let cand_channel_count = match self.snapshot.spectrogram_view_mode {
+            SpectrogramViewMode::Downmix => 1,
+            SpectrogramViewMode::PerChannel => native_ch,
+        };
+
+        if cand_effective_rate != self.active_session_effective_rate
+            || cand_channel_count != self.active_session_channel_count
+        {
+            profile_eprintln!(
+                "[analysis] staged: incompatible (rate {}!={} ch {}!={}), skipping",
+                cand_effective_rate,
+                self.active_session_effective_rate,
+                cand_channel_count,
+                self.active_session_channel_count,
+            );
+            return;
+        }
+
+        let fft_size = self.spectrogram.fft_size;
+        let hop_size = self.spectrogram.hop_size;
+        let view_mode = self.snapshot.spectrogram_view_mode;
+        let bins_per_column = (fft_size / 2) + 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let data: Arc<Mutex<Option<StagedSpectrogramData>>> = Arc::new(Mutex::new(None));
+        let cancel_clone = Arc::clone(&cancel);
+        let data_clone = Arc::clone(&data);
+        let path_clone = path.clone();
+
+        profile_eprintln!(
+            "[analysis] staging thread starting for {} (rate={cand_effective_rate} ch={cand_channel_count})",
+            path.display(),
+        );
+
+        let _ = std::thread::Builder::new()
+            .name("ferrous-spectrogram-staging".to_string())
+            .spawn(move || {
+                run_staged_decode(
+                    format,
+                    decoder,
+                    track_id,
+                    fft_size,
+                    hop_size,
+                    view_mode,
+                    cand_effective_rate,
+                    cand_channel_count,
+                    divisor,
+                    bins_per_column,
+                    total_est,
+                    path_clone,
+                    data_clone,
+                    cancel_clone,
+                );
+            });
+
+        self.staged_continuation = Some(StagedContinuation { path, data, cancel });
     }
 
     fn handle_track_change(
@@ -456,6 +630,12 @@ impl AnalysisRuntimeState {
     ) {
         #[cfg(feature = "profiling-logs")]
         let _track_change_start = std::time::Instant::now();
+
+        // Always update compat params from the new track so the staging
+        // preflight has correct values.  This also covers same-extension
+        // transitions where the worker internally falls back from
+        // ContinueWithFile to NewTrack (different sample rate).
+        self.update_session_compat_params(&path);
 
         self.active_track_token = track_token;
         // For gapless transitions the PCM stream is continuous — the
@@ -490,17 +670,59 @@ impl AnalysisRuntimeState {
             // continuous.  Adding the last known position ensures
             // PositionUpdate(0.0) becomes PositionUpdate(331.x).
             self.spectrogram_position_offset += self.last_spectrogram_position;
+
+            // Check if staged data is ready for this path.
+            let staged_data = self.take_staged_data_if_matching(&path);
+            let skip = staged_data.as_ref().map_or(0, |d| d.column_count);
+
+            if let Some(data) = staged_data {
+                // Authoritative boundary column from the worker's actual
+                // columns_produced (written by the worker at each chunk
+                // emission and EOF flush).
+                let staged_start_col = ctx.worker_columns_produced.load(Ordering::Relaxed);
+                let _ = ctx
+                    .event_tx
+                    .send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                        PrecomputedSpectrogramChunk {
+                            track_token,
+                            columns_u8: data.columns_u8,
+                            bins_per_column: data.bins_per_column,
+                            column_count: clamp_to_u16(data.column_count as usize),
+                            channel_count: data.channel_count,
+                            start_column_index: u64_to_u32_saturating(staged_start_col),
+                            total_columns_estimate: data.total_columns_estimate,
+                            sample_rate_hz: data.sample_rate_hz,
+                            hop_size: data.hop_size,
+                            coverage_seconds: data.coverage_seconds,
+                            complete: false,
+                            buffer_reset: false,
+                            clear_history: false,
+                        },
+                    ));
+                profile_eprintln!(
+                    "[analysis] staged commit: flushed {} columns at K={staged_start_col} offset={:.2}",
+                    data.column_count,
+                    self.spectrogram_position_offset,
+                );
+            }
+
             profile_eprintln!(
-                "[analysis] handle_track_change: dispatching ContinueWithFile gapless={gapless} offset={:.2}",
+                "[analysis] handle_track_change: dispatching ContinueWithFile gapless={gapless} skip={skip} offset={:.2}",
                 self.spectrogram_position_offset,
             );
+            // ContinueWithFile always sent (with or without staging).
+            // Worker opens the file, preserves STFT continuity, skips
+            // first `skip` output columns (already covered by staged data).
             let _ = ctx
                 .spectrogram_cmd_tx
                 .send(SpectrogramWorkerCommand::ContinueWithFile {
                     path: path.clone(),
                     track_token,
+                    skip_columns: skip,
                 });
         } else {
+            // Non-gapless: cancel any stale staged continuation.
+            self.cancel_staged_continuation();
             // Non-gapless: reset the offset since a new session starts
             // with fresh coordinates.
             self.spectrogram_position_offset = 0.0;
@@ -535,19 +757,40 @@ impl AnalysisRuntimeState {
         );
     }
 
+    /// Update the analysis-owned compatibility params from the given file
+    /// so staging preflight can compare candidate files against the live
+    /// worker session.  Called from `start_spectrogram_session` (covers all
+    /// restart paths) and from `handle_track_change` (covers gapless where
+    /// the worker may internally fall back from ContinueWithFile to NewTrack).
+    fn update_session_compat_params(&mut self, path: &Path) {
+        if let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(path) {
+            let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
+            let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
+            self.active_session_effective_rate =
+                u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
+            self.active_session_channel_count = match self.snapshot.spectrogram_view_mode {
+                SpectrogramViewMode::Downmix => 1,
+                SpectrogramViewMode::PerChannel => native_ch,
+            };
+            self.active_session_divisor = divisor;
+        }
+    }
+
     fn start_spectrogram_session(
-        &self,
+        &mut self,
         start_seconds: f64,
         emit_initial_reset: bool,
         clear_history_on_reset: bool,
         ctx: &AnalysisContext<'_>,
     ) {
-        let Some(path) = self.active_track_path.as_ref() else {
+        let Some(path) = self.active_track_path.as_ref().cloned() else {
             profile_eprintln!(
                 "[analysis] start_spectrogram_session: no active_track_path, skipping"
             );
             return;
         };
+        self.update_session_compat_params(&path);
+        let path = &path;
         let gen = ctx
             .spectrogram_decode_generation
             .fetch_add(1, Ordering::Relaxed)
@@ -981,16 +1224,188 @@ fn precomputed_to_u8_spectrum(v: f32, fft_size: usize) -> u8 {
     result
 }
 
+/// Off-screen staging decode: produces the first `MAX_STAGED_COLUMNS`
+/// columns of a candidate track into an `Arc<Mutex<Option<StagedSpectrogramData>>>`.
+/// Runs on a short-lived thread; checks `cancel` every 64 packets.
+#[allow(clippy::too_many_arguments)]
+fn run_staged_decode(
+    mut format: Box<dyn symphonia::core::formats::FormatReader>,
+    mut audio_decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    fft_size: usize,
+    hop_size: usize,
+    view_mode: SpectrogramViewMode,
+    effective_rate: u32,
+    channel_count: usize,
+    divisor: usize,
+    bins_per_column: usize,
+    total_columns_estimate: u32,
+    path: PathBuf,
+    output: Arc<Mutex<Option<StagedSpectrogramData>>>,
+    cancel: Arc<AtomicBool>,
+) {
+    let _start = std::time::Instant::now();
+    let decimation_factor = decimation_factor_for_hop(hop_size);
+    let mut stfts: Vec<StftComputer> = (0..channel_count)
+        .map(|_| StftComputer::new(fft_size, hop_size))
+        .collect();
+    let mut decimators: Vec<SpectrogramDecimator> = (0..channel_count)
+        .map(|_| SpectrogramDecimator::new(decimation_factor))
+        .collect();
+
+    let mut columns_u8 = Vec::new();
+    let mut column_count: u32 = 0;
+    let mut total_covered_samples: u64 = 0;
+    let mut packet_counter: usize = 0;
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            profile_eprintln!("[staging] cancelled after {column_count} columns");
+            return;
+        }
+
+        // Read and decode a packet.
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break, // EOF or error
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match audio_decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let spec = decoded.spec();
+        let native_channels = spec.channels.count();
+        let frames = decoded.frames();
+        let buf = sample_buf.get_or_insert_with(|| SampleBuffer::new(frames as u64, *spec));
+        if buf.capacity() < frames {
+            *buf = SampleBuffer::new(frames as u64, *spec);
+        }
+        buf.copy_interleaved_ref(decoded);
+        let samples = buf.samples();
+
+        // Deinterleave and resample.
+        let effective_frames = frames / divisor;
+        let per_channel = deinterleave_samples(
+            samples,
+            frames,
+            native_channels,
+            channel_count,
+            divisor,
+            effective_frames,
+            view_mode,
+        );
+
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            total_covered_samples += effective_frames as u64;
+        }
+
+        for (ch, channel_samples) in per_channel.iter().enumerate() {
+            if let Some(stft) = stfts.get_mut(ch) {
+                stft.enqueue_samples(channel_samples, effective_rate);
+            }
+        }
+
+        // Drain STFT rows.
+        loop {
+            let mut rows: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
+            let mut all_have = true;
+            for stft in &mut stfts {
+                let row = stft.take_rows(1);
+                if row.is_empty() {
+                    all_have = false;
+                    break;
+                }
+                rows.push(row.into_iter().next().unwrap());
+            }
+            if !all_have {
+                break;
+            }
+            let mut decimated: Vec<Option<Vec<f32>>> = Vec::with_capacity(channel_count);
+            for (ch, row) in rows.into_iter().enumerate() {
+                if let Some(dec) = decimators.get_mut(ch) {
+                    decimated.push(dec.push(row));
+                } else {
+                    decimated.push(Some(row));
+                }
+            }
+            if !decimated.iter().all(Option::is_some) {
+                continue;
+            }
+            // Quantize and append.
+            for maybe_row in &decimated {
+                let row = maybe_row.as_ref().unwrap();
+                for &v in row.iter().take(bins_per_column) {
+                    columns_u8.push(precomputed_to_u8_spectrum(v, fft_size));
+                }
+                if row.len() < bins_per_column {
+                    columns_u8.extend(std::iter::repeat_n(0u8, bins_per_column - row.len()));
+                }
+            }
+            column_count += 1;
+            if column_count >= MAX_STAGED_COLUMNS {
+                break;
+            }
+        }
+
+        packet_counter += 1;
+        if packet_counter % 64 == 0 && cancel.load(Ordering::Relaxed) {
+            profile_eprintln!("[staging] cancelled after {column_count} columns");
+            return;
+        }
+        if column_count >= MAX_STAGED_COLUMNS {
+            break;
+        }
+    }
+
+    if column_count == 0 {
+        profile_eprintln!("[staging] produced 0 columns, discarding");
+        return;
+    }
+
+    let coverage = seconds_from_frames(total_covered_samples, u64::from(effective_rate));
+    profile_eprintln!(
+        "[staging] done: {column_count} columns, {coverage:.2}s coverage in {:.1}ms",
+        _start.elapsed().as_secs_f64() * 1000.0,
+    );
+
+    if let Ok(mut guard) = output.lock() {
+        *guard = Some(StagedSpectrogramData {
+            path,
+            columns_u8,
+            column_count,
+            bins_per_column: clamp_to_u16(bins_per_column),
+            channel_count: clamp_to_u8(channel_count),
+            total_columns_estimate,
+            sample_rate_hz: effective_rate,
+            hop_size: clamp_to_u16(REFERENCE_HOP),
+            coverage_seconds: coverage,
+        });
+    }
+}
+
 fn spawn_spectrogram_decode_worker(
     cmd_rx: Receiver<SpectrogramWorkerCommand>,
     event_tx: Sender<AnalysisEvent>,
     active_token: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
+    columns_produced: Arc<AtomicU64>,
 ) {
     let _ = std::thread::Builder::new()
         .name("ferrous-spectrogram-decode".to_string())
         .spawn(move || {
-            spectrogram_worker_loop(&cmd_rx, &event_tx, &active_token, &generation);
+            spectrogram_worker_loop(
+                &cmd_rx,
+                &event_tx,
+                &active_token,
+                &generation,
+                &columns_produced,
+            );
         });
 }
 
@@ -1010,6 +1425,7 @@ fn spectrogram_worker_loop(
     event_tx: &Sender<AnalysisEvent>,
     active_token: &AtomicU64,
     generation: &AtomicU64,
+    columns_produced_out: &AtomicU64,
 ) {
     let mut next_cmd: Option<SpectrogramWorkerCommand> = None;
     let mut last_params: Option<LastSessionParams> = None;
@@ -1038,14 +1454,26 @@ fn spectrogram_worker_loop(
                     view_mode,
                     display_mode,
                 });
-                next_cmd =
-                    run_spectrogram_session(&cmd, cmd_rx, event_tx, active_token, generation);
+                next_cmd = run_spectrogram_session(
+                    &cmd,
+                    cmd_rx,
+                    event_tx,
+                    active_token,
+                    generation,
+                    columns_produced_out,
+                );
                 if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
                     break;
                 }
             }
-            SpectrogramWorkerCommand::ContinueWithFile { path, track_token } => {
+            SpectrogramWorkerCommand::ContinueWithFile {
+                path,
+                track_token,
+                skip_columns,
+            } => {
                 // No active session — convert to NewTrack fallback.
+                // When skip_columns > 0, staged data was already flushed
+                // to the ring — use emit_initial_reset to clear it.
                 if let Some(params) = &last_params {
                     let gen = generation.fetch_add(1, Ordering::Relaxed) + 1;
                     let fallback = SpectrogramWorkerCommand::NewTrack {
@@ -1056,7 +1484,7 @@ fn spectrogram_worker_loop(
                         hop_size: params.hop_size,
                         channel_count: params.channel_count,
                         start_seconds: 0.0,
-                        emit_initial_reset: false,
+                        emit_initial_reset: skip_columns > 0,
                         clear_history_on_reset: false,
                         view_mode: params.view_mode,
                         display_mode: params.display_mode,
@@ -1074,6 +1502,7 @@ fn spectrogram_worker_loop(
                         event_tx,
                         active_token,
                         generation,
+                        columns_produced_out,
                     );
                     if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
                         break;
@@ -1137,9 +1566,15 @@ struct SpectrogramSessionState {
     decode_rate_limit: f64,
     lookahead_columns: u64,
 
+    /// Columns to silently discard after a gapless file switch.  The STFT
+    /// processes all samples (preserving state continuity) but output
+    /// columns are not emitted until this reaches zero.
+    skip_output_columns: u32,
+
     /// Stored `ContinueWithFile` command to apply when the current file
     /// reaches EOF.  Set by command processing, consumed at EOF.
-    pending_continue: Option<(PathBuf, u64)>,
+    /// Fields: (path, track_token, skip_columns).
+    pending_continue: Option<(PathBuf, u64, u32)>,
 }
 
 /// Action returned by command processing in the session loop.
@@ -1159,6 +1594,7 @@ fn run_spectrogram_session(
     event_tx: &Sender<AnalysisEvent>,
     active_token: &AtomicU64,
     generation: &AtomicU64,
+    columns_produced_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
     let &SpectrogramWorkerCommand::NewTrack {
         track_token,
@@ -1284,6 +1720,7 @@ fn run_spectrogram_session(
         post_reset_unthrottled_columns: post_reset_unthrottled_columns(display_mode),
         decode_rate_limit,
         lookahead_columns,
+        skip_output_columns: 0,
         pending_continue: None,
     };
 
@@ -1319,18 +1756,23 @@ fn run_spectrogram_session(
             event_tx,
             active_token,
             generation,
+            columns_produced_out,
         );
 
         // Flush any partially accumulated chunk so the final columns are
         // not lost.
-        session_flush_chunk(&mut session, event_tx);
+        session_flush_chunk(&mut session, event_tx, columns_produced_out);
 
         match result {
-            Some(SpectrogramWorkerCommand::ContinueWithFile { path, track_token }) => {
+            Some(SpectrogramWorkerCommand::ContinueWithFile {
+                path,
+                track_token,
+                skip_columns,
+            }) => {
                 // Gapless continuation: open the next file but keep all
                 // STFT / decimator / rate-limiter state intact.
                 profile_eprintln!(
-                    "[spect-worker] ContinueWithFile path={} token={track_token} cols_so_far={}",
+                    "[spect-worker] ContinueWithFile path={} token={track_token} skip={skip_columns} cols_so_far={}",
                     path.file_name().unwrap_or_default().to_string_lossy(),
                     session.columns_produced.saturating_sub(start_column),
                 );
@@ -1351,6 +1793,7 @@ fn run_spectrogram_session(
                     track_id = new_tid;
                     session.track_token = track_token;
                     session.total_columns_estimate = new_est;
+                    session.skip_output_columns = skip_columns;
                     warmup_remaining = 0;
                     // Reset chunk target so the first columns from the
                     // new file are emitted promptly.  Reset the rate
@@ -1366,12 +1809,15 @@ fn run_spectrogram_session(
                         post_reset_unthrottled_columns(session.display_mode);
                     session.suppress_backward_seek = true;
                     profile_eprintln!(
-                        "[spect-worker] file switch OK, continuing session unthrottled_cols={}",
-                        session.post_reset_unthrottled_columns
+                        "[spect-worker] file switch OK, continuing session unthrottled_cols={} skip={}",
+                        session.post_reset_unthrottled_columns,
+                        skip_columns,
                     );
                     continue; // re-enter session_decode_loop
                 }
                 // Incompatible or open failed — fall back to NewTrack.
+                // When skip_columns > 0, staged data was already flushed
+                // to the ring — use emit_initial_reset to clear it.
                 profile_eprintln!(
                     "[spect-worker] ContinueWithFile incompatible, falling back to NewTrack"
                 );
@@ -1384,7 +1830,7 @@ fn run_spectrogram_session(
                     hop_size: session.hop_size,
                     channel_count: session.channel_count,
                     start_seconds: 0.0,
-                    emit_initial_reset: false,
+                    emit_initial_reset: skip_columns > 0,
                     clear_history_on_reset: false,
                     view_mode: session.view_mode,
                     display_mode: session.display_mode,
@@ -1424,6 +1870,7 @@ fn session_decode_loop(
     event_tx: &Sender<AnalysisEvent>,
     active_token: &AtomicU64,
     generation: &AtomicU64,
+    columns_produced_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
     // Only check generation for staleness. Generation is incremented whenever
     // analysis starts a fresh precomputed session for a new track or reset.
@@ -1453,6 +1900,7 @@ fn session_decode_loop(
                         event_tx,
                         active_token,
                         generation,
+                        columns_produced_out,
                     );
                 }
             }
@@ -1468,7 +1916,7 @@ fn session_decode_loop(
             // so flush them before sleeping. Rolling mode only needs data at
             // the playback head, so keep partial lookahead chunks buffered to
             // avoid re-fragmenting into heartbeat-sized UI updates.
-            flush_chunk_before_lookahead_park(session, event_tx);
+            flush_chunk_before_lookahead_park(session, event_tx, columns_produced_out);
             // Park: block until a command arrives.
             match cmd_rx.recv() {
                 Ok(cmd) => match handle_single_command(session, cmd) {
@@ -1489,6 +1937,7 @@ fn session_decode_loop(
                             event_tx,
                             active_token,
                             generation,
+                            columns_produced_out,
                         );
                     }
                 },
@@ -1529,6 +1978,7 @@ fn session_decode_loop(
                                     event_tx,
                                     active_token,
                                     generation,
+                                    columns_produced_out,
                                 );
                             }
                         },
@@ -1594,7 +2044,7 @@ fn session_decode_loop(
         }
 
         // 5. Drain STFT rows and emit chunks.
-        session_drain_stft_rows(session, warmup_remaining, event_tx);
+        session_drain_stft_rows(session, warmup_remaining, event_tx, columns_produced_out);
 
         // Yield periodically to avoid starving UI.
         if session.packet_counter.is_multiple_of(64) {
@@ -1605,9 +2055,13 @@ fn session_decode_loop(
     // EOF reached — flush remaining columns so the UI has all decoded
     // data.  If a ContinueWithFile is pending, return it immediately
     // so run_spectrogram_session can switch to the next file.
-    session_flush_chunk(session, event_tx);
-    if let Some((path, track_token)) = session.pending_continue.take() {
-        return Some(SpectrogramWorkerCommand::ContinueWithFile { path, track_token });
+    session_flush_chunk(session, event_tx, columns_produced_out);
+    if let Some((path, track_token, skip_columns)) = session.pending_continue.take() {
+        return Some(SpectrogramWorkerCommand::ContinueWithFile {
+            path,
+            track_token,
+            skip_columns,
+        });
     }
     // Otherwise park and keep handling commands so backward seeks
     // still work after the decoder has consumed the entire file.
@@ -1619,10 +2073,11 @@ fn session_decode_loop(
         match cmd_rx.recv() {
             Ok(cmd) => match handle_single_command(session, cmd) {
                 SessionAction::Continue => {
-                    if let Some((path, token)) = session.pending_continue.take() {
+                    if let Some((path, token, skip_columns)) = session.pending_continue.take() {
                         return Some(SpectrogramWorkerCommand::ContinueWithFile {
                             path,
                             track_token: token,
+                            skip_columns,
                         });
                     }
                 }
@@ -1640,6 +2095,7 @@ fn session_decode_loop(
                         event_tx,
                         active_token,
                         generation,
+                        columns_produced_out,
                     );
                 }
             },
@@ -1678,8 +2134,12 @@ fn process_session_commands(
                     f64::INFINITY
                 };
             }
-            SpectrogramWorkerCommand::ContinueWithFile { path, track_token } => {
-                session.pending_continue = Some((path, track_token));
+            SpectrogramWorkerCommand::ContinueWithFile {
+                path,
+                track_token,
+                skip_columns,
+            } => {
+                session.pending_continue = Some((path, track_token, skip_columns));
             }
             SpectrogramWorkerCommand::Stop => {
                 return Some(SessionAction::Stop);
@@ -1757,8 +2217,12 @@ fn handle_single_command(
             };
             SessionAction::Continue
         }
-        SpectrogramWorkerCommand::ContinueWithFile { path, track_token } => {
-            session.pending_continue = Some((path, track_token));
+        SpectrogramWorkerCommand::ContinueWithFile {
+            path,
+            track_token,
+            skip_columns,
+        } => {
+            session.pending_continue = Some((path, track_token, skip_columns));
             SessionAction::Continue
         }
         SpectrogramWorkerCommand::Stop => SessionAction::Stop,
@@ -1779,6 +2243,7 @@ fn handle_session_seek(
     event_tx: &Sender<AnalysisEvent>,
     active_token: &AtomicU64,
     generation: &AtomicU64,
+    columns_produced_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
     profile_eprintln!("[spect-worker] SEEK to {position_seconds:.2}s");
 
@@ -1855,6 +2320,7 @@ fn handle_session_seek(
         event_tx,
         active_token,
         generation,
+        columns_produced_out,
     )
 }
 
@@ -1895,6 +2361,7 @@ fn session_drain_stft_rows(
     session: &mut SpectrogramSessionState,
     warmup_remaining: &mut u64,
     event_tx: &Sender<AnalysisEvent>,
+    columns_produced_out: &AtomicU64,
 ) {
     loop {
         let mut rows: Vec<Vec<f32>> = Vec::with_capacity(session.channel_count);
@@ -1929,6 +2396,22 @@ fn session_drain_stft_rows(
         // Skip warmup columns (pre-seek: feed STFT without emitting).
         if *warmup_remaining > 0 {
             *warmup_remaining -= 1;
+            continue;
+        }
+
+        // Skip staged-prefix columns: the STFT has already processed the
+        // samples (preserving state continuity) but the output was
+        // pre-decoded by a staging thread and flushed to the UI at commit.
+        if session.skip_output_columns > 0 {
+            session.skip_output_columns -= 1;
+            session.columns_produced += 1;
+            if session.skip_output_columns == 0 {
+                // Align chunk bookkeeping so the first emitted chunk
+                // starts at K + N, not the stale pre-skip value.
+                session.chunk_start_index = session.columns_produced;
+                session.chunk_buf.clear();
+                session.chunk_columns = 0;
+            }
             continue;
         }
 
@@ -1975,6 +2458,7 @@ fn session_drain_stft_rows(
             ));
             session.chunk_start_index = session.columns_produced;
             session.chunk_columns = 0;
+            columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
             // Ramp up chunk size in rolling mode only to a latency-friendly cap.
             session.target_chunk_columns =
                 next_target_chunk_columns(session.target_chunk_columns, session.display_mode);
@@ -1982,7 +2466,11 @@ fn session_drain_stft_rows(
     }
 }
 
-fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<AnalysisEvent>) {
+fn session_flush_chunk(
+    session: &mut SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+    columns_produced_out: &AtomicU64,
+) {
     if session.chunk_columns > 0 {
         let coverage = seconds_from_frames(
             session.total_covered_samples,
@@ -2009,16 +2497,20 @@ fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<
         session.chunk_columns = 0;
         session.chunk_start_index = session.columns_produced;
     }
+    // Always publish the final columns_produced so the analysis runtime
+    // has the exact boundary at EOF for staged-commit alignment.
+    columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
 }
 
 fn flush_chunk_before_lookahead_park(
     session: &mut SpectrogramSessionState,
     event_tx: &Sender<AnalysisEvent>,
+    columns_produced_out: &AtomicU64,
 ) {
     if session.display_mode == SpectrogramDisplayMode::Rolling {
         return;
     }
-    session_flush_chunk(session, event_tx);
+    session_flush_chunk(session, event_tx, columns_produced_out);
 }
 
 /// Opens a Symphonia file and returns the format reader, decoder, and track info.
@@ -2144,6 +2636,7 @@ fn spawn_analysis_worker(
     waveform_decode_active_token: Arc<AtomicU64>,
     spectrogram_cmd_tx: Sender<SpectrogramWorkerCommand>,
     spectrogram_decode_generation: Arc<AtomicU64>,
+    worker_columns_produced: Arc<AtomicU64>,
 ) {
     let _ = std::thread::Builder::new()
         .name("ferrous-analysis".to_string())
@@ -2159,6 +2652,7 @@ fn spawn_analysis_worker(
                             waveform_decode_active_token: waveform_decode_active_token.as_ref(),
                             spectrogram_cmd_tx: &spectrogram_cmd_tx,
                             spectrogram_decode_generation: spectrogram_decode_generation.as_ref(),
+                            worker_columns_produced: worker_columns_produced.as_ref(),
                         };
                         state.handle_command(cmd, &ctx);
                     }
@@ -3987,6 +4481,7 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            skip_output_columns: 0,
             pending_continue: None,
         };
 
@@ -4073,6 +4568,7 @@ mod tests {
             ),
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            skip_output_columns: 0,
             pending_continue: None,
         };
 
@@ -4116,10 +4612,12 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            skip_output_columns: 0,
             pending_continue: None,
         };
 
-        session_flush_chunk(&mut session, &event_tx);
+        let cols_out = AtomicU64::new(0);
+        session_flush_chunk(&mut session, &event_tx, &cols_out);
 
         let chunk = event_rx
             .recv_timeout(Duration::from_millis(50))
@@ -4168,10 +4666,12 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            skip_output_columns: 0,
             pending_continue: None,
         };
 
-        flush_chunk_before_lookahead_park(&mut session, &event_tx);
+        let cols_out = AtomicU64::new(0);
+        flush_chunk_before_lookahead_park(&mut session, &event_tx, &cols_out);
 
         assert!(event_rx.try_recv().is_err());
         assert_eq!(session.chunk_columns, 1);
@@ -4212,10 +4712,12 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: 512,
+            skip_output_columns: 0,
             pending_continue: None,
         };
 
-        flush_chunk_before_lookahead_park(&mut session, &event_tx);
+        let cols_out = AtomicU64::new(0);
+        flush_chunk_before_lookahead_park(&mut session, &event_tx, &cols_out);
 
         let chunk = event_rx
             .recv_timeout(Duration::from_millis(50))
@@ -4240,12 +4742,14 @@ mod tests {
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
         };
 
         // Gapless track change now sends ContinueWithFile, not NewTrack.
@@ -4275,12 +4779,14 @@ mod tests {
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
         };
 
         // Non-gapless (gapless=false) must send NewTrack.
@@ -4336,6 +4842,7 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            skip_output_columns: 0,
             pending_continue: None,
         };
 
@@ -4344,12 +4851,13 @@ mod tests {
             SpectrogramWorkerCommand::ContinueWithFile {
                 path: PathBuf::from("/tmp/next.flac"),
                 track_token: 42,
+                skip_columns: 0,
             },
         );
 
         assert!(matches!(action, SessionAction::Continue));
         assert!(session.pending_continue.is_some());
-        let (path, token) = session.pending_continue.unwrap();
+        let (path, token, skip) = session.pending_continue.unwrap();
         assert_eq!(path, PathBuf::from("/tmp/next.flac"));
         assert_eq!(token, 42);
     }
@@ -4386,7 +4894,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
-            pending_continue: Some((PathBuf::from("/tmp/old.flac"), 10)),
+            skip_output_columns: 0,
+            pending_continue: Some((PathBuf::from("/tmp/old.flac"), 10, 0)),
         };
 
         let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
@@ -4394,6 +4903,7 @@ mod tests {
         tx.send(SpectrogramWorkerCommand::ContinueWithFile {
             path: PathBuf::from("/tmp/next.flac"),
             track_token: 20,
+            skip_columns: 0,
         })
         .unwrap();
         tx.send(SpectrogramWorkerCommand::NewTrack {

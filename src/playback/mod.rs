@@ -1085,6 +1085,10 @@ mod backend {
         /// commit it when the position actually confirms the stream switch
         /// (i.e., position jumps backward).
         pending_gapless_duration: Option<Duration>,
+        /// Set by the about-to-finish handler when a spectrogram staging
+        /// thread has been started for the likely next track.  Checked on
+        /// cancellation paths to send `CancelStagedContinuation`.
+        staged_continuation_active: Arc<AtomicBool>,
     }
 
     pub fn spawn_engine(
@@ -1134,6 +1138,7 @@ mod backend {
             analysis_pcm_token: Arc<AtomicU64>,
             event_tx: Sender<PlaybackEvent>,
             pending_eos_track_switch: Arc<AtomicBool>,
+            staged_continuation_active: Arc<AtomicBool>,
         ) -> Self {
             Self {
                 playbin,
@@ -1154,6 +1159,7 @@ mod backend {
                 seek_hold: None,
                 pending_eos_track_switch,
                 pending_gapless_duration: None,
+                staged_continuation_active,
             }
         }
 
@@ -1220,6 +1226,7 @@ mod backend {
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
             self.pending_gapless_duration = None;
+            self.cancel_staged_spectrogram();
             self.emit_track_changed(path, queue_index, kind, track_token);
             self.emit_snapshot();
         }
@@ -1233,6 +1240,7 @@ mod backend {
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
             self.pending_gapless_duration = None;
+            self.cancel_staged_spectrogram();
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
@@ -1262,6 +1270,7 @@ mod backend {
         }
 
         fn add_to_queue(&mut self, paths: Vec<PathBuf>) {
+            self.cancel_staged_spectrogram();
             let Some((repeat_mode, shuffle_enabled)) = (match self.queue_state.lock() {
                 Ok(mut state) => {
                     state.add_to_queue(paths);
@@ -1275,6 +1284,7 @@ mod backend {
         }
 
         fn remove_at(&mut self, idx: usize) {
+            self.cancel_staged_spectrogram();
             let old_current = self.snapshot.current.clone();
             let Some((next_current, repeat_mode, shuffle_enabled, current_index)) =
                 (match self.queue_state.lock() {
@@ -1313,6 +1323,7 @@ mod backend {
         }
 
         fn move_queue_item(&mut self, from: usize, to: usize) {
+            self.cancel_staged_spectrogram();
             let Some((repeat_mode, shuffle_enabled, current_index)) = (match self.queue_state.lock()
             {
                 Ok(mut state) => {
@@ -1539,8 +1550,22 @@ mod backend {
                 self.pending_eos_track_switch
                     .store(false, Ordering::Release);
                 self.pending_gapless_duration = None;
+                self.cancel_staged_spectrogram();
             }
             diverged
+        }
+
+        /// If a spectrogram staging thread is in flight, tell analysis to
+        /// cancel it and clear the local flag.
+        fn cancel_staged_spectrogram(&mut self) {
+            if self
+                .staged_continuation_active
+                .swap(false, Ordering::AcqRel)
+            {
+                let _ = self
+                    .analysis_tx
+                    .send(AnalysisCommand::CancelStagedContinuation);
+            }
         }
 
         fn set_volume(&mut self, volume: f32) {
@@ -1550,6 +1575,7 @@ mod backend {
         }
 
         fn set_repeat_mode(&mut self, mode: RepeatMode) {
+            self.cancel_staged_spectrogram();
             if let Ok(mut state) = self.queue_state.lock() {
                 state.set_repeat_mode(mode);
                 self.snapshot.repeat_mode = state.repeat_mode;
@@ -1560,6 +1586,7 @@ mod backend {
         }
 
         fn set_shuffle(&mut self, enabled: bool) {
+            self.cancel_staged_spectrogram();
             if let Ok(mut state) = self.queue_state.lock() {
                 state.set_shuffle_enabled(enabled);
                 self.snapshot.shuffle_enabled = state.shuffle_enabled;
@@ -1681,6 +1708,8 @@ mod backend {
                     maybe_emit_natural_handoff(&self.queue_state, &mut self.snapshot)
                 {
                     let track_token = self.advance_track_token_gapless();
+                    self.staged_continuation_active
+                        .store(false, Ordering::Release);
                     self.emit_track_changed(
                         path,
                         queue_index,
@@ -1889,10 +1918,13 @@ mod backend {
 
         let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
         let pending_eos_track_switch = Arc::new(AtomicBool::new(false));
+        let staged_continuation_active = Arc::new(AtomicBool::new(false));
 
         {
             let queue_state = Arc::clone(&queue_state);
             let pending_eos = Arc::clone(&pending_eos_track_switch);
+            let analysis_tx = analysis_tx.clone();
+            let staged_active = Arc::clone(&staged_continuation_active);
             playbin.connect("about-to-finish", false, move |values| {
                 let playbin_obj = values.first()?.get::<gst::Element>().ok()?;
 
@@ -1918,6 +1950,12 @@ mod backend {
                             new_path.display()
                         );
                     }
+                    // Tell analysis to stage spectrogram data for the next
+                    // track.  Runs on the analysis thread — the staging
+                    // thread will check format compatibility itself.
+                    let _ = analysis_tx
+                        .send(AnalysisCommand::PrepareGaplessContinuation { path: new_path });
+                    staged_active.store(true, Ordering::Release);
                 } else {
                     pending_eos.store(true, Ordering::Release);
                 }
@@ -1933,6 +1971,7 @@ mod backend {
             analysis_track_token,
             event_tx,
             pending_eos_track_switch,
+            staged_continuation_active,
         );
         runtime
             .playbin
