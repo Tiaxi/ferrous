@@ -345,9 +345,11 @@ impl AnalysisEngine {
             event_tx,
             waveform_job_tx,
             waveform_decode_active_token,
-            spectrogram_cmd_tx,
-            spectrogram_decode_generation,
-            worker_columns_produced,
+            SpectrogramWorkerHandles {
+                cmd_tx: spectrogram_cmd_tx,
+                decode_generation: spectrogram_decode_generation,
+                columns_produced: worker_columns_produced,
+            },
         );
 
         (Self { tx: cmd_tx, pcm_tx }, event_rx)
@@ -610,16 +612,18 @@ impl AnalysisRuntimeState {
                     format,
                     decoder,
                     track_id,
-                    fft_size,
-                    hop_size,
-                    view_mode,
-                    cand_effective_rate,
-                    cand_channel_count,
-                    divisor,
-                    bins_per_column,
-                    total_est,
-                    data_clone,
-                    cancel_clone,
+                    &StagedDecodeParams {
+                        fft_size,
+                        hop_size,
+                        view_mode,
+                        effective_rate: cand_effective_rate,
+                        channel_count: cand_channel_count,
+                        divisor,
+                        bins_per_column,
+                        total_columns_estimate: total_est,
+                    },
+                    &data_clone,
+                    &cancel_clone,
                 );
             });
 
@@ -1261,15 +1265,7 @@ fn precomputed_to_u8_spectrum(v: f32, fft_size: usize) -> u8 {
 /// columns of a candidate track into an `Arc<Mutex<Option<StagedSpectrogramData>>>`.
 /// Runs on a short-lived thread; checks `cancel` every 64 packets.
 // Arc params are moved into the staging thread — pass-by-value is intentional.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::needless_pass_by_value
-)]
-fn run_staged_decode(
-    mut format: Box<dyn symphonia::core::formats::FormatReader>,
-    mut audio_decoder: Box<dyn symphonia::core::codecs::Decoder>,
-    track_id: u32,
+struct StagedDecodeParams {
     fft_size: usize,
     hop_size: usize,
     view_mode: SpectrogramViewMode,
@@ -1278,15 +1274,71 @@ fn run_staged_decode(
     divisor: usize,
     bins_per_column: usize,
     total_columns_estimate: u32,
-    output: Arc<Mutex<Option<StagedSpectrogramData>>>,
-    cancel: Arc<AtomicBool>,
+}
+
+fn drain_staged_stft_rows(
+    stfts: &mut [StftComputer],
+    decimators: &mut [SpectrogramDecimator],
+    columns_u8: &mut Vec<u8>,
+    column_count: &mut u32,
+    fft_size: usize,
+    bins_per_column: usize,
+) {
+    loop {
+        let mut rows: Vec<Vec<f32>> = Vec::with_capacity(stfts.len());
+        let mut all_have = true;
+        for stft in stfts.iter_mut() {
+            let row = stft.take_rows(1);
+            if row.is_empty() {
+                all_have = false;
+                break;
+            }
+            rows.push(row.into_iter().next().unwrap());
+        }
+        if !all_have {
+            break;
+        }
+        let mut decimated: Vec<Option<Vec<f32>>> = Vec::with_capacity(decimators.len());
+        for (ch, row) in rows.into_iter().enumerate() {
+            if let Some(dec) = decimators.get_mut(ch) {
+                decimated.push(dec.push(row));
+            } else {
+                decimated.push(Some(row));
+            }
+        }
+        if !decimated.iter().all(Option::is_some) {
+            continue;
+        }
+        for maybe_row in &decimated {
+            let row = maybe_row.as_ref().unwrap();
+            for &v in row.iter().take(bins_per_column) {
+                columns_u8.push(precomputed_to_u8_spectrum(v, fft_size));
+            }
+            if row.len() < bins_per_column {
+                columns_u8.extend(std::iter::repeat_n(0u8, bins_per_column - row.len()));
+            }
+        }
+        *column_count += 1;
+        if *column_count >= MAX_STAGED_COLUMNS {
+            break;
+        }
+    }
+}
+
+fn run_staged_decode(
+    mut format: Box<dyn symphonia::core::formats::FormatReader>,
+    mut audio_decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    params: &StagedDecodeParams,
+    output: &Mutex<Option<StagedSpectrogramData>>,
+    cancel: &AtomicBool,
 ) {
     let _start = std::time::Instant::now();
-    let decimation_factor = decimation_factor_for_hop(hop_size);
-    let mut stfts: Vec<StftComputer> = (0..channel_count)
-        .map(|_| StftComputer::new(fft_size, hop_size))
+    let decimation_factor = decimation_factor_for_hop(params.hop_size);
+    let mut stfts: Vec<StftComputer> = (0..params.channel_count)
+        .map(|_| StftComputer::new(params.fft_size, params.hop_size))
         .collect();
-    let mut decimators: Vec<SpectrogramDecimator> = (0..channel_count)
+    let mut decimators: Vec<SpectrogramDecimator> = (0..params.channel_count)
         .map(|_| SpectrogramDecimator::new(decimation_factor))
         .collect();
 
@@ -1324,15 +1376,15 @@ fn run_staged_decode(
         let samples = buf.samples();
 
         // Deinterleave and resample.
-        let effective_frames = frames / divisor;
+        let effective_frames = frames / params.divisor;
         let per_channel = deinterleave_samples(
             samples,
             frames,
             native_channels,
-            channel_count,
-            divisor,
+            params.channel_count,
+            params.divisor,
             effective_frames,
-            view_mode,
+            params.view_mode,
         );
 
         #[allow(clippy::cast_possible_truncation)]
@@ -1342,51 +1394,18 @@ fn run_staged_decode(
 
         for (ch, channel_samples) in per_channel.iter().enumerate() {
             if let Some(stft) = stfts.get_mut(ch) {
-                stft.enqueue_samples(channel_samples, effective_rate);
+                stft.enqueue_samples(channel_samples, params.effective_rate);
             }
         }
 
-        // Drain STFT rows.
-        loop {
-            let mut rows: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
-            let mut all_have = true;
-            for stft in &mut stfts {
-                let row = stft.take_rows(1);
-                if row.is_empty() {
-                    all_have = false;
-                    break;
-                }
-                rows.push(row.into_iter().next().unwrap());
-            }
-            if !all_have {
-                break;
-            }
-            let mut decimated: Vec<Option<Vec<f32>>> = Vec::with_capacity(channel_count);
-            for (ch, row) in rows.into_iter().enumerate() {
-                if let Some(dec) = decimators.get_mut(ch) {
-                    decimated.push(dec.push(row));
-                } else {
-                    decimated.push(Some(row));
-                }
-            }
-            if !decimated.iter().all(Option::is_some) {
-                continue;
-            }
-            // Quantize and append.
-            for maybe_row in &decimated {
-                let row = maybe_row.as_ref().unwrap();
-                for &v in row.iter().take(bins_per_column) {
-                    columns_u8.push(precomputed_to_u8_spectrum(v, fft_size));
-                }
-                if row.len() < bins_per_column {
-                    columns_u8.extend(std::iter::repeat_n(0u8, bins_per_column - row.len()));
-                }
-            }
-            column_count += 1;
-            if column_count >= MAX_STAGED_COLUMNS {
-                break;
-            }
-        }
+        drain_staged_stft_rows(
+            &mut stfts,
+            &mut decimators,
+            &mut columns_u8,
+            &mut column_count,
+            params.fft_size,
+            params.bins_per_column,
+        );
 
         packet_counter += 1;
         if packet_counter.is_multiple_of(64) && cancel.load(Ordering::Relaxed) {
@@ -1403,7 +1422,7 @@ fn run_staged_decode(
         return;
     }
 
-    let coverage = seconds_from_frames(total_covered_samples, u64::from(effective_rate));
+    let coverage = seconds_from_frames(total_covered_samples, u64::from(params.effective_rate));
     profile_eprintln!(
         "[staging] done: {column_count} columns, {coverage:.2}s coverage in {:.1}ms",
         _start.elapsed().as_secs_f64() * 1000.0,
@@ -1413,10 +1432,10 @@ fn run_staged_decode(
         *guard = Some(StagedSpectrogramData {
             columns_u8,
             column_count,
-            bins_per_column: clamp_to_u16(bins_per_column),
-            channel_count: clamp_to_u8(channel_count),
-            total_columns_estimate,
-            sample_rate_hz: effective_rate,
+            bins_per_column: clamp_to_u16(params.bins_per_column),
+            channel_count: clamp_to_u8(params.channel_count),
+            total_columns_estimate: params.total_columns_estimate,
+            sample_rate_hz: params.effective_rate,
             hop_size: clamp_to_u16(REFERENCE_HOP),
             coverage_seconds: coverage,
         });
@@ -2672,16 +2691,19 @@ fn deinterleave_samples(
     per_channel
 }
 
-#[allow(clippy::too_many_arguments)]
+struct SpectrogramWorkerHandles {
+    cmd_tx: Sender<SpectrogramWorkerCommand>,
+    decode_generation: Arc<AtomicU64>,
+    columns_produced: Arc<AtomicU64>,
+}
+
 fn spawn_analysis_worker(
     cmd_rx: Receiver<AnalysisCommand>,
     pcm_rx: Receiver<AnalysisPcmChunk>,
     event_tx: Sender<AnalysisEvent>,
     waveform_job_tx: Sender<WaveformDecodeJob>,
     waveform_decode_active_token: Arc<AtomicU64>,
-    spectrogram_cmd_tx: Sender<SpectrogramWorkerCommand>,
-    spectrogram_decode_generation: Arc<AtomicU64>,
-    worker_columns_produced: Arc<AtomicU64>,
+    spectrogram: SpectrogramWorkerHandles,
 ) {
     let _ = std::thread::Builder::new()
         .name("ferrous-analysis".to_string())
@@ -2695,9 +2717,9 @@ fn spawn_analysis_worker(
                             event_tx: &event_tx,
                             waveform_job_tx: &waveform_job_tx,
                             waveform_decode_active_token: waveform_decode_active_token.as_ref(),
-                            spectrogram_cmd_tx: &spectrogram_cmd_tx,
-                            spectrogram_decode_generation: spectrogram_decode_generation.as_ref(),
-                            worker_columns_produced: worker_columns_produced.as_ref(),
+                            spectrogram_cmd_tx: &spectrogram.cmd_tx,
+                            spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
+                            worker_columns_produced: spectrogram.columns_produced.as_ref(),
                         };
                         state.handle_command(cmd, &ctx);
                     }
