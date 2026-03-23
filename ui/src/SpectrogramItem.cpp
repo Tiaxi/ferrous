@@ -1241,13 +1241,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             const bool hasCanvasRange =
                 m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
+
+            // In centered mode, suppress canvas rebuilds for ±1 column
+            // jitter from the position servo.  The sub-pixel shift is
+            // handled by columnPhase/drawX without touching the canvas.
+            const bool centeredStable = !rollingMode
+                && hasCanvasRange
+                && displayLeft >= m_precomputedCanvasDisplayLeft - 1
+                && displayLeft <= m_precomputedCanvasDisplayLeft + 1
+                && displayRight >= m_precomputedCanvasDisplayRight - 1
+                && displayRight <= m_precomputedCanvasDisplayRight + 1;
+
             const bool rangeChanged =
-                !hasCanvasRange
-                || displayLeft != m_precomputedCanvasDisplayLeft
-                || (visibleCols > 0
-                    ? displayLeft + static_cast<qint64>(visibleCols) - 1
-                    : displayLeft - 1) != m_precomputedCanvasDisplayRight
-                || rollingMode != m_precomputedCanvasRolling;
+                !centeredStable
+                && (!hasCanvasRange
+                    || displayLeft != m_precomputedCanvasDisplayLeft
+                    || (visibleCols > 0
+                        ? displayLeft + static_cast<qint64>(visibleCols) - 1
+                        : displayLeft - 1) != m_precomputedCanvasDisplayRight
+                    || rollingMode != m_precomputedCanvasRolling);
             const bool needsFullRebuild =
                 visibleCols > 0
                 && (m_canvas.isNull()
@@ -1255,8 +1267,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || m_canvas.height() != h
                     || rollingMode != m_precomputedCanvasRolling
                     || !hasCanvasRange
-                    || displayLeft < m_precomputedCanvasDisplayLeft
-                    || displayRight < m_precomputedCanvasDisplayRight
+                    || (!centeredStable && displayLeft < m_precomputedCanvasDisplayLeft)
+                    || (!centeredStable && displayRight < m_precomputedCanvasDisplayRight)
                     || static_cast<qint64>(visibleCols) > m_canvas.width());
 
             if (visibleCols > 0) {
