@@ -217,6 +217,7 @@ private:
     int m_precomputedSampleRateHz{44100};
     int m_precomputedHopSize{1024};
     quint64 m_precomputedTrackToken{0};
+    quint64 m_precomputedCommittedToken{0}; // token from the most recent buffer_reset
     bool m_precomputedReady{false};
     double m_positionSeconds{0.0};
     double m_positionAnchorSeconds{0.0};

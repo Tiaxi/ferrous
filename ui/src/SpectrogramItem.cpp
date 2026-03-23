@@ -426,6 +426,20 @@ void SpectrogramItem::feedPrecomputedChunk(
         return;
     }
 
+    // Record the committed token on buffer_reset so we can drop stale
+    // chunks from a superseded session that arrive out of order.
+    if (bufferReset && trackToken != 0) {
+        m_precomputedCommittedToken = trackToken;
+    }
+    // Drop chunks whose token doesn't match the most recent reset.
+    // This prevents a superseded session's late-arriving data from
+    // corrupting the ring buffer after a rapid double track change.
+    if (m_precomputedCommittedToken != 0
+        && trackToken != 0
+        && trackToken != m_precomputedCommittedToken) {
+        return;
+    }
+
     // Determine the number of channels from the packed data size.
     // For metadata-only chunks (columns==0, e.g. buffer_reset), channelCount
     // is unknown from data alone, so we allow any channelIndex through for
@@ -744,6 +758,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_trackEpochSeq = 0;
     m_rollingEpoch = 0;
     m_precomputedMaxColumnIndex = -1;
+    m_precomputedCommittedToken = 0;
     m_precomputedBinsPerColumn = 0;
     m_precomputedTotalColumnsEstimate = 0;
     m_precomputedResetPending = false;
