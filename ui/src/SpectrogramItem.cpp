@@ -1201,6 +1201,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     static_cast<qint64>(m_precomputedTotalColumnsEstimate - 1),
                     displayLeft + static_cast<qint64>(w) - 1);
                 displayLeft = std::max<qint64>(0, displayRight - static_cast<qint64>(w) + 1);
+
+                // Prevent backward jitter from the position servo: clamp
+                // displayLeft/displayRight to only advance.  This lets
+                // advancePrecomputedCanvasLocked handle every 1-column step
+                // smoothly instead of falling back to full rebuilds.
+                // Reset on buffer-reset (seek / track change).
+                if (m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
+                    displayLeft = std::max(displayLeft, m_precomputedCanvasDisplayLeft);
+                    displayRight = std::max(displayRight, m_precomputedCanvasDisplayRight);
+                }
+
                 playheadPixel = nowCol - static_cast<int>(displayLeft);
             } else {
                 // Rolling mode preserves the visible history as a continuous
@@ -1258,25 +1269,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             const bool hasCanvasRange =
                 m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
-
-            // In centered mode, suppress canvas rebuilds for ±1 column
-            // jitter from the position servo.  The sub-pixel shift is
-            // handled by columnPhase/drawX without touching the canvas.
-            const bool centeredStable = !rollingMode
-                && hasCanvasRange
-                && displayLeft >= m_precomputedCanvasDisplayLeft - 1
-                && displayLeft <= m_precomputedCanvasDisplayLeft + 1
-                && displayRight >= m_precomputedCanvasDisplayRight - 1
-                && displayRight <= m_precomputedCanvasDisplayRight + 1;
-
             const bool rangeChanged =
-                !centeredStable
-                && (!hasCanvasRange
-                    || displayLeft != m_precomputedCanvasDisplayLeft
-                    || (visibleCols > 0
-                        ? displayLeft + static_cast<qint64>(visibleCols) - 1
-                        : displayLeft - 1) != m_precomputedCanvasDisplayRight
-                    || rollingMode != m_precomputedCanvasRolling);
+                !hasCanvasRange
+                || displayLeft != m_precomputedCanvasDisplayLeft
+                || (visibleCols > 0
+                    ? displayLeft + static_cast<qint64>(visibleCols) - 1
+                    : displayLeft - 1) != m_precomputedCanvasDisplayRight
+                || rollingMode != m_precomputedCanvasRolling;
             const bool needsFullRebuild =
                 visibleCols > 0
                 && (m_canvas.isNull()
@@ -1284,8 +1283,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || m_canvas.height() != h
                     || rollingMode != m_precomputedCanvasRolling
                     || !hasCanvasRange
-                    || (!centeredStable && displayLeft < m_precomputedCanvasDisplayLeft)
-                    || (!centeredStable && displayRight < m_precomputedCanvasDisplayRight)
+                    || displayLeft < m_precomputedCanvasDisplayLeft
+                    || displayRight < m_precomputedCanvasDisplayRight
                     || static_cast<qint64>(visibleCols) > m_canvas.width());
 
             if (visibleCols > 0) {
