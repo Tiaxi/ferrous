@@ -1849,12 +1849,14 @@ fn handle_playback_bridge_command(
 }
 
 fn apply_analysis_spectrogram_settings(state: &mut BridgeState, analysis: &AnalysisEngine) {
+    // Send display mode first so that self.display_mode is correct before
+    // SetFftSize / SetSpectrogramViewMode restart the session.
+    analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
+        state.settings.spectrogram_display_mode,
+    ));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
     analysis.command(AnalysisCommand::SetSpectrogramViewMode(
         state.settings.spectrogram_view_mode,
-    ));
-    analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
-        state.settings.spectrogram_display_mode,
     ));
 }
 

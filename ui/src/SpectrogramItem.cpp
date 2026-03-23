@@ -693,7 +693,24 @@ void SpectrogramItem::feedPrecomputedChunk(
         && m_precomputedBinsPerColumn > 0;
 
     m_precomputedLastRightCol = -1;
-    m_precomputedCanvasDirty = true;
+
+    // In centered mode, only mark the canvas dirty when the new columns
+    // fall within the currently displayed range.  When the worker is
+    // decoding far ahead of the playhead (full-speed centered decode),
+    // those columns are not yet visible and repaint would cause twitching
+    // from continuous full-canvas rebuilds at frame rate.
+    if (m_displayMode == 1
+        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
+        const qint32 chunkEnd = static_cast<qint32>(startIndex) + columns - 1;
+        const bool overlapsVisible =
+            static_cast<qint32>(startIndex) <= static_cast<qint32>(m_precomputedCanvasDisplayRight)
+            && chunkEnd >= static_cast<qint32>(m_precomputedCanvasDisplayLeft);
+        if (overlapsVisible) {
+            m_precomputedCanvasDirty = true;
+        }
+    } else {
+        m_precomputedCanvasDirty = true;
+    }
 
     if (m_precomputedReady && !wasReady) {
         emit precomputedReadyChanged();
