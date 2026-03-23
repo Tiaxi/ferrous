@@ -1205,14 +1205,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (m_displayMode == 1) {
                 // Centered mode: playhead at center, data on both sides.
-                // Use the actual decoded column count when it exceeds the
-                // metadata estimate (the estimate can be off by hundreds
-                // of columns due to container overhead / padding).
+                // Use the actual decoded column count when available: the
+                // metadata estimate can both overshoot (STFT windowing at
+                // EOF eats a few columns) and undershoot (container padding).
+                // Using the actual max avoids blank gaps at the end.
                 rollingMode = false;
                 const int halfWidth = w / 2;
-                const qint64 totalCols = std::max(
-                    static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                    static_cast<qint64>(m_precomputedMaxColumnIndex) + 1);
+                const qint64 totalCols = m_precomputedMaxColumnIndex >= 0
+                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                    : static_cast<qint64>(m_precomputedTotalColumnsEstimate);
                 displayLeft = std::max(static_cast<qint64>(0),
                     static_cast<qint64>(nowCol) - halfWidth);
                 displayRight = std::min(
@@ -1339,9 +1340,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     // At the start (displayLeft == 0) and end (displayRight
                     // == total-1) the image is static and the playhead moves
                     // across it — sub-pixel offset would cause twitching.
-                    const qint64 totalColsForScroll = std::max(
-                        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                        static_cast<qint64>(m_precomputedMaxColumnIndex) + 1);
+                    const qint64 totalColsForScroll = m_precomputedMaxColumnIndex >= 0
+                        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                        : static_cast<qint64>(m_precomputedTotalColumnsEstimate);
                     const bool centeredScrolling =
                         displayLeft > 0
                         && displayRight < totalColsForScroll - 1;
