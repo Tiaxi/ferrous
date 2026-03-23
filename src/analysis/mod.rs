@@ -1457,9 +1457,11 @@ fn session_decode_loop(
         let lead = session.columns_produced.saturating_sub(target_column);
 
         if lead >= session.lookahead_columns && session.post_reset_burst == 0 {
-            // Flush any buffered columns before parking so the UI can
-            // display all decoded data while we wait.
-            session_flush_chunk(session, event_tx);
+            // In centered mode the parked rows can become immediately visible,
+            // so flush them before sleeping. Rolling mode only needs data at
+            // the playback head, so keep partial lookahead chunks buffered to
+            // avoid re-fragmenting into heartbeat-sized UI updates.
+            flush_chunk_before_lookahead_park(session, event_tx);
             // Park: block until a command arrives.
             match cmd_rx.recv() {
                 Ok(cmd) => match handle_single_command(session, cmd) {
@@ -1985,6 +1987,16 @@ fn session_flush_chunk(session: &mut SpectrogramSessionState, event_tx: &Sender<
         session.chunk_columns = 0;
         session.chunk_start_index = session.columns_produced;
     }
+}
+
+fn flush_chunk_before_lookahead_park(
+    session: &mut SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+) {
+    if session.display_mode == SpectrogramDisplayMode::Rolling {
+        return;
+    }
+    session_flush_chunk(session, event_tx);
 }
 
 /// Opens a Symphonia file and returns the format reader, decoder, and track info.
@@ -4043,6 +4055,103 @@ mod tests {
         }
         assert_eq!(session.chunk_columns, 0);
         assert_eq!(session.chunk_start_index, 320);
+    }
+
+    #[test]
+    fn rolling_mode_keeps_partial_chunk_buffered_while_parked() {
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let mut session = SpectrogramSessionState {
+            track_token: 7,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 2.0,
+            suppress_backward_seek: false,
+            columns_produced: 320,
+            session_start_column: 0,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: vec![1, 2, 3, 4],
+            chunk_columns: 1,
+            chunk_start_index: 256,
+            target_chunk_columns: 64,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_burst: 0,
+            decode_rate_limit: 2.0,
+            lookahead_columns: 512,
+            pending_continue: None,
+        };
+
+        flush_chunk_before_lookahead_park(&mut session, &event_tx);
+
+        assert!(event_rx.try_recv().is_err());
+        assert_eq!(session.chunk_columns, 1);
+        assert_eq!(session.chunk_start_index, 256);
+        assert_eq!(session.chunk_buf, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn centered_mode_flushes_partial_chunk_before_park() {
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let mut session = SpectrogramSessionState {
+            track_token: 7,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 2.0,
+            suppress_backward_seek: false,
+            columns_produced: 320,
+            session_start_column: 0,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: vec![1, 2, 3, 4],
+            chunk_columns: 1,
+            chunk_start_index: 256,
+            target_chunk_columns: 64,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_burst: 0,
+            decode_rate_limit: f64::INFINITY,
+            lookahead_columns: 512,
+            pending_continue: None,
+        };
+
+        flush_chunk_before_lookahead_park(&mut session, &event_tx);
+
+        let chunk = event_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("flushed centered chunk");
+        match chunk {
+            AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
+                assert_eq!(chunk.start_column_index, 256);
+                assert_eq!(chunk.column_count, 1);
+            }
+            other => panic!("expected precomputed chunk, got {other:?}"),
+        }
+        assert_eq!(session.chunk_columns, 0);
+        assert_eq!(session.chunk_start_index, 320);
+        assert!(session.chunk_buf.is_empty());
     }
 
     #[test]
