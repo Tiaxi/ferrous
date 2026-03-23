@@ -6724,14 +6724,12 @@ mod tests {
         F: Fn(&BridgeSnapshot) -> bool,
     {
         let deadline = Instant::now() + timeout;
-        let mut last = None;
         while Instant::now() < deadline {
             if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
                 if let BridgeEvent::Snapshot(snapshot) = event {
                     if predicate(&snapshot) {
                         return Some(*snapshot);
                     }
-                    last = Some(*snapshot);
                 }
             }
             while let Some(event) = bridge.try_recv() {
@@ -6739,11 +6737,10 @@ mod tests {
                     if predicate(&snapshot) {
                         return Some(*snapshot);
                     }
-                    last = Some(*snapshot);
                 }
             }
         }
-        last
+        None
     }
 
     fn wait_for_scrobble_queue(path: &Path, timeout: Duration) -> Option<Vec<LastFmScrobbleEntry>> {
@@ -7240,27 +7237,29 @@ mod tests {
         bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
             Duration::from_secs(180),
         )));
-        let deadline = Instant::now() + Duration::from_secs(4);
-        let mut handed_off = None;
-        while Instant::now() < deadline {
-            // Leave idle time for the bridge ticker to drive playback Poll, then sample state.
-            std::thread::sleep(Duration::from_millis(80));
-            bridge.command(BridgeCommand::RequestSnapshot);
-            if let Some(snapshot) =
-                wait_for_snapshot_matching(&bridge, Duration::from_millis(120), |_| false)
-            {
-                if snapshot.queue.len() == 2
-                    && snapshot.playback.current.as_ref() == Some(&second)
-                    && snapshot.playback.state == crate::playback::PlaybackState::Playing
+        // Poll with repeated RequestSnapshot so at least one snapshot
+        // includes the queue (heartbeat snapshots omit it).
+        let handed_off = {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut result = None;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(60));
+                bridge.command(BridgeCommand::RequestSnapshot);
+                let sc = second.clone();
+                if let Some(snap) =
+                    wait_for_snapshot_matching(&bridge, Duration::from_millis(200), move |s| {
+                        s.queue.len() == 2
+                            && s.playback.current.as_ref() == Some(&sc)
+                            && s.playback.state == crate::playback::PlaybackState::Playing
+                    })
                 {
-                    handed_off = Some(snapshot);
+                    result = Some(snap);
                     break;
                 }
             }
-        }
-        let handed_off = handed_off.expect("handoff to second track");
+            result.expect("handoff to second track")
+        };
         assert_eq!(handed_off.playback.current.as_ref(), Some(&second));
-        assert_eq!(handed_off.queue.len(), 2);
 
         bridge.command(BridgeCommand::Shutdown);
     }
@@ -7269,7 +7268,7 @@ mod tests {
     #[test]
     fn bridge_natural_handoff_keeps_old_metadata_until_new_metadata_arrives() {
         let _guard = test_guard();
-        let bridge = FrontendBridgeHandle::spawn_with_metadata_delay(Duration::from_millis(300));
+        let bridge = FrontendBridgeHandle::spawn_with_metadata_delay(Duration::from_secs(2));
         let first = p("/tmp/ferrous_metadata_case_a.flac");
         let second = p("/tmp/ferrous_metadata_case_b.flac");
         let first_title = "ferrous_metadata_case_a";
@@ -7279,35 +7278,79 @@ mod tests {
             tracks: vec![first.clone(), second.clone()],
             autoplay: true,
         }));
-        bridge.command(BridgeCommand::RequestSnapshot);
-        let first_loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(5), |s| {
-            s.queue.len() == 2
-                && s.playback.current.as_ref() == Some(&first)
-                && s.metadata.title == first_title
-        })
-        .expect("first track + metadata loaded");
+        let first_loaded = {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut result = None;
+            let fc = first.clone();
+            let ft = first_title.to_string();
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(60));
+                bridge.command(BridgeCommand::RequestSnapshot);
+                if let Some(snap) =
+                    wait_for_snapshot_matching(&bridge, Duration::from_millis(200), |s| {
+                        s.queue.len() == 2
+                            && s.playback.current.as_ref() == Some(&fc)
+                            && s.metadata.title == ft
+                    })
+                {
+                    result = Some(snap);
+                    break;
+                }
+            }
+            result.expect("first track + metadata loaded")
+        };
         assert_eq!(first_loaded.metadata.title, first_title);
 
         bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
             Duration::from_secs(180),
         )));
-        bridge.command(BridgeCommand::RequestSnapshot);
-        let handoff_snapshot = wait_for_snapshot_matching(&bridge, Duration::from_secs(2), |s| {
-            s.queue.len() == 2
-                && s.playback.current.as_ref() == Some(&second)
-                && s.metadata.title == first_title
-        })
-        .expect("handoff snapshot keeps old metadata before new metadata arrives");
+        // Wait for the handoff with repeated RequestSnapshot to ensure at
+        // least one snapshot includes the queue.
+        let second_for_handoff = second.clone();
+        let first_title_str = first_title.to_string();
+        let handoff_snapshot = {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut result = None;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(60));
+                bridge.command(BridgeCommand::RequestSnapshot);
+                if let Some(snap) =
+                    wait_for_snapshot_matching(&bridge, Duration::from_millis(100), |s| {
+                        s.queue.len() == 2
+                            && s.playback.current.as_ref() == Some(&second_for_handoff)
+                            && s.metadata.title == first_title_str
+                    })
+                {
+                    result = Some(snap);
+                    break;
+                }
+            }
+            result.expect("handoff snapshot keeps old metadata before new metadata arrives")
+        };
         assert_eq!(handoff_snapshot.playback.current.as_ref(), Some(&second));
         assert_eq!(handoff_snapshot.metadata.title, first_title);
 
-        bridge.command(BridgeCommand::RequestSnapshot);
-        let updated_metadata = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
-            s.queue.len() == 2
-                && s.playback.current.as_ref() == Some(&second)
-                && s.metadata.title == second_title
-        })
-        .expect("metadata updated for handed-off track");
+        let second_title_str = second_title.to_string();
+        let second_for_meta = second.clone();
+        let updated_metadata = {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut result = None;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(60));
+                bridge.command(BridgeCommand::RequestSnapshot);
+                if let Some(snap) =
+                    wait_for_snapshot_matching(&bridge, Duration::from_millis(100), |s| {
+                        s.queue.len() == 2
+                            && s.playback.current.as_ref() == Some(&second_for_meta)
+                            && s.metadata.title == second_title_str
+                    })
+                {
+                    result = Some(snap);
+                    break;
+                }
+            }
+            result.expect("metadata updated for handed-off track")
+        };
         assert_eq!(updated_metadata.metadata.title, second_title);
 
         bridge.command(BridgeCommand::Shutdown);

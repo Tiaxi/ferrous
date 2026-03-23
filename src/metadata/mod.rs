@@ -107,6 +107,9 @@ fn run_metadata_worker(
             path = newer_path;
         }
 
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
         let mut metadata = load_metadata_for_path(&path);
         let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
         apply_technical_details(&path, &mut metadata, event_tx);
@@ -116,9 +119,6 @@ fn run_metadata_worker(
         }
         if metadata.cover_art_rgba.is_none() {
             metadata.cover_art_rgba = load_folder_cover_art(&path);
-        }
-        if !delay.is_zero() {
-            std::thread::sleep(delay);
         }
         let _ = event_tx.send(MetadataEvent::Loaded(metadata));
     }
