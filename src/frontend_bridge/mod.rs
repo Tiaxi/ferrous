@@ -228,6 +228,24 @@ impl SpectrogramViewMode {
     }
 }
 
+impl SpectrogramDisplayMode {
+    #[must_use]
+    pub fn parse_settings_value(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "rolling" | "0" => Some(Self::Rolling),
+            "centered" | "centred" | "1" => Some(Self::Centered),
+            _ => None,
+        }
+    }
+
+    fn settings_value(self) -> &'static str {
+        match self {
+            Self::Rolling => "rolling",
+            Self::Centered => "centered",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerFullscreenMode {
     WithinWindow,
@@ -1834,6 +1852,9 @@ fn apply_analysis_spectrogram_settings(state: &mut BridgeState, analysis: &Analy
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
     analysis.command(AnalysisCommand::SetSpectrogramViewMode(
         state.settings.spectrogram_view_mode,
+    ));
+    analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
+        state.settings.spectrogram_display_mode,
     ));
 }
 
@@ -5375,6 +5396,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.spectrogram_view_mode = mode;
                 }
             }
+            "spectrogram_display_mode" => {
+                if let Some(mode) = SpectrogramDisplayMode::parse_settings_value(value) {
+                    settings.spectrogram_display_mode = mode;
+                }
+            }
             "viewer_fullscreen_mode" => {
                 if let Some(mode) = ViewerFullscreenMode::parse_settings_value(value) {
                     settings.viewer_fullscreen_mode = mode;
@@ -5431,10 +5457,11 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
+        settings.spectrogram_display_mode.settings_value(),
         settings.viewer_fullscreen_mode.settings_value(),
         settings.db_range,
         i32::from(settings.display.log_scale),

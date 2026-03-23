@@ -375,12 +375,17 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&viewerFullscreenMode)) {
         return false;
     }
+    quint8 spectrogramDisplayMode = 0;
+    if (!reader.atEnd() && !reader.readU8(&spectrogramDisplayMode)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
     out->present = true;
     out->fftSize = static_cast<int>(fftSize);
     out->spectrogramViewMode = static_cast<int>(spectrogramViewMode);
+    out->spectrogramDisplayMode = static_cast<int>(spectrogramDisplayMode);
     out->viewerFullscreenMode = static_cast<int>(viewerFullscreenMode);
     out->logScale = logScale != 0;
     out->showFps = showFps != 0;

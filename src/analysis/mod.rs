@@ -1657,12 +1657,17 @@ fn run_spectrogram_session(
     let decimation_factor = decimation_factor_for_hop(hop_size);
     let cols_per_second = f64::from(effective_rate) / usize_to_f64_approx(REFERENCE_HOP);
 
-    // Lookahead configuration
-    let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(10.0);
-    let lookahead_columns = f64_to_u64_saturating(lookahead_seconds * cols_per_second);
+    // Lookahead configuration: rolling mode parks the decode ~10 s ahead
+    // of the play head; centered mode decodes the entire track.
+    let lookahead_columns = if display_mode == SpectrogramDisplayMode::Centered {
+        u64::MAX
+    } else {
+        let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(10.0);
+        f64_to_u64_saturating(lookahead_seconds * cols_per_second)
+    };
 
     // Rate throttle: 2× realtime for rolling, unlimited for centered.
     let decode_rate_limit = if display_mode == SpectrogramDisplayMode::Rolling {
@@ -2133,15 +2138,7 @@ fn process_session_commands(
                 return Some(SessionAction::NewSession(cmd));
             }
             SpectrogramWorkerCommand::SetDisplayMode(mode) => {
-                session.display_mode = mode;
-                session.decode_rate_limit = if mode == SpectrogramDisplayMode::Rolling {
-                    std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
-                        .ok()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(2.0)
-                } else {
-                    f64::INFINITY
-                };
+                apply_display_mode(session, mode);
             }
             SpectrogramWorkerCommand::ContinueWithFile {
                 path,
@@ -2215,15 +2212,7 @@ fn handle_single_command(
         }
         SpectrogramWorkerCommand::NewTrack { .. } => SessionAction::NewSession(cmd),
         SpectrogramWorkerCommand::SetDisplayMode(mode) => {
-            session.display_mode = mode;
-            session.decode_rate_limit = if mode == SpectrogramDisplayMode::Rolling {
-                std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
-                    .ok()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(2.0)
-            } else {
-                f64::INFINITY
-            };
+            apply_display_mode(session, mode);
             SessionAction::Continue
         }
         SpectrogramWorkerCommand::ContinueWithFile {
@@ -2347,6 +2336,27 @@ fn next_target_chunk_columns(current: u16, display_mode: SpectrogramDisplayMode)
     current
         .saturating_mul(2)
         .min(max_target_chunk_columns(display_mode))
+}
+
+/// Apply a display-mode change to a live session: update rate limit
+/// and lookahead so centered mode decodes the full track immediately.
+fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDisplayMode) {
+    session.display_mode = mode;
+    if mode == SpectrogramDisplayMode::Rolling {
+        session.decode_rate_limit = std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(2.0);
+        let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(10.0);
+        session.lookahead_columns =
+            f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
+    } else {
+        session.decode_rate_limit = f64::INFINITY;
+        session.lookahead_columns = u64::MAX;
+    }
 }
 
 fn post_reset_unthrottled_columns(display_mode: SpectrogramDisplayMode) -> u32 {

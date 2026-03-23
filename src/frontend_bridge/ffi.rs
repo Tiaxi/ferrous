@@ -1769,6 +1769,13 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         clamp_u8_from_i32(snapshot.settings.viewer_fullscreen_mode.to_i32()),
     );
+    push_u8(
+        &mut out,
+        match snapshot.settings.spectrogram_display_mode {
+            SpectrogramDisplayMode::Rolling => 0,
+            SpectrogramDisplayMode::Centered => 1,
+        },
+    );
     out
 }
 
@@ -2719,8 +2726,10 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(0));
-        assert_eq!(settings.last().copied(), Some(1));
+        // Last 3 bytes: system_media_controls(0), viewer_fullscreen(1), display_mode(0)
+        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0));
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1));
+        assert_eq!(settings.last().copied(), Some(0));
     }
 
     #[test]

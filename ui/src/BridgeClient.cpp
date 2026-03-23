@@ -4921,6 +4921,18 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         snapshotSignalChanged = true;
     }
 
+    const int spectrogramDisplayMode = std::clamp(
+        snapshot.settings.present
+            ? snapshot.settings.spectrogramDisplayMode
+            : m_spectrogramDisplayMode,
+        0,
+        1);
+    if (m_spectrogramDisplayMode != spectrogramDisplayMode) {
+        m_spectrogramDisplayMode = spectrogramDisplayMode;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
     const int viewerFullscreenMode = std::clamp(
         snapshot.settings.present
             ? snapshot.settings.viewerFullscreenMode
