@@ -73,6 +73,7 @@ enum CommandId : quint16 {
     CmdRefreshEditedPaths = 47,
     CmdReplaceRootByPath = 48,
     CmdAppendRootByPath = 49,
+    CmdSetSpectrogramDisplayMode = 50,
 };
 
 struct DecodedPlayback {

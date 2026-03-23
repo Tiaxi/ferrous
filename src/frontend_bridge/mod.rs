@@ -11,7 +11,8 @@ use serde_json::json;
 use walkdir::WalkDir;
 
 use crate::analysis::{
-    AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramViewMode,
+    AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramDisplayMode,
+    SpectrogramViewMode,
 };
 use crate::artwork::apply_artwork_to_track;
 use crate::lastfm::{
@@ -181,6 +182,7 @@ pub enum BridgeSettingsCommand {
     SetVolume(f32),
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
+    SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     SetViewerFullscreenMode(ViewerFullscreenMode),
     SetDbRange(f32),
     SetLogScale(bool),
@@ -343,6 +345,7 @@ pub struct BridgeSettings {
     pub volume: f32,
     pub fft_size: usize,
     pub spectrogram_view_mode: SpectrogramViewMode,
+    pub spectrogram_display_mode: SpectrogramDisplayMode,
     pub viewer_fullscreen_mode: ViewerFullscreenMode,
     pub db_range: f32,
     pub display: BridgeDisplaySettings,
@@ -359,6 +362,7 @@ impl Default for BridgeSettings {
             volume: 1.0,
             fft_size: 8192,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
+            spectrogram_display_mode: SpectrogramDisplayMode::Rolling,
             viewer_fullscreen_mode: ViewerFullscreenMode::WithinWindow,
             db_range: 132.0,
             display: BridgeDisplaySettings {
@@ -1882,6 +1886,13 @@ fn handle_settings_bridge_command(
             context
                 .analysis
                 .command(AnalysisCommand::SetSpectrogramViewMode(*view_mode));
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetSpectrogramDisplayMode(mode) => {
+            state.settings.spectrogram_display_mode = *mode;
+            context
+                .analysis
+                .command(AnalysisCommand::SetSpectrogramDisplayMode(*mode));
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetViewerFullscreenMode(mode) => {
@@ -5722,6 +5733,7 @@ mod tests {
             volume: 0.42,
             fft_size: 2048,
             spectrogram_view_mode: SpectrogramViewMode::PerChannel,
+            spectrogram_display_mode: SpectrogramDisplayMode::Rolling,
             viewer_fullscreen_mode: ViewerFullscreenMode::WholeScreen,
             db_range: 77.5,
             display: BridgeDisplaySettings {

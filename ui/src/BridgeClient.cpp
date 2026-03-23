@@ -2400,6 +2400,9 @@ void BridgeClient::setSpectrogramDisplayMode(int value) {
         m_spectrogramDisplayMode = clamped;
         scheduleSnapshotChanged();
     }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramDisplayMode,
+        static_cast<quint8>(clamped)));
 }
 
 void BridgeClient::setViewerFullscreenMode(int value) {

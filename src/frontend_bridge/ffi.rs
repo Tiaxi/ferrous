@@ -15,7 +15,10 @@ use super::{
     BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
     FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
-use crate::analysis::{PrecomputedSpectrogramChunk, SpectrogramChannelLabel, SpectrogramViewMode};
+use crate::analysis::{
+    PrecomputedSpectrogramChunk, SpectrogramChannelLabel, SpectrogramDisplayMode,
+    SpectrogramViewMode,
+};
 use crate::library::{IndexedTrack, LibraryTrack};
 use crate::playback::{PlaybackState, RepeatMode};
 use crate::tag_editor;
@@ -1265,6 +1268,10 @@ fn parse_settings_command(
             i32::from(reader.read_u8()?),
         )),
         39 => BridgeSettingsCommand::SetSystemMediaControlsEnabled(reader.read_u8()? != 0),
+        50 => BridgeSettingsCommand::SetSpectrogramDisplayMode(match reader.read_u8()? {
+            1 => SpectrogramDisplayMode::Centered,
+            _ => SpectrogramDisplayMode::Rolling,
+        }),
         40 => BridgeSettingsCommand::SetLastFmScrobblingEnabled(reader.read_u8()? != 0),
         41 => BridgeSettingsCommand::BeginLastFmAuth,
         42 => BridgeSettingsCommand::CompleteLastFmAuth,
@@ -2253,6 +2260,7 @@ mod tests {
                 volume: 0.75,
                 fft_size: 2048,
                 spectrogram_view_mode: SpectrogramViewMode::Downmix,
+                spectrogram_display_mode: SpectrogramDisplayMode::Rolling,
                 viewer_fullscreen_mode: ViewerFullscreenMode::WholeScreen,
                 db_range: 132.0,
                 display: super::super::BridgeDisplaySettings {

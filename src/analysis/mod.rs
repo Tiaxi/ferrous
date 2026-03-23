@@ -54,6 +54,7 @@ pub enum AnalysisCommand {
     SetSampleRate(u32),
     SetFftSize(usize),
     SetSpectrogramViewMode(SpectrogramViewMode),
+    SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     RestartCurrentTrack {
         position_seconds: f64,
         clear_history: bool,
@@ -475,6 +476,14 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 self.start_spectrogram_session(0.0, true, true, ctx);
+            }
+            AnalysisCommand::SetSpectrogramDisplayMode(mode) => {
+                self.cancel_staged_continuation();
+                profile_eprintln!("[analysis] SetSpectrogramDisplayMode({mode:?})");
+                self.display_mode = mode;
+                let _ = ctx
+                    .spectrogram_cmd_tx
+                    .send(SpectrogramWorkerCommand::SetDisplayMode(mode));
             }
             AnalysisCommand::RestartCurrentTrack {
                 position_seconds,
