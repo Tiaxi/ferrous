@@ -1312,7 +1312,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 scrollOffset = columnPhase;
                 drawX = rollingMode
                     ? static_cast<double>(w - drawCols) - columnPhase
-                    : -columnPhase;
+                    : 0.0;
                 latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
                 tileCount = static_cast<int>(m_dirtyTiles.size());
                 const bool refreshAllTiles = node->tileTextures.size() != tileCount;

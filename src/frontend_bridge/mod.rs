@@ -1493,6 +1493,11 @@ fn restore_initial_bridge_state(
 ) {
     state.playback.volume = state.settings.volume;
     playback.command(PlaybackCommand::SetVolume(state.settings.volume));
+    // Display mode first so self.display_mode is correct before
+    // SetFftSize / SetSpectrogramViewMode restart the session.
+    analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
+        state.settings.spectrogram_display_mode,
+    ));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
     analysis.command(AnalysisCommand::SetSpectrogramViewMode(
         state.settings.spectrogram_view_mode,
