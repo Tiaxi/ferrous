@@ -669,10 +669,10 @@ impl AnalysisRuntimeState {
         }
         self.emit_snapshot(ctx.event_tx, true);
 
-        if gapless && !reset_spectrogram {
-            // Continue the existing decode session with the new file.
-            // The generation counter is NOT incremented, so the running
-            // session's is_stale() check won't trigger.
+        if gapless && !reset_spectrogram && self.display_mode == SpectrogramDisplayMode::Rolling {
+            // Rolling mode: continue the existing decode session with the
+            // new file.  The generation counter is NOT incremented, so the
+            // running session's is_stale() check won't trigger.
             //
             // Accumulate position offset: GStreamer's position resets to 0
             // for the new track, but the worker's coordinate space is
@@ -729,6 +729,15 @@ impl AnalysisRuntimeState {
                     track_token,
                     skip_columns: skip,
                 });
+        } else if gapless && !reset_spectrogram {
+            // Centered mode gapless: start a fresh session so the new
+            // track gets 0-based column indices.  ContinueWithFile would
+            // use the continuous K-based counter, which centered mode's
+            // position-based column lookup can't resolve.
+            self.cancel_staged_continuation();
+            self.spectrogram_position_offset = 0.0;
+            profile_eprintln!("[analysis] handle_track_change: centered gapless → fresh NewTrack",);
+            self.start_spectrogram_session(0.0, false, false, ctx);
         } else {
             // Non-gapless: cancel any stale staged continuation.
             self.cancel_staged_continuation();
