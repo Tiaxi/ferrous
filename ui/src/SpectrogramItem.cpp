@@ -1165,6 +1165,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             qint64 displayLeft, displayRight;
             int playheadPixel;
             bool rollingMode;
+            qint64 writeHeadSeq = -1;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            qint64 unclampedDisplaySeq = 0;
+            qint64 writeHeadHeadroom = 0;
+            bool writeHeadClamped = false;
+#endif
 
             if (m_displayMode == 1) {
                 // Centered mode: playhead at center, data on both sides.
@@ -1185,10 +1191,40 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 rollingMode = true;
                 const qint64 displaySeq =
                     m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0));
-                displayRight = std::min(displaySeq, m_ringWriteSeq - 1);
+                writeHeadSeq = m_ringWriteSeq - 1;
+                displayRight = std::min(displaySeq, writeHeadSeq);
                 displayLeft = std::max(m_ringOldestSeq, displayRight - w + 1);
                 playheadPixel = -1;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                unclampedDisplaySeq = displaySeq;
+                writeHeadHeadroom = writeHeadSeq - displaySeq;
+                writeHeadClamped = displaySeq > writeHeadSeq;
+#endif
             }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            if (m_profileEnabled
+                && rollingMode
+                && usePrecomputed
+                && (writeHeadClamped || writeHeadHeadroom <= 8)
+                && shouldLogProfileSpike(&m_profileLastWriteHeadClampSpike, renderNow, 0.10)) {
+                const auto usSinceTransitionFeed =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        renderNow - m_debugLastTransitionFeedAt).count();
+                FERROUS_SPECTROGRAM_LOGF(
+                    stderr,
+                    "[Qt-write-head@%p] pos=%.3f unclamped=%lld display=%lld write=%lld "
+                    "headroom=%lld tok=%llu usSinceFeed=%lld\n",
+                    static_cast<const void *>(this),
+                    renderPositionSeconds,
+                    static_cast<long long>(unclampedDisplaySeq),
+                    static_cast<long long>(displayRight),
+                    static_cast<long long>(writeHeadSeq),
+                    static_cast<long long>(writeHeadHeadroom),
+                    static_cast<unsigned long long>(m_precomputedTrackToken),
+                    static_cast<long long>(usSinceTransitionFeed));
+            }
+#endif
 
             // The decoder covers the full track minus ~2 columns at
             // EOF (STFT window effect).  Don't clamp the scroll — at

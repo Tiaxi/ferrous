@@ -1360,8 +1360,12 @@ fn run_spectrogram_session(
                     session.target_chunk_columns = 1;
                     session.session_start_time = std::time::Instant::now();
                     session.session_start_column = session.columns_produced;
+                    session.post_reset_burst = post_gapless_continue_burst(session.display_mode);
                     session.suppress_backward_seek = true;
-                    profile_eprintln!("[spect-worker] file switch OK, continuing session");
+                    profile_eprintln!(
+                        "[spect-worker] file switch OK, continuing session burst={}",
+                        session.post_reset_burst
+                    );
                     continue; // re-enter session_decode_loop
                 }
                 // Incompatible or open failed — fall back to NewTrack.
@@ -1867,6 +1871,17 @@ fn next_target_chunk_columns(current: u16, display_mode: SpectrogramDisplayMode)
     current
         .saturating_mul(2)
         .min(max_target_chunk_columns(display_mode))
+}
+
+fn post_gapless_continue_burst(display_mode: SpectrogramDisplayMode) -> u32 {
+    match display_mode {
+        // A natural gapless handoff starts with little or no future data from
+        // the new track in the rolling ring. Give the decoder a short
+        // unthrottled burst so the visible head does not catch the write head
+        // and stall until the next chunk lands.
+        SpectrogramDisplayMode::Rolling => 16,
+        SpectrogramDisplayMode::Centered => 0,
+    }
 }
 
 fn session_drain_stft_rows(
@@ -4002,6 +4017,18 @@ mod tests {
         assert_eq!(
             next_target_chunk_columns(256, SpectrogramDisplayMode::Centered),
             256
+        );
+    }
+
+    #[test]
+    fn gapless_continue_burst_is_only_enabled_in_rolling_mode() {
+        assert_eq!(
+            post_gapless_continue_burst(SpectrogramDisplayMode::Rolling),
+            16
+        );
+        assert_eq!(
+            post_gapless_continue_burst(SpectrogramDisplayMode::Centered),
+            0
         );
     }
 

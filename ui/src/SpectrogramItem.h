@@ -193,6 +193,7 @@ private:
     std::chrono::steady_clock::time_point m_profileLastAppendSpike{};
     std::chrono::steady_clock::time_point m_profileLastFrameGapSpike{};
     std::chrono::steady_clock::time_point m_profileLastPaintSpike{};
+    std::chrono::steady_clock::time_point m_profileLastWriteHeadClampSpike{};
     quint64 m_profilePaints{0};
     double m_profilePaintMs{0.0};
     quint64 m_sceneGraphGeneration{0};
