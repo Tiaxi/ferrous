@@ -1990,7 +1990,6 @@ void SpectrogramItem::drawPrecomputedColumnAtLocked(
             ? static_cast<int>(seq % m_ringCapacity)
             : -1;
         valid = displayIndex >= 0
-            && displayIndex < m_precomputedTotalColumnsEstimate
             && seq >= m_ringOldestSeq
             && seq < m_ringWriteSeq
             && slot >= 0
