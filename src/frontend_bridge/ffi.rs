@@ -1913,65 +1913,9 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     emit_state.last_waveform_coverage_millis = waveform_coverage_millis;
     emit_state.last_waveform_complete = s.analysis.waveform_complete;
 
-    let spectrogram_reset = s.analysis.spectrogram_seq < emit_state.last_spectrogram_seq
-        || (s.analysis.spectrogram_seq == 0
-            && s.analysis.spectrogram_channels.is_empty()
-            && emit_state.last_spectrogram_seq > 0);
-    let spectrogram_seq = s.analysis.spectrogram_seq;
-    let spectrogram_delta =
-        usize_from_u64(spectrogram_seq.saturating_sub(emit_state.last_spectrogram_seq));
-    let spectrogram_channels_u8 = if spectrogram_reset
-        && !s.analysis.spectrogram_channels.is_empty()
-    {
-        s.analysis
-            .spectrogram_channels
-            .iter()
-            .map(|channel| EncodedSpectrogramChannel {
-                label: channel.label,
-                rows_u8: channel
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size))
-                            .collect::<Vec<u8>>()
-                    })
-                    .collect(),
-            })
-            .collect()
-    } else if spectrogram_delta > 0 && !s.analysis.spectrogram_channels.is_empty() {
-        let frame_count = s
-            .analysis
-            .spectrogram_channels
-            .first()
-            .map_or(0, |channel| channel.rows.len());
-        let tail = spectrogram_delta.min(frame_count);
-        let start = frame_count.saturating_sub(tail);
-        s.analysis
-            .spectrogram_channels
-            .iter()
-            .map(|channel| EncodedSpectrogramChannel {
-                label: channel.label,
-                rows_u8: channel.rows[start..]
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|v| to_u8_spectrum(*v, s.settings.db_range, s.settings.fft_size))
-                            .collect::<Vec<u8>>()
-                    })
-                    .collect(),
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if !spectrogram_reset || !s.analysis.spectrogram_channels.is_empty() {
-        emit_state.last_spectrogram_seq = spectrogram_seq;
-    }
-    let has_payload = waveform_changed
-        || waveform_meta_changed
-        || (spectrogram_reset && !spectrogram_channels_u8.is_empty())
-        || !spectrogram_channels_u8.is_empty();
+    // Streaming spectrogram removed — always produce zero rows.
+    let spectrogram_channels_u8: Vec<EncodedSpectrogramChannel> = Vec::new();
+    let has_payload = waveform_changed || waveform_meta_changed;
     if has_payload {
         emit_state.analysis_frame_seq = emit_state.analysis_frame_seq.wrapping_add(1);
     }
@@ -1979,7 +1923,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     AnalysisDelta {
         sample_rate_hz: s.analysis.sample_rate_hz,
         frame_seq: emit_state.analysis_frame_seq,
-        spectrogram_reset: spectrogram_reset && !spectrogram_channels_u8.is_empty(),
+        spectrogram_reset: false,
         waveform_changed,
         waveform_coverage_millis,
         waveform_complete: s.analysis.waveform_complete,
@@ -2215,13 +2159,7 @@ mod tests {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
                 waveform_coverage_seconds: 0.0,
                 waveform_complete: true,
-                spectrogram_channels: vec![AnalysisSpectrogramChannel {
-                    label: SpectrogramChannelLabel::Mono,
-                    rows: vec![vec![0.0, 1.0], vec![2.0, 3.0]],
-                }],
-                spectrogram_seq: 2,
                 sample_rate_hz: 48_000,
-                spectrogram_view_mode: SpectrogramViewMode::Downmix,
             },
             metadata: crate::metadata::TrackMetadata {
                 source_path: Some("/music/a.flac".to_string()),
@@ -2804,56 +2742,9 @@ mod tests {
         let mut emit_state = AnalysisEmitState::default();
         let delta = compute_analysis_delta(&snapshot, &mut emit_state);
         assert!(delta.waveform_changed);
-        assert!(!delta.spectrogram_channels_u8.is_empty());
         let frame = encode_analysis_frame(&delta);
         assert!(!frame.is_empty());
         assert_eq!(frame[4], ANALYSIS_FRAME_MAGIC);
-    }
-
-    #[test]
-    fn analysis_delta_sends_full_rows_on_spectrogram_reset() {
-        let mut snapshot = sample_snapshot();
-        snapshot.analysis.spectrogram_seq = 3;
-        let mut emit_state = AnalysisEmitState {
-            last_waveform_peaks: snapshot.analysis.waveform_peaks.clone(),
-            last_waveform_coverage_millis: waveform_coverage_millis(
-                snapshot.analysis.waveform_coverage_seconds,
-            ),
-            last_waveform_complete: snapshot.analysis.waveform_complete,
-            last_spectrogram_seq: 9,
-            ..AnalysisEmitState::default()
-        };
-
-        let delta = compute_analysis_delta(&snapshot, &mut emit_state);
-
-        assert!(delta.spectrogram_reset);
-        assert_eq!(delta.spectrogram_channels_u8.len(), 1);
-        assert_eq!(delta.spectrogram_channels_u8[0].rows_u8.len(), 2);
-        assert_eq!(emit_state.last_spectrogram_seq, 3);
-    }
-
-    #[test]
-    fn analysis_delta_suppresses_empty_spectrogram_reset_frame() {
-        let mut snapshot = sample_snapshot();
-        snapshot.analysis.spectrogram_seq = 0;
-        snapshot.analysis.spectrogram_channels.clear();
-        snapshot.analysis.waveform_complete = false;
-        let mut emit_state = AnalysisEmitState {
-            last_waveform_peaks: snapshot.analysis.waveform_peaks.clone(),
-            last_waveform_coverage_millis: waveform_coverage_millis(
-                snapshot.analysis.waveform_coverage_seconds,
-            ),
-            last_waveform_complete: false,
-            last_spectrogram_seq: 9,
-            ..AnalysisEmitState::default()
-        };
-
-        let delta = compute_analysis_delta(&snapshot, &mut emit_state);
-
-        assert!(!delta.spectrogram_reset);
-        assert!(delta.spectrogram_channels_u8.is_empty());
-        assert!(encode_analysis_frame(&delta).is_empty());
-        assert_eq!(emit_state.last_spectrogram_seq, 9);
     }
 
     fn ffi_send_binary(handle: *mut FerrousFfiBridge, cmd: &[u8]) -> bool {

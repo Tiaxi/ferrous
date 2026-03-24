@@ -1388,29 +1388,14 @@ impl BridgeLoopRuntime {
             return;
         }
         let _rss_kb = current_rss_kb();
-        let _spectro_rows = self
-            .state
-            .analysis
-            .spectrogram_channels
-            .first()
-            .map_or(0, |channel| channel.rows.len());
-        let _spectro_bins = self
-            .state
-            .analysis
-            .spectrogram_channels
-            .first()
-            .and_then(|channel| channel.rows.first())
-            .map_or(0, std::vec::Vec::len);
         profile_eprintln!(
-            "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} spectro_rows={} spectro_bins={} sent_snap/s={} drop_snap/s={}",
+            "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} sent_snap/s={} drop_snap/s={}",
             _rss_kb,
             self.playback_rx.len(),
             self.analysis_rx.len(),
             self.metadata_rx.len(),
             self.library_rx.len(),
             self.state.analysis.waveform_peaks.len(),
-            _spectro_rows,
-            _spectro_bins,
             self.diagnostics.prof_snapshots_sent,
             self.diagnostics.prof_snapshots_dropped
         );
@@ -4707,14 +4692,7 @@ fn pump_playback_events(
 }
 
 fn process_analysis_event(snapshot: AnalysisSnapshot, state: &mut BridgeState) -> SnapshotUrgency {
-    if snapshot.spectrogram_seq == 0 && snapshot.spectrogram_channels.is_empty() {
-        state.analysis.spectrogram_channels.clear();
-    } else if !snapshot.spectrogram_channels.is_empty() {
-        state.analysis.spectrogram_channels = snapshot.spectrogram_channels;
-    }
-    state.analysis.spectrogram_seq = snapshot.spectrogram_seq;
     state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
-    state.analysis.spectrogram_view_mode = snapshot.spectrogram_view_mode;
     state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
     state.analysis.waveform_complete = snapshot.waveform_complete;
     if !snapshot.waveform_peaks.is_empty() {
@@ -7171,9 +7149,7 @@ mod tests {
             .recv_timeout(Duration::from_millis(500))
             .expect("analysis event after replay resume");
         match evt {
-            AnalysisEvent::Snapshot(snapshot) => {
-                assert!(snapshot.spectrogram_channels.is_empty());
-            }
+            AnalysisEvent::Snapshot(_snapshot) => {}
             _ => panic!("unexpected event variant"),
         }
     }

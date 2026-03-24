@@ -138,10 +138,7 @@ pub struct AnalysisSnapshot {
     pub waveform_peaks: Vec<f32>,
     pub waveform_coverage_seconds: f32,
     pub waveform_complete: bool,
-    pub spectrogram_channels: Vec<AnalysisSpectrogramChannel>,
-    pub spectrogram_seq: u64,
     pub sample_rate_hz: u32,
-    pub spectrogram_view_mode: SpectrogramViewMode,
 }
 
 #[derive(Debug, Clone)]
@@ -253,7 +250,9 @@ struct AnalysisRuntimeState {
     pending_channels: Vec<AnalysisSpectrogramChannel>,
     waveform_dirty: bool,
     last_emit: std::time::Instant,
-    spectrogram: SpectrogramRuntime,
+    fft_size: usize,
+    hop_size: usize,
+    spectrogram_view_mode: SpectrogramViewMode,
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
     active_track_stamp: Option<WaveformSourceStamp>,
@@ -371,13 +370,14 @@ impl AnalysisRuntimeState {
         Self {
             snapshot: AnalysisSnapshot {
                 sample_rate_hz: 48_000,
-                spectrogram_view_mode: SpectrogramViewMode::Downmix,
                 ..AnalysisSnapshot::default()
             },
             pending_channels: Vec::new(),
             waveform_dirty: false,
             last_emit: std::time::Instant::now(),
-            spectrogram: SpectrogramRuntime::new(8192, 1024, SpectrogramViewMode::Downmix, &[]),
+            fft_size: 8192,
+            hop_size: 1024,
+            spectrogram_view_mode: SpectrogramViewMode::Downmix,
             active_track_token: 0,
             active_track_path: None,
             active_track_stamp: None,
@@ -449,7 +449,8 @@ impl AnalysisRuntimeState {
                 self.clear_early_continuation(ctx);
                 let fft = size.clamp(512, 8192).next_power_of_two();
                 let hop = (fft / 8).max(64);
-                self.spectrogram.set_fft_size(fft, hop);
+                self.fft_size = fft;
+                self.hop_size = hop;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 self.start_spectrogram_session(0.0, true, true, ctx);
@@ -457,8 +458,7 @@ impl AnalysisRuntimeState {
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
                 self.clear_early_continuation(ctx);
                 profile_eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
-                self.snapshot.spectrogram_view_mode = view_mode;
-                self.spectrogram.set_view_mode(view_mode);
+                self.spectrogram_view_mode = view_mode;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 self.start_spectrogram_session(0.0, true, true, ctx);
@@ -555,7 +555,7 @@ impl AnalysisRuntimeState {
         let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
         let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
         let cand_effective_rate = u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
-        let cand_channel_count = match self.snapshot.spectrogram_view_mode {
+        let cand_channel_count = match self.spectrogram_view_mode {
             SpectrogramViewMode::Downmix => 1,
             SpectrogramViewMode::PerChannel => native_ch,
         };
@@ -741,7 +741,7 @@ impl AnalysisRuntimeState {
         let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
         self.active_session_effective_rate =
             u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
-        self.active_session_channel_count = match self.snapshot.spectrogram_view_mode {
+        self.active_session_channel_count = match self.spectrogram_view_mode {
             SpectrogramViewMode::Downmix => 1,
             SpectrogramViewMode::PerChannel => native_ch,
         };
@@ -773,21 +773,13 @@ impl AnalysisRuntimeState {
                 track_token: self.active_track_token,
                 generation: gen,
                 path: path.clone(),
-                fft_size: self.spectrogram.fft_size,
-                hop_size: self.spectrogram.hop_size,
-                // Use the file-derived channel count (set by
-                // update_session_compat_params) rather than the PCM
-                // pipeline count which reflects the previous track's
-                // layout until PCM labels arrive for the new track.
-                channel_count: if self.active_session_channel_count > 0 {
-                    self.active_session_channel_count
-                } else {
-                    self.spectrogram.pipelines.len().max(1)
-                },
+                fft_size: self.fft_size,
+                hop_size: self.hop_size,
+                channel_count: self.active_session_channel_count.max(1),
                 start_seconds,
                 emit_initial_reset,
                 clear_history_on_reset,
-                view_mode: self.snapshot.spectrogram_view_mode,
+                view_mode: self.spectrogram_view_mode,
                 display_mode: self.display_mode,
             });
     }
@@ -913,8 +905,6 @@ impl AnalysisRuntimeState {
 
     fn reset_spectrogram_state(&mut self) {
         self.pending_channels.clear();
-        self.snapshot.spectrogram_seq = 0;
-        self.spectrogram.reset();
         self.pcm_fifo.clear();
         // Clear labels so the first chunk from the new track
         // unconditionally sets them.  Keeping stale labels from the
@@ -937,9 +927,6 @@ impl AnalysisRuntimeState {
 
         let channel_count = self.pcm_labels.len().max(1);
         self.trim_pcm_fifo(channel_count);
-        let to_feed_frames = self.frames_available_to_feed(channel_count);
-        self.feed_spectrogram(channel_count, to_feed_frames);
-        self.collect_spectrogram_rows();
         self.emit_snapshot(event_tx, false);
         self.maybe_log_profile(channel_count);
     }
@@ -995,9 +982,6 @@ impl AnalysisRuntimeState {
             self.pcm_labels.clone_from(&chunk_labels);
             self.pcm_fifo.clear();
             self.pending_channels.clear();
-            self.spectrogram.update_channel_labels(&chunk_labels);
-            self.spectrogram.reset();
-            self.snapshot.spectrogram_seq = 0;
         }
         self.pcm_fifo.extend(chunk.samples);
     }
@@ -1008,48 +992,6 @@ impl AnalysisRuntimeState {
             for _ in 0..channel_count {
                 let _ = self.pcm_fifo.pop_front();
             }
-        }
-    }
-
-    fn frames_available_to_feed(&self, channel_count: usize) -> usize {
-        let visual_delay_ms = u32_to_usize(BASE_VISUAL_DELAY_MS.unsigned_abs());
-        let effective_delay_frames =
-            u32_to_usize(self.snapshot.sample_rate_hz).saturating_mul(visual_delay_ms) / 1000;
-        (self.pcm_fifo.len() / channel_count).saturating_sub(effective_delay_frames)
-    }
-
-    fn feed_spectrogram(&mut self, channel_count: usize, to_feed_frames: usize) {
-        if to_feed_frames == 0 {
-            return;
-        }
-
-        let mut feed = Vec::with_capacity(to_feed_frames.saturating_mul(channel_count));
-        for _ in 0..to_feed_frames.saturating_mul(channel_count) {
-            if let Some(sample) = self.pcm_fifo.pop_front() {
-                feed.push(sample);
-            }
-        }
-        self.prof_out_samples += feed.len();
-        self.spectrogram.feed_chunk(
-            &AnalysisPcmChunk {
-                samples: feed,
-                channel_labels: self.pcm_labels.clone(),
-                track_token: self.active_pcm_track_token,
-            },
-            self.snapshot.sample_rate_hz,
-        );
-    }
-
-    fn collect_spectrogram_rows(&mut self) {
-        let channels = self.spectrogram.take_channels(8);
-        let row_count = channels.first().map_or(0, |channel| channel.rows.len());
-        self.prof_rows += row_count;
-        if row_count > 0 {
-            self.snapshot.spectrogram_seq = self
-                .snapshot
-                .spectrogram_seq
-                .wrapping_add(usize_to_u64(row_count));
-            merge_pending_channels(&mut self.pending_channels, channels);
         }
     }
 
@@ -1065,14 +1007,11 @@ impl AnalysisRuntimeState {
             self.prof_in_samples,
             self.prof_out_samples,
             self.prof_rows,
-            self.spectrogram
-                .pipelines
-                .first()
-                .map_or(0, |pipeline| pipeline.stft.pending_len()),
+            0,
             self.pcm_fifo.len() / _channel_count,
-            self.spectrogram.fft_size,
-            self.spectrogram.hop_size,
-            self.spectrogram.labels.len()
+            self.fft_size,
+            self.hop_size,
+            self.pcm_labels.len()
         );
         self.prof_last = std::time::Instant::now();
         self.prof_pcm = 0;
@@ -3023,16 +2962,14 @@ fn emit_snapshot(
     last_emit: &mut std::time::Instant,
     force: bool,
 ) {
-    if !*waveform_dirty && pending_channels.is_empty() && !force {
+    if !*waveform_dirty && !force {
         return;
     }
-    if !force
-        && pending_channels.is_empty()
-        && last_emit.elapsed() < std::time::Duration::from_millis(16)
-    {
+    if !force && last_emit.elapsed() < std::time::Duration::from_millis(16) {
         return;
     }
 
+    pending_channels.clear();
     let out = AnalysisSnapshot {
         waveform_peaks: if *waveform_dirty {
             snapshot.waveform_peaks.clone()
@@ -3041,246 +2978,11 @@ fn emit_snapshot(
         },
         waveform_coverage_seconds: snapshot.waveform_coverage_seconds,
         waveform_complete: snapshot.waveform_complete,
-        spectrogram_channels: std::mem::take(pending_channels),
-        spectrogram_seq: snapshot.spectrogram_seq,
         sample_rate_hz: snapshot.sample_rate_hz,
-        spectrogram_view_mode: snapshot.spectrogram_view_mode,
     };
     let _ = event_tx.send(AnalysisEvent::Snapshot(out));
     *waveform_dirty = false;
     *last_emit = std::time::Instant::now();
-}
-
-struct SpectrogramPipeline {
-    stft: StftComputer,
-    decimator: SpectrogramDecimator,
-}
-
-impl SpectrogramPipeline {
-    fn new(fft_size: usize, hop_size: usize) -> Self {
-        Self {
-            stft: StftComputer::new(fft_size, hop_size),
-            decimator: SpectrogramDecimator::new(decimation_factor_for_hop(hop_size)),
-        }
-    }
-
-    fn reset(&mut self) {
-        self.stft.reset_full();
-        self.decimator.reset();
-    }
-}
-
-struct SpectrogramRuntime {
-    view_mode: SpectrogramViewMode,
-    labels: Vec<SpectrogramChannelLabel>,
-    pipelines: Vec<SpectrogramPipeline>,
-    fft_size: usize,
-    hop_size: usize,
-}
-
-impl SpectrogramRuntime {
-    fn new(
-        fft_size: usize,
-        hop_size: usize,
-        view_mode: SpectrogramViewMode,
-        labels: &[SpectrogramChannelLabel],
-    ) -> Self {
-        let normalized = Self::normalize_labels(view_mode, labels);
-        let pipeline_count = Self::pipeline_count_for(view_mode, normalized.len());
-        let pipelines = (0..pipeline_count)
-            .map(|_| SpectrogramPipeline::new(fft_size, hop_size))
-            .collect();
-        Self {
-            view_mode,
-            labels: normalized,
-            pipelines,
-            fft_size,
-            hop_size,
-        }
-    }
-
-    fn set_fft_size(&mut self, fft_size: usize, hop_size: usize) {
-        self.fft_size = fft_size;
-        self.hop_size = hop_size;
-        self.rebuild_pipelines();
-    }
-
-    fn set_view_mode(&mut self, view_mode: SpectrogramViewMode) {
-        if self.view_mode == view_mode {
-            return;
-        }
-        self.view_mode = view_mode;
-        self.labels = Self::normalize_labels(view_mode, &self.labels);
-        self.rebuild_pipelines();
-    }
-
-    fn update_channel_labels(&mut self, labels: &[SpectrogramChannelLabel]) {
-        let normalized = Self::normalize_labels(self.view_mode, labels);
-        if normalized == self.labels {
-            return;
-        }
-        self.labels = normalized;
-        self.rebuild_pipelines();
-    }
-
-    fn reset(&mut self) {
-        for pipeline in &mut self.pipelines {
-            pipeline.reset();
-        }
-    }
-
-    fn feed_chunk(&mut self, chunk: &AnalysisPcmChunk, sample_rate_hz: u32) {
-        if chunk.samples.is_empty() {
-            return;
-        }
-        let labels = Self::normalize_labels(self.view_mode, &chunk.channel_labels);
-        if labels != self.labels {
-            self.labels = labels;
-            self.rebuild_pipelines();
-        }
-
-        match self.view_mode {
-            SpectrogramViewMode::Downmix => {
-                let downmixed =
-                    downmix_interleaved_samples(&chunk.samples, chunk.channel_labels.len());
-                if let Some(pipeline) = self.pipelines.first_mut() {
-                    pipeline.stft.enqueue_samples(&downmixed, sample_rate_hz);
-                }
-            }
-            SpectrogramViewMode::PerChannel => {
-                let channels = self.labels.len().max(1);
-                if channels <= 1 {
-                    if let Some(pipeline) = self.pipelines.first_mut() {
-                        pipeline
-                            .stft
-                            .enqueue_samples(&chunk.samples, sample_rate_hz);
-                    }
-                    return;
-                }
-                let mut separated =
-                    vec![Vec::with_capacity(chunk.samples.len() / channels); channels];
-                for frame in chunk.samples.chunks_exact(channels) {
-                    for (index, sample) in frame.iter().copied().enumerate() {
-                        separated[index].push(sample);
-                    }
-                }
-                for (pipeline, samples) in self.pipelines.iter_mut().zip(separated.into_iter()) {
-                    pipeline.stft.enqueue_samples(&samples, sample_rate_hz);
-                }
-            }
-        }
-    }
-
-    fn take_channels(&mut self, max_rows: usize) -> Vec<AnalysisSpectrogramChannel> {
-        if self.pipelines.is_empty() {
-            return Vec::new();
-        }
-
-        let raw_rows: Vec<Vec<Vec<f32>>> = self
-            .pipelines
-            .iter_mut()
-            .map(|pipeline| pipeline.stft.take_rows(max_rows))
-            .collect();
-        let aligned_frames = raw_rows.iter().map(std::vec::Vec::len).min().unwrap_or(0);
-        if aligned_frames == 0 {
-            return Vec::new();
-        }
-
-        let mut output = self
-            .labels
-            .iter()
-            .copied()
-            .map(|label| AnalysisSpectrogramChannel {
-                label,
-                rows: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let mut iterators = raw_rows
-            .into_iter()
-            .map(std::iter::IntoIterator::into_iter)
-            .collect::<Vec<_>>();
-
-        for _ in 0..aligned_frames {
-            for (channel_index, iter) in iterators.iter_mut().enumerate() {
-                let Some(row) = iter.next() else {
-                    continue;
-                };
-                if let Some(slow_row) = self.pipelines[channel_index].decimator.push(row) {
-                    output[channel_index].rows.push(slow_row);
-                }
-            }
-        }
-
-        output.retain(|channel| !channel.rows.is_empty());
-        output
-    }
-
-    fn pipeline_count_for(view_mode: SpectrogramViewMode, label_count: usize) -> usize {
-        match view_mode {
-            SpectrogramViewMode::Downmix => 1,
-            SpectrogramViewMode::PerChannel => label_count.max(1),
-        }
-    }
-
-    fn normalize_labels(
-        view_mode: SpectrogramViewMode,
-        labels: &[SpectrogramChannelLabel],
-    ) -> Vec<SpectrogramChannelLabel> {
-        match view_mode {
-            SpectrogramViewMode::Downmix => vec![SpectrogramChannelLabel::Mono],
-            SpectrogramViewMode::PerChannel => {
-                if labels.is_empty() {
-                    vec![SpectrogramChannelLabel::Mono]
-                } else {
-                    labels.to_vec()
-                }
-            }
-        }
-    }
-
-    fn rebuild_pipelines(&mut self) {
-        let pipeline_count = Self::pipeline_count_for(self.view_mode, self.labels.len());
-        self.pipelines = (0..pipeline_count)
-            .map(|_| SpectrogramPipeline::new(self.fft_size, self.hop_size))
-            .collect();
-    }
-}
-
-fn downmix_interleaved_samples(samples: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-
-    let mut out = Vec::with_capacity(samples.len() / channels.max(1));
-    for frame in samples.chunks_exact(channels) {
-        let mut sum = 0.0f32;
-        for sample in frame {
-            sum += *sample;
-        }
-        out.push(sum / small_usize_to_f32(channels));
-    }
-    out
-}
-
-fn merge_pending_channels(
-    pending: &mut Vec<AnalysisSpectrogramChannel>,
-    incoming: Vec<AnalysisSpectrogramChannel>,
-) {
-    if incoming.is_empty() {
-        return;
-    }
-    if pending.len() != incoming.len()
-        || pending
-            .iter()
-            .zip(incoming.iter())
-            .any(|(left, right)| left.label != right.label)
-    {
-        *pending = incoming;
-        return;
-    }
-    for (pending_channel, incoming_channel) in pending.iter_mut().zip(incoming.into_iter()) {
-        pending_channel.rows.extend(incoming_channel.rows);
-    }
 }
 
 struct StftComputer {
@@ -4168,10 +3870,7 @@ mod tests {
             waveform_peaks: vec![0.1, 0.2],
             waveform_coverage_seconds: 0.0,
             waveform_complete: true,
-            spectrogram_channels: Vec::new(),
-            spectrogram_seq: 0,
             sample_rate_hz: 48_000,
-            spectrogram_view_mode: SpectrogramViewMode::Downmix,
         };
         let mut pending_channels = Vec::<AnalysisSpectrogramChannel>::new();
         let mut waveform_dirty = true;
@@ -4190,46 +3889,6 @@ mod tests {
             AnalysisEvent::Snapshot(s) => assert_eq!(s.waveform_peaks, vec![0.1, 0.2]),
             _ => panic!("unexpected event variant"),
         }
-    }
-
-    #[test]
-    fn emit_snapshot_bypasses_throttle_for_pending_spectrogram_rows() {
-        let (tx, rx) = unbounded::<AnalysisEvent>();
-        let snapshot = AnalysisSnapshot {
-            waveform_peaks: Vec::new(),
-            waveform_coverage_seconds: 0.0,
-            waveform_complete: false,
-            spectrogram_channels: Vec::new(),
-            spectrogram_seq: 4,
-            sample_rate_hz: 48_000,
-            spectrogram_view_mode: SpectrogramViewMode::Downmix,
-        };
-        let mut pending_channels = vec![AnalysisSpectrogramChannel {
-            label: SpectrogramChannelLabel::Mono,
-            rows: vec![vec![0.1, 0.2, 0.3]],
-        }];
-        let mut waveform_dirty = false;
-        let mut last_emit = std::time::Instant::now();
-
-        emit_snapshot(
-            &tx,
-            &snapshot,
-            &mut pending_channels,
-            &mut waveform_dirty,
-            &mut last_emit,
-            false,
-        );
-
-        let evt = rx.try_recv().expect("spectrogram snapshot event");
-        match evt {
-            AnalysisEvent::Snapshot(s) => {
-                assert_eq!(s.spectrogram_seq, 4);
-                assert_eq!(s.spectrogram_channels.len(), 1);
-                assert_eq!(s.spectrogram_channels[0].rows.len(), 1);
-            }
-            _ => panic!("unexpected event variant"),
-        }
-        assert!(pending_channels.is_empty());
     }
 
     #[test]
