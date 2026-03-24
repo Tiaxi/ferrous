@@ -568,7 +568,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 #endif
     }
 
-    if (trackToken != 0 && (appliedReset || !(bufferReset && columns <= 0))) {
+    if (trackToken != 0 && !(bufferReset && columns <= 0)) {
         m_precomputedTrackToken = trackToken;
     }
 
