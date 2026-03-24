@@ -431,12 +431,13 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (bufferReset && trackToken != 0) {
         m_precomputedCommittedToken = trackToken;
     }
-    // Drop chunks whose token doesn't match the most recent reset.
-    // This prevents a superseded session's late-arriving data from
-    // corrupting the ring buffer after a rapid double track change.
+    // Drop chunks from superseded sessions: tokens older than the most
+    // recent reset are stale (from a rapid double track change).  Tokens
+    // newer than committed are allowed — they come from gapless
+    // transitions which advance the token without a buffer_reset.
     if (m_precomputedCommittedToken != 0
         && trackToken != 0
-        && trackToken != m_precomputedCommittedToken) {
+        && trackToken < m_precomputedCommittedToken) {
         return;
     }
 
