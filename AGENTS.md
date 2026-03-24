@@ -1,5 +1,7 @@
 # AGENTS.md
 
+**IMPORTANT: Every rule in this file is mandatory. Not aspirational, not "when convenient" — mandatory. Violations waste the user's time, introduce regressions, and erode trust. Read and follow every rule on every task.**
+
 ## Project Overview
 
 Ferrous is a desktop music player. Rust backend (playback, analysis, library, metadata) linked as a static library into a Qt6/QML C++ frontend. GStreamer for audio. Symphonia for format probing. SQLite for library and waveform cache.
@@ -50,10 +52,13 @@ Two-phase: `about-to-finish` pre-arms the next URI (same-format) or sets `pendin
 
 ## Build & Validation
 
-- `./scripts/run-tests.sh` is the default validation entrypoint.
-  - Rust-only: `--rust-only`
-  - UI-only: `--ui-only`
-  - Cross-cutting (or uncertain): no flag
+- **Always validate via `./scripts/run-tests.sh`**, not ad-hoc `cargo test` or `cargo clippy` invocations. The script runs formatting checks, strict clippy (`-D clippy::pedantic`), cargo audit, Rust tests, UI build, and UI tests (ctest) in the correct order. Ad-hoc commands miss checks and lead to broken commits.
+- Choose test scope based on the change surface:
+  - Rust/backend-only changes: `./scripts/run-tests.sh --rust-only`
+  - UI/QML-only changes: `./scripts/run-tests.sh --ui-only`
+  - **Cross-cutting changes or any uncertainty: `./scripts/run-tests.sh` (full suite, no flags)**
+  - Changes touching both `src/` and `ui/` are always cross-cutting.
+- Fix ALL warnings and errors before committing. Do not ignore clippy warnings, compiler warnings, or test failures. If a warning existed before your change, fix it or leave it exactly as it was — do not introduce new ones.
 - Keep `--no-clippy` and `--no-audit` disabled unless explicitly justified.
 - `cargo` commands that fetch from the network require elevated sandbox permissions.
 - The Rust library builds as a static archive linked into the Qt executable via CMake.
@@ -71,10 +76,12 @@ Two-phase: `about-to-finish` pre-arms the next URI (same-format) or sets `pendin
 - Prefer async/background execution, incremental updates, batching, and cancellation.
 
 ### Test Rule
-- Add unit tests to lock in behavior, logic, and bug fixes.
+- **Every bug fix and every new feature must have a corresponding test before the work is considered done.** This is not optional. If you fix a bug without a test, the bug will come back. If you add a feature without a test, it will break silently.
+- Tests must cover BOTH sides of the stack when the change is cross-cutting: Rust tests in `src/` (`#[cfg(test)]` modules) AND C++ tests in `ui/tests/` (QtTest). Do not assume Rust-only tests are sufficient for changes that affect the UI.
 - Test the specific invariant or edge case that motivated the change.
 - Tests must be self-contained — no external files or network.
 - Feature-gated tests: `#[cfg(not(feature = "gst"))]` for mock-playback tests, `#[cfg(feature = "gst")]` for GStreamer integration tests.
+- SpectrogramItem behavior tests go in `ui/tests/tst_qml_smoke.cpp` using `feedPrecomputedChunk` to drive the widget directly.
 
 ### Clippy Suppression Rule
 - Do not add `#[allow(clippy::...)]` unless genuinely unavoidable (FFI constraints, intentional numeric casts, exact float comparison with known source).

@@ -4932,7 +4932,7 @@ mod tests {
 
         assert!(matches!(action, SessionAction::Continue));
         assert!(session.pending_continue.is_some());
-        let (path, token, skip) = session.pending_continue.unwrap();
+        let (path, token, _skip) = session.pending_continue.unwrap();
         assert_eq!(path, PathBuf::from("/tmp/next.flac"));
         assert_eq!(token, 42);
     }
