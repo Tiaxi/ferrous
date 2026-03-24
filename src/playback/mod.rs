@@ -1226,7 +1226,7 @@ mod backend {
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
             self.pending_gapless_duration = None;
-            self.cancel_staged_spectrogram();
+            self.clear_staged_spectrogram();
             self.emit_track_changed(path, queue_index, kind, track_token);
             self.emit_snapshot();
         }
@@ -1240,7 +1240,7 @@ mod backend {
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
             self.pending_gapless_duration = None;
-            self.cancel_staged_spectrogram();
+            self.clear_staged_spectrogram();
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
@@ -1284,7 +1284,6 @@ mod backend {
         }
 
         fn remove_at(&mut self, idx: usize) {
-            self.cancel_staged_spectrogram();
             let old_current = self.snapshot.current.clone();
             let Some((next_current, repeat_mode, shuffle_enabled, current_index)) =
                 (match self.queue_state.lock() {
@@ -1306,8 +1305,13 @@ mod backend {
             self.set_queue_flags(repeat_mode, shuffle_enabled);
             if let Some(path) = next_current {
                 if old_current.as_ref() == Some(&path) {
+                    // Same track stays current — restart spectrogram to
+                    // recover from possible wrong-file decode.
+                    self.cancel_staged_spectrogram();
                     self.snapshot.current = Some(path);
                 } else {
+                    // Track switches — switch_to_path calls
+                    // clear_staged_spectrogram internally.
                     self.switch_to_path(
                         path,
                         current_index.unwrap_or(0),
@@ -1317,6 +1321,8 @@ mod backend {
                     return;
                 }
             } else {
+                // Queue empties — stop_with_empty_queue calls
+                // clear_staged_spectrogram internally.
                 self.stop_with_empty_queue();
             }
             self.emit_snapshot();
@@ -1454,6 +1460,7 @@ mod backend {
                 self.seek_hold = None;
                 self.pending_eos_track_switch
                     .store(false, Ordering::Release);
+                self.clear_staged_spectrogram();
                 self.snapshot.state = PlaybackState::Stopped;
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
@@ -1555,8 +1562,9 @@ mod backend {
             diverged
         }
 
-        /// If a spectrogram staging thread is in flight, tell analysis to
-        /// cancel it and clear the local flag.
+        /// Cancel early continuation and restart the spectrogram session.
+        /// Used when the current track stays playing but the gapless
+        /// prediction is invalid (seek near EOF, queue mutation).
         fn cancel_staged_spectrogram(&mut self) {
             if self
                 .staged_continuation_active
@@ -1565,6 +1573,19 @@ mod backend {
                 let _ = self
                     .analysis_tx
                     .send(AnalysisCommand::CancelStagedContinuation);
+            }
+        }
+
+        /// Clear early continuation without restarting.  Used when a
+        /// `SetTrack` or stop follows immediately, superseding the worker.
+        fn clear_staged_spectrogram(&mut self) {
+            if self
+                .staged_continuation_active
+                .swap(false, Ordering::AcqRel)
+            {
+                let _ = self
+                    .analysis_tx
+                    .send(AnalysisCommand::ClearStagedContinuation);
             }
         }
 

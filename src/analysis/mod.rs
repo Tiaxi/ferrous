@@ -75,10 +75,15 @@ pub enum AnalysisCommand {
     PrepareGaplessContinuation {
         path: PathBuf,
     },
-    /// Cancel any in-progress staged continuation.  Sent when the gapless
-    /// prediction becomes invalid (seek near EOF, manual track change,
-    /// queue mutation, stop).
+    /// Cancel any in-progress staged continuation and restart the
+    /// spectrogram session.  Used when the current track stays playing
+    /// but the gapless prediction is invalid (seek near EOF, queue
+    /// mutation).  The restart recovers from possible wrong-file decode.
     CancelStagedContinuation,
+    /// Clear any in-progress staged continuation without restarting.
+    /// Used when a `SetTrack` or stop follows immediately, superseding
+    /// the worker session via generation or stopping playback.
+    ClearStagedContinuation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -311,8 +316,9 @@ struct AnalysisRuntimeState {
     active_session_effective_rate: u32,
     active_session_channel_count: usize,
     active_session_divisor: usize,
-    /// Off-screen staged spectrogram data for the next track.
-    staged_continuation: Option<StagedContinuation>,
+    /// Path of the next track for which an early `ContinueWithFile` was
+    /// sent to the worker.  Consumed at commit time (`handle_track_change`).
+    staged_continuation_path: Option<PathBuf>,
     profile_enabled: bool,
     prof_last: std::time::Instant,
     prof_pcm: usize,
@@ -434,10 +440,11 @@ impl AnalysisRuntimeState {
             active_session_effective_rate: 0,
             active_session_channel_count: 0,
             active_session_divisor: 1,
-            staged_continuation: None,
+            staged_continuation_path: None,
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_command(&mut self, cmd: AnalysisCommand, ctx: &AnalysisContext<'_>) {
         match cmd {
             AnalysisCommand::SetTrack {
@@ -465,7 +472,7 @@ impl AnalysisRuntimeState {
                 // for gapless transitions to keep channel state continuous).
             }
             AnalysisCommand::ResetSpectrogram => {
-                self.cancel_staged_continuation();
+                self.clear_early_continuation(ctx);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
             }
@@ -476,7 +483,7 @@ impl AnalysisRuntimeState {
                 }
             }
             AnalysisCommand::SetFftSize(size) => {
-                self.cancel_staged_continuation();
+                self.clear_early_continuation(ctx);
                 let fft = size.clamp(512, 8192).next_power_of_two();
                 let hop = (fft / 8).max(64);
                 self.spectrogram.set_fft_size(fft, hop);
@@ -485,7 +492,7 @@ impl AnalysisRuntimeState {
                 self.start_spectrogram_session(0.0, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
-                self.cancel_staged_continuation();
+                self.clear_early_continuation(ctx);
                 profile_eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
                 self.snapshot.spectrogram_view_mode = view_mode;
                 self.spectrogram.set_view_mode(view_mode);
@@ -494,7 +501,7 @@ impl AnalysisRuntimeState {
                 self.start_spectrogram_session(0.0, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramDisplayMode(mode) => {
-                self.cancel_staged_continuation();
+                self.clear_early_continuation(ctx);
                 profile_eprintln!("[analysis] SetSpectrogramDisplayMode({mode:?})");
                 self.display_mode = mode;
                 let _ = ctx
@@ -505,7 +512,7 @@ impl AnalysisRuntimeState {
                 position_seconds,
                 clear_history,
             } => {
-                self.cancel_staged_continuation();
+                self.clear_early_continuation(ctx);
                 profile_eprintln!(
                     "[analysis] RestartCurrentTrack pos={position_seconds:.2} clear_history={clear_history}"
                 );
@@ -539,45 +546,42 @@ impl AnalysisRuntimeState {
                 self.handle_prepare_gapless_continuation(path, ctx);
             }
             AnalysisCommand::CancelStagedContinuation => {
-                self.cancel_staged_continuation();
+                if self.staged_continuation_path.take().is_some() {
+                    let _ = ctx
+                        .spectrogram_cmd_tx
+                        .send(SpectrogramWorkerCommand::CancelPendingContinue);
+                    // Restart — the worker may have consumed the
+                    // continuation and be decoding the wrong file.
+                    self.spectrogram_position_offset = 0.0;
+                    self.start_spectrogram_session(
+                        self.last_spectrogram_position,
+                        true,  // emit_initial_reset — triggers UI truncation
+                        false, // clear_history — preserve rolling history
+                        ctx,
+                    );
+                }
+            }
+            AnalysisCommand::ClearStagedContinuation => {
+                self.clear_early_continuation(ctx);
             }
         }
     }
 
-    /// Cancel any in-progress staged continuation, if present.
-    fn cancel_staged_continuation(&mut self) {
-        if let Some(staged) = self.staged_continuation.take() {
-            staged.cancel.store(true, Ordering::Release);
-            profile_eprintln!("[analysis] staged continuation cancelled");
+    /// Send an early `ContinueWithFile` to the live worker so it writes
+    /// next-track columns directly into the ring — zero gap.  Rolling
+    /// mode only; centered mode needs fresh `NewTrack` with 0-based
+    /// indices at commit time.  Called from `about-to-finish`.
+    fn handle_prepare_gapless_continuation(&mut self, path: PathBuf, ctx: &AnalysisContext<'_>) {
+        // Early ContinueWithFile is rolling-mode only.
+        if self.display_mode != SpectrogramDisplayMode::Rolling {
+            return;
         }
-    }
 
-    /// Take staged data if it matches the given path; cancel the staging thread.
-    fn take_staged_data_if_matching(&mut self, path: &Path) -> Option<StagedSpectrogramData> {
-        let staged = self.staged_continuation.take()?;
-        staged.cancel.store(true, Ordering::Release);
-        if staged.path != *path {
-            profile_eprintln!(
-                "[analysis] staged path mismatch: staged={} requested={}",
-                staged.path.display(),
-                path.display(),
-            );
-            return None;
-        }
-        let mut guard = staged.data.lock().ok()?;
-        guard.take()
-    }
-
-    /// Spawn an off-screen staging thread to pre-decode the first columns
-    /// of a likely gapless successor.  Called from `about-to-finish`.
-    fn handle_prepare_gapless_continuation(&mut self, path: PathBuf, _ctx: &AnalysisContext<'_>) {
-        // Cancel any prior staging.
-        self.cancel_staged_continuation();
+        // Cancel any prior pending continuation.
+        self.clear_early_continuation(ctx);
 
         // Open the candidate file and check format compatibility.
-        let Some((format, decoder, track_id, native_sr, native_ch, total_est)) =
-            open_symphonia_file(&path)
-        else {
+        let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(&path) else {
             profile_eprintln!(
                 "[analysis] staged: cannot open candidate {}",
                 path.display(),
@@ -606,43 +610,30 @@ impl AnalysisRuntimeState {
             return;
         }
 
-        let fft_size = self.spectrogram.fft_size;
-        let hop_size = self.spectrogram.hop_size;
-        let view_mode = self.snapshot.spectrogram_view_mode;
-        let bins_per_column = (fft_size / 2) + 1;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let data: Arc<Mutex<Option<StagedSpectrogramData>>> = Arc::new(Mutex::new(None));
-        let cancel_clone = Arc::clone(&cancel);
-        let data_clone = Arc::clone(&data);
-
         profile_eprintln!(
-            "[analysis] staging thread starting for {} (rate={cand_effective_rate} ch={cand_channel_count})",
+            "[analysis] early ContinueWithFile for {} (rate={cand_effective_rate} ch={cand_channel_count})",
             path.display(),
         );
 
-        let _ = std::thread::Builder::new()
-            .name("ferrous-spectrogram-staging".to_string())
-            .spawn(move || {
-                run_staged_decode(
-                    format,
-                    decoder,
-                    track_id,
-                    &StagedDecodeParams {
-                        fft_size,
-                        hop_size,
-                        view_mode,
-                        effective_rate: cand_effective_rate,
-                        channel_count: cand_channel_count,
-                        divisor,
-                        bins_per_column,
-                        total_columns_estimate: total_est,
-                    },
-                    &data_clone,
-                    &cancel_clone,
-                );
+        // Send early ContinueWithFile with current (old) token.
+        let _ = ctx
+            .spectrogram_cmd_tx
+            .send(SpectrogramWorkerCommand::ContinueWithFile {
+                path: path.clone(),
+                track_token: self.active_track_token,
+                skip_columns: 0,
             });
+        self.staged_continuation_path = Some(path);
+    }
 
-        self.staged_continuation = Some(StagedContinuation { path, data, cancel });
+    /// Clear any early continuation, sending `CancelPendingContinue` to
+    /// the worker if one was in flight.  Does NOT restart the session.
+    fn clear_early_continuation(&mut self, ctx: &AnalysisContext<'_>) {
+        if self.staged_continuation_path.take().is_some() {
+            let _ = ctx
+                .spectrogram_cmd_tx
+                .send(SpectrogramWorkerCommand::CancelPendingContinue);
+        }
     }
 
     fn handle_track_change(
@@ -696,61 +687,35 @@ impl AnalysisRuntimeState {
             // PositionUpdate(0.0) becomes PositionUpdate(331.x).
             self.spectrogram_position_offset += self.last_spectrogram_position;
 
-            // Check if staged data is ready for this path.
-            let staged_data = self.take_staged_data_if_matching(&path);
-            let skip = staged_data.as_ref().map_or(0, |d| d.column_count);
-
-            if let Some(data) = staged_data {
-                // Authoritative boundary column from the worker's actual
-                // columns_produced (written by the worker at each chunk
-                // emission and EOF flush).
-                let staged_start_col = ctx.worker_columns_produced.load(Ordering::Relaxed);
-                let _ = ctx
-                    .event_tx
-                    .send(AnalysisEvent::PrecomputedSpectrogramChunk(
-                        PrecomputedSpectrogramChunk {
-                            track_token,
-                            columns_u8: data.columns_u8,
-                            bins_per_column: data.bins_per_column,
-                            column_count: clamp_to_u16(data.column_count as usize),
-                            channel_count: data.channel_count,
-                            start_column_index: u64_to_u32_saturating(staged_start_col),
-                            total_columns_estimate: data.total_columns_estimate,
-                            sample_rate_hz: data.sample_rate_hz,
-                            hop_size: data.hop_size,
-                            coverage_seconds: data.coverage_seconds,
-                            complete: false,
-                            buffer_reset: false,
-                            clear_history: false,
-                        },
-                    ));
+            if self.staged_continuation_path.take() == Some(path.clone()) {
+                // Early ContinueWithFile already sent — just update the token.
                 profile_eprintln!(
-                    "[analysis] staged commit: flushed {} columns at K={staged_start_col} offset={:.2}",
-                    data.column_count,
+                    "[analysis] handle_track_change: UpdateTrackToken (early continue matched) offset={:.2}",
                     self.spectrogram_position_offset,
                 );
+                let _ = ctx
+                    .spectrogram_cmd_tx
+                    .send(SpectrogramWorkerCommand::UpdateTrackToken { track_token });
+            } else {
+                // No early continuation or path mismatch — normal ContinueWithFile.
+                profile_eprintln!(
+                    "[analysis] handle_track_change: dispatching ContinueWithFile offset={:.2}",
+                    self.spectrogram_position_offset,
+                );
+                let _ = ctx
+                    .spectrogram_cmd_tx
+                    .send(SpectrogramWorkerCommand::ContinueWithFile {
+                        path: path.clone(),
+                        track_token,
+                        skip_columns: 0,
+                    });
             }
-
-            profile_eprintln!(
-                "[analysis] handle_track_change: dispatching ContinueWithFile gapless={gapless} skip={skip} offset={:.2}",
-                self.spectrogram_position_offset,
-            );
-            // ContinueWithFile always sent (with or without staging).
-            // Worker opens the file, preserves STFT continuity, skips
-            // first `skip` output columns (already covered by staged data).
-            let _ = ctx
-                .spectrogram_cmd_tx
-                .send(SpectrogramWorkerCommand::ContinueWithFile {
-                    path: path.clone(),
-                    track_token,
-                    skip_columns: skip,
-                });
         } else if gapless && !reset_spectrogram {
             // Centered mode gapless: start a fresh session so the new
             // track gets 0-based column indices.  ContinueWithFile would
             // use the continuous K-based counter, which centered mode's
             // position-based column lookup can't resolve.
-            self.cancel_staged_continuation();
+            self.clear_early_continuation(ctx);
             self.spectrogram_position_offset = 0.0;
             profile_eprintln!("[analysis] handle_track_change: centered gapless → fresh NewTrack",);
             // emit_initial_reset + clear_history so the UI clears the ring,
@@ -758,7 +723,7 @@ impl AnalysisRuntimeState {
             self.start_spectrogram_session(0.0, true, true, ctx);
         } else {
             // Non-gapless: cancel any stale staged continuation.
-            self.cancel_staged_continuation();
+            self.clear_early_continuation(ctx);
             // Non-gapless: reset the offset since a new session starts
             // with fresh coordinates.
             self.spectrogram_position_offset = 0.0;
@@ -5220,75 +5185,57 @@ mod tests {
     }
 
     #[test]
-    fn cancel_staged_continuation_clears_state() {
+    fn clear_early_continuation_sends_cancel_and_clears_path() {
         let mut state = AnalysisRuntimeState::new();
-        assert!(state.staged_continuation.is_none());
+        state.staged_continuation_path = Some(PathBuf::from("/tmp/next.flac"));
 
-        let cancel = Arc::new(AtomicBool::new(false));
-        let data: Arc<Mutex<Option<StagedSpectrogramData>>> = Arc::new(Mutex::new(None));
-        state.staged_continuation = Some(StagedContinuation {
-            path: PathBuf::from("/tmp/next.flac"),
-            data,
-            cancel: Arc::clone(&cancel),
-        });
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
 
-        state.cancel_staged_continuation();
-        assert!(state.staged_continuation.is_none());
-        assert!(cancel.load(Ordering::Relaxed));
+        state.clear_early_continuation(&ctx);
+        assert!(state.staged_continuation_path.is_none());
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            SpectrogramWorkerCommand::CancelPendingContinue
+        ));
     }
 
     #[test]
-    fn take_staged_data_returns_none_on_path_mismatch() {
+    fn clear_early_continuation_noop_when_no_path() {
         let mut state = AnalysisRuntimeState::new();
-        let data_inner = StagedSpectrogramData {
-            columns_u8: vec![1, 2, 3],
-            column_count: 1,
-            bins_per_column: 3,
-            channel_count: 1,
-            total_columns_estimate: 100,
-            sample_rate_hz: 44_100,
-            hop_size: 1024,
-            coverage_seconds: 0.023,
+        assert!(state.staged_continuation_path.is_none());
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
         };
-        let data: Arc<Mutex<Option<StagedSpectrogramData>>> =
-            Arc::new(Mutex::new(Some(data_inner)));
-        state.staged_continuation = Some(StagedContinuation {
-            path: PathBuf::from("/tmp/a.flac"),
-            data,
-            cancel: Arc::new(AtomicBool::new(false)),
-        });
 
-        // Mismatched path → None, staged cleared.
-        let result = state.take_staged_data_if_matching(Path::new("/tmp/b.flac"));
-        assert!(result.is_none());
-        assert!(state.staged_continuation.is_none());
-    }
-
-    #[test]
-    fn take_staged_data_returns_data_on_path_match() {
-        let mut state = AnalysisRuntimeState::new();
-        let data_inner = StagedSpectrogramData {
-            columns_u8: vec![1, 2, 3],
-            column_count: 1,
-            bins_per_column: 3,
-            channel_count: 1,
-            total_columns_estimate: 100,
-            sample_rate_hz: 44_100,
-            hop_size: 1024,
-            coverage_seconds: 0.023,
-        };
-        let data: Arc<Mutex<Option<StagedSpectrogramData>>> =
-            Arc::new(Mutex::new(Some(data_inner)));
-        state.staged_continuation = Some(StagedContinuation {
-            path: PathBuf::from("/tmp/a.flac"),
-            data,
-            cancel: Arc::new(AtomicBool::new(false)),
-        });
-
-        let result = state.take_staged_data_if_matching(Path::new("/tmp/a.flac"));
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().column_count, 1);
-        assert!(state.staged_continuation.is_none());
+        state.clear_early_continuation(&ctx);
+        // No command should be sent.
+        assert!(spectrogram_cmd_rx.try_recv().is_err());
     }
 
     #[test]
@@ -5891,5 +5838,206 @@ mod tests {
         let action = process_session_commands(&mut session, &rx);
         assert!(action.is_none());
         assert!(session.pending_continue.is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // Early ContinueWithFile (Task 2) tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn prepare_gapless_is_noop_in_centered_mode() {
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_prepare_gapless_continuation(PathBuf::from("/tmp/next.flac"), &ctx);
+
+        // No commands should be sent (centered mode skips early ContinueWithFile).
+        assert!(spectrogram_cmd_rx.try_recv().is_err());
+        assert!(state.staged_continuation_path.is_none());
+    }
+
+    #[test]
+    fn gapless_track_change_with_early_continue_sends_update_token() {
+        // When staged_continuation_path matches the incoming path,
+        // handle_track_change should send UpdateTrackToken (not ContinueWithFile).
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.active_track_path = Some(PathBuf::from("/tmp/a.flac"));
+        state.active_track_token = 1;
+        state.last_spectrogram_position = 200.0;
+        state.staged_continuation_path = Some(PathBuf::from("/tmp/b.flac"));
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(5000);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_track_change(
+            PathBuf::from("/tmp/b.flac"),
+            false,
+            true, // gapless
+            2,
+            &ctx,
+        );
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(
+                cmd,
+                SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 }
+            ),
+            "expected UpdateTrackToken, got {cmd:?}"
+        );
+        // staged_continuation_path consumed.
+        assert!(state.staged_continuation_path.is_none());
+        assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cancel_staged_continuation_restarts_session() {
+        let mut state = AnalysisRuntimeState::new();
+        state.staged_continuation_path = Some(PathBuf::from("/tmp/next.flac"));
+        state.spectrogram_position_offset = 200.0;
+        state.last_spectrogram_position = 50.0;
+        state.active_track_path = Some(PathBuf::from("/tmp/current.flac"));
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        let gen_before = spectrogram_decode_generation.load(Ordering::Relaxed);
+        state.handle_command(AnalysisCommand::CancelStagedContinuation, &ctx);
+
+        // Path should be cleared.
+        assert!(state.staged_continuation_path.is_none());
+        // CancelPendingContinue sent to worker.
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            SpectrogramWorkerCommand::CancelPendingContinue
+        ));
+        // Session restarted — generation incremented.
+        let gen_after = spectrogram_decode_generation.load(Ordering::Relaxed);
+        assert!(gen_after > gen_before);
+        // Position offset reset.
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
+    fn clear_staged_continuation_does_not_restart() {
+        let mut state = AnalysisRuntimeState::new();
+        state.staged_continuation_path = Some(PathBuf::from("/tmp/next.flac"));
+        state.spectrogram_position_offset = 200.0;
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        let gen_before = spectrogram_decode_generation.load(Ordering::Relaxed);
+        state.handle_command(AnalysisCommand::ClearStagedContinuation, &ctx);
+
+        // Path should be cleared.
+        assert!(state.staged_continuation_path.is_none());
+        // CancelPendingContinue sent to worker.
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            SpectrogramWorkerCommand::CancelPendingContinue
+        ));
+        // Session NOT restarted — generation unchanged.
+        let gen_after = spectrogram_decode_generation.load(Ordering::Relaxed);
+        assert_eq!(gen_after, gen_before);
+        // Position offset preserved.
+        assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cancel_staged_noop_when_no_path() {
+        let mut state = AnalysisRuntimeState::new();
+        assert!(state.staged_continuation_path.is_none());
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_command(AnalysisCommand::CancelStagedContinuation, &ctx);
+
+        // No commands should be sent when no early continuation active.
+        assert!(spectrogram_cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn seek_preserves_pending_continue() {
+        // An intra-track seek should NOT clear pending_continue.
+        let mut session = make_test_session();
+        session.pending_continue = Some((PathBuf::from("/tmp/next.flac"), 42, 0));
+
+        // Position update within lookahead should not touch pending_continue.
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::PositionUpdate {
+                position_seconds: 3.0,
+            },
+        );
+        assert!(matches!(action, SessionAction::Continue));
+        assert!(session.pending_continue.is_some());
     }
 }
