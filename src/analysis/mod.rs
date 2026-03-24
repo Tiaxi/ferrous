@@ -1416,7 +1416,7 @@ fn run_spectrogram_session(
         ref path,
         fft_size,
         hop_size,
-        channel_count: _channel_count,
+        channel_count: requested_channel_count,
         start_seconds,
         emit_initial_reset,
         clear_history_on_reset,
@@ -1431,21 +1431,43 @@ fn run_spectrogram_session(
     profile_eprintln!(
         "[spect-worker] SESSION START path={} gen={gen} token={track_token} fft={fft_size} hop={hop_size} ch={channel_count} view={view_mode:?} display={display_mode:?} start_s={start_seconds:.2}",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        channel_count = _channel_count,
+        channel_count = requested_channel_count,
     );
 
     let bins_per_column = (fft_size / 2) + 1;
-    let (
+    let Some((
         mut format,
         mut audio_decoder,
         mut track_id,
         native_sample_rate,
         native_channels,
         total_columns_estimate,
-    ) = open_symphonia_file(path).or_else(|| {
+    )) = open_symphonia_file(path)
+    else {
         profile_eprintln!("[spect-worker] failed to open file, aborting session");
-        None
-    })?;
+        // Emit a buffer_reset chunk so the UI clears stale ring data
+        // (e.g., switching from FLAC to AC3 which Symphonia can't decode).
+        if emit_initial_reset {
+            let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                PrecomputedSpectrogramChunk {
+                    track_token,
+                    columns_u8: Vec::new(),
+                    bins_per_column: clamp_to_u16(bins_per_column),
+                    column_count: 0,
+                    channel_count: clamp_to_u8(requested_channel_count),
+                    start_column_index: 0,
+                    total_columns_estimate: 0,
+                    sample_rate_hz: 0,
+                    hop_size: clamp_to_u16(REFERENCE_HOP),
+                    coverage_seconds: 0.0,
+                    complete: true,
+                    buffer_reset: true,
+                    clear_history: clear_history_on_reset,
+                },
+            ));
+        }
+        return None;
+    };
 
     profile_eprintln!(
         "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns_estimate}",
