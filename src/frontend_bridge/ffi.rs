@@ -15,10 +15,7 @@ use super::{
     BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
     FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
-use crate::analysis::{
-    PrecomputedSpectrogramChunk, SpectrogramChannelLabel, SpectrogramDisplayMode,
-    SpectrogramViewMode,
-};
+use crate::analysis::{PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode};
 use crate::library::{IndexedTrack, LibraryTrack};
 use crate::playback::{PlaybackState, RepeatMode};
 use crate::tag_editor;
@@ -1799,10 +1796,6 @@ fn clamp_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-fn clamp_u8(value: usize) -> u8 {
-    u8::try_from(value).unwrap_or(u8::MAX)
-}
-
 fn clamp_i32(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
@@ -2032,7 +2025,7 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::{AnalysisSnapshot, AnalysisSpectrogramChannel, SpectrogramChannelLabel};
+    use crate::analysis::AnalysisSnapshot;
     use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
     use crate::playback::{PlaybackSnapshot, PlaybackState};
     use std::sync::Arc;

@@ -179,7 +179,6 @@ const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
-const BASE_VISUAL_DELAY_MS: i32 = 0;
 const REFERENCE_HOP: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2293,7 +2292,7 @@ fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
     profile_eprintln!("[spect-worker] Symphonia failed, trying GStreamer fallback");
     #[cfg(feature = "gst")]
     {
-        return open_gstreamer_file(path);
+        open_gstreamer_file(path)
     }
     #[cfg(not(feature = "gst"))]
     {
@@ -3017,11 +3016,6 @@ impl StftComputer {
         }
     }
 
-    fn reset_full(&mut self) {
-        self.pending.clear();
-        self.pending_start = 0;
-    }
-
     fn enqueue_samples(&mut self, samples: &[f32], sample_rate_hz: u32) {
         self.compact_pending_if_needed();
         self.pending.extend_from_slice(samples);
@@ -3110,11 +3104,6 @@ impl SpectrogramDecimator {
             accum: Vec::new(),
             count: 0,
         }
-    }
-
-    fn reset(&mut self) {
-        self.accum.clear();
-        self.count = 0;
     }
 
     fn push(&mut self, row: Vec<f32>) -> Option<Vec<f32>> {
