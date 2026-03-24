@@ -255,6 +255,21 @@ enum SpectrogramWorkerCommand {
         /// many columns have been produced.
         skip_columns: u32,
     },
+    /// Update the track token on the running session.  If a
+    /// `pending_continue` exists (continuation not yet consumed at EOF),
+    /// only the pending token is updated so old-track tail columns keep
+    /// the old token.  If the continuation was already consumed, the
+    /// session token is updated directly.
+    // Wired up in handle_track_change (early ContinueWithFile path).
+    #[allow(dead_code)]
+    UpdateTrackToken {
+        track_token: u64,
+    },
+    /// Clear any pending continuation that has not yet been consumed at
+    /// EOF.  Sent when the gapless prediction is cancelled.
+    // Wired up in CancelStagedContinuation / ClearStagedContinuation handlers.
+    #[allow(dead_code)]
+    CancelPendingContinue,
     #[allow(dead_code)]
     SetDisplayMode(SpectrogramDisplayMode),
     Stop,
@@ -1575,7 +1590,7 @@ fn spectrogram_worker_loop(
                 }
             }
             SpectrogramWorkerCommand::Stop => break,
-            _ => {} // ignore commands outside session
+            _ => {} // UpdateTrackToken, CancelPendingContinue, etc. — stale outside session
         }
     }
 }
@@ -2199,6 +2214,16 @@ fn process_session_commands(
             } => {
                 session.pending_continue = Some((path, track_token, skip_columns));
             }
+            SpectrogramWorkerCommand::UpdateTrackToken { track_token } => {
+                if let Some((_, ref mut pending_token, _)) = session.pending_continue {
+                    *pending_token = track_token;
+                } else {
+                    session.track_token = track_token;
+                }
+            }
+            SpectrogramWorkerCommand::CancelPendingContinue => {
+                session.pending_continue = None;
+            }
             SpectrogramWorkerCommand::Stop => {
                 return Some(SessionAction::Stop);
             }
@@ -2273,6 +2298,21 @@ fn handle_single_command(
             skip_columns,
         } => {
             session.pending_continue = Some((path, track_token, skip_columns));
+            SessionAction::Continue
+        }
+        SpectrogramWorkerCommand::UpdateTrackToken { track_token } => {
+            if let Some((_, ref mut pending_token, _)) = session.pending_continue {
+                // Continuation not yet consumed — update pending token only.
+                // Old-track columns keep the old token until EOF.
+                *pending_token = track_token;
+            } else {
+                // Continuation already consumed — worker is on the new file.
+                session.track_token = track_token;
+            }
+            SessionAction::Continue
+        }
+        SpectrogramWorkerCommand::CancelPendingContinue => {
+            session.pending_continue = None;
             SessionAction::Continue
         }
         SpectrogramWorkerCommand::Stop => SessionAction::Stop,
@@ -5718,5 +5758,138 @@ mod tests {
         );
         // Position offset is reset for fresh coordinate space.
         assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    // ---------------------------------------------------------------
+    // UpdateTrackToken / CancelPendingContinue worker command tests
+    // ---------------------------------------------------------------
+
+    /// Helper: creates a minimal `SpectrogramSessionState` for command tests.
+    fn make_test_session() -> SpectrogramSessionState {
+        SpectrogramSessionState {
+            track_token: 1,
+            gen: 1,
+            fft_size: 2_048,
+            hop_size: 256,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            channel_count: 1,
+            bins_per_column: 1_025,
+            total_columns_estimate: 8_739,
+            effective_rate: 48_000,
+            cols_per_second: 46.875,
+            divisor: 1,
+            target_position_seconds: 2.0,
+            suppress_backward_seek: false,
+            columns_produced: 256,
+            session_start_column: 0,
+            stfts: Vec::new(),
+            decimators: Vec::new(),
+            sample_buf: None,
+            packet_counter: 0,
+            chunk_buf: Vec::new(),
+            chunk_columns: 0,
+            chunk_start_index: 256,
+            target_chunk_columns: 1,
+            total_covered_samples: 0,
+            session_start_time: std::time::Instant::now(),
+            post_reset_unthrottled_columns: 0,
+            decode_rate_limit: 2.0,
+            lookahead_columns: 512,
+            skip_output_columns: 0,
+            pending_continue: None,
+        }
+    }
+
+    #[test]
+    fn update_track_token_before_eof_updates_pending_only() {
+        let mut session = make_test_session();
+        session.pending_continue = Some((PathBuf::from("/tmp/next.flac"), 10, 0));
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateTrackToken { track_token: 20 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        // Session token must be unchanged (still old token).
+        assert_eq!(session.track_token, 1);
+        // Pending token must be updated.
+        let (_, token, _) = session.pending_continue.unwrap();
+        assert_eq!(token, 20);
+    }
+
+    #[test]
+    fn update_track_token_after_eof_updates_session_directly() {
+        let mut session = make_test_session();
+        // No pending_continue — continuation already consumed.
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateTrackToken { track_token: 20 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(session.track_token, 20);
+    }
+
+    #[test]
+    fn cancel_pending_continue_with_pending() {
+        let mut session = make_test_session();
+        session.pending_continue = Some((PathBuf::from("/tmp/next.flac"), 10, 0));
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::CancelPendingContinue,
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert!(session.pending_continue.is_none());
+    }
+
+    #[test]
+    fn cancel_pending_continue_without_pending_is_noop() {
+        let mut session = make_test_session();
+        assert!(session.pending_continue.is_none());
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::CancelPendingContinue,
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert!(session.pending_continue.is_none());
+    }
+
+    #[test]
+    fn process_session_commands_update_track_token_before_eof() {
+        let mut session = make_test_session();
+        session.pending_continue = Some((PathBuf::from("/tmp/next.flac"), 10, 0));
+
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 20 })
+            .unwrap();
+        drop(tx);
+
+        let action = process_session_commands(&mut session, &rx);
+        assert!(action.is_none()); // No seek/stop/new-session triggered.
+        assert_eq!(session.track_token, 1); // Unchanged.
+        let (_, token, _) = session.pending_continue.unwrap();
+        assert_eq!(token, 20);
+    }
+
+    #[test]
+    fn process_session_commands_cancel_pending_continue() {
+        let mut session = make_test_session();
+        session.pending_continue = Some((PathBuf::from("/tmp/next.flac"), 10, 0));
+
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(SpectrogramWorkerCommand::CancelPendingContinue)
+            .unwrap();
+        drop(tx);
+
+        let action = process_session_commands(&mut session, &rx);
+        assert!(action.is_none());
+        assert!(session.pending_continue.is_none());
     }
 }
