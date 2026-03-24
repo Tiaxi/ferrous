@@ -422,7 +422,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedReady ? 1 : 0, bufferReset ? 1 : 0,
         clearHistoryOnReset ? 1 : 0);
 
-    if ((totalEstimate <= 0 || bins <= 0) && !bufferReset) {
+    if (totalEstimate <= 0 || bins <= 0) {
         return;
     }
 
