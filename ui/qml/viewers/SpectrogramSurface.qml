@@ -13,10 +13,34 @@ Item {
     property var pendingPackedBatches: []
     property bool pendingPackedFlushScheduled: false
 
+    // Standard channel labels for common layouts.
+    readonly property var standardChannelLabels: [
+        ["M"],
+        ["L", "R"],
+        ["L", "R", "C"],
+        ["L", "R", "Ls", "Rs"],
+        ["L", "R", "C", "Ls", "Rs"],
+        ["L", "R", "C", "LFE", "Ls", "Rs"],
+        ["L", "R", "C", "LFE", "Ls", "Rs", "Lrs"],
+        ["L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs"]
+    ]
+
+    function descriptorsForChannelCount(count) {
+        const isPerChannel = root.uiBridge.spectrogramViewMode === 1
+        const showLabels = isPerChannel && count > 0
+        const labels = count > 0 && count <= standardChannelLabels.length
+            ? standardChannelLabels[count - 1]
+            : null
+        let result = []
+        for (let i = 0; i < Math.max(count, 1); ++i) {
+            const lbl = labels ? labels[i] || "" : (count === 0 ? "M" : "")
+            result.push({ label: lbl, showLabel: showLabels && lbl.length > 0 })
+        }
+        return result
+    }
+
     function placeholderDescriptors() {
-        return root.uiBridge.spectrogramViewMode === 1
-            ? [{ label: "M", showLabel: true }]
-            : [{ label: "", showLabel: false }]
+        return descriptorsForChannelCount(0)
     }
 
     function sameDescriptors(next) {
@@ -190,26 +214,10 @@ Item {
             // Sync pane count to match the chunk's channel count.
             // On buffer_reset (track change), allow shrinking; otherwise
             // only grow to avoid destroying precomputed data mid-track.
-            if (bufferReset && channelCount < spectrogramRepeater.count) {
-                let next = []
-                for (let i = 0; i < channelCount; ++i) {
-                    if (i < root.channelDescriptors.length) {
-                        next.push(root.channelDescriptors[i])
-                    } else {
-                        next.push({ label: "", showLabel: false })
-                    }
-                }
-                root.channelDescriptors = next
+            if (bufferReset && channelCount !== spectrogramRepeater.count) {
+                root.channelDescriptors = descriptorsForChannelCount(channelCount)
             } else if (channelCount > spectrogramRepeater.count) {
-                let next = []
-                for (let i = 0; i < channelCount; ++i) {
-                    if (i < root.channelDescriptors.length) {
-                        next.push(root.channelDescriptors[i])
-                    } else {
-                        next.push({ label: "", showLabel: false })
-                    }
-                }
-                root.channelDescriptors = next
+                root.channelDescriptors = descriptorsForChannelCount(channelCount)
             }
 
             const paneCount = spectrogramRepeater.count
