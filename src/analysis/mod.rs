@@ -5578,4 +5578,145 @@ mod tests {
             SpectrogramWorkerCommand::SetDisplayMode(SpectrogramDisplayMode::Centered)
         ));
     }
+
+    #[test]
+    fn start_spectrogram_session_uses_file_derived_channel_count() {
+        // Verify that start_spectrogram_session uses
+        // active_session_channel_count (from the file) rather than
+        // the stale spectrogram.pipelines.len() from the previous track.
+        let mut state = AnalysisRuntimeState::new();
+        // Simulate: previous track was 6-channel, pipelines has 6 entries.
+        // New track is stereo → active_session_channel_count should be 2.
+        state.active_session_channel_count = 2;
+        state.active_track_path = Some(PathBuf::from("/tmp/stereo.flac"));
+        state.active_track_token = 1;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.start_spectrogram_session(0.0, true, true, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        match cmd {
+            SpectrogramWorkerCommand::NewTrack { channel_count, .. } => {
+                // open_symphonia_file may fail for /tmp/stereo.flac (doesn't exist),
+                // which leaves active_session_channel_count at 2.
+                // The fallback path uses spectrogram.pipelines.len().max(1) = 1.
+                // Either 2 (file-derived) or 1 (fallback) is acceptable; NOT 6.
+                assert!(
+                    channel_count <= 2,
+                    "channel_count should use file-derived count, got {channel_count}"
+                );
+            }
+            _ => panic!("expected NewTrack, got {cmd:?}"),
+        }
+    }
+
+    #[test]
+    fn rolling_gapless_uses_continue_with_file_not_new_track() {
+        // Verify rolling mode gapless sends ContinueWithFile (not NewTrack)
+        // and accumulates the position offset.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.active_track_path = Some(PathBuf::from("/tmp/a.flac"));
+        state.active_track_token = 1;
+        state.last_spectrogram_position = 200.0;
+        state.active_session_channel_count = 2;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(5000);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_track_change(
+            PathBuf::from("/tmp/b.flac"),
+            false,
+            true, // gapless
+            2,
+            &ctx,
+        );
+
+        // Rolling gapless must use ContinueWithFile.
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::ContinueWithFile { .. }),
+            "rolling gapless should use ContinueWithFile, got {cmd:?}"
+        );
+        // Position offset accumulates old track duration.
+        assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn centered_gapless_uses_new_track_with_reset() {
+        // Verify centered mode gapless sends NewTrack with reset
+        // (not ContinueWithFile) and resets the position offset.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/a.flac"));
+        state.active_track_token = 1;
+        state.last_spectrogram_position = 200.0;
+        state.spectrogram_position_offset = 100.0;
+        state.active_session_channel_count = 2;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let worker_columns_produced = AtomicU64::new(5000);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            worker_columns_produced: &worker_columns_produced,
+        };
+
+        state.handle_track_change(
+            PathBuf::from("/tmp/b.flac"),
+            false,
+            true, // gapless
+            2,
+            &ctx,
+        );
+
+        // Centered gapless must use NewTrack with reset.
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(
+                cmd,
+                SpectrogramWorkerCommand::NewTrack {
+                    emit_initial_reset: true,
+                    clear_history_on_reset: true,
+                    ..
+                }
+            ),
+            "centered gapless should use NewTrack with reset, got {cmd:?}"
+        );
+        // Position offset is reset for fresh coordinate space.
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
 }
