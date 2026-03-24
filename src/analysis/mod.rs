@@ -725,17 +725,27 @@ impl AnalysisRuntimeState {
     /// restart paths) and from `handle_track_change` (covers gapless where
     /// the worker may internally fall back from `ContinueWithFile` to `NewTrack`).
     fn update_session_compat_params(&mut self, path: &Path) {
-        if let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(path) {
-            let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
-            let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
-            self.active_session_effective_rate =
-                u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
-            self.active_session_channel_count = match self.snapshot.spectrogram_view_mode {
-                SpectrogramViewMode::Downmix => 1,
-                SpectrogramViewMode::PerChannel => native_ch,
-            };
-            self.active_session_divisor = divisor;
-        }
+        let (native_sr, native_ch) = if let Some((_, _, _, sr, ch, _)) = open_symphonia_file(path) {
+            (sr, ch)
+        } else {
+            #[cfg(feature = "gst")]
+            if let Some((_, sr, ch, _)) = open_gstreamer_file(path) {
+                (sr, ch)
+            } else {
+                return;
+            }
+            #[cfg(not(feature = "gst"))]
+            return;
+        };
+        let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
+        let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
+        self.active_session_effective_rate =
+            u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
+        self.active_session_channel_count = match self.snapshot.spectrogram_view_mode {
+            SpectrogramViewMode::Downmix => 1,
+            SpectrogramViewMode::PerChannel => native_ch,
+        };
+        self.active_session_divisor = divisor;
     }
 
     fn start_spectrogram_session(
@@ -1365,7 +1375,6 @@ struct SpectrogramSessionState {
     // Chunking / STFT state
     stfts: Vec<StftComputer>,
     decimators: Vec<SpectrogramDecimator>,
-    sample_buf: Option<SampleBuffer<f32>>,
     packet_counter: usize,
     chunk_buf: Vec<u8>,
     chunk_columns: u16,
@@ -1439,17 +1448,8 @@ fn run_spectrogram_session(
     );
 
     let bins_per_column = (fft_size / 2) + 1;
-    let (
-        mut format,
-        mut audio_decoder,
-        mut track_id,
-        native_sample_rate,
-        native_channels,
-        total_columns_estimate,
-    ) = open_symphonia_file(path).or_else(|| {
-        profile_eprintln!("[spect-worker] failed to open file, aborting session");
-        None
-    })?;
+    let (mut source, native_sample_rate, native_channels, total_columns_estimate) =
+        open_audio_file(path)?;
 
     profile_eprintln!(
         "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns_estimate}",
@@ -1499,12 +1499,7 @@ fn run_spectrogram_session(
     };
 
     if actual_seek_seconds > 0.0 {
-        seek_symphonia(
-            &mut format,
-            track_id,
-            native_sample_rate,
-            actual_seek_seconds,
-        );
+        source.seek(actual_seek_seconds, native_sample_rate);
     }
 
     let start_column = f64_to_u64_saturating((start_seconds * cols_per_second).floor());
@@ -1532,7 +1527,6 @@ fn run_spectrogram_session(
         decimators: (0..actual_channel_count)
             .map(|_| SpectrogramDecimator::new(decimation_factor))
             .collect(),
-        sample_buf: None,
         packet_counter: 0,
         chunk_buf: Vec::new(),
         chunk_columns: 0,
@@ -1570,9 +1564,7 @@ fn run_spectrogram_session(
     loop {
         let result = session_decode_loop(
             &mut session,
-            &mut format,
-            &mut audio_decoder,
-            track_id,
+            &mut source,
             &mut warmup_remaining,
             cmd_rx,
             event_tx,
@@ -1594,21 +1586,19 @@ fn run_spectrogram_session(
                     path.file_name().unwrap_or_default().to_string_lossy(),
                     session.columns_produced.saturating_sub(start_column),
                 );
-                let opened = open_symphonia_file(&path);
-                let compatible = opened.as_ref().is_some_and(|&(_, _, _, sr, ch, _)| {
+                let opened = open_audio_file(&path);
+                let compatible = opened.as_ref().is_some_and(|(_, sr, ch, _)| {
                     let eff_ch = match session.view_mode {
                         SpectrogramViewMode::Downmix => 1,
-                        SpectrogramViewMode::PerChannel => ch,
+                        SpectrogramViewMode::PerChannel => *ch,
                     };
                     let divisor_u64 = u64::try_from(session.divisor).unwrap_or(1);
-                    sr == u64::from(session.effective_rate) * divisor_u64
+                    *sr == u64::from(session.effective_rate) * divisor_u64
                         && eff_ch == session.channel_count
                 });
                 if compatible {
-                    let (new_fmt, new_dec, new_tid, _, _, new_est) = opened.unwrap();
-                    format = new_fmt;
-                    audio_decoder = new_dec;
-                    track_id = new_tid;
+                    let (new_source, _, _, new_est) = opened.unwrap();
+                    source = new_source;
                     session.track_token = track_token;
                     session.total_columns_estimate = new_est;
                     warmup_remaining = 0;
@@ -1669,9 +1659,7 @@ fn run_spectrogram_session(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn session_decode_loop(
     session: &mut SpectrogramSessionState,
-    format: &mut Box<dyn symphonia::core::formats::FormatReader>,
-    audio_decoder: &mut Box<dyn symphonia::core::codecs::Decoder>,
-    track_id: u32,
+    source: &mut AudioFrameSource,
     warmup_remaining: &mut u64,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &Sender<AnalysisEvent>,
@@ -1702,9 +1690,7 @@ fn session_decode_loop(
                     return handle_session_seek(
                         session,
                         position_seconds,
-                        format,
-                        audio_decoder,
-                        track_id,
+                        source,
                         warmup_remaining,
                         cmd_rx,
                         event_tx,
@@ -1743,9 +1729,7 @@ fn session_decode_loop(
                         return handle_session_seek(
                             session,
                             position_seconds,
-                            format,
-                            audio_decoder,
-                            track_id,
+                            source,
                             warmup_remaining,
                             cmd_rx,
                             event_tx,
@@ -1788,9 +1772,7 @@ fn session_decode_loop(
                                 return handle_session_seek(
                                     session,
                                     position_seconds,
-                                    format,
-                                    audio_decoder,
-                                    track_id,
+                                    source,
                                     warmup_remaining,
                                     cmd_rx,
                                     event_tx,
@@ -1807,43 +1789,21 @@ fn session_decode_loop(
             }
         }
 
-        // 4. Decode next packet.
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
-                break;
-            }
-            Err(SymphoniaError::ResetRequired | _) => break,
+        // 4. Decode next batch of audio frames.
+        let audio = match source.next_frames() {
+            Some(af) if af.frames == 0 => continue, // GStreamer timeout, no data yet
+            Some(af) => af,
+            None => break, // EOF
         };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
         session.packet_counter += 1;
 
-        let decoded_audio = match audio_decoder.decode(&packet) {
-            Ok(decoded_audio) => decoded_audio,
-            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
-                break;
-            }
-            Err(SymphoniaError::DecodeError(_)) => continue,
-            Err(_) => break,
-        };
-
-        let spec = *decoded_audio.spec();
-        let decoded_channels = spec.channels.count().max(1);
-        let decoded_capacity = decoded_audio.capacity();
-        let buf = ensure_sample_buffer(&mut session.sample_buf, decoded_capacity, spec);
-        buf.copy_interleaved_ref(decoded_audio);
-        let samples = buf.samples();
-
-        let frames = samples.len() / decoded_channels;
+        let frames = audio.frames;
         let effective_frames = frames / session.divisor;
 
         let per_channel = deinterleave_samples(
-            samples,
+            &audio.samples,
             frames,
-            decoded_channels,
+            audio.channels,
             session.channel_count,
             session.divisor,
             effective_frames,
@@ -1903,9 +1863,7 @@ fn session_decode_loop(
                     return handle_session_seek(
                         session,
                         position_seconds,
-                        format,
-                        audio_decoder,
-                        track_id,
+                        source,
                         warmup_remaining,
                         cmd_rx,
                         event_tx,
@@ -2064,9 +2022,7 @@ fn handle_single_command(
 fn handle_session_seek(
     session: &mut SpectrogramSessionState,
     position_seconds: f64,
-    format: &mut Box<dyn symphonia::core::formats::FormatReader>,
-    audio_decoder: &mut Box<dyn symphonia::core::codecs::Decoder>,
-    track_id: u32,
+    source: &mut AudioFrameSource,
     warmup_remaining: &mut u64,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &Sender<AnalysisEvent>,
@@ -2089,8 +2045,7 @@ fn handle_session_seek(
     // Compute native rate from effective rate × divisor.
     let native_rate =
         u64::from(session.effective_rate) * u64::try_from(session.divisor).unwrap_or(1);
-    seek_symphonia(format, track_id, native_rate, actual_seek_seconds);
-    audio_decoder.reset();
+    source.seek(actual_seek_seconds, native_rate);
 
     // Reset STFT state.
     let decimation_factor = decimation_factor_for_hop(session.hop_size);
@@ -2141,9 +2096,7 @@ fn handle_session_seek(
     // Continue decode loop from new position.
     session_decode_loop(
         session,
-        format,
-        audio_decoder,
-        track_id,
+        source,
         warmup_remaining,
         cmd_rx,
         event_tx,
@@ -2381,6 +2334,35 @@ fn flush_chunk_before_lookahead_park(
 
 /// Opens a Symphonia file and returns the format reader, decoder, and track info.
 #[allow(clippy::type_complexity)]
+/// Try to open an audio file, first via Symphonia, then falling back to
+/// `GStreamer` for formats Symphonia cannot decode (AC3/DTS).
+/// Returns `(source, native_sample_rate, native_channels, total_columns_estimate)`.
+fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
+    if let Some((format, decoder, track_id, sr, ch, est)) = open_symphonia_file(path) {
+        return Some((
+            AudioFrameSource::Symphonia {
+                format,
+                decoder,
+                track_id,
+                sample_buf: None,
+            },
+            sr,
+            ch,
+            est,
+        ));
+    }
+    profile_eprintln!("[spect-worker] Symphonia failed, trying GStreamer fallback");
+    #[cfg(feature = "gst")]
+    {
+        return open_gstreamer_file(path);
+    }
+    #[cfg(not(feature = "gst"))]
+    {
+        profile_eprintln!("[spect-worker] GStreamer not available (gst feature disabled)");
+        None
+    }
+}
+
 /// Open an audio file with symphonia, returning the format reader,
 /// decoder, track info, and an estimated total column count.  A single
 /// file open + probe avoids the double-open latency that is visible on
@@ -4576,7 +4558,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -4660,7 +4641,6 @@ mod tests {
             session_start_column: 400,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -4705,7 +4685,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -4758,7 +4737,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -4803,7 +4781,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -4928,7 +4905,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -4978,7 +4954,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -5102,7 +5077,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: vec![0u8; 1_025],
             chunk_columns: 1,
@@ -5147,7 +5121,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -5192,7 +5165,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -5554,7 +5526,6 @@ mod tests {
             session_start_column: 0,
             stfts: Vec::new(),
             decimators: Vec::new(),
-            sample_buf: None,
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
