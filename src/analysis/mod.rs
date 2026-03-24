@@ -1386,9 +1386,17 @@ struct SpectrogramSessionState {
 /// Action returned by command processing in the session loop.
 enum SessionAction {
     Continue,
+    /// Token was updated directly on the session (continuation already
+    /// consumed).  The caller must flush any partial chunk and emit a
+    /// 0-column metadata chunk with the new token so the UI gapless
+    /// handler fires immediately — not delayed until the next
+    /// rate-limited data chunk.
+    FlushToken,
     Stop,
     NewSession(SpectrogramWorkerCommand),
-    SeekRequired { position_seconds: f64 },
+    SeekRequired {
+        position_seconds: f64,
+    },
 }
 
 /// Runs a spectrogram decode session for a single track.
@@ -1681,6 +1689,9 @@ fn session_decode_loop(
         if let Some(action) = process_session_commands(session, cmd_rx) {
             match action {
                 SessionAction::Continue => {}
+                SessionAction::FlushToken => {
+                    session_flush_token(session, event_tx, columns_produced_out);
+                }
                 SessionAction::Stop => return Some(SpectrogramWorkerCommand::Stop),
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
@@ -1716,6 +1727,10 @@ fn session_decode_loop(
             match cmd_rx.recv() {
                 Ok(cmd) => match handle_single_command(session, cmd) {
                     SessionAction::Continue => continue,
+                    SessionAction::FlushToken => {
+                        session_flush_token(session, event_tx, columns_produced_out);
+                        continue;
+                    }
                     SessionAction::Stop => {
                         return Some(SpectrogramWorkerCommand::Stop);
                     }
@@ -1755,6 +1770,10 @@ fn session_decode_loop(
                     match cmd_rx.recv_timeout(sleep_dur) {
                         Ok(cmd) => match handle_single_command(session, cmd) {
                             SessionAction::Continue => continue,
+                            SessionAction::FlushToken => {
+                                session_flush_token(session, event_tx, columns_produced_out);
+                                continue;
+                            }
                             SessionAction::Stop => {
                                 return Some(SpectrogramWorkerCommand::Stop);
                             }
@@ -1871,6 +1890,9 @@ fn session_decode_loop(
                         });
                     }
                 }
+                SessionAction::FlushToken => {
+                    session_flush_token(session, event_tx, columns_produced_out);
+                }
                 SessionAction::Stop => return Some(SpectrogramWorkerCommand::Stop),
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
@@ -1900,6 +1922,7 @@ fn process_session_commands(
 ) -> Option<SessionAction> {
     let mut latest_position: Option<f64> = None;
     let mut latest_seek: Option<f64> = None;
+    let mut needs_flush_token = false;
 
     // Drain all pending commands, take the latest seek/position update.
     while let Ok(cmd) = cmd_rx.try_recv() {
@@ -1924,6 +1947,7 @@ fn process_session_commands(
                     *pending_token = track_token;
                 } else {
                     session.track_token = track_token;
+                    needs_flush_token = true;
                 }
             }
             SpectrogramWorkerCommand::CancelPendingContinue => {
@@ -1933,6 +1957,12 @@ fn process_session_commands(
                 return Some(SessionAction::Stop);
             }
         }
+    }
+
+    // FlushToken takes priority over position-only results — the UI
+    // needs the metadata chunk before the next position update lands.
+    if needs_flush_token {
+        return Some(SessionAction::FlushToken);
     }
 
     if let Some(position_seconds) = latest_seek {
@@ -2006,11 +2036,15 @@ fn handle_single_command(
                 // Continuation not yet consumed — update pending token only.
                 // Old-track columns keep the old token until EOF.
                 *pending_token = track_token;
+                SessionAction::Continue
             } else {
                 // Continuation already consumed — worker is on the new file.
+                // FlushToken tells the caller to emit a 0-column metadata
+                // chunk immediately so the UI gapless handler fires without
+                // waiting for the next rate-limited data chunk.
                 session.track_token = track_token;
+                SessionAction::FlushToken
             }
-            SessionAction::Continue
         }
         SpectrogramWorkerCommand::CancelPendingContinue => {
             session.pending_continue = None;
@@ -2296,6 +2330,38 @@ fn session_flush_chunk(
     // Always publish the final columns_produced so the analysis runtime
     // has the exact boundary at EOF for staged-commit alignment.
     columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
+}
+
+/// Flush any partial chunk and emit a 0-column metadata chunk carrying
+/// the session's current token.  This makes the UI's gapless handler fire
+/// immediately on `UpdateTrackToken` instead of waiting for the next
+/// rate-limited data chunk (~0.4–0.7 s later).
+fn session_flush_token(
+    session: &mut SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+    columns_produced_out: &AtomicU64,
+) {
+    // Flush any partially accumulated data so it carries the new token.
+    session_flush_chunk(session, event_tx, columns_produced_out);
+
+    // Emit a 0-column metadata chunk with the new token.
+    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+        PrecomputedSpectrogramChunk {
+            track_token: session.track_token,
+            columns_u8: Vec::new(),
+            bins_per_column: clamp_to_u16(session.bins_per_column),
+            column_count: 0,
+            channel_count: clamp_to_u8(session.channel_count),
+            start_column_index: u64_to_u32_saturating(session.columns_produced),
+            total_columns_estimate: session.total_columns_estimate,
+            sample_rate_hz: session.effective_rate,
+            hop_size: clamp_to_u16(REFERENCE_HOP),
+            coverage_seconds: 0.0,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+        },
+    ));
 }
 
 fn flush_chunk_before_lookahead_park(
@@ -5276,7 +5342,7 @@ mod tests {
     }
 
     #[test]
-    fn update_track_token_after_eof_updates_session_directly() {
+    fn update_track_token_after_eof_updates_session_and_returns_flush() {
         let mut session = make_test_session();
         // No pending_continue — continuation already consumed.
 
@@ -5285,7 +5351,10 @@ mod tests {
             SpectrogramWorkerCommand::UpdateTrackToken { track_token: 20 },
         );
 
-        assert!(matches!(action, SessionAction::Continue));
+        assert!(
+            matches!(action, SessionAction::FlushToken),
+            "expected FlushToken when pending_continue is None"
+        );
         assert_eq!(session.track_token, 20);
     }
 
