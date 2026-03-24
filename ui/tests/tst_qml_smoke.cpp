@@ -393,6 +393,10 @@ private slots:
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
+    void spectrogramStaleTokenChunksAreDropped();
+    void spectrogramGaplessTokenChunksPassFilter();
+    void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
+    void spectrogramCenteredModeSeekPreservesRing();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2206,6 +2210,117 @@ void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
         Q_ARG(QVariant, QStringLiteral("/music/same-track.flac")));
     QVERIFY(invoked);
     QCOMPARE(result.toBool(), false);
+}
+
+void QmlSmokeTest::spectrogramStaleTokenChunksAreDropped() {
+    // After a buffer_reset with token N, chunks from token < N are stale
+    // and must be dropped to prevent ring corruption.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int bins = 8;
+    constexpr int total = 1024;
+
+    // Reset with token 5.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total, 48000, 1024, false, true, 5);
+    QByteArray data4(4 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data4, bins, 0, 4, 0, total, 48000, 1024, false, false, 5);
+    QCOMPARE(item.m_ringWriteSeq, 4);
+
+    // Reset with token 10 (new track).
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total, 48000, 1024, false, true, 10, true);
+    QByteArray data2(2 * bins, '\x80');
+    item.feedPrecomputedChunk(
+        data2, bins, 0, 2, 0, total, 48000, 1024, false, false, 10);
+    QCOMPARE(item.m_ringWriteSeq, 2);
+
+    // Stale chunk from token 5 (< committed 10) — must be dropped.
+    QByteArray stale(3 * bins, '\xFF');
+    const qint64 before = item.m_ringWriteSeq;
+    item.feedPrecomputedChunk(
+        stale, bins, 0, 3, 100, total, 48000, 1024, false, false, 5);
+    QCOMPARE(item.m_ringWriteSeq, before);
+}
+
+void QmlSmokeTest::spectrogramGaplessTokenChunksPassFilter() {
+    // In a gapless rolling transition, the token advances (3→4) without
+    // a buffer_reset.  Committed stays at 3.  Token 4 chunks must NOT
+    // be dropped.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int bins = 8;
+    constexpr int total = 1024;
+
+    // Reset with token 3.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total, 48000, 1024, false, true, 3);
+    QByteArray data(4 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 4, 0, total, 48000, 1024, false, false, 3);
+    QCOMPARE(item.m_ringWriteSeq, 4);
+    QCOMPARE(item.m_precomputedCommittedToken, 3ULL);
+
+    // Gapless token 4 (> committed 3) — must be accepted.
+    QByteArray gaplessData(2 * bins, '\x80');
+    item.feedPrecomputedChunk(
+        gaplessData, bins, 0, 2, 4, total, 48000, 1024, false, false, 4);
+    QCOMPARE(item.m_ringWriteSeq, 6);
+    QCOMPARE(item.m_precomputedTrackToken, 4ULL);
+}
+
+void QmlSmokeTest::spectrogramFreshWidgetAcceptsDataWithImplicitReset() {
+    // A fresh/recycled widget (ringCapacity==0, no pending reset)
+    // receiving data should apply an implicit reset and accept the data.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    QCOMPARE(item.m_ringCapacity, 0);
+    QVERIFY(!item.m_precomputedResetPending);
+
+    constexpr int bins = 8;
+    constexpr int total = 512;
+    QByteArray data(4 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 4, 100, total, 48000, 1024, false, false, 7);
+
+    // Ring should have been allocated and data written.
+    QVERIFY(item.m_ringCapacity > 0);
+    QCOMPARE(item.m_ringWriteSeq, 4);
+    QCOMPARE(item.m_precomputedTrackToken, 7ULL);
+}
+
+void QmlSmokeTest::spectrogramCenteredModeSeekPreservesRing() {
+    // In centered mode, seeking should NOT clear the ring.
+    // The position just moves the display window.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 8;
+    constexpr int total = 1024;
+
+    // Reset and write some data.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total, 48000, 1024, false, true, 5);
+    QByteArray data(100 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 100, 0, total, 48000, 1024, false, false, 5);
+    QCOMPARE(item.m_ringWriteSeq, 100);
+
+    // Simulate a position change (seek) — ring must be preserved.
+    item.setPositionSeconds(50.0);
+    QCOMPARE(item.m_ringWriteSeq, 100);
+
+    // Data at the new position must still be valid in the ring.
+    QVERIFY(item.m_ringCapacity > 0);
 }
 
 int main(int argc, char **argv) {
