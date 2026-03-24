@@ -10,8 +10,6 @@ Item {
     property double positionSeconds: 0
 
     property var channelDescriptors: []
-    property var pendingPackedBatches: []
-    property bool pendingPackedFlushScheduled: false
 
     // Standard channel labels for common layouts.
     readonly property var standardChannelLabels: [
@@ -93,82 +91,13 @@ Item {
         root.channelDescriptors = next
     }
 
-    function schedulePendingPackedFlush() {
-        if (root.pendingPackedFlushScheduled) {
-            return
-        }
-        root.pendingPackedFlushScheduled = true
-        Qt.callLater(function() {
-            root.pendingPackedFlushScheduled = false
-            root.flushPendingPackedDeltas()
-        })
-    }
-
-    function flushPendingPackedDeltas() {
-        if (!root.pendingPackedBatches || root.pendingPackedBatches.length === 0) {
-            return
-        }
-
-        const batch = root.pendingPackedBatches[0]
-        const channels = batch ? batch.channels : null
-        const seedHistory = batch ? batch.seedHistory === true : false
-        if (!channels || channels.length === 0) {
-            root.pendingPackedBatches.shift()
-            if (root.pendingPackedBatches.length > 0) {
-                schedulePendingPackedFlush()
-            }
-            return
-        }
-
-        syncChannelDescriptors(channels)
-        if (spectrogramRepeater.count < channels.length) {
-            schedulePendingPackedFlush()
-            return
-        }
-
-        for (let i = 0; i < channels.length; ++i) {
-            const pane = spectrogramRepeater.itemAt(i)
-            if (!pane || !pane.spectrogramItem) {
-                schedulePendingPackedFlush()
-                return
-            }
-        }
-
-        root.pendingPackedBatches.shift()
-        for (let i = 0; i < channels.length; ++i) {
-            const pane = spectrogramRepeater.itemAt(i)
-            const channel = channels[i]
-            if (!pane || !pane.spectrogramItem || !channel) {
-                continue
-            }
-            if ((channel.rows || 0) > 0 && (channel.bins || 0) > 0) {
-                pane.spectrogramItem.appendPackedRows(
-                            channel.data,
-                            channel.rows,
-                            channel.bins,
-                            seedHistory)
-            }
-        }
-
-        if (root.pendingPackedBatches.length > 0) {
-            schedulePendingPackedFlush()
-        }
-    }
-
     function resetForCurrentMode(preserveDescriptors) {
-        root.pendingPackedBatches = []
-        root.pendingPackedFlushScheduled = false
         if (!preserveDescriptors) {
             syncChannelDescriptors([])
         }
         for (let i = 0; i < spectrogramRepeater.count; ++i) {
             const pane = spectrogramRepeater.itemAt(i)
             if (pane && pane.spectrogramItem) {
-                // Don't clear precomputed data here — the streaming path
-                // resets frequently, but the precomputed atlas has its own
-                // lifecycle managed by the backend worker.  Clearing it
-                // here would cause the precomputed spectrogram to flash
-                // and disappear every time the streaming path resets.
                 pane.spectrogramItem.reset()
             }
         }
@@ -184,25 +113,12 @@ Item {
     }
 
     function haltForCurrentMode() {
-        root.pendingPackedBatches = []
-        root.pendingPackedFlushScheduled = false
         for (let i = 0; i < spectrogramRepeater.count; ++i) {
             const pane = spectrogramRepeater.itemAt(i)
             if (pane && pane.spectrogramItem) {
                 pane.spectrogramItem.halt()
             }
         }
-    }
-
-    function appendPackedDelta(channels, seedHistory) {
-        if (!channels || channels.length === 0) {
-            return
-        }
-        root.pendingPackedBatches.push({
-            channels: channels,
-            seedHistory: seedHistory === true
-        })
-        schedulePendingPackedFlush()
     }
 
     Connections {

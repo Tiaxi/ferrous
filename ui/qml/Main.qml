@@ -67,7 +67,6 @@ Kirigami.ApplicationWindow {
     readonly property var libraryTreeModel: (typeof libraryModel !== "undefined" && libraryModel)
         ? libraryModel
         : null
-    readonly property int spectrogramDeltaRowsPerTurn: -1
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
     readonly property var uiPalette: uiPaletteObject
     readonly property var overlayHost: Overlay.overlay
@@ -187,7 +186,6 @@ Kirigami.ApplicationWindow {
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
-        property bool spectrogramReset: false
         property real dbRange: 132
         property int fftSize: 8192
         property int spectrogramViewMode: 0
@@ -314,9 +312,6 @@ Kirigami.ApplicationWindow {
         function shutdown() {}
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
-        function takeSpectrogramRowsDeltaPacked(maxRowsPerChannel) {
-            return ({ channels: [], reset: false })
-        }
     }
 
     QtObject {
@@ -1165,22 +1160,6 @@ Kirigami.ApplicationWindow {
 
     Connections {
         target: uiBridge
-        function applyAnalysisDelta() {
-            const delta = uiBridge.takeSpectrogramRowsDeltaPacked(root.spectrogramDeltaRowsPerTurn)
-            if ((uiBridge.playbackState || "") === "Stopped") {
-                spectrogramSurface.haltForCurrentMode()
-                return
-            }
-            if (delta.reset
-                    && root.visualFeedsEnabled
-                    && delta.channels
-                    && delta.channels.length > 0) {
-                spectrogramSurface.resetForCurrentMode(true)
-            }
-            if (root.visualFeedsEnabled && delta.channels && delta.channels.length > 0) {
-                spectrogramSurface.appendPackedDelta(delta.channels, delta.seedHistory === true)
-            }
-        }
         function onSnapshotChanged() {
             playbackController.handleSnapshotChanged(
                 function() { spectrogramSurface.haltForCurrentMode() },
@@ -1195,9 +1174,6 @@ Kirigami.ApplicationWindow {
         }
         function onLibraryTreeFrameReceived(version, treeBytes) {
             libraryController.requestTreeApply(version, treeBytes || "")
-        }
-        function onAnalysisChanged() {
-            applyAnalysisDelta()
         }
         function onGlobalSearchResultsChanged() {
             globalSearchController.syncSelectionAfterResultsChange()

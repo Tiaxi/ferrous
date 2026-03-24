@@ -26,8 +26,6 @@ use crate::tag_editor;
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const PRECOMPUTED_SPECTROGRAM_MAGIC: u8 = 0xA2;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
-const ANALYSIS_FLAG_RESET: u8 = 0x02;
-const ANALYSIS_FLAG_SPECTROGRAM: u8 = 0x04;
 const ANALYSIS_FLAG_WAVEFORM_COMPLETE: u8 = 0x08;
 const MAX_PENDING_BINARY_EVENTS: usize = 12;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
@@ -66,18 +64,10 @@ fn create_nonblocking_pipe() -> Option<(i32, i32)> {
 struct AnalysisDelta {
     sample_rate_hz: u32,
     frame_seq: u32,
-    spectrogram_reset: bool,
     waveform_changed: bool,
     waveform_coverage_millis: u32,
     waveform_complete: bool,
     waveform_peaks_u8: Vec<u8>,
-    spectrogram_channels_u8: Vec<EncodedSpectrogramChannel>,
-}
-
-#[derive(Default)]
-struct EncodedSpectrogramChannel {
-    label: SpectrogramChannelLabel,
-    rows_u8: Vec<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -85,7 +75,6 @@ struct AnalysisEmitState {
     last_waveform_peaks: Vec<f32>,
     last_waveform_coverage_millis: u32,
     last_waveform_complete: bool,
-    last_spectrogram_seq: u64,
     analysis_frame_seq: u32,
 }
 
@@ -1829,13 +1818,6 @@ fn usize_from_u32(value: u32) -> usize {
     }
 }
 
-fn usize_from_u64(value: u64) -> usize {
-    match usize::try_from(value) {
-        Ok(value) => value,
-        Err(_) => usize::MAX,
-    }
-}
-
 fn usize_from_i32(value: i32) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| format!("binary command index out of range: {value}"))
 }
@@ -1913,8 +1895,6 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     emit_state.last_waveform_coverage_millis = waveform_coverage_millis;
     emit_state.last_waveform_complete = s.analysis.waveform_complete;
 
-    // Streaming spectrogram removed — always produce zero rows.
-    let spectrogram_channels_u8: Vec<EncodedSpectrogramChannel> = Vec::new();
     let has_payload = waveform_changed || waveform_meta_changed;
     if has_payload {
         emit_state.analysis_frame_seq = emit_state.analysis_frame_seq.wrapping_add(1);
@@ -1923,32 +1903,16 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     AnalysisDelta {
         sample_rate_hz: s.analysis.sample_rate_hz,
         frame_seq: emit_state.analysis_frame_seq,
-        spectrogram_reset: false,
         waveform_changed,
         waveform_coverage_millis,
         waveform_complete: s.analysis.waveform_complete,
         waveform_peaks_u8,
-        spectrogram_channels_u8,
     }
 }
 
 fn to_u8_norm(v: f32) -> u8 {
     let clamped = v.clamp(0.0, 1.0);
     round_clamped_to_u8(f64::from(clamped) * 255.0)
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn to_u8_spectrum(v: f32, db_range: f32, fft_size: usize) -> u8 {
-    let range = f64::from(db_range.clamp(50.0, 150.0));
-    let db = if v > 0.0 {
-        (10.0 / std::f64::consts::LN_10) * f64::from(v).ln()
-    } else {
-        -200.0
-    };
-    // Normalise for FFT size + BH4 window energy: 20·log₁₀(N·a₀/2).
-    let peak_db = 20.0 * (fft_size as f64 * 0.35875 / 2.0).log10();
-    let xdb = (db + range - peak_db).clamp(0.0, range);
-    round_clamped_to_u8((xdb / range) * 255.0)
 }
 
 fn round_clamped_to_u8(value: f64) -> u8 {
@@ -1961,45 +1925,14 @@ fn round_clamped_to_u8(value: f64) -> u8 {
         .unwrap_or(u8::MAX)
 }
 
-fn encode_channel_label(label: SpectrogramChannelLabel) -> u8 {
-    match label {
-        SpectrogramChannelLabel::Mono => 0,
-        SpectrogramChannelLabel::FrontLeft => 1,
-        SpectrogramChannelLabel::FrontRight => 2,
-        SpectrogramChannelLabel::FrontCenter => 3,
-        SpectrogramChannelLabel::Lfe => 4,
-        SpectrogramChannelLabel::SideLeft => 5,
-        SpectrogramChannelLabel::SideRight => 6,
-        SpectrogramChannelLabel::RearLeft => 7,
-        SpectrogramChannelLabel::RearRight => 8,
-        SpectrogramChannelLabel::RearCenter => 9,
-        SpectrogramChannelLabel::Unknown => 255,
-    }
-}
-
+/// Encode an analysis frame for the binary bridge protocol.
+/// Streaming spectrogram fields (rows, channels, reset) are always zero.
 fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     let waveform_len = delta.waveform_peaks_u8.len();
-    let channel_count = delta.spectrogram_channels_u8.len();
-    let row_count = delta
-        .spectrogram_channels_u8
-        .first()
-        .map_or(0, |channel| channel.rows_u8.len());
-    let bin_count = delta
-        .spectrogram_channels_u8
-        .first()
-        .and_then(|channel| channel.rows_u8.first())
-        .map_or(0, std::vec::Vec::len);
-    let has_spectrogram = row_count > 0 && bin_count > 0 && channel_count > 0;
 
     let mut flags = 0u8;
     if delta.waveform_changed && waveform_len > 0 {
         flags |= ANALYSIS_FLAG_WAVEFORM;
-    }
-    if delta.spectrogram_reset {
-        flags |= ANALYSIS_FLAG_RESET;
-    }
-    if has_spectrogram {
-        flags |= ANALYSIS_FLAG_SPECTROGRAM;
     }
     if delta.waveform_complete {
         flags |= ANALYSIS_FLAG_WAVEFORM_COMPLETE;
@@ -2010,17 +1943,8 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     }
 
     let waveform_len_u16 = clamp_u16(waveform_len);
-    let row_count_u16 = clamp_u16(row_count);
-    let bin_count_u16 = clamp_u16(bin_count);
-    let channel_count_u8 = clamp_u8(channel_count);
-    let label_bytes = if has_spectrogram || delta.spectrogram_reset {
-        usize::from(channel_count_u8)
-    } else {
-        0
-    };
-    let spectrogram_bytes =
-        usize::from(row_count_u16) * usize::from(channel_count_u8) * usize::from(bin_count_u16);
-    let payload_len = 21usize + usize::from(waveform_len_u16) + label_bytes + spectrogram_bytes;
+    // Streaming spectrogram fields are zero (rows=0, bins=0, channels=0).
+    let payload_len = 21usize + usize::from(waveform_len_u16);
 
     let mut out = Vec::with_capacity(4 + payload_len);
     out.extend_from_slice(&clamp_u32(payload_len).to_le_bytes());
@@ -2029,33 +1953,13 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     out.push(flags);
     out.extend_from_slice(&waveform_len_u16.to_le_bytes());
     out.extend_from_slice(&delta.waveform_coverage_millis.to_le_bytes());
-    out.extend_from_slice(&row_count_u16.to_le_bytes());
-    out.extend_from_slice(&bin_count_u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // row_count = 0
+    out.extend_from_slice(&0u16.to_le_bytes()); // bin_count = 0
     out.extend_from_slice(&delta.frame_seq.to_le_bytes());
-    out.push(channel_count_u8);
+    out.push(0); // channel_count = 0
 
     if (flags & ANALYSIS_FLAG_WAVEFORM) != 0 {
         out.extend_from_slice(&delta.waveform_peaks_u8[..usize::from(waveform_len_u16)]);
-    }
-    if label_bytes > 0 {
-        for channel in delta
-            .spectrogram_channels_u8
-            .iter()
-            .take(usize::from(channel_count_u8))
-        {
-            out.push(encode_channel_label(channel.label));
-        }
-    }
-    if (flags & ANALYSIS_FLAG_SPECTROGRAM) != 0 {
-        for row_index in 0..usize::from(row_count_u16) {
-            for channel in delta
-                .spectrogram_channels_u8
-                .iter()
-                .take(usize::from(channel_count_u8))
-            {
-                out.extend_from_slice(&channel.rows_u8[row_index][..usize::from(bin_count_u16)]);
-            }
-        }
     }
 
     out

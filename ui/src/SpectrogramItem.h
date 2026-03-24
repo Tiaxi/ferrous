@@ -68,11 +68,6 @@ public:
     Q_INVOKABLE void reset();
     Q_INVOKABLE void halt();
     Q_INVOKABLE void appendRows(const QVariantList &rows);
-    Q_INVOKABLE void appendPackedRows(
-        const QByteArray &packedRows,
-        int rowCount,
-        int binsPerRow,
-        bool seedHistoryBurst = false);
 
 signals:
     void dbRangeChanged();
@@ -130,27 +125,21 @@ private:
     void resizeDirtyTilesLocked();
     void markTileDirtyLocked(int x);
     void markAllTilesDirtyLocked();
-    bool consumePendingColumnsLocked(int requested);
-    void absorbPendingHistoryLocked(int retainPending);
-    bool advanceAnimationLocked(double elapsedSeconds);
-    void noteIncomingRowsLocked();
-    double targetRowsPerSecondLocked() const;
     void updateOverlayImageLocked();
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
     void updateFpsEstimateLocked();
+    double targetRowsPerSecondLocked() const;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     void resetSeekProfileLocked();
     void maybeStartSeekProfileLocked(qint64 nowMs);
     void noteSeekProfileFrameLocked(qint64 nowMs, double elapsedSeconds, bool pending, bool advanced);
-    void noteSeekProfileDrainLocked(int consumed);
     void finalizeSeekProfileLocked(qint64 nowMs, const char *reason);
     QVariantMap debugSeekProfileStateLocked() const;
     void resetSmoothnessProfileLocked();
     void maybeStartSmoothnessProfileLocked(qint64 nowMs);
     void noteSmoothnessProfileFrameLocked(qint64 nowMs, double elapsedSeconds, bool pending, bool advanced);
-    void noteSmoothnessProfileDrainLocked(int consumed);
     void noteSmoothnessPaintLocked(double paintMs);
     void finalizeSmoothnessProfileLocked(qint64 nowMs, const char *reason);
     QVariantMap debugSmoothnessProfileStateLocked() const;
@@ -174,11 +163,8 @@ private:
     int m_canvasWriteX{0};
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
-    std::deque<std::vector<quint8>> m_pendingColumns;
     std::vector<unsigned char> m_dirtyTiles;
-    double m_pendingPhase{0.0};
     bool m_seedHistoryOnNextAppend{true};
-    std::chrono::steady_clock::time_point m_lastRowAppendTime{};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};
     bool m_forceFpsOverlay{false};

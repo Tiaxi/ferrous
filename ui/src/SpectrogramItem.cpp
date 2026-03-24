@@ -37,8 +37,6 @@ constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
 // data-driven release always wins, while still being short enough to
 // recover if the backend never sends a reset (e.g. stream interruption).
 constexpr double kPositionJumpHoldTimeoutSeconds = 2.0;
-constexpr int kMaxPendingColumns = 512;
-constexpr int kLivePendingColumns = 2;
 constexpr int kMaxTileFragments = 96;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 constexpr qint64 kSeekTraceWindowMs = 1800;
@@ -959,10 +957,7 @@ void SpectrogramItem::reset() {
     m_lastIncomingRowsAtMs = 0;
 #endif
     m_columns.clear();
-    m_pendingColumns.clear();
-    m_pendingPhase = 0.0;
     m_seedHistoryOnNextAppend = true;
-    m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
 
     // When precomputed mode is active, don't destroy the canvas or
@@ -983,9 +978,6 @@ void SpectrogramItem::halt() {
     resetSeekProfileLocked();
     m_lastIncomingRowsAtMs = 0;
 #endif
-    m_pendingColumns.clear();
-    m_pendingPhase = 0.0;
-    m_lastRowAppendTime = std::chrono::steady_clock::time_point{};
     m_animationTickInitialized = false;
     update();
 }
@@ -994,6 +986,13 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
     QMutexLocker lock(&m_stateMutex);
     if (rows.isEmpty()) {
         return;
+    }
+
+    const int w = std::max(1, static_cast<int>(std::floor(width())));
+    const int h = std::max(1, static_cast<int>(std::floor(height())));
+    ensureCanvas(w, h);
+    if (!m_canvas.isNull() && m_canvasDirty) {
+        rebuildCanvasFromColumns();
     }
 
     int rowsAdded = 0;
@@ -1013,99 +1012,22 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         if (static_cast<int>(mapped.size()) != m_binsPerColumn) {
             continue;
         }
-        m_pendingColumns.emplace_back(std::move(mapped));
+        m_columns.emplace_back(std::move(mapped));
+        while (static_cast<int>(m_columns.size()) > m_maxColumns) {
+            m_columns.pop_front();
+        }
+        if (!m_canvas.isNull()) {
+            drawColumnAt(m_canvasWriteX, m_columns.back());
+            m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
+            m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
+        }
         rowsAdded++;
     }
 
-    while (static_cast<int>(m_pendingColumns.size()) > kMaxPendingColumns) {
-        m_pendingColumns.pop_front();
-    }
     if (rowsAdded <= 0) {
         return;
     }
-    noteIncomingRowsLocked();
-    if (m_seedHistoryOnNextAppend || m_columns.empty()) {
-        absorbPendingHistoryLocked(kLivePendingColumns);
-    }
-    if (m_columns.empty()) {
-        consumePendingColumnsLocked(1);
-    }
-    lock.unlock();
-    update();
-}
-
-void SpectrogramItem::appendPackedRows(
-    const QByteArray &packedRows,
-    int rowCount,
-    int binsPerRow,
-    bool seedHistoryBurst) {
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    const auto appendStart = std::chrono::steady_clock::now();
-#endif
-    QMutexLocker lock(&m_stateMutex);
-    // When precomputed mode is active, ignore streaming rows — they
-    // would fight with the position-indexed atlas rendering.
-    if (m_precomputedReady) {
-        return;
-    }
-    if (packedRows.isEmpty() || rowCount <= 0 || binsPerRow <= 0) {
-        return;
-    }
-    const qsizetype expected = static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(binsPerRow);
-    if (packedRows.size() < expected) {
-        return;
-    }
-
-    if (m_binsPerColumn <= 0) {
-        m_binsPerColumn = binsPerRow;
-        invalidateMapping();
-    }
-    if (m_binsPerColumn != binsPerRow) {
-        return;
-    }
-
-    int appended = 0;
-    const auto *src = reinterpret_cast<const quint8 *>(packedRows.constData());
-    for (int r = 0; r < rowCount; ++r) {
-        std::vector<quint8> col(static_cast<size_t>(binsPerRow));
-        std::copy_n(
-            src + static_cast<qsizetype>(r) * static_cast<qsizetype>(binsPerRow),
-            binsPerRow,
-            col.begin());
-        m_pendingColumns.emplace_back(std::move(col));
-        appended++;
-    }
-    while (static_cast<int>(m_pendingColumns.size()) > kMaxPendingColumns) {
-        m_pendingColumns.pop_front();
-    }
-    if (appended <= 0) {
-        return;
-    }
-    noteIncomingRowsLocked();
-    if (seedHistoryBurst || m_seedHistoryOnNextAppend || m_columns.empty()) {
-        absorbPendingHistoryLocked(kLivePendingColumns);
-    }
-    if (m_columns.empty()) {
-        consumePendingColumnsLocked(1);
-    }
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    if (m_profileEnabled) {
-        const auto now = std::chrono::steady_clock::now();
-        const double appendMs = std::chrono::duration<double, std::milli>(now - appendStart).count();
-        const int backlog = static_cast<int>(m_pendingColumns.size());
-        if ((appendMs >= 2.0 || backlog >= 96)
-            && shouldLogProfileSpike(&m_profileLastAppendSpike, now)) {
-            FERROUS_SPECTROGRAM_LOGF(
-                stderr,
-                "[ui-spectrogram] append rows=%d bins=%d copy_ms=%.3f backlog=%d cols=%zu\n",
-                appended,
-                binsPerRow,
-                appendMs,
-                backlog,
-                static_cast<size_t>(m_columns.size()));
-        }
-    }
-#endif
+    m_seedHistoryOnNextAppend = false;
     lock.unlock();
     update();
 }
@@ -1442,7 +1364,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     hasCanvas = true;
                     canvasSize = m_canvas.size();
                     srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
-                    scrollOffset = std::clamp(m_pendingPhase, 0.0, 0.999);
+                    scrollOffset = 0.0;
                     drawX = static_cast<double>(w - drawCols) - scrollOffset;
                     latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
                     tileCount = static_cast<int>(m_dirtyTiles.size());
@@ -1480,7 +1402,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
         }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        profilePendingColumns = m_pendingColumns.size();
+        profilePendingColumns = 0;
         profileColumnCount = m_columns.size();
         profileBinsPerColumn = m_binsPerColumn;
 #endif
@@ -2182,141 +2104,6 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     return true;
 }
 
-bool SpectrogramItem::consumePendingColumnsLocked(int requested) {
-    if (requested <= 0 || m_pendingColumns.empty()) {
-        return false;
-    }
-    const int toConsume = std::min(requested, static_cast<int>(m_pendingColumns.size()));
-    if (toConsume <= 0) {
-        return false;
-    }
-
-    const int w = std::max(1, static_cast<int>(std::floor(width())));
-    const int h = std::max(1, static_cast<int>(std::floor(height())));
-    ensureCanvas(w, h);
-    if (!m_canvas.isNull() && m_canvasDirty) {
-        rebuildCanvasFromColumns();
-    }
-
-    bool consumed = false;
-    for (int i = 0; i < toConsume; ++i) {
-        std::vector<quint8> col = std::move(m_pendingColumns.front());
-        m_pendingColumns.pop_front();
-        if (static_cast<int>(col.size()) != m_binsPerColumn) {
-            continue;
-        }
-        m_columns.emplace_back(std::move(col));
-        while (static_cast<int>(m_columns.size()) > m_maxColumns) {
-            m_columns.pop_front();
-        }
-        if (!m_canvas.isNull()) {
-            drawColumnAt(m_canvasWriteX, m_columns.back());
-            m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
-            m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
-        }
-        consumed = true;
-    }
-    return consumed;
-}
-
-void SpectrogramItem::absorbPendingHistoryLocked(int retainPending) {
-    const int retain = std::max(0, retainPending);
-    const int pending = static_cast<int>(m_pendingColumns.size());
-    const int absorb = std::max(0, pending - retain);
-    if (absorb > 0) {
-        consumePendingColumnsLocked(absorb);
-        m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
-    }
-    m_seedHistoryOnNextAppend = false;
-}
-
-bool SpectrogramItem::advanceAnimationLocked(double elapsedSeconds) {
-    double dt = elapsedSeconds;
-    const bool gapDetected = !std::isfinite(dt) || dt <= 0.0 || dt > 0.25;
-    if (gapDetected) {
-        const double fallbackFps = m_fpsValue > 0 ? static_cast<double>(m_fpsValue) : 60.0;
-        dt = 1.0 / std::max(30.0, fallbackFps);
-    }
-
-    const double rowsPerSecond = targetRowsPerSecondLocked();
-    if (!std::isfinite(rowsPerSecond) || rowsPerSecond <= 1.0) {
-        if (m_pendingPhase > 0.0) {
-            m_pendingPhase = 0.0;
-            return true;
-        }
-        return false;
-    }
-
-    const int backlog = static_cast<int>(m_pendingColumns.size());
-
-    // After a display gap (sleep/background/compositor stall), the analysis
-    // engine kept producing rows while frameSwapped was paused.  Drain the
-    // entire backlog immediately so the spectrogram catches up to the current
-    // audio position instead of lagging permanently.
-    if (gapDetected && backlog > 0) {
-        const bool consumed = consumePendingColumnsLocked(backlog);
-        m_pendingPhase = 0.0;
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        if (consumed) {
-            noteSmoothnessProfileDrainLocked(backlog);
-            noteSeekProfileDrainLocked(backlog);
-        }
-#endif
-        return consumed;
-    }
-
-    // Catch-up boost: if the pending queue is growing during normal playback
-    // (e.g. due to small timing discrepancies between audio output rate and
-    // display refresh rate), accelerate the drain proportionally so the
-    // spectrogram never drifts more than a few rows behind.
-    constexpr int kCatchUpThreshold = 4;
-    double boost = 1.0;
-    if (backlog > kCatchUpThreshold) {
-        // Ramp from 1× at threshold to 2× at 2×threshold, capped at 3×.
-        boost = std::min(3.0,
-            1.0 + static_cast<double>(backlog - kCatchUpThreshold)
-                / static_cast<double>(kCatchUpThreshold));
-    }
-
-    const double prevPhase = m_pendingPhase;
-    m_pendingPhase += rowsPerSecond * dt * boost;
-
-    bool consumed = false;
-    const int ready = std::min(
-        static_cast<int>(std::floor(m_pendingPhase)),
-        backlog);
-    if (ready > 0) {
-        consumed = consumePendingColumnsLocked(ready);
-        if (consumed) {
-            m_pendingPhase = std::max(0.0, m_pendingPhase - static_cast<double>(ready));
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-            noteSmoothnessProfileDrainLocked(ready);
-            noteSeekProfileDrainLocked(ready);
-#endif
-        }
-    }
-
-    if (m_pendingColumns.empty()) {
-        const double idleSeconds = m_lastRowAppendTime.time_since_epoch().count() == 0
-            ? 1.0
-            : std::chrono::duration<double>(std::chrono::steady_clock::now() - m_lastRowAppendTime).count();
-        if (idleSeconds > 0.30) {
-            m_pendingPhase = 0.0;
-        } else {
-            m_pendingPhase = std::clamp(m_pendingPhase, 0.0, 0.999);
-        }
-    }
-    const bool phaseChanged = std::abs(m_pendingPhase - prevPhase) > 0.0001;
-    return consumed || phaseChanged;
-}
-
-void SpectrogramItem::noteIncomingRowsLocked() {
-    m_lastRowAppendTime = std::chrono::steady_clock::now();
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    m_lastIncomingRowsAtMs = QDateTime::currentMSecsSinceEpoch();
-#endif
-}
-
 double SpectrogramItem::targetRowsPerSecondLocked() const {
     if (m_sampleRateHz > 0) {
         const double stableRate = static_cast<double>(m_sampleRateHz) / kReferenceHopSamples;
@@ -2443,13 +2230,13 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 #endif
 
-    bool advanced = false;
-    bool pending = false;
-    double elapsed = 0.0;
     QMutexLocker lock(&m_stateMutex);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    double elapsed = 0.0;
     if (m_animationTickInitialized) {
         elapsed = std::chrono::duration<double>(now - m_lastAnimationTick).count();
     }
+#endif
     m_lastAnimationTick = now;
     m_animationTickInitialized = true;
     if (m_positionJumpHoldActive) {
@@ -2471,27 +2258,22 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     maybeStartSmoothnessProfileLocked(nowMs);
     maybeStartSeekProfileLocked(nowMs);
 #endif
-    advanced = advanceAnimationLocked(elapsed);
-    pending = !m_pendingColumns.empty();
     const bool precomputedActive = m_precomputedReady;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    noteSmoothnessProfileFrameLocked(nowMs, elapsed, pending, advanced);
-    noteSeekProfileFrameLocked(nowMs, elapsed, pending, advanced);
+    noteSmoothnessProfileFrameLocked(nowMs, elapsed, false, false);
+    noteSeekProfileFrameLocked(nowMs, elapsed, false, false);
     if (m_profileEnabled
         && elapsed >= 0.025
         && shouldLogProfileSpike(&m_profileLastFrameGapSpike, now)) {
         FERROUS_SPECTROGRAM_LOGF(
             stderr,
-            "[ui-spectrogram] frame_gap ms=%.3f pending=%zu phase=%.3f fps=%d advanced=%d\n",
+            "[ui-spectrogram] frame_gap ms=%.3f fps=%d\n",
             elapsed * 1000.0,
-            static_cast<size_t>(m_pendingColumns.size()),
-            m_pendingPhase,
-            m_fpsValue,
-            advanced ? 1 : 0);
+            m_fpsValue);
     }
 #endif
     lock.unlock();
-    if (changed || advanced || pending || precomputedActive) {
+    if (changed || precomputedActive) {
         update();
     }
 }
@@ -2506,8 +2288,8 @@ void SpectrogramItem::maybeStartSmoothnessProfileLocked(qint64 nowMs) {
         return;
     }
 
-    const bool streamActive = !m_pendingColumns.empty()
-        || (m_lastIncomingRowsAtMs > 0 && (nowMs - m_lastIncomingRowsAtMs) <= kSmoothnessIdleMs);
+    const bool streamActive =
+        (m_lastIncomingRowsAtMs > 0 && (nowMs - m_lastIncomingRowsAtMs) <= kSmoothnessIdleMs);
 
     if (m_smoothnessProfile.active) {
         if ((nowMs - m_smoothnessProfile.startedAtMs) >= kSmoothnessWindowMs) {
@@ -2534,10 +2316,8 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
         return;
     }
 
-    const int pendingRows = static_cast<int>(m_pendingColumns.size());
     m_smoothnessProfile.framesObserved += 1;
     m_smoothnessProfile.lastFrameAtMs = nowMs;
-    m_smoothnessProfile.maxPendingRows = std::max(m_smoothnessProfile.maxPendingRows, pendingRows);
     if (pending) {
         m_smoothnessProfile.pendingFrames += 1;
     } else {
@@ -2546,7 +2326,7 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
 
     const int canvasWidth = m_canvas.width() > 0 ? m_canvas.width()
         : std::max(1, static_cast<int>(std::floor(width())));
-    const double headUnits = static_cast<double>(m_canvasWriteX) + m_pendingPhase;
+    const double headUnits = static_cast<double>(m_canvasWriteX);
     double unwrappedHeadUnits = headUnits;
     if (m_smoothnessProfile.lastHeadValid && canvasWidth > 1) {
         if ((m_smoothnessProfile.lastHeadUnits - unwrappedHeadUnits)
@@ -2614,14 +2394,6 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
             m_smoothnessProfile.maxGapMs,
             advanced ? 1 : 0);
     }
-}
-
-void SpectrogramItem::noteSmoothnessProfileDrainLocked(int consumed) {
-    if (!m_smoothnessProfile.active || consumed <= 0) {
-        return;
-    }
-    m_smoothnessProfile.drainPasses += 1;
-    m_smoothnessProfile.drainedColumns += consumed;
 }
 
 void SpectrogramItem::noteSmoothnessPaintLocked(double paintMs) {
@@ -2778,10 +2550,8 @@ void SpectrogramItem::noteSeekProfileFrameLocked(
         return;
     }
 
-    const int pendingRows = static_cast<int>(m_pendingColumns.size());
     m_seekProfile.framesObserved += 1;
     m_seekProfile.lastFrameAtMs = nowMs;
-    m_seekProfile.maxPendingRows = std::max(m_seekProfile.maxPendingRows, pendingRows);
     if (pending) {
         m_seekProfile.pendingFrames += 1;
     } else {
@@ -2789,7 +2559,7 @@ void SpectrogramItem::noteSeekProfileFrameLocked(
     }
 
     const int canvasWidth = m_canvas.width() > 0 ? m_canvas.width() : std::max(1, static_cast<int>(std::floor(width())));
-    const double headUnits = static_cast<double>(m_canvasWriteX) + m_pendingPhase;
+    const double headUnits = static_cast<double>(m_canvasWriteX);
     double unwrappedHeadUnits = headUnits;
     if (m_seekProfile.lastHeadValid && canvasWidth > 1) {
         if ((m_seekProfile.lastHeadUnits - unwrappedHeadUnits) > (static_cast<double>(canvasWidth) * 0.5)) {
@@ -2849,14 +2619,6 @@ void SpectrogramItem::noteSeekProfileFrameLocked(
     if (seekAgeMs >= kSeekTraceWindowMs || (!pending && seekAgeMs >= 150 && m_seekProfile.framesObserved >= 4)) {
         finalizeSeekProfileLocked(nowMs, pending ? "expired" : "settled");
     }
-}
-
-void SpectrogramItem::noteSeekProfileDrainLocked(int consumed) {
-    if (!m_seekProfile.active || consumed <= 0) {
-        return;
-    }
-    m_seekProfile.drainPasses += 1;
-    m_seekProfile.drainedColumns += consumed;
 }
 
 void SpectrogramItem::finalizeSeekProfileLocked(qint64 nowMs, const char *reason) {

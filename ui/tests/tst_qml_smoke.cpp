@@ -367,12 +367,6 @@ private slots:
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
     void artistPrefixSearchUsesModelLookup();
-    void spectrogramSurfaceDefersPackedDeltaFlush();
-    void spectrogramItemRendersNonBackgroundPixels();
-    void spectrogramItemRendersRowsAppendedAfterInitialBlankFrame();
-    void spectrogramItemSurvivesRepeatedIncrementalTextureReplacement();
-    void spectrogramWrappedHistoryStaysContinuousAcrossTileBoundary();
-    void spectrogramChunkedResetBurstSeedsHistoryAcrossChunks();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
@@ -381,10 +375,6 @@ private slots:
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
     void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
-    void spectrogramSeedsOnlyFirstResetBurstIntoHistory();
-    void spectrogramSteadyStateAppendKeepsRowsPendingForAnimation();
-    void spectrogramQueuedDrainConsumesReadyRows();
-    void spectrogramHaltDropsPendingMotion();
     void diagnosticsLogUsesLowercaseAppDir();
     void playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate();
     void playbackControllerPlaybackUpdateDoesNotPredictSpectrogramForward();
@@ -1014,274 +1004,6 @@ void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
 }
 
-void QmlSmokeTest::spectrogramItemRendersNonBackgroundPixels() {
-    QQuickWindow window;
-    window.resize(320, 180);
-
-    auto *item = new SpectrogramItem(window.contentItem());
-    item->setWidth(320);
-    item->setHeight(180);
-    item->setSampleRateHz(48000);
-
-    constexpr int rowCount = 320;
-    constexpr int binsPerRow = 128;
-    QByteArray packedRows;
-    packedRows.resize(rowCount * binsPerRow);
-    for (int row = 0; row < rowCount; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            const int index = row * binsPerRow + bin;
-            packedRows[index] = static_cast<char>((row * 5 + bin * 3) % 256);
-        }
-    }
-    item->appendPackedRows(packedRows, rowCount, binsPerRow);
-
-    window.show();
-    QTest::qWait(100);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-    const QImage frame = window.grabWindow();
-    QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed");
-
-    const QColor background(0x0b, 0x0b, 0x0f);
-    int minX = frame.width();
-    int maxX = -1;
-    int nonBackgroundPixels = 0;
-    for (int y = 0; y < frame.height(); ++y) {
-        for (int x = 0; x < frame.width(); ++x) {
-            if (frame.pixelColor(x, y) != background) {
-                ++nonBackgroundPixels;
-                minX = std::min(minX, x);
-                maxX = std::max(maxX, x);
-            }
-        }
-    }
-    QVERIFY2(nonBackgroundPixels > (frame.width() * frame.height()) / 50,
-        "Spectrogram rendered too few non-background pixels");
-    QVERIFY2(maxX >= 0 && (maxX - minX) > frame.width() / 3,
-        "Spectrogram pixels did not span enough horizontal width");
-}
-
-void QmlSmokeTest::spectrogramItemRendersRowsAppendedAfterInitialBlankFrame() {
-    QQuickWindow window;
-    window.resize(320, 180);
-
-    auto *item = new SpectrogramItem(window.contentItem());
-    item->setWidth(320);
-    item->setHeight(180);
-    item->setSampleRateHz(48000);
-
-    window.show();
-    QTest::qWait(50);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-
-    constexpr int rowCount = 320;
-    constexpr int binsPerRow = 128;
-    QByteArray packedRows;
-    packedRows.resize(rowCount * binsPerRow);
-    for (int row = 0; row < rowCount; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            const int index = row * binsPerRow + bin;
-            packedRows[index] = static_cast<char>((row * 11 + bin * 7) % 256);
-        }
-    }
-    item->appendPackedRows(packedRows, rowCount, binsPerRow);
-
-    QTest::qWait(100);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-    const QImage frame = window.grabWindow();
-    QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed after delayed append");
-
-    const QColor background(0x0b, 0x0b, 0x0f);
-    int minX = frame.width();
-    int maxX = -1;
-    int nonBackgroundPixels = 0;
-    for (int y = 0; y < frame.height(); ++y) {
-        for (int x = 0; x < frame.width(); ++x) {
-            if (frame.pixelColor(x, y) != background) {
-                ++nonBackgroundPixels;
-                minX = std::min(minX, x);
-                maxX = std::max(maxX, x);
-            }
-        }
-    }
-    QVERIFY2(nonBackgroundPixels > (frame.width() * frame.height()) / 50,
-        "Spectrogram stayed nearly blank after delayed append");
-    QVERIFY2(maxX >= 0 && (maxX - minX) > frame.width() / 3,
-        "Delayed spectrogram append only rendered a narrow strip");
-}
-
-void QmlSmokeTest::spectrogramItemSurvivesRepeatedIncrementalTextureReplacement() {
-    QQuickWindow window;
-    window.resize(320, 180);
-
-    auto *item = new SpectrogramItem(window.contentItem());
-    item->setWidth(320);
-    item->setHeight(180);
-    item->setSampleRateHz(48000);
-
-    constexpr int initialRows = 320;
-    constexpr int burstRows = 96;
-    constexpr int binsPerRow = 128;
-
-    auto makePackedRows = [](int rowCount, int bins, int seed) {
-        QByteArray packedRows;
-        packedRows.resize(rowCount * bins);
-        for (int row = 0; row < rowCount; ++row) {
-            for (int bin = 0; bin < bins; ++bin) {
-                packedRows[row * bins + bin] = static_cast<char>((seed + row * 17 + bin * 5) % 256);
-            }
-        }
-        return packedRows;
-    };
-
-    item->appendPackedRows(makePackedRows(initialRows, binsPerRow, 11), initialRows, binsPerRow);
-
-    window.show();
-    QTest::qWait(80);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 80);
-
-    for (int burst = 0; burst < 6; ++burst) {
-        item->appendPackedRows(makePackedRows(burstRows, binsPerRow, 40 + burst * 13), burstRows, binsPerRow);
-        QTest::qWait(80);
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 80);
-        const QImage frame = window.grabWindow();
-        QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed during incremental replacement");
-    }
-}
-
-void QmlSmokeTest::spectrogramWrappedHistoryStaysContinuousAcrossTileBoundary() {
-    QQuickWindow window;
-    window.resize(320, 180);
-
-    auto *item = new SpectrogramItem(window.contentItem());
-    item->setWidth(320);
-    item->setHeight(180);
-    item->setSampleRateHz(48000);
-
-    constexpr int rowCount = 323;
-    constexpr int binsPerRow = 96;
-    QByteArray packedRows;
-    packedRows.resize(rowCount * binsPerRow);
-    std::fill(packedRows.begin(), packedRows.end(), static_cast<char>(255));
-    item->appendPackedRows(packedRows, rowCount, binsPerRow);
-
-    window.show();
-    QTest::qWait(100);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-    const QImage frame = window.grabWindow();
-    QVERIFY2(!frame.isNull(), "Spectrogram frame grab failed for wrapped history continuity");
-
-    const QColor background(0x0b, 0x0b, 0x0f);
-    int maxBackgroundRun = 0;
-    int currentBackgroundRun = 0;
-    for (int x = 0; x < frame.width(); ++x) {
-        int nonBackgroundPixels = 0;
-        for (int y = 0; y < frame.height(); ++y) {
-            if (frame.pixelColor(x, y) != background) {
-                ++nonBackgroundPixels;
-            }
-        }
-        if (nonBackgroundPixels < frame.height() / 4) {
-            currentBackgroundRun += 1;
-            maxBackgroundRun = std::max(maxBackgroundRun, currentBackgroundRun);
-        } else {
-            currentBackgroundRun = 0;
-        }
-    }
-
-    QVERIFY2(
-        maxBackgroundRun <= 1,
-        qPrintable(QStringLiteral("Wrapped spectrogram history had a background gap of %1 columns")
-                       .arg(maxBackgroundRun)));
-}
-
-void QmlSmokeTest::spectrogramChunkedResetBurstSeedsHistoryAcrossChunks() {
-    SpectrogramItem item;
-    item.setWidth(320);
-    item.setHeight(180);
-    item.setSampleRateHz(48000);
-
-    constexpr int rowsPerChunk = 4;
-    constexpr int binsPerRow = 32;
-    QByteArray firstChunk;
-    firstChunk.resize(rowsPerChunk * binsPerRow);
-    QByteArray secondChunk;
-    secondChunk.resize(rowsPerChunk * binsPerRow);
-    for (int row = 0; row < rowsPerChunk; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            firstChunk[row * binsPerRow + bin] = static_cast<char>((row * 11 + bin * 3) % 256);
-            secondChunk[row * binsPerRow + bin] = static_cast<char>((50 + row * 7 + bin * 5) % 256);
-        }
-    }
-
-    item.appendPackedRows(firstChunk, rowsPerChunk, binsPerRow, true);
-    item.appendPackedRows(secondChunk, rowsPerChunk, binsPerRow, true);
-
-    QCOMPARE(item.m_columns.size(), static_cast<size_t>(6));
-    QCOMPARE(item.m_pendingColumns.size(), static_cast<size_t>(2));
-}
-
-void QmlSmokeTest::spectrogramSurfaceDefersPackedDeltaFlush() {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "viewers" as Viewers
-
-Item {
-    width: 420
-    height: 160
-
-    QtObject {
-        id: bridge
-        property int spectrogramViewMode: 0
-        property int spectrogramDisplayMode: 0
-        property real dbRange: 90
-        property bool logScale: false
-        property bool showFps: false
-        property int sampleRateHz: 48000
-        signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
-            int startIndex, int totalEstimate, int sampleRate, int hopSize,
-            real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken)
-    }
-
-    Viewers.SpectrogramSurface {
-        id: surface
-        objectName: "surface"
-        anchors.fill: parent
-        uiBridge: bridge
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *surface = root->findChild<QObject *>(QStringLiteral("surface"));
-    QVERIFY(surface != nullptr);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-
-    QVariantMap channel;
-    channel.insert(QStringLiteral("label"), QStringLiteral("L"));
-    channel.insert(QStringLiteral("rows"), 10);
-    channel.insert(QStringLiteral("bins"), 2);
-    channel.insert(QStringLiteral("data"), QByteArray::fromHex("0102030405060708090a0b0c0d0e0f1011121314"));
-
-    const bool invoked = QMetaObject::invokeMethod(
-        surface,
-        "appendPackedDelta",
-        Q_ARG(QVariant, QVariant::fromValue(QVariantList{channel})),
-        Q_ARG(QVariant, false));
-    QVERIFY(invoked);
-
-    QVERIFY(surface->property("pendingPackedFlushScheduled").toBool());
-    QCOMPARE(surface->property("pendingPackedBatches").toList().size(), 1);
-
-    QTRY_VERIFY(surface->property("pendingPackedBatches").toList().isEmpty());
-    QVERIFY(!surface->property("pendingPackedFlushScheduled").toBool());
-}
-
 void QmlSmokeTest::playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -1870,143 +1592,6 @@ void QmlSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
     QVERIFY(std::abs(item.m_positionSeconds - expectedSeconds) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramSeedsOnlyFirstResetBurstIntoHistory() {
-    SpectrogramItem item;
-    item.setWidth(320);
-    item.setHeight(180);
-    item.setSampleRateHz(48000);
-
-    constexpr int rowCount = 24;
-    constexpr int binsPerRow = 32;
-    QByteArray packedRows;
-    packedRows.resize(rowCount * binsPerRow);
-    for (int row = 0; row < rowCount; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            packedRows[row * binsPerRow + bin] = static_cast<char>((row * 13 + bin * 5) % 256);
-        }
-    }
-
-    item.appendPackedRows(packedRows, rowCount, binsPerRow);
-
-    QCOMPARE(item.m_columns.size(), static_cast<size_t>(rowCount - 2));
-    QCOMPARE(item.m_pendingColumns.size(), static_cast<size_t>(2));
-    QCOMPARE(item.m_binsPerColumn, binsPerRow);
-    QVERIFY(!item.m_seedHistoryOnNextAppend);
-}
-
-void QmlSmokeTest::spectrogramSteadyStateAppendKeepsRowsPendingForAnimation() {
-    SpectrogramItem item;
-    item.setWidth(320);
-    item.setHeight(180);
-    item.setSampleRateHz(48000);
-
-    constexpr int initialRows = 24;
-    constexpr int extraRows = 8;
-    constexpr int binsPerRow = 32;
-    QByteArray initialPackedRows;
-    initialPackedRows.resize(initialRows * binsPerRow);
-    for (int row = 0; row < initialRows; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            initialPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 7 + bin * 3) % 256);
-        }
-    }
-    item.appendPackedRows(initialPackedRows, initialRows, binsPerRow);
-
-    const size_t seededColumns = item.m_columns.size();
-    const size_t seededPending = item.m_pendingColumns.size();
-
-    QByteArray extraPackedRows;
-    extraPackedRows.resize(extraRows * binsPerRow);
-    for (int row = 0; row < extraRows; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            extraPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 17 + bin * 11) % 256);
-        }
-    }
-    item.appendPackedRows(extraPackedRows, extraRows, binsPerRow);
-
-    QCOMPARE(item.m_columns.size(), seededColumns);
-    QCOMPARE(item.m_pendingColumns.size(), seededPending + static_cast<size_t>(extraRows));
-    QVERIFY(!item.m_seedHistoryOnNextAppend);
-}
-
-void QmlSmokeTest::spectrogramQueuedDrainConsumesReadyRows() {
-    SpectrogramItem item;
-    item.setWidth(320);
-    item.setHeight(180);
-    item.setSampleRateHz(48000);
-
-    constexpr int initialRows = 24;
-    constexpr int extraRows = 8;
-    constexpr int binsPerRow = 32;
-    QByteArray initialPackedRows;
-    initialPackedRows.resize(initialRows * binsPerRow);
-    for (int row = 0; row < initialRows; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            initialPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 5 + bin * 7) % 256);
-        }
-    }
-    item.appendPackedRows(initialPackedRows, initialRows, binsPerRow);
-
-    QByteArray extraPackedRows;
-    extraPackedRows.resize(extraRows * binsPerRow);
-    for (int row = 0; row < extraRows; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            extraPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 19 + bin * 3) % 256);
-        }
-    }
-    item.appendPackedRows(extraPackedRows, extraRows, binsPerRow);
-
-    const size_t columnsBefore = item.m_columns.size();
-    const size_t pendingBefore = item.m_pendingColumns.size();
-    QVERIFY(pendingBefore >= static_cast<size_t>(extraRows));
-
-    item.m_pendingPhase = 3.0;
-    // Use a small but valid dt (1ms) so gapDetected is false and the drain
-    // is governed by pendingPhase rather than consuming the entire backlog.
-    // At 46.875 rows/s with max boost=3× the phase advances by ~0.14 per ms,
-    // keeping floor(3 + advance) == 3 regardless of backlog size.
-    QVERIFY(item.advanceAnimationLocked(0.001));
-
-    QCOMPARE(item.m_columns.size(), columnsBefore + 3);
-    QCOMPARE(item.m_pendingColumns.size(), pendingBefore - 3);
-    QVERIFY(item.m_pendingPhase >= 0.0);
-    QVERIFY(item.m_pendingPhase < 1.0);
-}
-
-void QmlSmokeTest::spectrogramHaltDropsPendingMotion() {
-    SpectrogramItem item;
-    item.setWidth(320);
-    item.setHeight(180);
-    item.setSampleRateHz(48000);
-
-    constexpr int initialRows = 24;
-    constexpr int extraRows = 8;
-    constexpr int binsPerRow = 32;
-    QByteArray initialPackedRows;
-    initialPackedRows.resize(initialRows * binsPerRow);
-    for (int row = 0; row < initialRows; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            initialPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 7 + bin * 3) % 256);
-        }
-    }
-    item.appendPackedRows(initialPackedRows, initialRows, binsPerRow);
-
-    QByteArray extraPackedRows;
-    extraPackedRows.resize(extraRows * binsPerRow);
-    for (int row = 0; row < extraRows; ++row) {
-        for (int bin = 0; bin < binsPerRow; ++bin) {
-            extraPackedRows[row * binsPerRow + bin] = static_cast<char>((row * 17 + bin * 11) % 256);
-        }
-    }
-    item.appendPackedRows(extraPackedRows, extraRows, binsPerRow);
-    QVERIFY(!item.m_pendingColumns.empty());
-
-    item.halt();
-
-    QVERIFY(item.m_pendingColumns.empty());
-    QCOMPARE(item.m_pendingPhase, 0.0);
-}
-
 void QmlSmokeTest::diagnosticsLogUsesLowercaseAppDir() {
     const QString logPath = DiagnosticsLog::defaultLogPath();
     QVERIFY(!logPath.isEmpty());
@@ -2039,11 +1624,6 @@ void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_profileEnabled = true;
         item.m_canvasWriteX = 96;
-        item.m_pendingPhase = 0.25;
-        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
-        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
-        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
-        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
 
         const qint64 startedAtMs = SpectrogramSeekTrace::startedAtMs();
         QVERIFY(startedAtMs > 0);
@@ -2062,7 +1642,7 @@ void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
     QCOMPARE(state.value("reason").toString(), QStringLiteral("test"));
     QVERIFY(state.value("incidentDetected").toBool());
     QCOMPARE(state.value("gapFrames").toInt(), 3);
-    QCOMPARE(state.value("maxPendingRows").toInt(), 4);
+    QCOMPARE(state.value("maxPendingRows").toInt(), 0);
 #else
     QSKIP("Seek hitch profiling instrumentation is compiled out");
 #endif
@@ -2081,10 +1661,7 @@ void QmlSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_profileEnabled = true;
         item.m_canvasWriteX = 48;
-        item.m_pendingPhase = 0.5;
         item.m_lastIncomingRowsAtMs = QDateTime::currentMSecsSinceEpoch();
-        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
-        item.m_pendingColumns.emplace_back(std::vector<quint8>(64, 1));
         item.maybeStartSmoothnessProfileLocked(item.m_lastIncomingRowsAtMs);
         QVERIFY(item.m_smoothnessProfile.active);
 

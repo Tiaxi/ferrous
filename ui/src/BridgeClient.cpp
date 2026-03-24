@@ -634,33 +634,6 @@ QString channelLayoutIconKey(int channels) {
     }
 }
 
-QString spectrogramChannelLabelText(quint8 code, int fallbackIndex) {
-    switch (code) {
-    case 0:
-        return QStringLiteral("M");
-    case 1:
-        return QStringLiteral("L");
-    case 2:
-        return QStringLiteral("R");
-    case 3:
-        return QStringLiteral("C");
-    case 4:
-        return QStringLiteral("LFE");
-    case 5:
-        return QStringLiteral("SL");
-    case 6:
-        return QStringLiteral("SR");
-    case 7:
-        return QStringLiteral("RL");
-    case 8:
-        return QStringLiteral("RR");
-    case 9:
-        return QStringLiteral("RC");
-    default:
-        return QStringLiteral("Ch%1").arg(std::max(1, fallbackIndex + 1));
-    }
-}
-
 QString formatLabelFromPath(const QString &path) {
     const QString ext = QFileInfo(path).suffix().trimmed().toLower();
     if (ext == QStringLiteral("m4a")
@@ -2062,10 +2035,6 @@ bool BridgeClient::waveformComplete() const {
     return m_waveformComplete;
 }
 
-bool BridgeClient::spectrogramReset() const {
-    return m_spectrogramReset;
-}
-
 int BridgeClient::sampleRateHz() const {
     return m_sampleRateHz;
 }
@@ -3391,118 +3360,6 @@ void BridgeClient::scanDefaultMusicRoot() {
     scanRoot(music);
 }
 
-QVariantMap BridgeClient::takeSpectrogramRowsDeltaPacked(int maxRowsPerChannel) {
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    QElapsedTimer deltaTimer;
-    deltaTimer.start();
-#endif
-    QVariantMap out;
-    QVariantList channels;
-    channels.reserve(m_spectrogramChannels.size());
-    const int clampedMaxRows = maxRowsPerChannel > 0 ? maxRowsPerChannel : std::numeric_limits<int>::max();
-    int rowsToTake = std::numeric_limits<int>::max();
-    for (const auto &channel : m_spectrogramChannels) {
-        if (channel.packedRowsCount <= 0 || channel.packedBins <= 0 || channel.packedRows.isEmpty()) {
-            continue;
-        }
-        rowsToTake = std::min(rowsToTake, channel.packedRowsCount);
-    }
-    if (rowsToTake == std::numeric_limits<int>::max()) {
-        rowsToTake = 0;
-    } else {
-        rowsToTake = std::min(rowsToTake, clampedMaxRows);
-    }
-
-    int totalRows = 0;
-    qsizetype totalBytes = 0;
-    bool hasRemainingRows = false;
-    for (auto &channel : m_spectrogramChannels) {
-        if (channel.packedRowsCount <= 0 || channel.packedBins <= 0 || channel.packedRows.isEmpty()) {
-            channel.packedRows.clear();
-            channel.packedRowsCount = 0;
-            continue;
-        }
-        const int takeRows = std::min(channel.packedRowsCount, rowsToTake);
-        if (takeRows <= 0) {
-            hasRemainingRows = hasRemainingRows || channel.packedRowsCount > 0;
-            continue;
-        }
-        const qsizetype takeBytes = static_cast<qsizetype>(takeRows)
-            * static_cast<qsizetype>(channel.packedBins);
-        QVariantMap channelMap;
-        channelMap.insert(QStringLiteral("label"), channel.label);
-        channelMap.insert(QStringLiteral("rows"), takeRows);
-        channelMap.insert(QStringLiteral("bins"), channel.packedBins);
-        channelMap.insert(
-            QStringLiteral("data"),
-            channel.packedRows.left(static_cast<int>(takeBytes)));
-        channels.push_back(channelMap);
-        totalRows += takeRows;
-        totalBytes += takeBytes;
-        if (takeRows >= channel.packedRowsCount) {
-            channel.packedRows.clear();
-            channel.packedRowsCount = 0;
-        } else {
-            channel.packedRows.remove(0, takeBytes);
-            channel.packedRowsCount -= takeRows;
-            hasRemainingRows = true;
-        }
-    }
-    out.insert(QStringLiteral("channels"), channels);
-    const bool reset = m_spectrogramReset && !channels.isEmpty();
-    const bool seedHistory = m_spectrogramSeedBurstRowsRemaining > 0 && !channels.isEmpty();
-    out.insert(QStringLiteral("reset"), reset);
-    out.insert(QStringLiteral("seedHistory"), seedHistory);
-    if (seedHistory) {
-        m_spectrogramSeedBurstRowsRemaining = std::max(0, m_spectrogramSeedBurstRowsRemaining - rowsToTake);
-    }
-    if (reset) {
-        m_spectrogramReset = false;
-    }
-    if (!hasRemainingRows) {
-        m_spectrogramChannels.clear();
-    } else {
-        scheduleAnalysisChanged();
-    }
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    if (m_profileUiEnabled) {
-        const double deltaMs = static_cast<double>(deltaTimer.nsecsElapsed()) / 1'000'000.0;
-        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-        if (SpectrogramSeekTrace::isActive(nowMs)
-            && shouldEmitUiProfileLog(nowMs, &m_lastSpectrogramDeltaProfileLogMs, 120)) {
-            FERROUS_PROFILE_LOG_DIAGNOSTIC(
-                QStringLiteral("ui-prof"),
-                QStringLiteral(
-                    "seek_spectrogram_delta gen=%1 rows=%2 channels=%3 reset=%4 seed=%5 remaining=%6 kb=%7")
-                    .arg(SpectrogramSeekTrace::currentGeneration())
-                    .arg(totalRows)
-                    .arg(channels.size())
-                    .arg(reset ? 1 : 0)
-                    .arg(seedHistory ? 1 : 0)
-                    .arg(hasRemainingRows ? 1 : 0)
-                    .arg(static_cast<double>(totalBytes) / 1024.0, 0, 'f', 1));
-        }
-        if ((deltaMs >= 2.0 || totalRows >= 48)
-            && shouldEmitUiProfileLog(nowMs, &m_lastSpectrogramDeltaProfileLogMs, 200)) {
-            FERROUS_PROFILE_LOG_DIAGNOSTIC(
-                QStringLiteral("ui-prof"),
-                QStringLiteral("spectrogram_delta ms=%1 channels=%2 rows=%3 kb=%4")
-                    .arg(deltaMs, 0, 'f', 2)
-                    .arg(channels.size())
-                    .arg(totalRows)
-                    .arg(static_cast<double>(totalBytes) / 1024.0, 0, 'f', 1));
-        }
-    }
-#endif
-    return out;
-}
-
-void BridgeClient::clearSpectrogramDeltaState() {
-    m_spectrogramChannels.clear();
-    m_spectrogramReset = false;
-    m_spectrogramSeedBurstRowsRemaining = 0;
-}
-
 void BridgeClient::requestSnapshot() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot));
 }
@@ -3930,9 +3787,6 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
 
     bool changed = false;
     int parsedFrames = 0;
-    int totalRows = 0;
-    int totalChannels = 0;
-    int maxBins = 0;
     qsizetype readOffset = m_analysisBufferReadOffset;
     const qsizetype totalSize = m_analysisBuffer.size();
     const auto *base = reinterpret_cast<const uchar *>(m_analysisBuffer.constData());
@@ -3978,9 +3832,6 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
             continue;
         }
         parsedFrames++;
-        totalRows += static_cast<int>(rowCount);
-        totalChannels = std::max(totalChannels, static_cast<int>(channelCount));
-        maxBins = std::max(maxBins, static_cast<int>(binCount));
         if (m_hasAnalysisFrameSeq && !isNewerSeq(frameSeq, m_lastAnalysisFrameSeq)) {
             m_analysisDroppedFrames++;
             continue;
@@ -3995,14 +3846,9 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
             changed = true;
         }
 
-        const bool spectrogramReset = (flags & kAnalysisFlagReset) != 0;
         const double waveformCoverageSeconds =
             static_cast<double>(waveformCoverageMillis) / 1000.0;
         const bool waveformComplete = (flags & kAnalysisFlagWaveformComplete) != 0;
-        if (m_spectrogramReset != spectrogramReset) {
-            m_spectrogramReset = spectrogramReset;
-            changed = true;
-        }
         if (std::abs(m_waveformCoverageSeconds - waveformCoverageSeconds) > 0.0001) {
             m_waveformCoverageSeconds = waveformCoverageSeconds;
             changed = true;
@@ -4010,13 +3856,6 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         if (m_waveformComplete != waveformComplete) {
             m_waveformComplete = waveformComplete;
             changed = true;
-        }
-        if (spectrogramReset) {
-            if (!m_spectrogramChannels.isEmpty()) {
-                m_spectrogramChannels.clear();
-                changed = true;
-            }
-            m_spectrogramSeedBurstRowsRemaining = 0;
         }
 
         if ((flags & kAnalysisFlagWaveform) != 0) {
@@ -4030,76 +3869,11 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
             cursor += waveformLen;
         }
 
-        QVector<QString> channelLabels;
-        channelLabels.reserve(channelCount);
-        for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
-            channelLabels.push_back(
-                spectrogramChannelLabelText(cursor[channelIndex], channelIndex));
-        }
+        // Skip channel labels and spectrogram row data (streaming spectrogram
+        // has been replaced by the precomputed worker path).
         cursor += labelBytes;
-
-        if ((flags & kAnalysisFlagSpectrogram) != 0
-            && rowCount > 0
-            && binCount > 0
-            && channelCount > 0) {
-            bool rebuildChannels = m_spectrogramChannels.size() != channelCount;
-            if (!rebuildChannels) {
-                for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
-                    const auto &channel = m_spectrogramChannels[channelIndex];
-                    if (channel.label != channelLabels[channelIndex]
-                        || (channel.packedBins > 0
-                            && channel.packedBins != static_cast<int>(binCount))) {
-                        rebuildChannels = true;
-                        break;
-                    }
-                }
-            }
-            if (rebuildChannels) {
-                m_spectrogramChannels.clear();
-                m_spectrogramChannels.reserve(channelCount);
-                for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
-                    SpectrogramChannelDelta channel;
-                    channel.label = channelLabels[channelIndex];
-                    channel.packedBins = static_cast<int>(binCount);
-                    m_spectrogramChannels.push_back(channel);
-                }
-                changed = true;
-            }
-
-            constexpr int kMaxPendingSpectrogramRows = 512;
-            const qsizetype rowBytes = static_cast<qsizetype>(binCount);
-            for (int rowIndex = 0; rowIndex < rowCount; ++rowIndex) {
-                for (int channelIndex = 0; channelIndex < channelCount; ++channelIndex) {
-                    auto &channel = m_spectrogramChannels[channelIndex];
-                    channel.packedRows.append(reinterpret_cast<const char *>(cursor), rowBytes);
-                    channel.packedRowsCount += 1;
-                    if (channel.packedRowsCount > kMaxPendingSpectrogramRows && channel.packedBins > 0) {
-                        const int dropRows = channel.packedRowsCount - kMaxPendingSpectrogramRows;
-                        const qsizetype dropBytes = static_cast<qsizetype>(dropRows)
-                            * static_cast<qsizetype>(channel.packedBins);
-                        channel.packedRows.remove(0, dropBytes);
-                        channel.packedRowsCount = kMaxPendingSpectrogramRows;
-                    }
-                    cursor += rowBytes;
-                }
-            }
-            if (!m_spectrogramChannels.isEmpty()) {
-                const bool hasPendingRows = std::any_of(
-                    m_spectrogramChannels.cbegin(),
-                    m_spectrogramChannels.cend(),
-                    [](const SpectrogramChannelDelta &channel) {
-                        return channel.packedRowsCount > 0;
-                    });
-                if (hasPendingRows) {
-                    if (spectrogramReset) {
-                        m_spectrogramSeedBurstRowsRemaining = std::max(
-                            m_spectrogramSeedBurstRowsRemaining,
-                            static_cast<int>(rowCount));
-                    }
-                    changed = true;
-                }
-            }
-        }
+        cursor += static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(channelCount)
+            * static_cast<qsizetype>(binCount);
     }
 
     if (changed) {
@@ -4125,25 +3899,17 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
-        int pendingRows = 0;
-        for (const auto &channel : m_spectrogramChannels) {
-            pendingRows = std::max(pendingRows, channel.packedRowsCount);
-        }
         const double analysisMs = static_cast<double>(analysisTimer.nsecsElapsed()) / 1'000'000.0;
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-        if ((analysisMs >= 3.0 || pendingRows >= 96 || parsedFrames > 1)
+        if ((analysisMs >= 3.0 || parsedFrames > 1)
             && shouldEmitUiProfileLog(nowMs, &m_lastAnalysisProfileLogMs, 200)) {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("ui-prof"),
                 QStringLiteral(
-                    "analysis_decode ms=%1 chunk_kb=%2 parsed_frames=%3 rows=%4 channels=%5 bins=%6 pending_rows=%7 changed=%8 dropped=%9")
+                    "analysis_decode ms=%1 chunk_kb=%2 parsed_frames=%3 changed=%4 dropped=%5")
                     .arg(analysisMs, 0, 'f', 2)
                     .arg(static_cast<double>(chunk.size()) / 1024.0, 0, 'f', 1)
                     .arg(parsedFrames)
-                    .arg(totalRows)
-                    .arg(totalChannels)
-                    .arg(maxBins)
-                    .arg(pendingRows)
                     .arg(changed ? 1 : 0)
                     .arg(static_cast<qulonglong>(m_analysisDroppedFrames)));
         }
@@ -4750,10 +4516,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     int nextTrackCurrentBitrateKbps = currentPath.isEmpty() ? 0 : m_currentTrackCurrentBitrateKbps;
     QString queueTrackCover;
     const bool stoppedTrackAdvanced = isStopped && hadTrackContextPath && currentPathChanged;
-    if (stoppedTrackAdvanced
-        && (!m_spectrogramChannels.isEmpty() || m_spectrogramReset)) {
-        clearSpectrogramDeltaState();
-    }
     if (!metadataMatchesCurrentPath && !currentPath.isEmpty() && nextTrackFormatLabel.isEmpty()) {
         nextTrackFormatLabel = formatLabelFromPath(currentPath);
     }

@@ -104,7 +104,6 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
     Q_PROPERTY(double waveformCoverageSeconds READ waveformCoverageSeconds NOTIFY analysisChanged)
     Q_PROPERTY(bool waveformComplete READ waveformComplete NOTIFY analysisChanged)
-    Q_PROPERTY(bool spectrogramReset READ spectrogramReset NOTIFY analysisChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(int fftSize READ fftSize NOTIFY snapshotChanged)
     Q_PROPERTY(int spectrogramViewMode READ spectrogramViewMode NOTIFY snapshotChanged)
@@ -187,7 +186,6 @@ public:
     QByteArray waveformPeaksPacked() const;
     double waveformCoverageSeconds() const;
     bool waveformComplete() const;
-    bool spectrogramReset() const;
     int sampleRateHz() const;
     int fftSize() const;
     int spectrogramViewMode() const;
@@ -303,7 +301,6 @@ public:
     Q_INVOKABLE QVariantMap imageFileDetails(const QString &path) const;
     Q_INVOKABLE void scanRoot(const QString &path);
     Q_INVOKABLE void scanDefaultMusicRoot();
-    Q_INVOKABLE QVariantMap takeSpectrogramRowsDeltaPacked(int maxRowsPerChannel = -1);
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
     Q_INVOKABLE void clearDiagnostics();
@@ -333,13 +330,6 @@ private:
         QByteArray payload;
         qint64 ffiPoppedAtMs{0};
         qint64 ffiPopMs{0};
-    };
-
-    struct SpectrogramChannelDelta {
-        QString label;
-        QByteArray packedRows;
-        int packedRowsCount{0};
-        int packedBins{0};
     };
 
     struct SearchWorkerOutputFrame {
@@ -464,7 +454,6 @@ private:
     void flushPendingDiagnosticDiskLines();
     void rebuildDiagnosticsText();
     static QString resolveDiagnosticsLogPath();
-    void clearSpectrogramDeltaState();
     void schedulePlaybackChanged();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
@@ -512,9 +501,6 @@ private:
     QByteArray m_waveformPeaksPacked;
     double m_waveformCoverageSeconds{0.0};
     bool m_waveformComplete{false};
-    QVector<SpectrogramChannelDelta> m_spectrogramChannels;
-    bool m_spectrogramReset{false};
-    int m_spectrogramSeedBurstRowsRemaining{0};
     int m_sampleRateHz{48000};
     int m_fftSize{8192};
     int m_spectrogramViewMode{0};
@@ -641,7 +627,6 @@ private:
     bool m_profileUiEnabled{false};
     qint64 m_lastBridgePollProfileLogMs{0};
     qint64 m_lastAnalysisProfileLogMs{0};
-    qint64 m_lastSpectrogramDeltaProfileLogMs{0};
     qint64 m_lastSnapshotApplyProfileLogMs{0};
     qint64 m_lastUiStallProfileLogMs{0};
     QTimer m_uiStallWatchdogTimer;

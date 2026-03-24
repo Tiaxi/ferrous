@@ -42,9 +42,6 @@ private slots:
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
-    void spectrogramDeltaSkipsMetadataOnlyChannels();
-    void spectrogramDeltaDrainsInBoundedChunksAndResetsOnce();
-    void stoppedTrackChangeClearsPendingSpectrogramDelta();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void diagnosticsWritesBatchOffHotPath();
@@ -163,110 +160,6 @@ void BridgeClientTest::queuePathFallbackUsesCachedFirstIndex() {
     QVERIFY(client.processBinarySnapshot(playbackSnapshot));
     QCOMPARE(client.m_playingQueueIndex, 0);
     QCOMPARE(client.currentTrackTitle(), QStringLiteral("Duplicate First"));
-}
-
-void BridgeClientTest::spectrogramDeltaSkipsMetadataOnlyChannels() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-
-    BridgeClient::SpectrogramChannelDelta channel;
-    channel.label = QStringLiteral("L");
-    channel.packedBins = 128;
-    channel.packedRowsCount = 0;
-    client.m_spectrogramChannels.push_back(channel);
-
-    const QVariantMap delta = client.takeSpectrogramRowsDeltaPacked();
-    const QVariantList channels = delta.value(QStringLiteral("channels")).toList();
-    QCOMPARE(channels.size(), 0);
-    QCOMPARE(client.m_spectrogramChannels.size(), 0);
-}
-
-void BridgeClientTest::spectrogramDeltaDrainsInBoundedChunksAndResetsOnce() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-
-    BridgeClient::SpectrogramChannelDelta channel;
-    channel.label = QStringLiteral("L");
-    channel.packedBins = 2;
-    channel.packedRows = QByteArray::fromHex("0102030405060708090a");
-    channel.packedRowsCount = 5;
-    client.m_spectrogramChannels.push_back(channel);
-    client.m_spectrogramReset = true;
-    client.m_spectrogramSeedBurstRowsRemaining = 5;
-
-    QSignalSpy analysisSpy(&client, SIGNAL(analysisChanged()));
-
-    QVariantMap delta = client.takeSpectrogramRowsDeltaPacked(2);
-    QVariantList channels = delta.value(QStringLiteral("channels")).toList();
-    QCOMPARE(delta.value(QStringLiteral("reset")).toBool(), true);
-    QCOMPARE(delta.value(QStringLiteral("seedHistory")).toBool(), true);
-    QCOMPARE(channels.size(), 1);
-    QCOMPARE(channels.first().toMap().value(QStringLiteral("rows")).toInt(), 2);
-    QCOMPARE(
-        channels.first().toMap().value(QStringLiteral("data")).toByteArray(),
-        QByteArray::fromHex("01020304"));
-    QCOMPARE(client.m_spectrogramChannels.size(), 1);
-    QCOMPARE(client.m_spectrogramChannels.first().packedRowsCount, 3);
-    QCOMPARE(client.m_spectrogramChannels.first().packedRows, QByteArray::fromHex("05060708090a"));
-    QVERIFY(!client.m_spectrogramReset);
-    QCOMPARE(client.m_spectrogramSeedBurstRowsRemaining, 3);
-    QTRY_COMPARE_WITH_TIMEOUT(analysisSpy.count(), 1, 1000);
-
-    delta = client.takeSpectrogramRowsDeltaPacked(2);
-    channels = delta.value(QStringLiteral("channels")).toList();
-    QCOMPARE(delta.value(QStringLiteral("reset")).toBool(), false);
-    QCOMPARE(delta.value(QStringLiteral("seedHistory")).toBool(), true);
-    QCOMPARE(channels.size(), 1);
-    QCOMPARE(channels.first().toMap().value(QStringLiteral("rows")).toInt(), 2);
-    QCOMPARE(
-        channels.first().toMap().value(QStringLiteral("data")).toByteArray(),
-        QByteArray::fromHex("05060708"));
-    QCOMPARE(client.m_spectrogramChannels.first().packedRowsCount, 1);
-    QCOMPARE(client.m_spectrogramChannels.first().packedRows, QByteArray::fromHex("090a"));
-    QCOMPARE(client.m_spectrogramSeedBurstRowsRemaining, 1);
-    QTRY_COMPARE_WITH_TIMEOUT(analysisSpy.count(), 2, 1000);
-
-    delta = client.takeSpectrogramRowsDeltaPacked(2);
-    channels = delta.value(QStringLiteral("channels")).toList();
-    QCOMPARE(delta.value(QStringLiteral("reset")).toBool(), false);
-    QCOMPARE(delta.value(QStringLiteral("seedHistory")).toBool(), true);
-    QCOMPARE(channels.size(), 1);
-    QCOMPARE(channels.first().toMap().value(QStringLiteral("rows")).toInt(), 1);
-    QCOMPARE(
-        channels.first().toMap().value(QStringLiteral("data")).toByteArray(),
-        QByteArray::fromHex("090a"));
-    QCOMPARE(client.m_spectrogramChannels.size(), 0);
-    QCOMPARE(client.m_spectrogramSeedBurstRowsRemaining, 0);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-    QCOMPARE(analysisSpy.count(), 2);
-}
-
-void BridgeClientTest::stoppedTrackChangeClearsPendingSpectrogramDelta() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-
-    client.m_playbackState = QStringLiteral("Stopped");
-    client.m_currentTrackPath = QStringLiteral("/music/old-track.flac");
-    client.m_spectrogramReset = true;
-    client.m_spectrogramSeedBurstRowsRemaining = 1;
-
-    BridgeClient::SpectrogramChannelDelta channel;
-    channel.label = QStringLiteral("L");
-    channel.packedBins = 4;
-    channel.packedRows = QByteArray::fromHex("01020304");
-    channel.packedRowsCount = 1;
-    client.m_spectrogramChannels.push_back(channel);
-
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 0;
-    snapshot.playback.currentPath = QStringLiteral("/music/new-track.flac");
-
-    QVERIFY(client.processBinarySnapshot(snapshot));
-    QCOMPARE(client.m_currentTrackPath, QStringLiteral("/music/new-track.flac"));
-    QCOMPARE(client.m_spectrogramChannels.size(), 0);
-    QCOMPARE(client.m_spectrogramReset, false);
-    QCOMPARE(client.m_spectrogramSeedBurstRowsRemaining, 0);
 }
 
 void BridgeClientTest::inProcessBridgeInstallsWakeNotifier() {
