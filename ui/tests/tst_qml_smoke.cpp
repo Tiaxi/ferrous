@@ -1785,12 +1785,9 @@ void QmlSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {
         12,
         true);
 
-    // clearHistory=true → reset applied immediately (not deferred).
-    // This ensures the ring clears even if no data follows (e.g. format
-    // unsupported by the spectrogram decoder).
-    QVERIFY(!item.m_precomputedResetPending);
-    QCOMPARE(item.m_ringWriteSeq, 0);
-    QCOMPARE(item.m_rollingEpoch, 0);
+    QVERIFY(item.m_precomputedResetPending);
+    QVERIFY(item.m_precomputedPendingResetClearHistory);
+    QCOMPARE(item.m_ringWriteSeq, 4);
 
     QByteArray nextTrackChunk(2 * binsPerColumn, '\0');
     item.feedPrecomputedChunk(

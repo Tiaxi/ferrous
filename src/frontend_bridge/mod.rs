@@ -7130,18 +7130,16 @@ mod tests {
         assert!(changed);
         assert!(state.pending_waveform_track.is_none());
 
-        // Expect a Snapshot event after resume.  The spectrogram worker
-        // may also emit a PrecomputedSpectrogramChunk (buffer_reset) if the
-        // file path doesn't exist — drain both.
-        let mut saw_snapshot = false;
-        while let Ok(evt) = analysis_rx.recv_timeout(Duration::from_millis(500)) {
-            match evt {
-                AnalysisEvent::Snapshot(_) => saw_snapshot = true,
-                AnalysisEvent::PrecomputedSpectrogramChunk(_) => {} // expected: file-not-found reset
-                _ => panic!("unexpected event variant: {evt:?}"),
-            }
+        let evt = analysis_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("analysis event after resume");
+        match evt {
+            AnalysisEvent::Snapshot(_) => {}
+            _ => panic!("unexpected event variant"),
         }
-        assert!(saw_snapshot, "expected Snapshot event after resume");
+        assert!(analysis_rx
+            .recv_timeout(Duration::from_millis(120))
+            .is_err());
     }
 
     #[test]

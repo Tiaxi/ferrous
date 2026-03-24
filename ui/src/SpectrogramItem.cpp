@@ -464,14 +464,11 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     bool appliedReset = false;
-    if (bufferReset && columns <= 0 && !clearHistoryOnReset) {
+    if (bufferReset && columns <= 0) {
         // Delay the reset handoff until the first data-bearing post-seek
         // chunk arrives. Resetting on the metadata-only frame makes the
         // item repaint against an empty/new timeline before there is any
         // matching data, which shows up as a blank flash on backward seeks.
-        // Only deferred for seeks (clearHistory=false); track changes
-        // (clearHistory=true) apply immediately — if no data follows
-        // (e.g. format unsupported by Symphonia), the ring must still clear.
         m_precomputedResetPending = true;
         m_precomputedPendingResetStartIndex = startIndex;
         m_precomputedPendingResetBins = bins;
