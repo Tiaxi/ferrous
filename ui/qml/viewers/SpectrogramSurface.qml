@@ -187,10 +187,20 @@ Item {
                                                      startIndex, totalEstimate, sampleRate,
                                                      hopSize, coverage, complete, bufferReset,
                                                      clearHistory, trackToken) {
-            // If the chunk has more channels than we have panes, grow the
-            // Repeater model.  This only adds panes (never removes) so it
-            // won't destroy existing delegates with precomputed data.
-            if (channelCount > spectrogramRepeater.count) {
+            // Sync pane count to match the chunk's channel count.
+            // On buffer_reset (track change), allow shrinking; otherwise
+            // only grow to avoid destroying precomputed data mid-track.
+            if (bufferReset && channelCount < spectrogramRepeater.count) {
+                let next = []
+                for (let i = 0; i < channelCount; ++i) {
+                    if (i < root.channelDescriptors.length) {
+                        next.push(root.channelDescriptors[i])
+                    } else {
+                        next.push({ label: "", showLabel: false })
+                    }
+                }
+                root.channelDescriptors = next
+            } else if (channelCount > spectrogramRepeater.count) {
                 let next = []
                 for (let i = 0; i < channelCount; ++i) {
                     if (i < root.channelDescriptors.length) {

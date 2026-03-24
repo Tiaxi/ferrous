@@ -824,7 +824,15 @@ impl AnalysisRuntimeState {
                 path: path.clone(),
                 fft_size: self.spectrogram.fft_size,
                 hop_size: self.spectrogram.hop_size,
-                channel_count: self.spectrogram.pipelines.len().max(1),
+                // Use the file-derived channel count (set by
+                // update_session_compat_params) rather than the PCM
+                // pipeline count which reflects the previous track's
+                // layout until PCM labels arrive for the new track.
+                channel_count: if self.active_session_channel_count > 0 {
+                    self.active_session_channel_count
+                } else {
+                    self.spectrogram.pipelines.len().max(1)
+                },
                 start_seconds,
                 emit_initial_reset,
                 clear_history_on_reset,
