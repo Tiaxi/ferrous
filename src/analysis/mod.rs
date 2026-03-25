@@ -2276,6 +2276,14 @@ fn flush_chunk_before_lookahead_park(
 /// `GStreamer` for formats Symphonia cannot decode (AC3/DTS).
 /// Returns `(source, native_sample_rate, native_channels, total_columns_estimate)`.
 fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
+    // Skip Symphonia for raw AC3/DTS — it can't decode them but its probe
+    // can misidentify the bitstream as another format, returning wrong
+    // sample rate and channel count (e.g. 32 kHz stereo for a 48 kHz 5.1
+    // DTS file).
+    #[cfg(feature = "gst")]
+    if is_raw_surround_file(path) {
+        return open_gstreamer_file(path);
+    }
     if let Some((format, decoder, track_id, sr, ch, est)) = open_symphonia_file(path) {
         return Some((
             AudioFrameSource::Symphonia {
