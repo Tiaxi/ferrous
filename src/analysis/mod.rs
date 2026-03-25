@@ -724,16 +724,16 @@ impl AnalysisRuntimeState {
     /// restart paths) and from `handle_track_change` (covers gapless where
     /// the worker may internally fall back from `ContinueWithFile` to `NewTrack`).
     fn update_session_compat_params(&mut self, path: &Path) {
-        let (native_sr, native_ch) = if let Some((_, _, _, sr, ch, _)) = open_symphonia_file(path) {
-            (sr, ch)
-        } else {
-            #[cfg(feature = "gst")]
-            if let Some((_, sr, ch, _)) = open_gstreamer_file(path) {
-                (sr, ch)
-            } else {
-                return;
-            }
-            #[cfg(not(feature = "gst"))]
+        // Only probe via Symphonia (instant, ~0.05 ms).  For raw surround
+        // files (AC3/DTS), skip entirely — Symphonia can't decode them and
+        // its probe wastes ~200 ms per attempt on network filesystems
+        // trying every format before failing.  The worker determines the
+        // real format from its own file open.
+        #[cfg(feature = "gst")]
+        if is_raw_surround_file(path) {
+            return;
+        }
+        let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(path) else {
             return;
         };
         let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
@@ -760,7 +760,9 @@ impl AnalysisRuntimeState {
             );
             return;
         };
-        self.update_session_compat_params(&path);
+        // update_session_compat_params is already called by
+        // handle_track_change before start_spectrogram_session; skip the
+        // redundant probe here to avoid a second CIFS roundtrip.
         let path = &path;
         let gen = ctx
             .spectrogram_decode_generation
