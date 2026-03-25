@@ -558,7 +558,12 @@ impl AnalysisRuntimeState {
         let surround_optimistic = false;
 
         if !surround_optimistic {
-            let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(&path) else {
+            let Some(SymphoniaFile {
+                native_sample_rate: native_sr,
+                native_channels: native_ch,
+                ..
+            }) = open_symphonia_file(&path)
+            else {
                 profile_eprintln!(
                     "[analysis] staged: cannot open candidate {}",
                     path.display(),
@@ -750,7 +755,12 @@ impl AnalysisRuntimeState {
         if is_raw_surround_file(path) {
             return;
         }
-        let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(path) else {
+        let Some(SymphoniaFile {
+            native_sample_rate: native_sr,
+            native_channels: native_ch,
+            ..
+        }) = open_symphonia_file(path)
+        else {
             return;
         };
         let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
@@ -2303,17 +2313,17 @@ fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
     if is_raw_surround_file(path) {
         return open_gstreamer_file(path);
     }
-    if let Some((format, decoder, track_id, sr, ch, est)) = open_symphonia_file(path) {
+    if let Some(sf) = open_symphonia_file(path) {
         return Some((
             AudioFrameSource::Symphonia {
-                format,
-                decoder,
-                track_id,
+                format: sf.format,
+                decoder: sf.decoder,
+                track_id: sf.track_id,
                 sample_buf: None,
             },
-            sr,
-            ch,
-            est,
+            sf.native_sample_rate,
+            sf.native_channels,
+            sf.total_columns,
         ));
     }
     profile_eprintln!("[spect-worker] Symphonia failed, trying GStreamer fallback");
@@ -2328,20 +2338,20 @@ fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
     }
 }
 
+struct SymphoniaFile {
+    format: Box<dyn symphonia::core::formats::FormatReader>,
+    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    native_sample_rate: u64,
+    native_channels: usize,
+    total_columns: u32,
+}
+
 /// Open an audio file with symphonia, returning the format reader,
 /// decoder, track info, and an estimated total column count.  A single
 /// file open + probe avoids the double-open latency that is visible on
 /// network-mounted storage during gapless transitions.
-fn open_symphonia_file(
-    path: &Path,
-) -> Option<(
-    Box<dyn symphonia::core::formats::FormatReader>,
-    Box<dyn symphonia::core::codecs::Decoder>,
-    u32,
-    u64,
-    usize,
-    u32,
-)> {
+fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -2376,14 +2386,14 @@ fn open_symphonia_file(
     let audio_decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .ok()?;
-    Some((
+    Some(SymphoniaFile {
         format,
-        audio_decoder,
+        decoder: audio_decoder,
         track_id,
         native_sample_rate,
         native_channels,
         total_columns,
-    ))
+    })
 }
 
 fn seek_symphonia(

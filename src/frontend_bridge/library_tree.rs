@@ -1085,11 +1085,8 @@ pub(crate) fn collect_artist_paths_tree_order(
             }
 
             // Resolve and sort albums identically to the tree.
-            let mut resolved_albums: Vec<ResolvedAlbum> = artist
-                .albums
-                .values()
-                .map(|album| resolve_album(album))
-                .collect();
+            let mut resolved_albums: Vec<ResolvedAlbum> =
+                artist.albums.values().map(resolve_album).collect();
             sort_resolved_albums(&mut resolved_albums, sort_mode);
 
             for album in &resolved_albums {
