@@ -12,7 +12,6 @@ QtObject {
     property real spectrogramPositionSeconds: 0
     property bool positionSmoothingPrimed: false
     property real positionSmoothingAnchorSeconds: 0
-    property int positionSmoothingAnimationMs: 0
     property real positionSmoothingLastMs: 0
     property string positionSmoothingTrackPath: ""
     property string stoppedSpectrogramTrackPath: ""
@@ -20,13 +19,26 @@ QtObject {
     property real rememberedVolumeBeforeMute: 1.0
     property bool volumeMuted: false
 
-    Behavior on displayedPositionSeconds {
-        enabled: root.positionSmoothingAnimationMs > 0
-            && !root.seekPressed
-            && root.visualFeedsEnabled
-        NumberAnimation {
-            duration: root.positionSmoothingAnimationMs
-            easing.type: Easing.Linear
+    // Local interpolation: advance position at 1 s/s between bridge
+    // updates, anchored to the last known position + wall-clock time.
+    property real interpolationAnchorPosition: 0
+    property real interpolationAnchorMs: 0
+    property bool interpolationActive: false
+
+    // Timer drives local interpolation at ~60 fps.
+    property Timer interpolationTimer: Timer {
+        interval: 16
+        repeat: true
+        running: root.interpolationActive && !root.seekPressed
+        onTriggered: {
+            const nowMs = Date.now()
+            const elapsed = (nowMs - root.interpolationAnchorMs) / 1000.0
+            const duration = Math.max(root.uiBridge.durationSeconds, 0)
+            let next = root.interpolationAnchorPosition + elapsed
+            if (duration > 0) {
+                next = Math.min(next, duration)
+            }
+            root.displayedPositionSeconds = Math.max(0, next)
         }
     }
 
@@ -104,11 +116,12 @@ QtObject {
     }
 
     function seekCommitted(value) {
-        root.positionSmoothingAnimationMs = 0
+        root.interpolationActive = false
         root.displayedPositionSeconds = value
+        root.interpolationAnchorPosition = value
+        root.interpolationAnchorMs = Date.now()
         root.positionSmoothingPrimed = true
-        root.positionSmoothingAnchorSeconds = value
-        root.positionSmoothingLastMs = Date.now()
+        root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         root.uiBridge.seek(value)
     }
 
@@ -155,47 +168,34 @@ QtObject {
         const incomingPosition = root.uiBridge.positionSeconds
         const trackChanged = root.positionSmoothingTrackPath !== root.uiBridge.currentTrackPath
         const nowMs = Date.now()
-        const duration = Math.max(root.uiBridge.durationSeconds, 0)
+
+        root.spectrogramPositionSeconds = incomingPosition
 
         if (playbackState !== "Playing") {
             if (playbackState === "Stopped") {
                 haltSpectrogram()
             }
-            root.positionSmoothingAnimationMs = 0
+            root.interpolationActive = false
             root.displayedPositionSeconds = incomingPosition
-            root.spectrogramPositionSeconds = incomingPosition
+            root.interpolationAnchorPosition = incomingPosition
+            root.interpolationAnchorMs = nowMs
             root.positionSmoothingPrimed = false
-            root.positionSmoothingAnchorSeconds = incomingPosition
-            root.positionSmoothingLastMs = nowMs
             root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         } else if (!root.positionSmoothingPrimed || trackChanged) {
-            root.positionSmoothingAnimationMs = 0
+            // First update or track change: snap to position, start interpolating.
             root.displayedPositionSeconds = incomingPosition
-            root.spectrogramPositionSeconds = incomingPosition
+            root.interpolationAnchorPosition = incomingPosition
+            root.interpolationAnchorMs = nowMs
+            root.interpolationActive = true
             root.positionSmoothingPrimed = true
-            root.positionSmoothingAnchorSeconds = incomingPosition
-            root.positionSmoothingLastMs = nowMs
             root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         } else {
-            const cadenceMs = root.positionSmoothingLastMs > 0
-                ? Math.max(120, Math.min(1200, nowMs - root.positionSmoothingLastMs))
-                : 1000
-            const drift = incomingPosition - root.displayedPositionSeconds
-            root.spectrogramPositionSeconds = incomingPosition
-            if (Math.abs(drift) > 0.20) {
-                root.positionSmoothingAnimationMs = 0
-                root.displayedPositionSeconds = incomingPosition
-            } else {
-                root.positionSmoothingAnimationMs = cadenceMs
-                const predictedTarget = incomingPosition + (cadenceMs / 1000.0)
-                const nextPosition = duration > 0
-                    ? Math.min(duration, Math.max(0.0, predictedTarget))
-                    : Math.max(0.0, predictedTarget)
-                root.displayedPositionSeconds = nextPosition
-            }
-            root.positionSmoothingAnchorSeconds = incomingPosition
-            root.positionSmoothingLastMs = nowMs
-            root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
+            // Steady-state: update the anchor so the interpolation timer
+            // tracks the real position.  The timer is already advancing
+            // displayedPositionSeconds smoothly at ~60 fps.
+            root.interpolationAnchorPosition = incomingPosition
+            root.interpolationAnchorMs = nowMs
+            root.interpolationActive = true
         }
 
         root.lastSpectrogramPlaybackState = playbackState
@@ -206,9 +206,9 @@ QtObject {
         root.spectrogramPositionSeconds = root.uiBridge.positionSeconds
         root.syncMutedVolumeState()
         root.positionSmoothingPrimed = root.uiBridge.playbackState === "Playing"
-        root.positionSmoothingAnchorSeconds = root.uiBridge.positionSeconds
-        root.positionSmoothingAnimationMs = 0
-        root.positionSmoothingLastMs = Date.now()
+        root.interpolationAnchorPosition = root.uiBridge.positionSeconds
+        root.interpolationAnchorMs = Date.now()
+        root.interpolationActive = root.uiBridge.playbackState === "Playing"
         root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         root.stoppedSpectrogramTrackPath = root.uiBridge.currentTrackPath || ""
         root.lastSpectrogramPlaybackState = root.uiBridge.playbackState || ""

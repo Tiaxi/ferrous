@@ -824,7 +824,7 @@ impl BridgeLoopRuntime {
         let paused_poll_interval =
             env_duration_ms("FERROUS_PLAYBACK_PAUSED_POLL_MS", 333, 125, 1000);
         let playing_snapshot_interval =
-            env_duration_ms("FERROUS_BRIDGE_PLAYING_HEARTBEAT_MS", 100, 33, 1000);
+            env_duration_ms("FERROUS_BRIDGE_PLAYING_HEARTBEAT_MS", 40, 16, 1000);
         let analysis_snapshot_interval =
             env_duration_ms("FERROUS_BRIDGE_ANALYSIS_SNAPSHOT_MS", 16, 8, 1000);
         let paused_snapshot_interval =
