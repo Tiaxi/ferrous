@@ -2360,146 +2360,15 @@ where
     resolved
 }
 
-fn resolved_album_year(tracks: &[&LibraryTrack]) -> Option<i32> {
-    resolve_uniform_year(tracks.iter().map(|track| track.year))
-}
-
-fn ordered_track_paths_for_queue(tracks: Vec<&LibraryTrack>) -> Vec<PathBuf> {
-    struct QueueTrackOrder<'a> {
-        track: &'a LibraryTrack,
-        title: String,
-        path: String,
-        rank: u8,
-        number: u32,
-    }
-
-    let mut ordered = tracks
-        .into_iter()
-        .map(|track| {
-            let file_stem = track
-                .path
-                .file_stem()
-                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-            let filename_number = leading_track_number(&file_stem);
-            let number = track
-                .track_no
-                .or(filename_number)
-                .unwrap_or_else(|| u32::MAX.saturating_sub(1));
-            let rank = if track.track_no.is_some() {
-                0
-            } else if filename_number.is_some() {
-                1
-            } else {
-                2
-            };
-            QueueTrackOrder {
-                track,
-                title: normalized_library_track_title(track),
-                path: track.path.to_string_lossy().to_string(),
-                rank,
-                number,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    ordered.sort_by(|a, b| {
-        a.rank
-            .cmp(&b.rank)
-            .then_with(|| a.number.cmp(&b.number))
-            .then_with(|| natural_cmp(&a.title, &b.title))
-            .then_with(|| natural_cmp(&a.path, &b.path))
-    });
-
-    ordered
-        .into_iter()
-        .map(|item| item.track.path.clone())
-        .collect()
-}
-
 fn collect_artist_paths_for_queue(
     library: &LibrarySnapshot,
     artist: &str,
     sort_mode: LibrarySortMode,
 ) -> Vec<PathBuf> {
-    struct AlbumBucket<'a> {
-        key: String,
-        title: String,
-        year: Option<i32>,
-        tracks: Vec<&'a LibraryTrack>,
-    }
-
-    let mut loose_tracks = Vec::new();
-    let mut album_buckets: HashMap<String, AlbumBucket<'_>> = HashMap::new();
-    let artist_selector = artist.trim();
-    let artist_selector_is_key = artist_selector.starts_with("artist|");
-
-    for track in &library.tracks {
-        let context = derive_tree_path_context(&track.path, &library.roots, &track.artist);
-        let artist_matches = if artist_selector_is_key {
-            context
-                .as_ref()
-                .is_some_and(|ctx| ctx.artist_key == artist_selector)
-        } else if let Some(ctx) = context.as_ref() {
-            ctx.artist_name == artist_selector
-        } else {
-            normalized_library_artist(track) == artist_selector
-        };
-        if !artist_matches {
-            continue;
-        }
-        let Some(context) = context else {
-            loose_tracks.push(track);
-            continue;
-        };
-        let Some(album_key) = context.album_key else {
-            loose_tracks.push(track);
-            continue;
-        };
-        let fallback_title = normalized_library_album(track);
-        let bucket = album_buckets
-            .entry(album_key.clone())
-            .or_insert_with(|| AlbumBucket {
-                key: album_key.clone(),
-                title: fallback_title.to_string(),
-                year: None,
-                tracks: Vec::new(),
-            });
-        if bucket.title == "Unknown Album" && fallback_title != "Unknown Album" {
-            bucket.title = fallback_title.to_string();
-        }
-        bucket.tracks.push(track);
-    }
-
-    let mut albums = album_buckets.into_values().collect::<Vec<_>>();
-    for bucket in &mut albums {
-        bucket.year = resolved_album_year(&bucket.tracks);
-    }
-    albums.sort_by(|a, b| match sort_mode {
-        LibrarySortMode::Year => {
-            let a_unknown = a.year.is_none();
-            let b_unknown = b.year.is_none();
-            a_unknown
-                .cmp(&b_unknown)
-                .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
-                .then_with(|| natural_cmp(&a.title, &b.title))
-                .then_with(|| natural_cmp(&a.key, &b.key))
-        }
-        LibrarySortMode::Title => natural_cmp(&a.title, &b.title)
-            .then_with(|| {
-                let a_unknown = a.year.is_none();
-                let b_unknown = b.year.is_none();
-                a_unknown
-                    .cmp(&b_unknown)
-                    .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
-            })
-            .then_with(|| natural_cmp(&a.key, &b.key)),
-    });
-
-    let mut out = ordered_track_paths_for_queue(loose_tracks);
-    for bucket in albums {
-        out.extend(ordered_track_paths_for_queue(bucket.tracks));
-    }
-    out
+    // Delegate to the tree module so the playlist order exactly matches
+    // the library tree display order (album sorting by year/title,
+    // root tracks → disc sections → non-disc sections).
+    library_tree::collect_artist_paths_tree_order(library, artist.trim(), sort_mode)
 }
 
 fn collect_album_paths_for_queue(

@@ -1050,6 +1050,89 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     a.len().cmp(&b.len())
 }
 
+/// Collect all track paths for the given artist in the same order the
+/// library tree displays them.  Albums are sorted by `sort_mode` (year
+/// or title).  Within each album: root tracks first, then disc sections
+/// in alphabetical order, then non-disc sections sorted by year (or
+/// name when year is absent).
+pub(crate) fn collect_artist_paths_tree_order(
+    library: &LibrarySnapshot,
+    artist_selector: &str,
+    sort_mode: LibrarySortMode,
+) -> Vec<PathBuf> {
+    let artist_selector_is_key = artist_selector.starts_with("artist|");
+
+    let builders = build_root_builders(&library.roots, &library.tracks);
+    let mut out = Vec::new();
+
+    for root_builder in builders.values() {
+        for artist in root_builder.artists.values() {
+            let matches = if artist_selector_is_key {
+                let root_path = root_builder.root_path.to_string_lossy();
+                let key = format!("artist|{root_path}|{}", artist.artist_name);
+                key == artist_selector
+            } else {
+                artist.artist_name == artist_selector
+            };
+            if !matches {
+                continue;
+            }
+
+            // Loose tracks (directly under the artist folder).
+            let loose = order_tracks(&artist.loose_tracks);
+            for track in &loose {
+                out.push(PathBuf::from(&track.path));
+            }
+
+            // Resolve and sort albums identically to the tree.
+            let mut resolved_albums: Vec<ResolvedAlbum> = artist
+                .albums
+                .values()
+                .map(|album| resolve_album(album))
+                .collect();
+            sort_resolved_albums(&mut resolved_albums, sort_mode);
+
+            for album in &resolved_albums {
+                // Root-level album tracks.
+                for track in &album.root_tracks {
+                    out.push(PathBuf::from(&track.path));
+                }
+
+                // Disc sections first (alphabetical, already sorted by
+                // resolve_album which sorts sections by natural_cmp).
+                for section in &album.sections {
+                    if super::is_main_album_disc_section(&section.name) {
+                        for track in &section.tracks {
+                            out.push(PathBuf::from(&track.path));
+                        }
+                    }
+                }
+
+                // Non-disc sections: sort by year (or name if no year).
+                let mut non_disc: Vec<&ResolvedSection> = album
+                    .sections
+                    .iter()
+                    .filter(|s| !super::is_main_album_disc_section(&s.name))
+                    .collect();
+                non_disc.sort_by(|a, b| {
+                    let a_unknown = a.year.is_none();
+                    let b_unknown = b.year.is_none();
+                    a_unknown
+                        .cmp(&b_unknown)
+                        .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
+                        .then_with(|| natural_cmp(&a.name, &b.name))
+                });
+                for section in non_disc {
+                    for track in &section.tracks {
+                        out.push(PathBuf::from(&track.path));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
