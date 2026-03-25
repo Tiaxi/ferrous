@@ -1886,4 +1886,74 @@ mod tests {
         assert_eq!(section_row.title, "Lightbulb Sun (2000)");
         assert_eq!(section_row.cover_path, "/cover.jpg");
     }
+
+    #[test]
+    fn collect_artist_paths_tree_order_sorts_albums_and_sections() {
+        // Album B (1998): root track, "Disc 2" section track, "Bonus" section track
+        // Album A (2000): root tracks 01, 02
+        // Year sort → Album B first, then Album A.
+        // Within Album B: root, disc sections (alphabetical), non-disc sections (by year/name).
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: vec![
+                // Album A — year 2000
+                track(
+                    "/music/TestArtist/Album A/01.flac",
+                    "Album A",
+                    Some(2000),
+                    Some(1),
+                    "Track 01",
+                ),
+                track(
+                    "/music/TestArtist/Album A/02.flac",
+                    "Album A",
+                    Some(2000),
+                    Some(2),
+                    "Track 02",
+                ),
+                // Album B — year 1998, root track
+                track(
+                    "/music/TestArtist/Album B/01.flac",
+                    "Album B",
+                    Some(1998),
+                    Some(1),
+                    "Track 01",
+                ),
+                // Album B — "Disc 2" section track (disc section)
+                track(
+                    "/music/TestArtist/Album B/Disc 2/01.flac",
+                    "Album B",
+                    Some(1998),
+                    Some(1),
+                    "Track 01",
+                ),
+                // Album B — "Bonus" section track (non-disc section)
+                track(
+                    "/music/TestArtist/Album B/Bonus/01.flac",
+                    "Bonus Tracks",
+                    Some(1998),
+                    Some(1),
+                    "Bonus 01",
+                ),
+            ],
+            ..LibrarySnapshot::default()
+        };
+
+        let paths = collect_artist_paths_tree_order(&library, "TestArtist", LibrarySortMode::Year);
+
+        assert_eq!(
+            paths,
+            vec![
+                // Album B (1998) first — root track
+                PathBuf::from("/music/TestArtist/Album B/01.flac"),
+                // Album B — disc section "Disc 2"
+                PathBuf::from("/music/TestArtist/Album B/Disc 2/01.flac"),
+                // Album B — non-disc section "Bonus"
+                PathBuf::from("/music/TestArtist/Album B/Bonus/01.flac"),
+                // Album A (2000) — root tracks in track_no order
+                PathBuf::from("/music/TestArtist/Album A/01.flac"),
+                PathBuf::from("/music/TestArtist/Album A/02.flac"),
+            ]
+        );
+    }
 }

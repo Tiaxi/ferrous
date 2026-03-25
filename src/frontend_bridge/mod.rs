@@ -6297,6 +6297,57 @@ mod tests {
     }
 
     #[test]
+    fn collect_album_paths_for_queue_excludes_bonus_by_name_selector() {
+        // Test the name-based (non-key) album selector path: when both
+        // artist and album selectors are plain names instead of keys,
+        // the filter should still exclude non-disc sections.
+        let root = p("/music");
+        let library = LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks: vec![
+                // Root-level album track — included.
+                library_track(
+                    "/music/Opeth/Blackwater Park/01 - The Leper Affinity.flac",
+                    &root,
+                    "Opeth",
+                    "Blackwater Park",
+                    Some(2001),
+                    Some(1),
+                ),
+                // Disc section track — included.
+                library_track(
+                    "/music/Opeth/Blackwater Park/CD2/01 - Patterns.flac",
+                    &root,
+                    "Opeth",
+                    "Blackwater Park",
+                    Some(2001),
+                    Some(1),
+                ),
+                // Non-disc section track — excluded.
+                library_track(
+                    "/music/Opeth/Blackwater Park/Deluxe Bonus/01 - Still Day.flac",
+                    &root,
+                    "Opeth",
+                    "Deluxe Bonus",
+                    Some(2001),
+                    Some(1),
+                ),
+            ],
+            ..LibrarySnapshot::default()
+        };
+
+        // Use plain name selectors (not key-based).
+        let ordered = collect_album_paths_for_queue(&library, "Opeth", "Blackwater Park");
+        assert_eq!(
+            ordered,
+            vec![
+                p("/music/Opeth/Blackwater Park/01 - The Leper Affinity.flac"),
+                p("/music/Opeth/Blackwater Park/CD2/01 - Patterns.flac"),
+            ]
+        );
+    }
+
+    #[test]
     fn queue_append_into_empty_loads_full_queue() {
         let mut queue = Vec::new();
         let mut selected = None;

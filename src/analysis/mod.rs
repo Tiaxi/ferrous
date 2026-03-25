@@ -5489,6 +5489,80 @@ mod tests {
         assert!(spectrogram_cmd_rx.try_recv().is_err());
     }
 
+    #[cfg(feature = "gst")]
+    #[test]
+    fn prepare_gapless_surround_sends_optimistic_continue() {
+        // When the active track and candidate are both .dts files,
+        // the surround-optimistic path sends ContinueWithFile without
+        // needing to open the file via Symphonia.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.active_track_path = Some(PathBuf::from("/tmp/current.dts"));
+        state.active_track_token = 7;
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+        };
+
+        state.handle_prepare_gapless_continuation(PathBuf::from("/tmp/next.dts"), &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(
+                cmd,
+                SpectrogramWorkerCommand::ContinueWithFile {
+                    ref path,
+                    track_token: 7,
+                } if path == &PathBuf::from("/tmp/next.dts")
+            ),
+            "expected ContinueWithFile for /tmp/next.dts with token 7, got {cmd:?}"
+        );
+        assert_eq!(
+            state.staged_continuation_path,
+            Some(PathBuf::from("/tmp/next.dts"))
+        );
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn prepare_gapless_surround_rejects_mixed_extensions() {
+        // AC3 active + DTS candidate: surround_optimistic is false,
+        // falls through to open_symphonia_file which fails for the
+        // nonexistent file, so no ContinueWithFile is sent.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.active_track_path = Some(PathBuf::from("/tmp/current.ac3"));
+
+        let (event_tx, _) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+        };
+
+        state.handle_prepare_gapless_continuation(PathBuf::from("/tmp/next.dts"), &ctx);
+
+        // No ContinueWithFile — surround_optimistic is false and
+        // open_symphonia_file fails for the nonexistent path.
+        assert!(spectrogram_cmd_rx.try_recv().is_err());
+        assert!(state.staged_continuation_path.is_none());
+    }
+
     #[test]
     fn seek_preserves_pending_continue() {
         // An intra-track seek should NOT clear pending_continue.

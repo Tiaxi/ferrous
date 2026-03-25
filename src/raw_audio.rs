@@ -165,10 +165,9 @@ pub(crate) fn is_dts_file(path: &Path) -> bool {
 }
 
 pub(crate) fn same_surround_extension(a: &Path, b: &Path) -> bool {
-    match (raw_surround_extension(a), raw_surround_extension(b)) {
-        (Some(ea), Some(eb)) => ea == eb,
-        _ => false,
-    }
+    is_raw_surround_file(a)
+        && is_raw_surround_file(b)
+        && raw_surround_extension(a) == raw_surround_extension(b)
 }
 
 fn raw_surround_extension(path: &Path) -> Option<String> {
@@ -1136,5 +1135,50 @@ mod tests {
         assert!(audio_byte_range(&path).is_none());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn same_surround_extension_matches_identical_formats() {
+        use super::same_surround_extension;
+
+        assert!(same_surround_extension(
+            Path::new("/a/track.ac3"),
+            Path::new("/b/other.ac3")
+        ));
+        assert!(same_surround_extension(
+            Path::new("/a/track.dts"),
+            Path::new("/b/other.dts")
+        ));
+    }
+
+    #[test]
+    fn same_surround_extension_rejects_different_surround_formats() {
+        use super::same_surround_extension;
+
+        assert!(!same_surround_extension(
+            Path::new("/a/track.ac3"),
+            Path::new("/b/other.dts")
+        ));
+    }
+
+    #[test]
+    fn same_surround_extension_rejects_surround_vs_non_surround() {
+        use super::same_surround_extension;
+
+        assert!(!same_surround_extension(
+            Path::new("/a/track.ac3"),
+            Path::new("/b/other.flac")
+        ));
+    }
+
+    #[test]
+    fn same_surround_extension_rejects_non_surround_pair() {
+        use super::same_surround_extension;
+
+        // Neither file is a raw surround file.
+        assert!(!same_surround_extension(
+            Path::new("/a/track.flac"),
+            Path::new("/b/other.flac")
+        ));
     }
 }
