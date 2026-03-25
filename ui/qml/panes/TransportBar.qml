@@ -97,16 +97,17 @@ ToolBar {
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     visible: seekSlider.seekAllowed
-                    width: Math.round(parent.width * seekSlider.stableVisualPosition)
+                    width: parent.width * seekSlider.stableVisualPosition
                     color: Qt.rgba(120 / 255, 190 / 255, 1.0, 0.26)
                 }
 
                 Rectangle {
                     visible: seekSlider.seekAllowed
                     width: 1
+                    antialiasing: true
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    x: Math.round(seekSlider.stableVisualPosition * (parent.width - 1))
+                    x: seekSlider.stableVisualPosition * (parent.width - 1)
                     color: "#2f7cd6"
                 }
             }
