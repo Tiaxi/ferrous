@@ -46,6 +46,14 @@ pub(crate) fn register_raw_surround_typefinders() {
             if let Some(factory) = gst::ElementFactory::find("apedemux") {
                 factory.set_rank(gst::Rank::NONE);
             }
+
+            // Demote liba52's a52dec in favour of avdec_ac3 (FFmpeg).
+            // a52dec occasionally misparses exponent/scale-factor data in
+            // AC3 frames, producing a brief full-bandwidth noise burst
+            // (peak values millions of times above full-scale).
+            if let Some(factory) = gst::ElementFactory::find("a52dec") {
+                factory.set_rank(gst::Rank::NONE);
+            }
         }
 
         // Register AC3/DTS typefinders.  AC3 files ripped from DVDs often
