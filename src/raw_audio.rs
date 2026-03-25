@@ -164,6 +164,13 @@ pub(crate) fn is_dts_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("dts"))
 }
 
+pub(crate) fn same_surround_extension(a: &Path, b: &Path) -> bool {
+    match (raw_surround_extension(a), raw_surround_extension(b)) {
+        (Some(ea), Some(eb)) => ea == eb,
+        _ => false,
+    }
+}
+
 fn raw_surround_extension(path: &Path) -> Option<String> {
     let ext = path.extension().and_then(|value| value.to_str())?;
     Some(ext.to_ascii_lowercase())

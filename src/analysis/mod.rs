@@ -27,7 +27,7 @@ use gstreamer as gst;
 #[cfg(feature = "gst")]
 use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
-use crate::raw_audio::{is_dts_file, register_raw_surround_typefinders};
+use crate::raw_audio::{is_dts_file, register_raw_surround_typefinders, same_surround_extension};
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;
 
@@ -543,37 +543,54 @@ impl AnalysisRuntimeState {
         self.clear_early_continuation(ctx);
 
         // Open the candidate file and check format compatibility.
-        let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(&path) else {
-            profile_eprintln!(
-                "[analysis] staged: cannot open candidate {}",
-                path.display(),
-            );
-            return;
-        };
+        // For raw surround files (AC3/DTS), Symphonia can't probe the
+        // format and a GStreamer pipeline is too expensive.  Same-extension
+        // surround transitions are virtually always compatible (same rate
+        // and channel layout), so send ContinueWithFile optimistically —
+        // the worker validates and falls back to NewTrack if wrong.
+        #[cfg(feature = "gst")]
+        let surround_optimistic = is_raw_surround_file(&path)
+            && self
+                .active_track_path
+                .as_deref()
+                .is_some_and(|active| same_surround_extension(active, &path));
+        #[cfg(not(feature = "gst"))]
+        let surround_optimistic = false;
 
-        let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
-        let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
-        let cand_effective_rate = u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
-        let cand_channel_count = match self.spectrogram_view_mode {
-            SpectrogramViewMode::Downmix => 1,
-            SpectrogramViewMode::PerChannel => native_ch,
-        };
+        if !surround_optimistic {
+            let Some((_, _, _, native_sr, native_ch, _)) = open_symphonia_file(&path) else {
+                profile_eprintln!(
+                    "[analysis] staged: cannot open candidate {}",
+                    path.display(),
+                );
+                return;
+            };
 
-        if cand_effective_rate != self.active_session_effective_rate
-            || cand_channel_count != self.active_session_channel_count
-        {
-            profile_eprintln!(
-                "[analysis] staged: incompatible (rate {}!={} ch {}!={}), skipping",
-                cand_effective_rate,
-                self.active_session_effective_rate,
-                cand_channel_count,
-                self.active_session_channel_count,
-            );
-            return;
+            let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
+            let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
+            let cand_effective_rate =
+                u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
+            let cand_channel_count = match self.spectrogram_view_mode {
+                SpectrogramViewMode::Downmix => 1,
+                SpectrogramViewMode::PerChannel => native_ch,
+            };
+
+            if cand_effective_rate != self.active_session_effective_rate
+                || cand_channel_count != self.active_session_channel_count
+            {
+                profile_eprintln!(
+                    "[analysis] staged: incompatible (rate {}!={} ch {}!={}), skipping",
+                    cand_effective_rate,
+                    self.active_session_effective_rate,
+                    cand_channel_count,
+                    self.active_session_channel_count,
+                );
+                return;
+            }
         }
 
         profile_eprintln!(
-            "[analysis] early ContinueWithFile for {} (rate={cand_effective_rate} ch={cand_channel_count})",
+            "[analysis] early ContinueWithFile for {} optimistic={surround_optimistic}",
             path.display(),
         );
 
