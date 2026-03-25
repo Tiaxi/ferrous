@@ -3364,7 +3364,12 @@ where
             if base.is_multiple_of(4096) && is_cancelled() {
                 return Ok(());
             }
-            if !waveform.push_sample(samples[base].abs(), sample_stride, &mut on_update) {
+            // Take the loudest channel at each sample point so the
+            // waveform represents the full mix, not just channel 0.
+            let peak = (0..channels)
+                .map(|ch| samples.get(base + ch).map_or(0.0, |s| s.abs()))
+                .fold(0.0_f32, f32::max);
+            if !waveform.push_sample(peak, sample_stride, &mut on_update) {
                 return Ok(());
             }
         }
