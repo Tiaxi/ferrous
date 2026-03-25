@@ -2263,6 +2263,7 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     maybeStartSeekProfileLocked(nowMs);
 #endif
     const bool precomputedActive = m_precomputedReady;
+    const bool playing = m_playing;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     noteSmoothnessProfileFrameLocked(nowMs, elapsed, false, false);
     noteSeekProfileFrameLocked(nowMs, elapsed, false, false);
@@ -2277,7 +2278,11 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     }
 #endif
     lock.unlock();
-    if (changed || precomputedActive) {
+    // Only sustain the render loop when the spectrogram is actively
+    // scrolling (playing).  When stopped/paused the display is static
+    // and re-renders are already triggered on demand by data feeds
+    // (feedPrecomputedChunk) or property changes (setPositionSeconds).
+    if (changed || (precomputedActive && playing)) {
         update();
     }
 }
