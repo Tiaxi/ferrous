@@ -181,7 +181,7 @@ Item {
                     maxColumns: Math.max(Math.floor(width), Screen.desktopAvailableWidth)
                     dbRange: root.uiBridge.dbRange
                     logScale: root.uiBridge.logScale
-                    showFpsOverlay: index === 0 ? root.uiBridge.showFps : false
+                    showFpsOverlay: index === 0 ? (root.uiBridge.showFps || spectrogramPaneItem.forceFpsOverlay) : false
                     sampleRateHz: root.uiBridge.sampleRateHz
                     positionSeconds: root.positionSeconds
                     playing: (root.uiBridge.playbackState || "") === "Playing"

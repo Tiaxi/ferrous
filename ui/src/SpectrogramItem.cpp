@@ -236,8 +236,12 @@ bool SpectrogramItem::showFpsOverlay() const {
     return m_showFpsOverlay;
 }
 
+bool SpectrogramItem::forceFpsOverlay() const {
+    return m_forceFpsOverlay;
+}
+
 void SpectrogramItem::setShowFpsOverlay(bool value) {
-    const bool next = value || m_forceFpsOverlay;
+    const bool next = value;
     {
         QMutexLocker lock(&m_stateMutex);
         if (m_showFpsOverlay == next) {

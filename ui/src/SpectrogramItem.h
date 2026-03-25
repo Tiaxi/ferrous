@@ -21,6 +21,7 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY dbRangeChanged)
     Q_PROPERTY(bool logScale READ logScale WRITE setLogScale NOTIFY logScaleChanged)
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
+    Q_PROPERTY(bool forceFpsOverlay READ forceFpsOverlay CONSTANT)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz WRITE setSampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(int maxColumns READ maxColumns WRITE setMaxColumns NOTIFY maxColumnsChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
@@ -39,6 +40,7 @@ public:
 
     bool showFpsOverlay() const;
     void setShowFpsOverlay(bool value);
+    bool forceFpsOverlay() const;
 
     int sampleRateHz() const;
     void setSampleRateHz(int value);
