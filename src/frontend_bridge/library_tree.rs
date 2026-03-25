@@ -631,9 +631,14 @@ fn album_play_paths(album: &ResolvedAlbum) -> Vec<String> {
     for track in &album.root_tracks {
         play_paths.push(track.path.clone());
     }
+    // Only include recognised disc sections (Disc 1, CD 2, …) in the
+    // album's play paths.  Bonus/extra subfolders are excluded so
+    // double-clicking an album queues just the main album content.
     for section in &album.sections {
-        for track in &section.tracks {
-            play_paths.push(track.path.clone());
+        if super::is_main_album_disc_section(&section.name) {
+            for track in &section.tracks {
+                play_paths.push(track.path.clone());
+            }
         }
     }
     play_paths

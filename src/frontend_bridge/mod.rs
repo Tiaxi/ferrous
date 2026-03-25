@@ -2522,10 +2522,20 @@ fn collect_album_paths_for_queue(
             let context = derive_tree_path_context(&track.path, &library.roots, &track.artist);
 
             if album_selector_is_key {
-                return context
+                let Some(ctx) = context.as_ref() else {
+                    return false;
+                };
+                let key_matches = ctx
+                    .album_key
                     .as_ref()
-                    .and_then(|ctx| ctx.album_key.as_ref())
                     .is_some_and(|key| key == album_selector);
+                if !key_matches {
+                    return false;
+                }
+                // Only include root album tracks and recognised disc
+                // sections (Disc 1, CD 2, …).  Exclude bonus/extra
+                // subfolders so the queue represents the main album.
+                return ctx.is_main_level_album_track || ctx.is_disc_section_album_track;
             }
 
             let artist_matches = if artist_selector_is_key {
@@ -2545,7 +2555,10 @@ fn collect_album_paths_for_queue(
                 let context_album = ctx
                     .album_folder
                     .unwrap_or_else(|| String::from("Unknown Album"));
-                return context_album == album_selector;
+                if context_album != album_selector {
+                    return false;
+                }
+                return ctx.is_main_level_album_track || ctx.is_disc_section_album_track;
             }
             normalized_library_album(track) == album_selector
         })
@@ -6360,6 +6373,16 @@ mod tests {
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
             tracks: vec![
+                // Root-level album track — always included.
+                library_track(
+                    "/music/Porcupine Tree/Muut/01 - Intro.flac",
+                    &root,
+                    "Porcupine Tree",
+                    "Muut",
+                    Some(2005),
+                    Some(1),
+                ),
+                // Track in a non-disc subfolder — excluded from album queue.
                 library_track(
                     "/music/Porcupine Tree/Muut/Porcupine Tree Sampler 2005/01 - Hello.flac",
                     &root,
@@ -6368,6 +6391,16 @@ mod tests {
                     Some(2005),
                     Some(1),
                 ),
+                // Track in a disc subfolder — included in album queue.
+                library_track(
+                    "/music/Porcupine Tree/Muut/Disc 2/01 - Bonus.flac",
+                    &root,
+                    "Porcupine Tree",
+                    "Muut",
+                    Some(2005),
+                    Some(1),
+                ),
+                // Track from a different artist — never included.
                 library_track(
                     "/music/Blackfield/Blackfield/01 - Open Mind.flac",
                     &root,
@@ -6387,9 +6420,10 @@ mod tests {
         );
         assert_eq!(
             ordered,
-            vec![p(
-                "/music/Porcupine Tree/Muut/Porcupine Tree Sampler 2005/01 - Hello.flac"
-            )]
+            vec![
+                p("/music/Porcupine Tree/Muut/01 - Intro.flac"),
+                p("/music/Porcupine Tree/Muut/Disc 2/01 - Bonus.flac"),
+            ]
         );
     }
 
