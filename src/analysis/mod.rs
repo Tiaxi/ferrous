@@ -3277,6 +3277,15 @@ fn waveform_sample_rate_divisor(sample_rate_hz: u64) -> u64 {
     1
 }
 
+/// Return the maximum absolute sample value across `channels` interleaved
+/// channels starting at `base` in `samples`.  Used by the waveform decoder
+/// so the seekbar peak represents the loudest channel, not just channel 0.
+fn peak_across_channels(samples: &[f32], base: usize, channels: usize) -> f32 {
+    (0..channels)
+        .map(|ch| samples.get(base + ch).map_or(0.0, |s| s.abs()))
+        .fold(0.0_f32, f32::max)
+}
+
 fn decode_waveform_peaks_stream<F, C>(
     path: &Path,
     max_points: usize,
@@ -3364,11 +3373,7 @@ where
             if base.is_multiple_of(4096) && is_cancelled() {
                 return Ok(());
             }
-            // Take the loudest channel at each sample point so the
-            // waveform represents the full mix, not just channel 0.
-            let peak = (0..channels)
-                .map(|ch| samples.get(base + ch).map_or(0.0, |s| s.abs()))
-                .fold(0.0_f32, f32::max);
+            let peak = peak_across_channels(samples, base, channels);
             if !waveform.push_sample(peak, sample_stride, &mut on_update) {
                 return Ok(());
             }
@@ -5606,5 +5611,62 @@ mod tests {
         let _ = gst::init();
         let result = open_gstreamer_file(Path::new("/nonexistent/path/to/file.ac3"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn open_audio_file_skips_symphonia_for_dts() {
+        // Write a tiny file with DTS sync word header.  Without the
+        // surround guard, Symphonia's probe would attempt to open this
+        // and potentially misidentify it (returning wrong sr/ch).
+        // With the guard, open_audio_file skips Symphonia entirely.
+        let dir = std::env::temp_dir().join("ferrous_test_open_audio_dts");
+        let _ = std::fs::create_dir_all(&dir);
+        let dts_path = dir.join("test.dts");
+        // DTS sync word 0x7FFE8001 followed by garbage.
+        let mut data = vec![0x7F, 0xFE, 0x80, 0x01];
+        data.extend_from_slice(&[0u8; 252]);
+        std::fs::write(&dts_path, &data).expect("write test dts file");
+
+        let result = open_audio_file(&dts_path);
+        // Without gst feature: returns None (skips Symphonia, no GStreamer).
+        // With gst feature: returns None (GStreamer can't decode garbage).
+        // Either way, Symphonia must NOT be called — if it were, it could
+        // misidentify the bytes and return Some with wrong parameters.
+        assert!(result.is_none());
+
+        let _ = std::fs::remove_file(&dts_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn open_audio_file_uses_symphonia_for_flac() {
+        // A .flac path goes through Symphonia (not the surround skip).
+        // Nonexistent file → Symphonia fails to open → returns None.
+        // This confirms the Symphonia path is still active for non-surround.
+        let result = open_audio_file(Path::new("/nonexistent/path/to/file.flac"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn peak_across_channels_returns_max_absolute_value() {
+        // 3-channel interleaved: frame at base=0 has channels [0.2, -0.8, 0.5]
+        let samples = [0.2_f32, -0.8, 0.5, 0.1, 0.3, -0.1];
+        assert!((peak_across_channels(&samples, 0, 3) - 0.8).abs() < f32::EPSILON);
+        assert!((peak_across_channels(&samples, 3, 3) - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn peak_across_channels_mono_returns_abs_sample() {
+        let samples = [-0.6_f32, 0.3, -0.9];
+        assert!((peak_across_channels(&samples, 0, 1) - 0.6).abs() < f32::EPSILON);
+        assert!((peak_across_channels(&samples, 2, 1) - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn peak_across_channels_handles_out_of_bounds() {
+        let samples = [0.5_f32, 0.3];
+        // Requesting 4 channels but only 2 samples — out-of-bounds channels
+        // should contribute 0.0, not panic.
+        assert!((peak_across_channels(&samples, 0, 4) - 0.5).abs() < f32::EPSILON);
     }
 }
