@@ -387,6 +387,9 @@ private slots:
     void spectrogramGaplessTokenChunksPassFilter();
     void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
     void spectrogramCenteredModeSeekPreservesRing();
+    void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
+    void playbackControllerInterpolationActivatesOnPlayback();
+    void playbackControllerInterpolationDeactivatesOnStop();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -1898,6 +1901,120 @@ void QmlSmokeTest::spectrogramCenteredModeSeekPreservesRing() {
 
     // Data at the new position must still be valid in the ring.
     QVERIFY(item.m_ringCapacity > 0);
+}
+
+void QmlSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding() {
+    // forceFpsOverlay is a CONSTANT property set at construction time from
+    // the FERROUS_PROFILE_UI env var.  The setter for showFpsOverlay must
+    // NOT OR in the force flag — QML's index===0 gate must be respected.
+    SpectrogramItem item;
+    QCOMPARE(item.forceFpsOverlay(), false); // no env var in test
+
+    // Explicitly setting showFpsOverlay to false must stay false,
+    // not be overridden by the force flag.
+    item.setShowFpsOverlay(true);
+    QCOMPARE(item.showFpsOverlay(), true);
+    item.setShowFpsOverlay(false);
+    QCOMPARE(item.showFpsOverlay(), false);
+}
+
+void QmlSmokeTest::playbackControllerInterpolationActivatesOnPlayback() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        property string playbackState: "Playing"
+        property real positionSeconds: 5.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QCOMPARE(controller->property("interpolationActive").toBool(), true);
+
+    // After a playback update, interpolation remains active.
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    bridge->setProperty("positionSeconds", 5.12);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+    QCOMPARE(controller->property("interpolationActive").toBool(), true);
+}
+
+void QmlSmokeTest::playbackControllerInterpolationDeactivatesOnStop() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    // Embed JS no-op callbacks directly in the QML harness so
+    // handlePlaybackChanged can call haltSpectrogram without error.
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 10.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+
+    function simulateStop() {
+        bridge.playbackState = "Stopped"
+        bridge.positionSeconds = 0.0
+        controller.handlePlaybackChanged(
+            function() { /* halt */ },
+            function() { /* reset */ })
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QCOMPARE(controller->property("interpolationActive").toBool(), true);
+
+    // Simulate stop via the QML helper that provides proper JS callbacks.
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "simulateStop"));
+    QCOMPARE(controller->property("interpolationActive").toBool(), false);
 }
 
 int main(int argc, char **argv) {
