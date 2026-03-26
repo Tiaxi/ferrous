@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -285,6 +285,16 @@ struct AnalysisRuntimeState {
     /// Path of the next track for which an early `ContinueWithFile` was
     /// sent to the worker.  Consumed at commit time (`handle_track_change`).
     staged_continuation_path: Option<PathBuf>,
+    /// Receiver for pre-decoded centered-mode chunks from the staging
+    /// thread.  Each chunk has `track_token: 0` (placeholder).
+    staged_centered_rx: Option<Receiver<PrecomputedSpectrogramChunk>>,
+    /// Stop flag shared with the staging thread.
+    staged_centered_stop: Option<Arc<AtomicBool>>,
+    /// Join handle for the staging thread -- joined before draining
+    /// to guarantee all flushed output is in the channel.
+    staged_centered_handle: Option<std::thread::JoinHandle<()>>,
+    /// Path of the file being pre-decoded for centered gapless.
+    staged_centered_path: Option<PathBuf>,
     profile_enabled: bool,
     prof_last: std::time::Instant,
     prof_pcm: usize,
@@ -403,6 +413,10 @@ impl AnalysisRuntimeState {
             active_session_channel_count: 0,
             active_session_divisor: 1,
             staged_continuation_path: None,
+            staged_centered_rx: None,
+            staged_centered_stop: None,
+            staged_centered_handle: None,
+            staged_centered_path: None,
         }
     }
 
@@ -435,6 +449,7 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::ResetSpectrogram => {
                 self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
             }
@@ -446,6 +461,7 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::SetFftSize(size) => {
                 self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
                 let fft = size.clamp(512, 8192).next_power_of_two();
                 let hop = (fft / 8).max(64);
                 self.fft_size = fft;
@@ -456,6 +472,7 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
                 self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
                 profile_eprintln!("[analysis] SetSpectrogramViewMode({view_mode:?})");
                 self.spectrogram_view_mode = view_mode;
                 self.reset_spectrogram_state();
@@ -464,6 +481,7 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::SetSpectrogramDisplayMode(mode) => {
                 self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
                 profile_eprintln!("[analysis] SetSpectrogramDisplayMode({mode:?})");
                 self.display_mode = mode;
                 let _ = ctx
@@ -475,6 +493,7 @@ impl AnalysisRuntimeState {
                 clear_history,
             } => {
                 self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
                 profile_eprintln!(
                     "[analysis] RestartCurrentTrack pos={position_seconds:.2} clear_history={clear_history}"
                 );
@@ -508,6 +527,7 @@ impl AnalysisRuntimeState {
                 self.handle_prepare_gapless_continuation(path, ctx);
             }
             AnalysisCommand::CancelStagedContinuation => {
+                self.cancel_centered_staging();
                 if self.staged_continuation_path.take().is_some() {
                     let _ = ctx
                         .spectrogram_cmd_tx
@@ -525,6 +545,7 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::ClearStagedContinuation => {
                 self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
             }
         }
     }
@@ -619,6 +640,19 @@ impl AnalysisRuntimeState {
         }
     }
 
+    /// Cancel any in-progress centered-mode staging thread and discard
+    /// its buffered chunks.  Joins the thread to ensure clean shutdown.
+    fn cancel_centered_staging(&mut self) {
+        if let Some(stop) = self.staged_centered_stop.take() {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(handle) = self.staged_centered_handle.take() {
+            let _ = handle.join();
+        }
+        self.staged_centered_rx = None;
+        self.staged_centered_path = None;
+    }
+
     fn handle_track_change(
         &mut self,
         path: PathBuf,
@@ -706,6 +740,7 @@ impl AnalysisRuntimeState {
         } else {
             // Non-gapless: cancel any stale staged continuation.
             self.clear_early_continuation(ctx);
+            self.cancel_centered_staging();
             // Non-gapless: reset the offset since a new session starts
             // with fresh coordinates.
             self.spectrogram_position_offset = 0.0;
