@@ -762,13 +762,19 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_snapshotNotifyTimer, &QTimer::timeout, this, [this]() {
         if (m_snapshotChangedPending) {
             m_snapshotChangedPending = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             QElapsedTimer t; t.start();
+#endif
             emit snapshotChanged();
-            const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
-            if (ms >= 5.0) {
-                FERROUS_SPECTROGRAM_LOGF(stderr,
-                    "[ui-signal-profile] snapshotChanged dispatch ms=%.1f\n", ms);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            {
+                const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
+                if (ms >= 5.0) {
+                    FERROUS_SPECTROGRAM_LOGF(stderr,
+                        "[ui-signal-profile] snapshotChanged dispatch ms=%.1f\n", ms);
+                }
             }
+#endif
         }
     });
 
@@ -4014,13 +4020,19 @@ void BridgeClient::schedulePlaybackChanged() {
                 return;
             }
             m_playbackChangedPending = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             QElapsedTimer t; t.start();
+#endif
             emit playbackChanged();
-            const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
-            if (ms >= 5.0) {
-                FERROUS_SPECTROGRAM_LOGF(stderr,
-                    "[ui-signal-profile] playbackChanged dispatch ms=%.1f\n", ms);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            {
+                const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
+                if (ms >= 5.0) {
+                    FERROUS_SPECTROGRAM_LOGF(stderr,
+                        "[ui-signal-profile] playbackChanged dispatch ms=%.1f\n", ms);
+                }
             }
+#endif
         },
         Qt::QueuedConnection);
 }
