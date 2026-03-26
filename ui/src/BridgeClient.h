@@ -87,20 +87,20 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
-    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackGenre READ currentTrackGenre NOTIFY snapshotChanged)
-    Q_PROPERTY(QVariant currentTrackYear READ currentTrackYear NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackFormatLabel READ currentTrackFormatLabel NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackChannelLayoutText READ currentTrackChannelLayoutText NOTIFY snapshotChanged)
-    Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY snapshotChanged)
-    Q_PROPERTY(int currentTrackSampleRateHz READ currentTrackSampleRateHz NOTIFY snapshotChanged)
-    Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY snapshotChanged)
-    Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY snapshotChanged)
+    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackGenre READ currentTrackGenre NOTIFY trackChanged)
+    Q_PROPERTY(QVariant currentTrackYear READ currentTrackYear NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackFormatLabel READ currentTrackFormatLabel NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackChannelLayoutText READ currentTrackChannelLayoutText NOTIFY trackChanged)
+    Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY trackChanged)
+    Q_PROPERTY(int currentTrackSampleRateHz READ currentTrackSampleRateHz NOTIFY trackChanged)
+    Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY trackChanged)
+    Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY trackChanged)
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
     Q_PROPERTY(double waveformCoverageSeconds READ waveformCoverageSeconds NOTIFY analysisChanged)
     Q_PROPERTY(bool waveformComplete READ waveformComplete NOTIFY analysisChanged)
@@ -311,6 +311,7 @@ public:
 
 signals:
     void playbackChanged();
+    void trackChanged();
     void snapshotChanged();
     void analysisChanged();
     void precomputedSpectrogramChunkReady(
