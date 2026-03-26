@@ -656,21 +656,17 @@ impl AnalysisRuntimeState {
     }
 
     /// Signal the staging thread to stop, drain all buffered chunks,
-    /// consolidate into a few large chunks, rewrite their track token,
-    /// and emit them to the bridge.  Returns the number of columns emitted.
+    /// rewrite their track token, and emit them to the bridge.  Returns
+    /// the number of columns emitted.
     ///
     /// Does NOT join the staging thread — the chunks have been accumulating
     /// in the channel for ~2 seconds and `try_iter()` grabs them all.
-    /// Blocking on `join()` would stall the analysis thread for ~30-40 ms
-    /// while the position has already jumped to 0, causing the centered
-    /// display to visually "travel" backward through the old track.
     /// The staging thread exits naturally after seeing the stop flag;
     /// `cancel_centered_staging` joins it if needed for cleanup.
     ///
-    /// The staging thread produces many small chunks (1, 2, 4, ... columns)
-    /// due to the chunk-size ramp.  Consolidating into ~4 large chunks
-    /// ensures the entire pre-staged range arrives within a single bridge
-    /// poll (budget: 8 analysis events).
+    /// Chunks are emitted individually (no consolidation) so the first
+    /// chunk (carrying the buffer reset) reaches the bridge immediately
+    /// without waiting for a costly memcpy pass over the full dataset.
     fn drain_staged_centered_chunks(&mut self, track_token: u64, ctx: &AnalysisContext<'_>) -> u32 {
         // Signal staging thread to stop (non-blocking).
         if let Some(stop) = self.staged_centered_stop.take() {
@@ -683,93 +679,21 @@ impl AnalysisRuntimeState {
         let Some(rx) = self.staged_centered_rx.take() else {
             return 0;
         };
-        // Collect all staged chunks.
-        let raw_chunks: Vec<PrecomputedSpectrogramChunk> = rx.try_iter().collect();
-        if raw_chunks.is_empty() {
-            return 0;
-        }
 
-        // Consolidate contiguous chunks into a few large ones so they
-        // fit within the bridge's per-poll budget (8 analysis events).
-        let total_columns: u32 = raw_chunks.iter().map(|c| u32::from(c.column_count)).sum();
-        let target_merged = 4u32;
-        let cols_per_merged = total_columns.div_ceil(target_merged).max(1);
-
-        // Use metadata from the first chunk as template.
-        let template = &raw_chunks[0];
-        let bins = template.bins_per_column;
-        let ch = template.channel_count;
-        let sr = template.sample_rate_hz;
-        let hop = template.hop_size;
-        let est = template.total_columns_estimate;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut merged_cols: u16 = 0;
-        let mut merged_start: u32 = 0;
-        let mut last_coverage: f32 = 0.0;
+        let mut total_columns = 0u32;
         let mut first = true;
-
-        for chunk in &raw_chunks {
-            if merged_cols == 0 {
-                merged_start = chunk.start_column_index;
-            }
-            buf.extend_from_slice(&chunk.columns_u8);
-            merged_cols = merged_cols.saturating_add(chunk.column_count);
-            last_coverage = chunk.coverage_seconds;
-
-            if u32::from(merged_cols) >= cols_per_merged {
-                let mut merged = PrecomputedSpectrogramChunk {
-                    track_token,
-                    columns_u8: std::mem::take(&mut buf),
-                    bins_per_column: bins,
-                    column_count: merged_cols,
-                    channel_count: ch,
-                    start_column_index: merged_start,
-                    total_columns_estimate: est,
-                    sample_rate_hz: sr,
-                    hop_size: hop,
-                    coverage_seconds: last_coverage,
-                    complete: false,
-                    buffer_reset: false,
-                    clear_history: false,
-                };
-                if first {
-                    merged.buffer_reset = true;
-                    merged.clear_history = true;
-                    first = false;
-                }
-                let _ = ctx
-                    .event_tx
-                    .send(AnalysisEvent::PrecomputedSpectrogramChunk(merged));
-                merged_cols = 0;
-            }
-        }
-
-        // Flush remainder.
-        if merged_cols > 0 {
-            let mut merged = PrecomputedSpectrogramChunk {
-                track_token,
-                columns_u8: buf,
-                bins_per_column: bins,
-                column_count: merged_cols,
-                channel_count: ch,
-                start_column_index: merged_start,
-                total_columns_estimate: est,
-                sample_rate_hz: sr,
-                hop_size: hop,
-                coverage_seconds: last_coverage,
-                complete: false,
-                buffer_reset: false,
-                clear_history: false,
-            };
+        for mut chunk in rx.try_iter() {
+            total_columns += u32::from(chunk.column_count);
+            chunk.track_token = track_token;
             if first {
-                merged.buffer_reset = true;
-                merged.clear_history = true;
+                chunk.buffer_reset = true;
+                chunk.clear_history = true;
+                first = false;
             }
             let _ = ctx
                 .event_tx
-                .send(AnalysisEvent::PrecomputedSpectrogramChunk(merged));
+                .send(AnalysisEvent::PrecomputedSpectrogramChunk(chunk));
         }
-
         total_columns
     }
 
