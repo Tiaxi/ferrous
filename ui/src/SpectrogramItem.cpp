@@ -307,11 +307,10 @@ void SpectrogramItem::setPositionSeconds(double value) {
         QMutexLocker lock(&m_stateMutex);
         const auto now = Clock::now();
         const double currentPosition = currentRenderPositionSecondsLocked(now);
-        const bool largeRollingJump = m_precomputedReady
-            && m_displayMode == 0
+        const bool largeJump = m_precomputedReady
             && m_playing
             && std::abs(clamped - currentPosition) >= kPositionJumpHoldThresholdSeconds;
-        if (largeRollingJump) {
+        if (largeJump) {
             // Update the target position unconditionally, but only stamp the
             // start time on the *first* activation.  Without this guard, each
             // position heartbeat (~100 ms) during a natural track transition
