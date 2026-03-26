@@ -417,6 +417,11 @@ struct BridgeState {
     pending_search_results: Option<BridgeSearchResultsFrame>,
     pending_waveform_track: Option<PendingWaveformTrack>,
     analysis_track_token: u64,
+    /// Set by gapless `TrackChanged` events.  When true, the next snapshot
+    /// should skip the queue section because only the playing index changed
+    /// (already in the playback section).  Avoids the 100-250 ms model
+    /// reset stall on the Qt side for large playlists.
+    skip_queue_for_gapless: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1268,6 +1273,15 @@ impl BridgeLoopRuntime {
             .max(apply_album_art_urgency)
             .max(external_queue_details_urgency)
             .max(lastfm_urgency);
+        // Gapless track changes don't modify the queue contents — only
+        // the playing index moves, which is already in the playback section.
+        // Suppress the queue section to avoid the 100-250 ms model reset
+        // stall on the Qt side for large playlists.  Any deferred queue
+        // detail sync catches up on the next revalidation cycle (~2 s).
+        if self.state.skip_queue_for_gapless {
+            self.state.skip_queue_for_gapless = false;
+            self.snapshot_plan.include_queue_in_next_snapshot = false;
+        }
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
@@ -4371,6 +4385,9 @@ fn process_playback_event(
                     track_token,
                     gapless: is_gapless,
                 });
+            }
+            if is_gapless {
+                state.skip_queue_for_gapless = true;
             }
             SnapshotUrgency::Immediate
         }
