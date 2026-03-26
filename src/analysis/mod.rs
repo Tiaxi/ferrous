@@ -1222,6 +1222,271 @@ fn precomputed_to_u8_spectrum(v: f32, fft_size: usize) -> u8 {
     result
 }
 
+/// State for the staging decode thread's chunk accumulation.
+/// Bundles both mutable accumulation state and immutable session
+/// parameters so that helper functions stay under the argument limit.
+struct StagingChunkState {
+    // Immutable session parameters.
+    fft_size: usize,
+    bins_per_column: usize,
+    channel_count: usize,
+    effective_rate: u32,
+    total_columns_estimate: u32,
+    // Mutable accumulation state.
+    columns_produced: u64,
+    total_covered_samples: u64,
+    chunk_buf: Vec<u8>,
+    chunk_columns: u16,
+    chunk_start_index: u64,
+    target_chunk_columns: u16,
+}
+
+impl StagingChunkState {
+    /// Build a partial-flush chunk from the current accumulation state
+    /// without resetting counters.  Returns `None` if no columns are
+    /// buffered.
+    fn take_partial_chunk(&mut self) -> Option<PrecomputedSpectrogramChunk> {
+        if self.chunk_columns == 0 {
+            return None;
+        }
+        let coverage =
+            seconds_from_frames(self.total_covered_samples, u64::from(self.effective_rate));
+        Some(PrecomputedSpectrogramChunk {
+            track_token: 0,
+            columns_u8: std::mem::take(&mut self.chunk_buf),
+            bins_per_column: clamp_to_u16(self.bins_per_column),
+            column_count: self.chunk_columns,
+            channel_count: clamp_to_u8(self.channel_count),
+            start_column_index: u64_to_u32_saturating(self.chunk_start_index),
+            total_columns_estimate: self.total_columns_estimate,
+            sample_rate_hz: self.effective_rate,
+            hop_size: clamp_to_u16(REFERENCE_HOP),
+            coverage_seconds: coverage,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+        })
+    }
+}
+
+/// Drain STFT rows from the staging pipeline, quantize, and emit
+/// chunks via the channel.  Extracted from `centered_staging_decode`
+/// to stay within clippy's line limit.
+/// Returns `true` to continue decoding, `false` if the receiver dropped.
+fn staging_drain_stft_rows(
+    stfts: &mut [StftComputer],
+    decimators: &mut [SpectrogramDecimator],
+    state: &mut StagingChunkState,
+    tx: &Sender<PrecomputedSpectrogramChunk>,
+) -> bool {
+    loop {
+        let mut rows: Vec<Vec<f32>> = Vec::with_capacity(state.channel_count);
+        let mut all_have_row = true;
+        for stft in stfts.iter_mut() {
+            let row = stft.take_rows(1);
+            if row.is_empty() {
+                all_have_row = false;
+                break;
+            }
+            rows.push(row.into_iter().next().unwrap());
+        }
+        if !all_have_row {
+            break;
+        }
+
+        let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(state.channel_count);
+        for (ch, row) in rows.into_iter().enumerate() {
+            if let Some(dec) = decimators.get_mut(ch) {
+                decimated_rows.push(dec.push(row));
+            } else {
+                decimated_rows.push(Some(row));
+            }
+        }
+
+        if !decimated_rows.iter().all(Option::is_some) {
+            continue;
+        }
+
+        for maybe_row in &decimated_rows {
+            let row = maybe_row.as_ref().unwrap();
+            for &v in row.iter().take(state.bins_per_column) {
+                state
+                    .chunk_buf
+                    .push(precomputed_to_u8_spectrum(v, state.fft_size));
+            }
+            if row.len() < state.bins_per_column {
+                state
+                    .chunk_buf
+                    .extend(std::iter::repeat_n(0u8, state.bins_per_column - row.len()));
+            }
+        }
+        state.chunk_columns += 1;
+        state.columns_produced += 1;
+
+        if state.chunk_columns >= state.target_chunk_columns {
+            let coverage =
+                seconds_from_frames(state.total_covered_samples, u64::from(state.effective_rate));
+            let chunk = PrecomputedSpectrogramChunk {
+                track_token: 0,
+                columns_u8: std::mem::take(&mut state.chunk_buf),
+                bins_per_column: clamp_to_u16(state.bins_per_column),
+                column_count: state.chunk_columns,
+                channel_count: clamp_to_u8(state.channel_count),
+                start_column_index: u64_to_u32_saturating(state.chunk_start_index),
+                total_columns_estimate: state.total_columns_estimate,
+                sample_rate_hz: state.effective_rate,
+                hop_size: clamp_to_u16(REFERENCE_HOP),
+                coverage_seconds: coverage,
+                complete: false,
+                buffer_reset: false,
+                clear_history: false,
+            };
+            if tx.send(chunk).is_err() {
+                return false; // receiver dropped
+            }
+            state.chunk_start_index = state.columns_produced;
+            state.chunk_columns = 0;
+            state.target_chunk_columns = next_target_chunk_columns(
+                state.target_chunk_columns,
+                SpectrogramDisplayMode::Centered,
+            );
+        }
+    }
+    true // ok, continue decoding
+}
+
+fn centered_staging_decode(
+    path: &Path,
+    fft_size: usize,
+    hop_size: usize,
+    view_mode: SpectrogramViewMode,
+    stop: &AtomicBool,
+    tx: &Sender<PrecomputedSpectrogramChunk>,
+) {
+    let Some((mut source, native_sample_rate, native_channels, total_columns_estimate)) =
+        open_audio_file(path)
+    else {
+        profile_eprintln!("[staging] failed to open {}", path.display());
+        return;
+    };
+
+    let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
+    let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
+    let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
+    let channel_count = match view_mode {
+        SpectrogramViewMode::Downmix => 1,
+        SpectrogramViewMode::PerChannel => native_channels,
+    };
+    let bins_per_column = (fft_size / 2) + 1;
+    let decimation_factor = decimation_factor_for_hop(hop_size);
+
+    let mut stfts: Vec<StftComputer> = (0..channel_count)
+        .map(|_| StftComputer::new(fft_size, hop_size))
+        .collect();
+    let mut decimators: Vec<SpectrogramDecimator> = (0..channel_count)
+        .map(|_| SpectrogramDecimator::new(decimation_factor))
+        .collect();
+
+    let mut state = StagingChunkState {
+        fft_size,
+        bins_per_column,
+        channel_count,
+        effective_rate,
+        total_columns_estimate,
+        columns_produced: 0,
+        total_covered_samples: 0,
+        chunk_buf: Vec::new(),
+        chunk_columns: 0,
+        chunk_start_index: 0,
+        target_chunk_columns: 1,
+    };
+
+    profile_eprintln!(
+        "[staging] started for {} sr={native_sample_rate} ch={native_channels}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+    );
+
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            // Flush any partial chunk so the drain captures as much data as possible.
+            if let Some(chunk) = state.take_partial_chunk() {
+                let _ = tx.send(chunk);
+            }
+            profile_eprintln!("[staging] stopped after {} columns", state.columns_produced);
+            return;
+        }
+
+        let audio = match source.next_frames() {
+            Some(af) if af.frames == 0 => continue,
+            Some(af) => af,
+            None => break, // EOF
+        };
+
+        let effective_frames = audio.frames / divisor;
+        let per_channel = deinterleave_samples(
+            &audio.samples,
+            audio.frames,
+            audio.channels,
+            channel_count,
+            divisor,
+            effective_frames,
+            view_mode,
+        );
+
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            state.total_covered_samples += effective_frames as u64;
+        }
+
+        for (ch, channel_samples) in per_channel.iter().enumerate() {
+            if let Some(stft) = stfts.get_mut(ch) {
+                stft.enqueue_samples(channel_samples, effective_rate);
+            }
+        }
+
+        if !staging_drain_stft_rows(&mut stfts, &mut decimators, &mut state, tx) {
+            return; // receiver dropped
+        }
+    }
+
+    // Flush remaining partial chunk at EOF.
+    if let Some(chunk) = state.take_partial_chunk() {
+        let _ = tx.send(chunk);
+    }
+
+    profile_eprintln!(
+        "[staging] completed {} columns for {}",
+        state.columns_produced,
+        path.file_name().unwrap_or_default().to_string_lossy(),
+    );
+}
+
+/// Spawn a short-lived staging thread that pre-decodes a track for
+/// centered-mode gapless.  Produces `PrecomputedSpectrogramChunk`s
+/// with 0-based column indices and `track_token: 0` (placeholder).
+/// Returns the chunk receiver and the thread's join handle.
+// Callers are added in a subsequent task (handle_prepare_gapless_continuation).
+#[allow(dead_code)]
+fn spawn_centered_staging_worker(
+    path: PathBuf,
+    fft_size: usize,
+    hop_size: usize,
+    view_mode: SpectrogramViewMode,
+    stop: Arc<AtomicBool>,
+) -> (
+    Receiver<PrecomputedSpectrogramChunk>,
+    std::thread::JoinHandle<()>,
+) {
+    let (tx, rx) = unbounded::<PrecomputedSpectrogramChunk>();
+    let handle = std::thread::Builder::new()
+        .name("ferrous-spectrogram-staging".to_string())
+        .spawn(move || {
+            centered_staging_decode(&path, fft_size, hop_size, view_mode, &stop, &tx);
+        })
+        .expect("failed to spawn staging thread");
+    (rx, handle)
+}
+
 fn spawn_spectrogram_decode_worker(
     cmd_rx: Receiver<SpectrogramWorkerCommand>,
     event_tx: Sender<AnalysisEvent>,
@@ -5713,5 +5978,81 @@ mod tests {
         // Requesting 4 channels but only 2 samples — out-of-bounds channels
         // should contribute 0.0, not panic.
         assert!((peak_across_channels(&samples, 0, 4) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn centered_staging_chunk_indices_are_zero_based_and_monotonic() {
+        // Exercises the same STFT -> decimator -> chunk indexing logic used
+        // by centered_staging_decode, verifying 0-based start indices and
+        // placeholder token 0.
+        let fft_size = 512;
+        let hop_size = 128;
+        let bins_per_column = (fft_size / 2) + 1;
+        let decimation_factor = decimation_factor_for_hop(hop_size);
+
+        let mut stft = StftComputer::new(fft_size, hop_size);
+        let mut decimator = SpectrogramDecimator::new(decimation_factor);
+
+        // Feed a 440 Hz sine wave, enough for several output columns.
+        let sample_rate = 48_000u32;
+        let samples: Vec<f32> = (0u32..32_768)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / sample_rate as f32)).sin())
+            .collect();
+        stft.enqueue_samples(&samples, sample_rate);
+
+        let mut columns_produced: u64 = 0;
+        let mut chunk_start_index: u64 = 0;
+        let mut chunk_columns: u16 = 0;
+        let mut target_chunk_columns: u16 = 1;
+        let mut chunks: Vec<PrecomputedSpectrogramChunk> = Vec::new();
+
+        loop {
+            let row = stft.take_rows(1);
+            if row.is_empty() {
+                break;
+            }
+            let row = row.into_iter().next().unwrap();
+            let maybe_dec = decimator.push(row);
+            if maybe_dec.is_none() {
+                continue;
+            }
+
+            chunk_columns += 1;
+            columns_produced += 1;
+
+            if chunk_columns >= target_chunk_columns {
+                chunks.push(PrecomputedSpectrogramChunk {
+                    track_token: 0,
+                    columns_u8: vec![0u8; usize::from(chunk_columns) * bins_per_column],
+                    bins_per_column: clamp_to_u16(bins_per_column),
+                    column_count: chunk_columns,
+                    channel_count: 1,
+                    start_column_index: u64_to_u32_saturating(chunk_start_index),
+                    total_columns_estimate: 1000,
+                    sample_rate_hz: sample_rate,
+                    hop_size: clamp_to_u16(REFERENCE_HOP),
+                    coverage_seconds: 0.0,
+                    complete: false,
+                    buffer_reset: false,
+                    clear_history: false,
+                });
+                chunk_start_index = columns_produced;
+                chunk_columns = 0;
+                target_chunk_columns = next_target_chunk_columns(
+                    target_chunk_columns,
+                    SpectrogramDisplayMode::Centered,
+                );
+            }
+        }
+
+        assert!(chunks.len() >= 2, "should produce multiple chunks");
+        // First chunk starts at index 0.
+        assert_eq!(chunks[0].start_column_index, 0);
+        assert_eq!(chunks[0].track_token, 0);
+        // Indices are monotonically increasing.
+        for i in 1..chunks.len() {
+            assert!(chunks[i].start_column_index > chunks[i - 1].start_column_index);
+            assert_eq!(chunks[i].track_token, 0);
+        }
     }
 }
