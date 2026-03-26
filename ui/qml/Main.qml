@@ -1161,11 +1161,23 @@ Kirigami.ApplicationWindow {
     Connections {
         target: uiBridge
         function onSnapshotChanged() {
+            const profiling = uiBridge.profileLogsEnabled
+            const t0 = profiling ? Date.now() : 0
             playbackController.handleSnapshotChanged(
                 function() { spectrogramSurface.haltForCurrentMode() },
                 function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
+            const t1 = profiling ? Date.now() : 0
             viewerController.handleSnapshotChanged()
+            const t2 = profiling ? Date.now() : 0
             queueController.handleBridgeSnapshotUpdate()
+            if (profiling) {
+                const t3 = Date.now()
+                const total = t3 - t0
+                if (total >= 10)
+                    console.warn("[qml-signal-profile] onSnapshotChanged total=" + total
+                        + "ms playback=" + (t1-t0) + " viewer=" + (t2-t1)
+                        + " queueUpdate=" + (t3-t2))
+            }
         }
         function onPlaybackChanged() {
             playbackController.handlePlaybackChanged(

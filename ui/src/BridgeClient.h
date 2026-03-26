@@ -153,6 +153,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
+    Q_PROPERTY(bool profileLogsEnabled READ profileLogsEnabled CONSTANT)
 
 public:
     explicit BridgeClient(QObject *parent = nullptr);
@@ -235,6 +236,7 @@ public:
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
     bool connected() const;
+    bool profileLogsEnabled() const { return m_profileUiEnabled; }
 
     Q_INVOKABLE void play();
     Q_INVOKABLE void pause();
