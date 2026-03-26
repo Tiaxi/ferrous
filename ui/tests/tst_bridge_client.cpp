@@ -50,6 +50,9 @@ private slots:
     void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
+    void trackOnlySnapshotSetsTrackFlagOnly();
+    void coverLookupSchedulesTrackChangedNotSnapshotChanged();
+    void mprisRepublishesMetadataOnTrackChanged();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
     void mprisCanPauseOnlyWhilePlaying();
     void mprisControllerConstructionDoesNotCrash();
@@ -409,6 +412,92 @@ void BridgeClientTest::itunesSquareArtworkReuseSkipsRedundantNormalization() {
     QVERIFY(!downloadPath.isEmpty());
     QCOMPARE(normalizedPath, downloadPath);
     QCOMPARE(result.value(QStringLiteral("fileSizeBytes")).toLongLong(), QFileInfo(normalizedPath).size());
+}
+
+void BridgeClientTest::trackOnlySnapshotSetsTrackFlagOnly() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    // Pre-populate a playing track so the snapshot changes metadata fields.
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/old.flac");
+    client.m_currentTrackTitle = QStringLiteral("Old Title");
+    client.m_currentTrackArtist = QStringLiteral("Old Artist");
+    client.m_playingQueueIndex = 0;
+
+    // Build a snapshot that only changes track metadata (no queue/settings/library).
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1; // Playing
+    snapshot.playback.currentQueueIndex = 1;
+    snapshot.playback.currentPath = QStringLiteral("/music/new.flac");
+
+    snapshot.metadata.present = true;
+    snapshot.metadata.title = QStringLiteral("New Title");
+    snapshot.metadata.artist = QStringLiteral("New Artist");
+    snapshot.metadata.album = QStringLiteral("New Album");
+
+    // Reset poll flags before processing.
+    client.m_pollPlaybackChanged = false;
+    client.m_pollTrackChanged = false;
+    client.m_pollSnapshotChanged = false;
+
+    QVERIFY(client.processBinarySnapshot(snapshot));
+
+    // Core invariant: track-only changes must set m_pollTrackChanged without
+    // setting m_pollSnapshotChanged.
+    QVERIFY(client.m_pollTrackChanged);
+    QVERIFY(!client.m_pollSnapshotChanged);
+}
+
+void BridgeClientTest::coverLookupSchedulesTrackChangedNotSnapshotChanged() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_currentTrackCoverPath = QStringLiteral("file:///old-cover.jpg");
+
+    // Apply a new cover via the async lookup path.
+    client.applyTrackCoverLookupResult(
+        QStringLiteral("/music/track.flac"),
+        QStringLiteral("file:///new-cover.jpg"));
+
+    // The cover update must schedule trackChanged, not snapshotChanged.
+    QVERIFY(client.m_trackChangedPending);
+    QVERIFY(!client.m_snapshotChangedPending);
+    QCOMPARE(client.m_currentTrackCoverPath, QStringLiteral("file:///new-cover.jpg"));
+}
+
+void BridgeClientTest::mprisRepublishesMetadataOnTrackChanged() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 1;
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_currentTrackTitle = QStringLiteral("Old Title");
+    client.m_currentTrackArtist = QStringLiteral("Old Artist");
+
+    MprisController controller(&client);
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+
+    // Mutate track metadata and emit trackChanged.
+    client.m_currentTrackTitle = QStringLiteral("New Title");
+    client.m_currentTrackArtist = QStringLiteral("New Artist");
+    emit client.trackChanged();
+
+    // MPRIS must have republished with the new metadata.
+    QVERIFY(controller.m_hasPublishedPlayerState);
+    const QVariantMap meta = controller.m_lastPlayerState.metadata;
+    QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(),
+             QStringLiteral("New Title"));
+    const QStringList artists = meta.value(QStringLiteral("xesam:artist")).toStringList();
+    QVERIFY(!artists.isEmpty());
+    QCOMPARE(artists.first(), QStringLiteral("New Artist"));
+
+    // Clean up D-Bus state before destruction.
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
 }
 
 void BridgeClientTest::mprisPublishesPlaybackStateOnPlaybackSignal() {

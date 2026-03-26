@@ -392,6 +392,7 @@ private slots:
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
     void playbackControllerInterpolationDeactivatesOnStop();
+    void trackChangedSignalTriggersQmlHandler();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2121,6 +2122,47 @@ Item {
     // Simulate stop via the QML helper that provides proper JS callbacks.
     QVERIFY(QMetaObject::invokeMethod(root.data(), "simulateStop"));
     QCOMPARE(controller->property("interpolationActive").toBool(), false);
+}
+
+void QmlSmokeTest::trackChangedSignalTriggersQmlHandler() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+
+Item {
+    id: harness
+    property int trackChangedCount: 0
+
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property int playingQueueIndex: -1
+        signal trackChanged()
+        signal snapshotChanged()
+    }
+
+    Connections {
+        target: bridge
+        function onTrackChanged() {
+            harness.trackChangedCount++
+        }
+    }
+
+    function emitTrackChanged() {
+        bridge.playingQueueIndex = 5
+        bridge.trackChanged()
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QCOMPARE(root->property("trackChangedCount").toInt(), 0);
+
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "emitTrackChanged"));
+    QCOMPARE(root->property("trackChangedCount").toInt(), 1);
 }
 
 int main(int argc, char **argv) {
