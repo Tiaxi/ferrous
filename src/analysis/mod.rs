@@ -555,20 +555,16 @@ impl AnalysisRuntimeState {
     /// mode only; centered mode needs fresh `NewTrack` with 0-based
     /// indices at commit time.  Called from `about-to-finish`.
     fn handle_prepare_gapless_continuation(&mut self, path: PathBuf, ctx: &AnalysisContext<'_>) {
-        // Early ContinueWithFile is rolling-mode only.
-        if self.display_mode != SpectrogramDisplayMode::Rolling {
-            return;
-        }
-
-        // Cancel any prior pending continuation.
+        // Cancel any prior pending work for both modes.
         self.clear_early_continuation(ctx);
+        self.cancel_centered_staging();
 
-        // Open the candidate file and check format compatibility.
+        // Format compatibility check (shared between both modes).
         // For raw surround files (AC3/DTS), Symphonia can't probe the
         // format and a GStreamer pipeline is too expensive.  Same-extension
         // surround transitions are virtually always compatible (same rate
-        // and channel layout), so send ContinueWithFile optimistically —
-        // the worker validates and falls back to NewTrack if wrong.
+        // and channel layout), so proceed optimistically — the worker
+        // validates and falls back to NewTrack if wrong.
         #[cfg(feature = "gst")]
         let surround_optimistic = is_raw_surround_file(&path)
             && self
@@ -615,19 +611,38 @@ impl AnalysisRuntimeState {
             }
         }
 
-        profile_eprintln!(
-            "[analysis] early ContinueWithFile for {} optimistic={surround_optimistic}",
-            path.display(),
-        );
-
-        // Send early ContinueWithFile with current (old) token.
-        let _ = ctx
-            .spectrogram_cmd_tx
-            .send(SpectrogramWorkerCommand::ContinueWithFile {
-                path: path.clone(),
-                track_token: self.active_track_token,
-            });
-        self.staged_continuation_path = Some(path);
+        if self.display_mode == SpectrogramDisplayMode::Rolling {
+            // Rolling mode: send early ContinueWithFile to live worker.
+            profile_eprintln!(
+                "[analysis] early ContinueWithFile for {} optimistic={surround_optimistic}",
+                path.display(),
+            );
+            let _ = ctx
+                .spectrogram_cmd_tx
+                .send(SpectrogramWorkerCommand::ContinueWithFile {
+                    path: path.clone(),
+                    track_token: self.active_track_token,
+                });
+            self.staged_continuation_path = Some(path);
+        } else {
+            // Centered mode: spawn staging decode thread.
+            profile_eprintln!(
+                "[analysis] centered staging for {} optimistic={surround_optimistic}",
+                path.display(),
+            );
+            let stop = Arc::new(AtomicBool::new(false));
+            let (rx, handle) = spawn_centered_staging_worker(
+                path.clone(),
+                self.fft_size,
+                self.hop_size,
+                self.spectrogram_view_mode,
+                Arc::clone(&stop),
+            );
+            self.staged_centered_rx = Some(rx);
+            self.staged_centered_stop = Some(stop);
+            self.staged_centered_handle = Some(handle);
+            self.staged_centered_path = Some(path);
+        }
     }
 
     /// Clear any early continuation, sending `CancelPendingContinue` to
@@ -6064,5 +6079,134 @@ mod tests {
             assert!(chunks[i].start_column_index > chunks[i - 1].start_column_index);
             assert_eq!(chunks[i].track_token, 0);
         }
+    }
+
+    #[test]
+    fn cancel_centered_staging_sets_stop_and_clears_state() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (_tx, rx) = unbounded::<PrecomputedSpectrogramChunk>();
+
+        let mut state = AnalysisRuntimeState::new();
+        state.staged_centered_rx = Some(rx);
+        state.staged_centered_stop = Some(Arc::clone(&stop));
+        state.staged_centered_path = Some(PathBuf::from("/test/track.flac"));
+
+        state.cancel_centered_staging();
+
+        assert!(state.staged_centered_rx.is_none());
+        assert!(state.staged_centered_stop.is_none());
+        assert!(state.staged_centered_handle.is_none());
+        assert!(state.staged_centered_path.is_none());
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn stop_join_drain_captures_all_staged_output() {
+        // Simulate a staging thread that produces chunks and flushes on stop.
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = unbounded::<PrecomputedSpectrogramChunk>();
+        let stop_clone = Arc::clone(&stop);
+
+        let handle = std::thread::Builder::new()
+            .name("test-staging".to_string())
+            .spawn(move || {
+                for i in 0..5u32 {
+                    let _ = tx.send(PrecomputedSpectrogramChunk {
+                        track_token: 0,
+                        columns_u8: vec![0u8; 4],
+                        bins_per_column: 4,
+                        column_count: 1,
+                        channel_count: 1,
+                        start_column_index: i,
+                        total_columns_estimate: 100,
+                        sample_rate_hz: 48_000,
+                        hop_size: 1024,
+                        coverage_seconds: 0.0,
+                        complete: false,
+                        buffer_reset: false,
+                        clear_history: false,
+                    });
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // Wait for stop signal, then produce one more (flush-on-stop).
+                while !stop_clone.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let _ = tx.send(PrecomputedSpectrogramChunk {
+                    track_token: 0,
+                    columns_u8: vec![0u8; 4],
+                    bins_per_column: 4,
+                    column_count: 1,
+                    channel_count: 1,
+                    start_column_index: 5,
+                    total_columns_estimate: 100,
+                    sample_rate_hz: 48_000,
+                    hop_size: 1024,
+                    coverage_seconds: 0.0,
+                    complete: false,
+                    buffer_reset: false,
+                    clear_history: false,
+                });
+            })
+            .unwrap();
+
+        // Give the thread time to produce initial chunks.
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Signal stop, join, then drain — should get all 6 chunks.
+        stop.store(true, Ordering::Release);
+        let _ = handle.join();
+        let chunks: Vec<_> = rx.try_iter().collect();
+
+        assert_eq!(chunks.len(), 6);
+        assert_eq!(chunks[5].start_column_index, 5);
+    }
+
+    #[test]
+    fn staged_chunks_get_token_rewritten_and_first_gets_reset_flags() {
+        let (tx, rx) = unbounded::<PrecomputedSpectrogramChunk>();
+
+        for i in 0..3u32 {
+            let _ = tx.send(PrecomputedSpectrogramChunk {
+                track_token: 0,
+                columns_u8: vec![0u8; 12],
+                bins_per_column: 4,
+                column_count: 3,
+                channel_count: 1,
+                start_column_index: i * 3,
+                total_columns_estimate: 1000,
+                sample_rate_hz: 48_000,
+                hop_size: 1024,
+                coverage_seconds: 0.0,
+                complete: false,
+                buffer_reset: false,
+                clear_history: false,
+            });
+        }
+        drop(tx);
+
+        let real_token: u64 = 42;
+        let mut first = true;
+        let mut rewritten: Vec<PrecomputedSpectrogramChunk> = Vec::new();
+        for mut chunk in rx.try_iter() {
+            chunk.track_token = real_token;
+            if first {
+                chunk.buffer_reset = true;
+                chunk.clear_history = true;
+                first = false;
+            }
+            rewritten.push(chunk);
+        }
+
+        assert_eq!(rewritten.len(), 3);
+        assert_eq!(rewritten[0].track_token, 42);
+        assert!(rewritten[0].buffer_reset);
+        assert!(rewritten[0].clear_history);
+        assert_eq!(rewritten[0].start_column_index, 0);
+        assert_eq!(rewritten[1].track_token, 42);
+        assert!(!rewritten[1].buffer_reset);
+        assert!(!rewritten[1].clear_history);
+        assert_eq!(rewritten[2].track_token, 42);
+        assert!(!rewritten[2].buffer_reset);
     }
 }
