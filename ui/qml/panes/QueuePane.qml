@@ -360,15 +360,10 @@ Rectangle {
                 target: root.uiBridge
 
                 function onSnapshotChanged() {
-                    if (root.uiBridge.profileLogsEnabled) {
-                        const t0 = Date.now()
-                        root.controller.handleSnapshotChanged(playlistView)
-                        const ms = Date.now() - t0
-                        if (ms >= 10)
-                            console.warn("[qml-signal-profile] QueuePane.handleSnapshotChanged ms=" + ms)
-                    } else {
-                        root.controller.handleSnapshotChanged(playlistView)
-                    }
+                    root.controller.handleSnapshotChanged(playlistView)
+                }
+                function onTrackChanged() {
+                    root.controller.handleSnapshotChanged(playlistView)
                 }
             }
 

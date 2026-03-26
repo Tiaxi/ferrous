@@ -536,6 +536,7 @@ Item {
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
             real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken)
+        signal trackChanged()
         signal snapshotChanged()
         function setVolume(value) {}
         function setLibrarySortMode(mode) {}
