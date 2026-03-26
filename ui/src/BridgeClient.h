@@ -458,6 +458,7 @@ private:
     void rebuildDiagnosticsText();
     static QString resolveDiagnosticsLogPath();
     void schedulePlaybackChanged();
+    void scheduleTrackChanged();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
     void shutdownBridgeGracefully();
@@ -590,9 +591,11 @@ private:
     bool m_loggedStartupQueueMissing{false};
     bool m_loggedStartupQueuePresent{false};
     bool m_playbackChangedPending{false};
+    bool m_trackChangedPending{false};
     bool m_snapshotChangedPending{false};
     bool m_analysisChangedPending{false};
     bool m_pollPlaybackChanged{false};
+    bool m_pollTrackChanged{false};
     bool m_pollSnapshotChanged{false};
     bool m_pendingSeek{false};
     double m_pendingSeekTargetSeconds{0.0};

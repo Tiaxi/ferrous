@@ -153,6 +153,11 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
                 publishPlayerState();
             }
         });
+        connect(m_bridge, &BridgeClient::trackChanged, this, [this]() {
+            if (m_serviceRegistered) {
+                publishPlayerState();
+            }
+        });
         connect(m_bridge, &BridgeClient::snapshotChanged, this, [this]() {
             setEnabled(m_bridge->systemMediaControlsEnabled());
             if (m_serviceRegistered) {
