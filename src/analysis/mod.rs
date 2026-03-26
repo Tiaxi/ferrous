@@ -742,16 +742,75 @@ impl AnalysisRuntimeState {
                     });
             }
         } else if gapless && !reset_spectrogram {
-            // Centered mode gapless: start a fresh session so the new
-            // track gets 0-based column indices.  ContinueWithFile would
-            // use the continuous K-based counter, which centered mode's
-            // position-based column lookup can't resolve.
+            // Centered mode gapless: check for pre-staged data.
             self.clear_early_continuation(ctx);
             self.spectrogram_position_offset = 0.0;
-            profile_eprintln!("[analysis] handle_track_change: centered gapless → fresh NewTrack",);
-            // emit_initial_reset + clear_history so the UI clears the ring,
-            // canvas range, and max column index from the previous track.
-            self.start_spectrogram_session(0.0, true, true, ctx);
+
+            let staged_match = self.staged_centered_path.as_ref() == Some(&path);
+            let staged_rx = if staged_match {
+                // Signal staging thread to stop, then join it to guarantee
+                // all flushed output (including the partial-chunk flush-on-stop)
+                // is in the channel before we drain.
+                if let Some(stop) = self.staged_centered_stop.take() {
+                    stop.store(true, Ordering::Release);
+                }
+                if let Some(handle) = self.staged_centered_handle.take() {
+                    let _ = handle.join();
+                }
+                self.staged_centered_rx.take()
+            } else {
+                None
+            };
+            // Always clean up remaining staging state.
+            self.cancel_centered_staging();
+
+            if let Some(rx) = staged_rx {
+                // Drain all staged chunks.  The staging thread has been joined
+                // above, so every chunk it produced is now in the channel.
+                let mut chunk_count = 0u32;
+                let mut first = true;
+                for mut chunk in rx.try_iter() {
+                    chunk.track_token = track_token;
+                    if first {
+                        chunk.buffer_reset = true;
+                        chunk.clear_history = true;
+                        first = false;
+                    }
+                    let _ = ctx
+                        .event_tx
+                        .send(AnalysisEvent::PrecomputedSpectrogramChunk(chunk));
+                    chunk_count += 1;
+                }
+
+                if chunk_count > 0 {
+                    profile_eprintln!(
+                        "[analysis] handle_track_change: centered gapless → emitted {chunk_count} staged chunks",
+                    );
+                    // Start main worker from 0 without initial reset.  The
+                    // staged chunks already performed the reset.  The worker
+                    // re-decodes from the beginning; its identical columns
+                    // overwrite staged data in the ring (same token + column
+                    // index → map update only, no visual effect).
+                    //
+                    // Why not start from coverage_seconds?  The STFT warmup
+                    // in the new session would skip columns at the seam.
+                    // Re-decoding from 0 means the overlap equals whatever the
+                    // staging thread produced in ~2 seconds of wall time.
+                    // This is bounded by the about-to-finish window duration
+                    // and avoids any seam artifacts.
+                    self.start_spectrogram_session_no_reset(0.0, ctx);
+                } else {
+                    profile_eprintln!(
+                        "[analysis] handle_track_change: centered gapless → no staged data, fresh NewTrack",
+                    );
+                    self.start_spectrogram_session(0.0, true, true, ctx);
+                }
+            } else {
+                profile_eprintln!(
+                    "[analysis] handle_track_change: centered gapless → fresh NewTrack (no staging)",
+                );
+                self.start_spectrogram_session(0.0, true, true, ctx);
+            }
         } else {
             // Non-gapless: cancel any stale staged continuation.
             self.clear_early_continuation(ctx);
