@@ -307,11 +307,16 @@ void SpectrogramItem::setPositionSeconds(double value) {
         QMutexLocker lock(&m_stateMutex);
         const auto now = Clock::now();
         const double currentPosition = currentRenderPositionSecondsLocked(now);
-        const bool largeRollingJump = m_precomputedReady
-            && m_displayMode == 0
+        const bool largeJump = m_precomputedReady
             && m_playing
             && std::abs(clamped - currentPosition) >= kPositionJumpHoldThresholdSeconds;
-        if (largeRollingJump) {
+        // In centered mode, only hold for gapless transitions (position
+        // resets to near zero from deep in the track), not same-track
+        // seeks.  Seeks must apply immediately because the full-track
+        // ring already has data at the target position.
+        const bool centeredSeek = m_displayMode == 1
+            && clamped >= 1.0;
+        if (largeJump && !centeredSeek) {
             // Update the target position unconditionally, but only stamp the
             // start time on the *first* activation.  Without this guard, each
             // position heartbeat (~100 ms) during a natural track transition

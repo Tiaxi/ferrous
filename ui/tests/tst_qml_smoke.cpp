@@ -387,6 +387,7 @@ private slots:
     void spectrogramGaplessTokenChunksPassFilter();
     void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
     void spectrogramCenteredModeSeekPreservesRing();
+    void spectrogramCenteredGaplessPreStagedFill();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -1901,6 +1902,48 @@ void QmlSmokeTest::spectrogramCenteredModeSeekPreservesRing() {
     QCOMPARE(item.m_ringWriteSeq, 100);
 
     // Data at the new position must still be valid in the ring.
+    QVERIFY(item.m_ringCapacity > 0);
+}
+
+void QmlSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
+    // Verify that pre-staged chunks in centered mode provide instant
+    // fill: after a buffer_reset+data batch, m_precomputedMaxColumnIndex
+    // reflects the full pre-staged extent rather than growing from zero.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 8;
+    constexpr int total = 1024;
+    constexpr quint64 oldToken = 5;
+    constexpr quint64 newToken = 6;
+
+    // Set up old track data.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total, 48000, 1024, false, true, oldToken);
+    QByteArray oldData(100 * bins, '\x10');
+    item.feedPrecomputedChunk(
+        oldData, bins, 0, 100, 0, total, 48000, 1024, false, false, oldToken);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 99);
+
+    // Simulate pre-staged gapless: first chunk carries reset + data.
+    QByteArray batch1(500 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        batch1, bins, 0, 500, 0, total, 48000, 1024, false, true, newToken, true);
+
+    // After first batch, maxColumnIndex should jump to 499 (not grow
+    // incrementally from zero).
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 499);
+
+    // Second staged batch extends.
+    QByteArray batch2(300 * bins, '\x50');
+    item.feedPrecomputedChunk(
+        batch2, bins, 0, 300, 500, total, 48000, 1024, false, false, newToken);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 799);
+
+    // Ring populated, not growing from zero.
+    QVERIFY(item.m_ringWriteSeq >= 800);
     QVERIFY(item.m_ringCapacity > 0);
 }
 
