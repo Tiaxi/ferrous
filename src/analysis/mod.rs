@@ -710,6 +710,56 @@ impl AnalysisRuntimeState {
         self.staged_centered_path = None;
     }
 
+    /// Rolling mode gapless: continue the existing decode session if
+    /// format-compatible, or reset and start fresh when the format changed
+    /// (e.g. 48 kHz/6ch → 44.1 kHz/2ch).
+    fn handle_rolling_gapless(
+        &mut self,
+        path: &Path,
+        track_token: u64,
+        format_compatible: bool,
+        ctx: &AnalysisContext<'_>,
+    ) {
+        if format_compatible {
+            // Accumulate position offset: GStreamer's position resets to 0
+            // for the new track, but the worker's coordinate space is
+            // continuous.
+            self.spectrogram_position_offset += self.last_spectrogram_position;
+
+            if self.staged_continuation_path.take() == Some(path.to_path_buf()) {
+                profile_eprintln!(
+                    "[analysis] handle_track_change: UpdateTrackToken (early continue matched) offset={:.2}",
+                    self.spectrogram_position_offset,
+                );
+                let _ = ctx
+                    .spectrogram_cmd_tx
+                    .send(SpectrogramWorkerCommand::UpdateTrackToken { track_token });
+            } else {
+                profile_eprintln!(
+                    "[analysis] handle_track_change: dispatching ContinueWithFile offset={:.2}",
+                    self.spectrogram_position_offset,
+                );
+                let _ = ctx
+                    .spectrogram_cmd_tx
+                    .send(SpectrogramWorkerCommand::ContinueWithFile {
+                        path: path.to_path_buf(),
+                        track_token,
+                    });
+            }
+        } else {
+            // Format changed — ContinueWithFile would be rejected by the
+            // worker and fall back to NewTrack internally, but the analysis
+            // would still have the accumulated offset, sending the worker
+            // insane position updates past EOF.  Reset and start fresh.
+            self.clear_early_continuation(ctx);
+            self.spectrogram_position_offset = 0.0;
+            profile_eprintln!(
+                "[analysis] handle_track_change: rolling gapless format mismatch → fresh NewTrack",
+            );
+            self.start_spectrogram_session(0.0, true, false, ctx);
+        }
+    }
+
     fn handle_track_change(
         &mut self,
         path: PathBuf,
@@ -721,11 +771,19 @@ impl AnalysisRuntimeState {
         #[cfg(feature = "profiling-logs")]
         let _track_change_start = std::time::Instant::now();
 
+        // Save previous compat params so the rolling gapless path can
+        // detect incompatible transitions (e.g. 48 kHz/6ch → 44.1 kHz/2ch)
+        // that would cause ContinueWithFile to fall back inside the worker.
+        let prev_effective_rate = self.active_session_effective_rate;
+        let prev_channel_count = self.active_session_channel_count;
+
         // Always update compat params from the new track so the staging
         // preflight has correct values.  This also covers same-extension
         // transitions where the worker internally falls back from
         // ContinueWithFile to NewTrack (different sample rate).
         self.update_session_compat_params(&path);
+        let format_compatible = self.active_session_effective_rate == prev_effective_rate
+            && self.active_session_channel_count == prev_channel_count;
 
         self.active_track_token = track_token;
         // For gapless transitions the PCM stream is continuous — the
@@ -751,38 +809,7 @@ impl AnalysisRuntimeState {
         self.emit_snapshot(ctx.event_tx, true);
 
         if gapless && !reset_spectrogram && self.display_mode == SpectrogramDisplayMode::Rolling {
-            // Rolling mode: continue the existing decode session with the
-            // new file.  The generation counter is NOT incremented, so the
-            // running session's is_stale() check won't trigger.
-            //
-            // Accumulate position offset: GStreamer's position resets to 0
-            // for the new track, but the worker's coordinate space is
-            // continuous.  Adding the last known position ensures
-            // PositionUpdate(0.0) becomes PositionUpdate(331.x).
-            self.spectrogram_position_offset += self.last_spectrogram_position;
-
-            if self.staged_continuation_path.take() == Some(path.clone()) {
-                // Early ContinueWithFile already sent — just update the token.
-                profile_eprintln!(
-                    "[analysis] handle_track_change: UpdateTrackToken (early continue matched) offset={:.2}",
-                    self.spectrogram_position_offset,
-                );
-                let _ = ctx
-                    .spectrogram_cmd_tx
-                    .send(SpectrogramWorkerCommand::UpdateTrackToken { track_token });
-            } else {
-                // No early continuation or path mismatch — normal ContinueWithFile.
-                profile_eprintln!(
-                    "[analysis] handle_track_change: dispatching ContinueWithFile offset={:.2}",
-                    self.spectrogram_position_offset,
-                );
-                let _ = ctx
-                    .spectrogram_cmd_tx
-                    .send(SpectrogramWorkerCommand::ContinueWithFile {
-                        path: path.clone(),
-                        track_token,
-                    });
-            }
+            self.handle_rolling_gapless(&path, track_token, format_compatible, ctx);
         } else if gapless && !reset_spectrogram {
             // Centered mode gapless: check for pre-staged data.
             self.clear_early_continuation(ctx);
