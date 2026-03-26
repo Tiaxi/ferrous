@@ -847,6 +847,16 @@ impl AnalysisRuntimeState {
             });
     }
 
+    /// Start a spectrogram session without emitting an initial reset.
+    /// Used when staged chunks have already been emitted with reset flags.
+    fn start_spectrogram_session_no_reset(
+        &mut self,
+        start_seconds: f64,
+        ctx: &AnalysisContext<'_>,
+    ) {
+        self.start_spectrogram_session(start_seconds, false, false, ctx);
+    }
+
     fn update_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         self.last_spectrogram_position = position_seconds;
         let adjusted = position_seconds + self.spectrogram_position_offset;
