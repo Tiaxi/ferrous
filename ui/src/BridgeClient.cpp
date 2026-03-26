@@ -4005,7 +4005,19 @@ void BridgeClient::scheduleTrackChanged() {
                 return;
             }
             m_trackChangedPending = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            QElapsedTimer t; t.start();
+#endif
             emit trackChanged();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            {
+                const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
+                if (ms >= 5.0) {
+                    FERROUS_SPECTROGRAM_LOGF(stderr,
+                        "[ui-signal-profile] trackChanged dispatch ms=%.1f\n", ms);
+                }
+            }
+#endif
         },
         Qt::QueuedConnection);
 }
@@ -4029,7 +4041,19 @@ void BridgeClient::schedulePlaybackChanged() {
                 return;
             }
             m_playbackChangedPending = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            QElapsedTimer t; t.start();
+#endif
             emit playbackChanged();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            {
+                const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
+                if (ms >= 5.0) {
+                    FERROUS_SPECTROGRAM_LOGF(stderr,
+                        "[ui-signal-profile] playbackChanged dispatch ms=%.1f\n", ms);
+                }
+            }
+#endif
         },
         Qt::QueuedConnection);
 }

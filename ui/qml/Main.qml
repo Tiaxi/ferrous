@@ -1162,18 +1162,52 @@ Kirigami.ApplicationWindow {
     Connections {
         target: uiBridge
         function onSnapshotChanged() {
-            playbackController.handleSnapshotChanged(
-                function() { spectrogramSurface.haltForCurrentMode() },
-                function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
-            viewerController.handleSnapshotChanged()
-            queueController.handleBridgeSnapshotUpdate()
+            if (uiBridge.profileLogsEnabled) {
+                const t0 = Date.now()
+                playbackController.handleSnapshotChanged(
+                    function() { spectrogramSurface.haltForCurrentMode() },
+                    function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
+                const t1 = Date.now()
+                viewerController.handleSnapshotChanged()
+                const t2 = Date.now()
+                queueController.handleBridgeSnapshotUpdate()
+                const t3 = Date.now()
+                const total = t3 - t0
+                if (total >= 5)
+                    console.warn("[qml-signal-profile] onSnapshotChanged total=" + total
+                        + "ms playback=" + (t1-t0) + " viewer=" + (t2-t1)
+                        + " queueUpdate=" + (t3-t2))
+            } else {
+                playbackController.handleSnapshotChanged(
+                    function() { spectrogramSurface.haltForCurrentMode() },
+                    function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
+                viewerController.handleSnapshotChanged()
+                queueController.handleBridgeSnapshotUpdate()
+            }
         }
         function onTrackChanged() {
-            playbackController.handleSnapshotChanged(
-                function() { spectrogramSurface.haltForCurrentMode() },
-                function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
-            viewerController.handleSnapshotChanged()
-            queueController.handleBridgeSnapshotUpdate()
+            if (uiBridge.profileLogsEnabled) {
+                const t0 = Date.now()
+                playbackController.handleSnapshotChanged(
+                    function() { spectrogramSurface.haltForCurrentMode() },
+                    function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
+                const t1 = Date.now()
+                viewerController.handleSnapshotChanged()
+                const t2 = Date.now()
+                queueController.handleBridgeSnapshotUpdate()
+                const t3 = Date.now()
+                const total = t3 - t0
+                if (total >= 5)
+                    console.warn("[qml-signal-profile] onTrackChanged total=" + total
+                        + "ms playback=" + (t1-t0) + " viewer=" + (t2-t1)
+                        + " queueUpdate=" + (t3-t2))
+            } else {
+                playbackController.handleSnapshotChanged(
+                    function() { spectrogramSurface.haltForCurrentMode() },
+                    function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
+                viewerController.handleSnapshotChanged()
+                queueController.handleBridgeSnapshotUpdate()
+            }
         }
         function onPlaybackChanged() {
             playbackController.handlePlaybackChanged(

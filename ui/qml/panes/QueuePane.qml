@@ -360,10 +360,26 @@ Rectangle {
                 target: root.uiBridge
 
                 function onSnapshotChanged() {
-                    root.controller.handleSnapshotChanged(playlistView)
+                    if (root.uiBridge.profileLogsEnabled) {
+                        const t0 = Date.now()
+                        root.controller.handleSnapshotChanged(playlistView)
+                        const ms = Date.now() - t0
+                        if (ms >= 5)
+                            console.warn("[qml-signal-profile] QueuePane.onSnapshotChanged ms=" + ms)
+                    } else {
+                        root.controller.handleSnapshotChanged(playlistView)
+                    }
                 }
                 function onTrackChanged() {
-                    root.controller.handleSnapshotChanged(playlistView)
+                    if (root.uiBridge.profileLogsEnabled) {
+                        const t0 = Date.now()
+                        root.controller.handleSnapshotChanged(playlistView)
+                        const ms = Date.now() - t0
+                        if (ms >= 5)
+                            console.warn("[qml-signal-profile] QueuePane.onTrackChanged ms=" + ms)
+                    } else {
+                        root.controller.handleSnapshotChanged(playlistView)
+                    }
                 }
             }
 
