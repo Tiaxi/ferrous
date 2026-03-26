@@ -655,25 +655,31 @@ impl AnalysisRuntimeState {
         }
     }
 
-    /// Stop the staging thread, join it, drain all buffered chunks,
+    /// Signal the staging thread to stop, drain all buffered chunks,
     /// consolidate into a few large chunks, rewrite their track token,
     /// and emit them to the bridge.  Returns the number of columns emitted.
     ///
+    /// Does NOT join the staging thread — the chunks have been accumulating
+    /// in the channel for ~2 seconds and `try_iter()` grabs them all.
+    /// Blocking on `join()` would stall the analysis thread for ~30-40 ms
+    /// while the position has already jumped to 0, causing the centered
+    /// display to visually "travel" backward through the old track.
+    /// The staging thread exits naturally after seeing the stop flag;
+    /// `cancel_centered_staging` joins it if needed for cleanup.
+    ///
     /// The staging thread produces many small chunks (1, 2, 4, ... columns)
-    /// due to the chunk-size ramp.  Emitting them individually would
-    /// saturate the bridge's per-poll budget (8 events), spreading delivery
-    /// over many poll cycles and leaving the first paint frame nearly empty.
-    /// Consolidating into ~4 large chunks ensures the entire pre-staged
-    /// range arrives within a single bridge poll.
+    /// due to the chunk-size ramp.  Consolidating into ~4 large chunks
+    /// ensures the entire pre-staged range arrives within a single bridge
+    /// poll (budget: 8 analysis events).
     fn drain_staged_centered_chunks(&mut self, track_token: u64, ctx: &AnalysisContext<'_>) -> u32 {
-        // Signal staging thread to stop, then join it to guarantee
-        // all flushed output is in the channel before we drain.
+        // Signal staging thread to stop (non-blocking).
         if let Some(stop) = self.staged_centered_stop.take() {
             stop.store(true, Ordering::Release);
         }
-        if let Some(handle) = self.staged_centered_handle.take() {
-            let _ = handle.join();
-        }
+        // Detach the handle so cancel_centered_staging (called next)
+        // won't block on join.  The thread exits naturally after
+        // seeing the stop flag; dropping the handle detaches it.
+        self.staged_centered_handle.take();
         let Some(rx) = self.staged_centered_rx.take() else {
             return 0;
         };
