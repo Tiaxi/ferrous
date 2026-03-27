@@ -31,9 +31,17 @@ pub(crate) fn register_raw_surround_typefinders() {
         {
             use gst::prelude::PluginFeatureExtManual;
 
-            // Disable all typefinders whose caps mention APE tags, and the
-            // apedemux element.  Match on caps string rather than factory name
-            // because the factory name varies across GStreamer versions.
+            // Disable typefinders whose caps mention APE tags so raw
+            // surround files (AC3/DTS) with appended APEv2 tags are never
+            // mis-typed as application/x-apetag.  The source-setup byte-
+            // level probe already strips APE tags before the typefinder
+            // runs, but disabling the typefinder is a defence-in-depth
+            // measure.
+            //
+            // NOTE: `apedemux` itself is left at its default rank.  Other
+            // formats (notably MP3) legitimately embed APE tags alongside
+            // ID3, and `parsebin` needs `apedemux` to strip them.  For
+            // AC3/DTS the source probe handles removal at the byte level.
             for factory in gst::TypeFindFactory::factories() {
                 let dominated_by_ape = factory.caps().is_some_and(|c| {
                     c.to_string().contains("apetag") || c.to_string().contains("x-ape")
@@ -41,10 +49,6 @@ pub(crate) fn register_raw_surround_typefinders() {
                 if dominated_by_ape {
                     factory.set_rank(gst::Rank::NONE);
                 }
-            }
-
-            if let Some(factory) = gst::ElementFactory::find("apedemux") {
-                factory.set_rank(gst::Rank::NONE);
             }
 
             // Demote liba52's a52dec in favour of avdec_ac3 (FFmpeg).

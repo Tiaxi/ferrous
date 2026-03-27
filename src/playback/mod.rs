@@ -1922,7 +1922,6 @@ mod backend {
             .build()
             .map_err(|_| anyhow!("failed to create playbin3"))?;
         configure_playbin_buffering(&playbin);
-        install_apedemux_block(&playbin);
 
         let analysis_sink = build_analysis_audio_sink(
             analysis_tx.clone(),
@@ -2014,38 +2013,6 @@ mod backend {
         Ok(())
     }
 
-    /// Prevent `apedemux` from being auto-plugged inside playbin's internal
-    /// decodebins.  We handle `APEv2` tags ourselves; `apedemux` causes
-    /// crashes and decode failures for AC3/DTS files with appended tags.
-    ///
-    /// Uses `deep-element-added` (a recursive `GstBin` signal) to intercept
-    /// every element created anywhere in the pipeline, including nested
-    /// decodebins inside uridecodebin.  When a decodebin appears, its
-    /// `autoplug-select` signal is hooked to return SKIP for `apedemux`.
-    fn install_apedemux_block(playbin: &gst::Element) {
-        playbin.connect("deep-element-added", false, |values| {
-            // deep-element-added(bin, sub_bin, element)
-            let element = values.get(2).and_then(|v| v.get::<gst::Element>().ok())?;
-            let has_autoplug = element.factory().is_some_and(|f| {
-                let name = f.name();
-                name == "decodebin"
-                    || name == "uridecodebin"
-                    || name == "decodebin3"
-                    || name == "uridecodebin3"
-            });
-            if has_autoplug {
-                element.connect("autoplug-select", false, |values| {
-                    let factory = values
-                        .get(3)
-                        .and_then(|v| v.get::<gst::ElementFactory>().ok());
-                    let skip = factory.is_some_and(|f| f.name() == "apedemux");
-                    autoplug_select_result(if skip { 2 } else { 0 })
-                });
-            }
-            None
-        });
-    }
-
     /// Install a `source-setup` handler on playbin that attaches a pad
     /// probe to each source element feeding a raw surround file.  The
     /// probe strips leading partial-frame bytes (before the first sync
@@ -2111,17 +2078,6 @@ mod backend {
             });
             None
         });
-    }
-
-    /// Build a `GstAutoplugSelectResult` enum value for signal return.
-    fn autoplug_select_result(value: i32) -> Option<gst::glib::Value> {
-        use gst::glib::translate::ToGlibPtrMut;
-        let gtype = gst::glib::Type::from_name("GstAutoplugSelectResult")?;
-        let mut gvalue = gst::glib::Value::from_type(gtype);
-        unsafe {
-            gst::glib::gobject_ffi::g_value_set_enum(gvalue.to_glib_none_mut().0, value);
-        }
-        Some(gvalue)
     }
 
     fn configure_playbin_buffering(playbin: &gst::Element) {
@@ -2966,5 +2922,151 @@ mod backend {
 
     fn file_uri(path: &Path) -> Option<String> {
         url::Url::from_file_path(path).ok().map(|u| u.to_string())
+    }
+
+    /// Integration test for MP3 files that have both ID3 and APE tags.
+    /// Reproduces the pipeline setup used by the real engine (custom
+    /// typefinders + source probe + analysis audio sink) to catch
+    /// `not-linked` regressions from GStreamer version bumps.
+    #[cfg(all(test, feature = "gst"))]
+    mod gst_integration_tests {
+        use super::*;
+
+        fn wait_for_playing_or_error(
+            playbin: &gst::Element,
+            timeout_secs: u64,
+        ) -> Result<(), String> {
+            let bus = playbin.bus().expect("bus");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            while std::time::Instant::now() < deadline {
+                let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) else {
+                    continue;
+                };
+                match msg.view() {
+                    gst::MessageView::Error(err) => {
+                        return Err(format!(
+                            "GStreamer error from {:?}: {} ({:?})",
+                            err.src().map(gstreamer::prelude::GstObjectExt::path_string),
+                            err.error(),
+                            err.debug()
+                        ));
+                    }
+                    gst::MessageView::StateChanged(sc) => {
+                        if sc.src().is_some_and(|s| s == playbin)
+                            && sc.current() == gst::State::Playing
+                        {
+                            return Ok(());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Err("timeout waiting for Playing state".into())
+        }
+
+        fn make_full_analysis_sink() -> gst::Bin {
+            let bin = gst::Bin::new();
+            let caps = gst::Caps::builder("audio/x-raw").build();
+            let analysis_caps = gst::Caps::builder("audio/x-raw")
+                .field("format", "F32LE")
+                .field("layout", "interleaved")
+                .field("rate", 44_100i32)
+                .build();
+
+            let input_cf = gst::ElementFactory::make("capsfilter")
+                .property("caps", &caps)
+                .build()
+                .unwrap();
+            let tee = gst::ElementFactory::make("tee").build().unwrap();
+
+            // output branch
+            let q_out = gst::ElementFactory::make("queue").build().unwrap();
+            let conv_out = gst::ElementFactory::make("audioconvert").build().unwrap();
+            let res_out = gst::ElementFactory::make("audioresample").build().unwrap();
+            let cf_out = gst::ElementFactory::make("capsfilter")
+                .property("caps", &caps)
+                .build()
+                .unwrap();
+            let sink_out = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .build()
+                .unwrap();
+
+            // analysis branch
+            let q_tap = gst::ElementFactory::make("queue")
+                .property_from_str("leaky", "downstream")
+                .property("max-size-buffers", 128u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", 0u64)
+                .build()
+                .unwrap();
+            let conv_tap = gst::ElementFactory::make("audioconvert").build().unwrap();
+            let res_tap = gst::ElementFactory::make("audioresample").build().unwrap();
+            let cf_tap = gst::ElementFactory::make("capsfilter")
+                .property("caps", &analysis_caps)
+                .build()
+                .unwrap();
+            let sink_tap = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .build()
+                .unwrap();
+
+            bin.add_many([
+                &input_cf, &tee, &q_out, &conv_out, &res_out, &cf_out, &sink_out, &q_tap,
+                &conv_tap, &res_tap, &cf_tap, &sink_tap,
+            ])
+            .unwrap();
+            gst::Element::link_many([&input_cf, &tee]).unwrap();
+            gst::Element::link_many([&q_out, &conv_out, &res_out, &cf_out, &sink_out]).unwrap();
+            gst::Element::link_many([&q_tap, &conv_tap, &res_tap, &cf_tap, &sink_tap]).unwrap();
+            link_tee_branch(&tee, &q_out, "out").unwrap();
+            link_tee_branch(&tee, &q_tap, "tap").unwrap();
+
+            let ghost = gst::GhostPad::with_target(&input_cf.static_pad("sink").unwrap()).unwrap();
+            ghost.set_active(true).unwrap();
+            bin.add_pad(&ghost).unwrap();
+            bin
+        }
+
+        const TEST_MP3: &str =
+            "/mnt/nassikka/Musiikki/Albumit/Coldplay/X&Y/Instrumental/02 - What If.mp3";
+
+        /// Full app pipeline pattern: custom typefinders + source probe
+        /// + full analysis sink.  Verifies that MP3 files with APE tags
+        /// play correctly (regression test for apedemux rank demotion).
+        #[test]
+        fn playbin3_mp3_with_typefinders_and_full_sink() {
+            let test_path = std::path::Path::new(TEST_MP3);
+            if !test_path.exists() {
+                eprintln!("skipping: test file not available");
+                return;
+            }
+
+            gst::init().unwrap();
+            register_raw_surround_typefinders();
+
+            let playbin = gst::ElementFactory::make("playbin3")
+                .build()
+                .expect("playbin3");
+            configure_playbin_buffering(&playbin);
+            install_raw_surround_source_probe(&playbin);
+            playbin.set_property("audio-sink", &make_full_analysis_sink());
+
+            let _ = playbin.set_state(gst::State::Ready);
+            let uri = file_uri(test_path).expect("file_uri");
+            playbin.set_property("uri", &uri);
+            playbin
+                .set_state(gst::State::Playing)
+                .expect("set_state(Playing)");
+
+            match wait_for_playing_or_error(&playbin, 5) {
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = playbin.set_state(gst::State::Null);
+                    panic!("{e}");
+                }
+            }
+            let _ = playbin.set_state(gst::State::Null);
+        }
     }
 }
