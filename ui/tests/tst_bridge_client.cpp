@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDateTime>
+#include <QDBusObjectPath>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
@@ -51,8 +52,10 @@ private slots:
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
+    void gaplessHandoffSetsIdentityFlagBeforeMetadata();
     void coverLookupSchedulesTrackChangedNotSnapshotChanged();
-    void mprisRepublishesMetadataOnTrackChanged();
+    void mprisRepublishesOnTrackMetadataChanged();
+    void mprisRepublishesOnTrackIdentityChanged();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
     void mprisCanPauseOnlyWhilePlaying();
     void mprisControllerConstructionDoesNotCrash();
@@ -425,7 +428,7 @@ void BridgeClientTest::trackOnlySnapshotSetsTrackFlagOnly() {
     client.m_currentTrackArtist = QStringLiteral("Old Artist");
     client.m_playingQueueIndex = 0;
 
-    // Build a snapshot that only changes track metadata (no queue/settings/library).
+    // Build a snapshot that changes both identity (path/index) and metadata.
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.playback.present = true;
     snapshot.playback.state = 1; // Playing
@@ -433,6 +436,7 @@ void BridgeClientTest::trackOnlySnapshotSetsTrackFlagOnly() {
     snapshot.playback.currentPath = QStringLiteral("/music/new.flac");
 
     snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = QStringLiteral("/music/new.flac");
     snapshot.metadata.title = QStringLiteral("New Title");
     snapshot.metadata.artist = QStringLiteral("New Artist");
     snapshot.metadata.album = QStringLiteral("New Album");
@@ -445,10 +449,71 @@ void BridgeClientTest::trackOnlySnapshotSetsTrackFlagOnly() {
 
     QVERIFY(client.processBinarySnapshot(snapshot));
 
-    // Core invariant: track-only changes must set track poll flags without
-    // setting m_pollSnapshotChanged.
+    // Both identity and metadata changed, neither is a snapshot-level change.
     QVERIFY(client.m_pollTrackIdentityChanged);
+    QVERIFY(client.m_pollTrackMetadataChanged);
     QVERIFY(!client.m_pollSnapshotChanged);
+}
+
+void BridgeClientTest::gaplessHandoffSetsIdentityFlagBeforeMetadata() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    // Pre-populate a playing track with metadata.
+    // m_currentTrackFormatLabel must be pre-set because processBinarySnapshot
+    // falls back to formatLabelFromPath(currentPath) when the existing label
+    // is empty. Without this, phase 1 would derive "FLAC" from the new path
+    // and set the metadata flag.
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/old.flac");
+    client.m_currentTrackTitle = QStringLiteral("Old Title");
+    client.m_currentTrackArtist = QStringLiteral("Old Artist");
+    client.m_currentTrackFormatLabel = QStringLiteral("FLAC");
+    client.m_playingQueueIndex = 0;
+
+    // Phase 1: Gapless handoff — path/index advance, metadata still for OLD track.
+    // The backend preserves old metadata until the metadata worker catches up.
+    // sourcePath = old path, so metadataSourcePath != currentPath and metadata
+    // fields are ignored by processBinarySnapshot.
+    BinaryBridgeCodec::DecodedSnapshot handoff;
+    handoff.playback.present = true;
+    handoff.playback.state = 1; // Playing
+    handoff.playback.currentQueueIndex = 1;
+    handoff.playback.currentPath = QStringLiteral("/music/new.flac");
+
+    handoff.metadata.present = true;
+    handoff.metadata.sourcePath = QStringLiteral("/music/old.flac"); // stale source
+    handoff.metadata.title = QStringLiteral("Old Title");
+    handoff.metadata.artist = QStringLiteral("Old Artist");
+
+    client.m_pollTrackIdentityChanged = false;
+    client.m_pollTrackMetadataChanged = false;
+    client.m_pollSnapshotChanged = false;
+
+    QVERIFY(client.processBinarySnapshot(handoff));
+    QVERIFY(client.m_pollTrackIdentityChanged);
+    QVERIFY(!client.m_pollTrackMetadataChanged);  // metadata unchanged
+
+    // Phase 2: Metadata worker delivers new metadata, same path/index.
+    // sourcePath now matches currentPath, so metadata fields ARE applied.
+    BinaryBridgeCodec::DecodedSnapshot metaUpdate;
+    metaUpdate.playback.present = true;
+    metaUpdate.playback.state = 1;
+    metaUpdate.playback.currentQueueIndex = 1;
+    metaUpdate.playback.currentPath = QStringLiteral("/music/new.flac");
+
+    metaUpdate.metadata.present = true;
+    metaUpdate.metadata.sourcePath = QStringLiteral("/music/new.flac");
+    metaUpdate.metadata.title = QStringLiteral("New Title");
+    metaUpdate.metadata.artist = QStringLiteral("New Artist");
+    metaUpdate.metadata.album = QStringLiteral("New Album");
+
+    client.m_pollTrackIdentityChanged = false;
+    client.m_pollTrackMetadataChanged = false;
+
+    QVERIFY(client.processBinarySnapshot(metaUpdate));
+    QVERIFY(!client.m_pollTrackIdentityChanged);  // identity unchanged
+    QVERIFY(client.m_pollTrackMetadataChanged);
 }
 
 void BridgeClientTest::coverLookupSchedulesTrackChangedNotSnapshotChanged() {
@@ -463,13 +528,14 @@ void BridgeClientTest::coverLookupSchedulesTrackChangedNotSnapshotChanged() {
         QStringLiteral("/music/track.flac"),
         QStringLiteral("file:///new-cover.jpg"));
 
-    // The cover update must schedule trackMetadataChanged, not snapshotChanged.
+    // The cover update must schedule trackMetadataChanged, not identity or snapshot.
     QVERIFY(client.m_trackMetadataChangedPending);
+    QVERIFY(!client.m_trackIdentityChangedPending);
     QVERIFY(!client.m_snapshotChangedPending);
     QCOMPARE(client.m_currentTrackCoverPath, QStringLiteral("file:///new-cover.jpg"));
 }
 
-void BridgeClientTest::mprisRepublishesMetadataOnTrackChanged() {
+void BridgeClientTest::mprisRepublishesOnTrackMetadataChanged() {
     BridgeClient client;
     isolateBridgeClient(client);
     client.m_queueLength = 1;
@@ -482,7 +548,7 @@ void BridgeClientTest::mprisRepublishesMetadataOnTrackChanged() {
     controller.m_serviceRegistered = true;
     controller.m_hasPublishedPlayerState = false;
 
-    // Mutate track metadata and emit trackMetadataChanged.
+    // Mutate only metadata fields (not path/index).
     client.m_currentTrackTitle = QStringLiteral("New Title");
     client.m_currentTrackArtist = QStringLiteral("New Artist");
     emit client.trackMetadataChanged();
@@ -495,6 +561,38 @@ void BridgeClientTest::mprisRepublishesMetadataOnTrackChanged() {
     const QStringList artists = meta.value(QStringLiteral("xesam:artist")).toStringList();
     QVERIFY(!artists.isEmpty());
     QCOMPARE(artists.first(), QStringLiteral("New Artist"));
+
+    // Clean up D-Bus state before destruction.
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
+
+void BridgeClientTest::mprisRepublishesOnTrackIdentityChanged() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 2;
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/old.flac");
+    client.m_playingQueueIndex = 0;
+
+    MprisController controller(&client);
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+
+    // Change path/index (identity) and emit trackIdentityChanged.
+    client.m_currentTrackPath = QStringLiteral("/music/new.flac");
+    client.m_playingQueueIndex = 1;
+    emit client.trackIdentityChanged();
+
+    // MPRIS must have republished after identity changed.
+    QVERIFY(controller.m_hasPublishedPlayerState);
+    const QVariantMap meta = controller.m_lastPlayerState.metadata;
+    const QString trackId =
+        meta.value(QStringLiteral("mpris:trackid")).value<QDBusObjectPath>().path();
+    // Track ID is a D-Bus path derived from the file path hash — verify
+    // it's a valid path (not the NoTrack sentinel).
+    QVERIFY(!trackId.isEmpty());
+    QVERIFY(!trackId.contains(QStringLiteral("NoTrack")));
 
     // Clean up D-Bus state before destruction.
     controller.m_serviceRegistered = false;

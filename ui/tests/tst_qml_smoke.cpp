@@ -392,7 +392,8 @@ private slots:
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
     void playbackControllerInterpolationDeactivatesOnStop();
-    void trackChangedSignalTriggersQmlHandler();
+    void trackIdentityChangedSignalTriggersQmlHandler();
+    void queueAutoCenterIsDeferredOffHandlerStack();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2125,7 +2126,7 @@ Item {
     QCOMPARE(controller->property("interpolationActive").toBool(), false);
 }
 
-void QmlSmokeTest::trackChangedSignalTriggersQmlHandler() {
+void QmlSmokeTest::trackIdentityChangedSignalTriggersQmlHandler() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2165,6 +2166,76 @@ Item {
 
     QVERIFY(QMetaObject::invokeMethod(root.data(), "emitTrackIdentityChanged"));
     QCOMPARE(root->property("trackIdentityChangedCount").toInt(), 1);
+}
+
+void QmlSmokeTest::queueAutoCenterIsDeferredOffHandlerStack() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR)
+        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    id: harness
+    property bool positionViewCalled: false
+    property int positionViewIndex: -1
+
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property string currentTrackPath: "/music/old.flac"
+        property int playingQueueIndex: 5
+        property int queueLength: 100
+        property int queueVersion: 1
+        property int selectedQueueIndex: -1
+        property bool profileLogsEnabled: false
+    }
+
+    QtObject {
+        id: stubView
+        function positionViewAtIndex(index, mode) {
+            harness.positionViewCalled = true
+            harness.positionViewIndex = index
+        }
+    }
+
+    Controllers.QueueController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        tagEditorApi: QtObject { function openSelection(sel) { return false } }
+        openTagEditorDialog: function() {}
+    }
+
+    function triggerTrackChange() {
+        bridge.currentTrackPath = "/music/new.flac"
+        bridge.playingQueueIndex = 42
+        controller.handleSnapshotChanged(stubView)
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    // Initialize controller so it has a lastAutoCenterTrackPath to compare against.
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+
+    // Trigger a track change — handleSnapshotChanged detects path changed
+    // and should defer positionViewAtIndex via Qt.callLater().
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "triggerTrackChange"));
+
+    // Immediately after handler returns: positionViewAtIndex must NOT have run yet.
+    QVERIFY(!root->property("positionViewCalled").toBool());
+
+    // Process the event loop so Qt.callLater() fires.
+    QCoreApplication::processEvents();
+    QVERIFY(root->property("positionViewCalled").toBool());
+    QCOMPARE(root->property("positionViewIndex").toInt(), 42);
 }
 
 int main(int argc, char **argv) {
