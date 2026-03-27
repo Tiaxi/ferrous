@@ -85,6 +85,7 @@ Rectangle {
                 flickDeceleration: root.snappyScrollFlickDeceleration
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
                 pixelAligned: true
+                cacheBuffer: 480
                 property real reservedRightPadding: playlistVerticalScrollBar.visible
                     ? (playlistVerticalScrollBar.width + 6)
                     : 0
