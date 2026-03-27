@@ -153,7 +153,12 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
                 publishPlayerState();
             }
         });
-        connect(m_bridge, &BridgeClient::trackChanged, this, [this]() {
+        connect(m_bridge, &BridgeClient::trackIdentityChanged, this, [this]() {
+            if (m_serviceRegistered) {
+                publishPlayerState();
+            }
+        });
+        connect(m_bridge, &BridgeClient::trackMetadataChanged, this, [this]() {
             if (m_serviceRegistered) {
                 publishPlayerState();
             }

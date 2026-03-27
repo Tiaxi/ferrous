@@ -370,13 +370,13 @@ Rectangle {
                         root.controller.handleSnapshotChanged(playlistView)
                     }
                 }
-                function onTrackChanged() {
+                function onTrackIdentityChanged() {
                     if (root.uiBridge.profileLogsEnabled) {
                         const t0 = Date.now()
                         root.controller.handleSnapshotChanged(playlistView)
                         const ms = Date.now() - t0
                         if (ms >= 5)
-                            console.warn("[qml-signal-profile] QueuePane.onTrackChanged ms=" + ms)
+                            console.warn("[qml-signal-profile] QueuePane.onTrackIdentityChanged ms=" + ms)
                     } else {
                         root.controller.handleSnapshotChanged(playlistView)
                     }

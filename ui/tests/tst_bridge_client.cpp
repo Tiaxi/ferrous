@@ -439,14 +439,15 @@ void BridgeClientTest::trackOnlySnapshotSetsTrackFlagOnly() {
 
     // Reset poll flags before processing.
     client.m_pollPlaybackChanged = false;
-    client.m_pollTrackChanged = false;
+    client.m_pollTrackIdentityChanged = false;
+    client.m_pollTrackMetadataChanged = false;
     client.m_pollSnapshotChanged = false;
 
     QVERIFY(client.processBinarySnapshot(snapshot));
 
-    // Core invariant: track-only changes must set m_pollTrackChanged without
+    // Core invariant: track-only changes must set track poll flags without
     // setting m_pollSnapshotChanged.
-    QVERIFY(client.m_pollTrackChanged);
+    QVERIFY(client.m_pollTrackIdentityChanged);
     QVERIFY(!client.m_pollSnapshotChanged);
 }
 
@@ -462,8 +463,8 @@ void BridgeClientTest::coverLookupSchedulesTrackChangedNotSnapshotChanged() {
         QStringLiteral("/music/track.flac"),
         QStringLiteral("file:///new-cover.jpg"));
 
-    // The cover update must schedule trackChanged, not snapshotChanged.
-    QVERIFY(client.m_trackChangedPending);
+    // The cover update must schedule trackMetadataChanged, not snapshotChanged.
+    QVERIFY(client.m_trackMetadataChangedPending);
     QVERIFY(!client.m_snapshotChangedPending);
     QCOMPARE(client.m_currentTrackCoverPath, QStringLiteral("file:///new-cover.jpg"));
 }
@@ -481,10 +482,10 @@ void BridgeClientTest::mprisRepublishesMetadataOnTrackChanged() {
     controller.m_serviceRegistered = true;
     controller.m_hasPublishedPlayerState = false;
 
-    // Mutate track metadata and emit trackChanged.
+    // Mutate track metadata and emit trackMetadataChanged.
     client.m_currentTrackTitle = QStringLiteral("New Title");
     client.m_currentTrackArtist = QStringLiteral("New Artist");
-    emit client.trackChanged();
+    emit client.trackMetadataChanged();
 
     // MPRIS must have republished with the new metadata.
     QVERIFY(controller.m_hasPublishedPlayerState);

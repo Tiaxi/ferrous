@@ -87,20 +87,20 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
-    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackGenre READ currentTrackGenre NOTIFY trackChanged)
-    Q_PROPERTY(QVariant currentTrackYear READ currentTrackYear NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackFormatLabel READ currentTrackFormatLabel NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackChannelLayoutText READ currentTrackChannelLayoutText NOTIFY trackChanged)
-    Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY trackChanged)
-    Q_PROPERTY(int currentTrackSampleRateHz READ currentTrackSampleRateHz NOTIFY trackChanged)
-    Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY trackChanged)
-    Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY trackChanged)
+    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
+    Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
+    Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QString currentTrackGenre READ currentTrackGenre NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QVariant currentTrackYear READ currentTrackYear NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QString currentTrackFormatLabel READ currentTrackFormatLabel NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QString currentTrackChannelLayoutText READ currentTrackChannelLayoutText NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY trackMetadataChanged)
+    Q_PROPERTY(int currentTrackSampleRateHz READ currentTrackSampleRateHz NOTIFY trackMetadataChanged)
+    Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY trackMetadataChanged)
+    Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY trackMetadataChanged)
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
     Q_PROPERTY(double waveformCoverageSeconds READ waveformCoverageSeconds NOTIFY analysisChanged)
     Q_PROPERTY(bool waveformComplete READ waveformComplete NOTIFY analysisChanged)
@@ -311,7 +311,8 @@ public:
 
 signals:
     void playbackChanged();
-    void trackChanged();
+    void trackIdentityChanged();
+    void trackMetadataChanged();
     void snapshotChanged();
     void analysisChanged();
     void precomputedSpectrogramChunkReady(
@@ -458,7 +459,8 @@ private:
     void rebuildDiagnosticsText();
     static QString resolveDiagnosticsLogPath();
     void schedulePlaybackChanged();
-    void scheduleTrackChanged();
+    void scheduleTrackIdentityChanged();
+    void scheduleTrackMetadataChanged();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
     void shutdownBridgeGracefully();
@@ -591,11 +593,13 @@ private:
     bool m_loggedStartupQueueMissing{false};
     bool m_loggedStartupQueuePresent{false};
     bool m_playbackChangedPending{false};
-    bool m_trackChangedPending{false};
+    bool m_trackIdentityChangedPending{false};
+    bool m_trackMetadataChangedPending{false};
     bool m_snapshotChangedPending{false};
     bool m_analysisChangedPending{false};
     bool m_pollPlaybackChanged{false};
-    bool m_pollTrackChanged{false};
+    bool m_pollTrackIdentityChanged{false};
+    bool m_pollTrackMetadataChanged{false};
     bool m_pollSnapshotChanged{false};
     bool m_pendingSeek{false};
     double m_pendingSeekTargetSeconds{0.0};

@@ -1075,7 +1075,7 @@ void BridgeClient::applyTrackCoverLookupResult(const QString &trackPath, const Q
     cacheTrackCoverForPath(trackPath, coverUrl);
     if (m_currentTrackPath == trackPath && m_currentTrackCoverPath != coverUrl) {
         m_currentTrackCoverPath = coverUrl;
-        scheduleTrackChanged();
+        scheduleTrackMetadataChanged();
     }
 }
 
@@ -1877,15 +1877,19 @@ void BridgeClient::pollInProcessBridge() {
 #endif
 
     m_pollPlaybackChanged = false;
-    m_pollTrackChanged = false;
+    m_pollTrackIdentityChanged = false;
+    m_pollTrackMetadataChanged = false;
     m_pollSnapshotChanged = false;
     const BridgePollRunResult run = drainBridgeQueues(m_bridgePollBudgetMs);
 
     if (m_pollPlaybackChanged) {
         schedulePlaybackChanged();
     }
-    if (m_pollTrackChanged) {
-        scheduleTrackChanged();
+    if (m_pollTrackIdentityChanged) {
+        scheduleTrackIdentityChanged();
+    }
+    if (m_pollTrackMetadataChanged) {
+        scheduleTrackMetadataChanged();
     }
     if (m_pollSnapshotChanged) {
         scheduleSnapshotChanged();
@@ -3993,28 +3997,57 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
         coverage, complete, bufferReset, clearHistory, trackToken);
 }
 
-void BridgeClient::scheduleTrackChanged() {
-    if (m_trackChangedPending) {
+void BridgeClient::scheduleTrackIdentityChanged() {
+    if (m_trackIdentityChangedPending) {
         return;
     }
-    m_trackChangedPending = true;
+    m_trackIdentityChangedPending = true;
     QMetaObject::invokeMethod(
         this,
         [this]() {
-            if (!m_trackChangedPending) {
+            if (!m_trackIdentityChangedPending) {
                 return;
             }
-            m_trackChangedPending = false;
+            m_trackIdentityChangedPending = false;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             QElapsedTimer t; t.start();
 #endif
-            emit trackChanged();
+            emit trackIdentityChanged();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             {
                 const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
                 if (ms >= 5.0) {
                     FERROUS_SPECTROGRAM_LOGF(stderr,
-                        "[ui-signal-profile] trackChanged dispatch ms=%.1f\n", ms);
+                        "[ui-signal-profile] trackIdentityChanged dispatch ms=%.1f\n", ms);
+                }
+            }
+#endif
+        },
+        Qt::QueuedConnection);
+}
+
+void BridgeClient::scheduleTrackMetadataChanged() {
+    if (m_trackMetadataChangedPending) {
+        return;
+    }
+    m_trackMetadataChangedPending = true;
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            if (!m_trackMetadataChangedPending) {
+                return;
+            }
+            m_trackMetadataChangedPending = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            QElapsedTimer t; t.start();
+#endif
+            emit trackMetadataChanged();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            {
+                const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
+                if (ms >= 5.0) {
+                    FERROUS_SPECTROGRAM_LOGF(stderr,
+                        "[ui-signal-profile] trackMetadataChanged dispatch ms=%.1f\n", ms);
                 }
             }
 #endif
@@ -4320,7 +4353,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 
     bool changed = false;
     bool playbackSignalChanged = false;
-    bool trackSignalChanged = false;
+    bool trackIdentitySignalChanged = false;
+    bool trackMetadataSignalChanged = false;
     bool snapshotSignalChanged = false;
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
     const QString previousPlaybackState = m_playbackState;
@@ -4502,7 +4536,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (currentPathChanged) {
         m_currentTrackPath = currentPath;
         changed = true;
-        trackSignalChanged = true;
+        trackIdentitySignalChanged = true;
     }
 
     if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
@@ -4511,7 +4545,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_playingQueueIndex != playing) {
         m_playingQueueIndex = playing;
         changed = true;
-        trackSignalChanged = true;
+        trackIdentitySignalChanged = true;
     }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
@@ -4630,52 +4664,52 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_currentTrackTitle != nextTrackTitle) {
         m_currentTrackTitle = nextTrackTitle;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackArtist != nextTrackArtist) {
         m_currentTrackArtist = nextTrackArtist;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackAlbum != nextTrackAlbum) {
         m_currentTrackAlbum = nextTrackAlbum;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackGenre != nextTrackGenre) {
         m_currentTrackGenre = nextTrackGenre;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackYear != nextTrackYear) {
         m_currentTrackYear = nextTrackYear;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackFormatLabel != nextTrackFormatLabel) {
         m_currentTrackFormatLabel = nextTrackFormatLabel;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackChannels != nextTrackChannels) {
         m_currentTrackChannels = nextTrackChannels;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackSampleRateHz != nextTrackSampleRateHz) {
         m_currentTrackSampleRateHz = nextTrackSampleRateHz;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackBitDepth != nextTrackBitDepth) {
         m_currentTrackBitDepth = nextTrackBitDepth;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     if (m_currentTrackCurrentBitrateKbps != nextTrackCurrentBitrateKbps) {
         m_currentTrackCurrentBitrateKbps = nextTrackCurrentBitrateKbps;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
 
     QString currentCover = metadataCoverUrl;
@@ -4705,7 +4739,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;
         changed = true;
-        trackSignalChanged = true;
+        trackMetadataSignalChanged = true;
     }
     finishSnapshotSection(snapshotTrackMs);
 
@@ -4991,8 +5025,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (playbackSignalChanged) {
         m_pollPlaybackChanged = true;
     }
-    if (trackSignalChanged) {
-        m_pollTrackChanged = true;
+    if (trackIdentitySignalChanged) {
+        m_pollTrackIdentityChanged = true;
+    }
+    if (trackMetadataSignalChanged) {
+        m_pollTrackMetadataChanged = true;
     }
     if (snapshotSignalChanged) {
         m_pollSnapshotChanged = true;

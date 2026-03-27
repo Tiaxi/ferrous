@@ -537,7 +537,8 @@ Item {
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
             real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken)
-        signal trackChanged()
+        signal trackIdentityChanged()
+        signal trackMetadataChanged()
         signal snapshotChanged()
         function setVolume(value) {}
         function setLibrarySortMode(mode) {}
@@ -2134,35 +2135,36 @@ import QtQuick 2.15
 
 Item {
     id: harness
-    property int trackChangedCount: 0
+    property int trackIdentityChangedCount: 0
 
     QtObject {
         id: bridge
         objectName: "bridge"
         property int playingQueueIndex: -1
-        signal trackChanged()
+        signal trackIdentityChanged()
+        signal trackMetadataChanged()
         signal snapshotChanged()
     }
 
     Connections {
         target: bridge
-        function onTrackChanged() {
-            harness.trackChangedCount++
+        function onTrackIdentityChanged() {
+            harness.trackIdentityChangedCount++
         }
     }
 
-    function emitTrackChanged() {
+    function emitTrackIdentityChanged() {
         bridge.playingQueueIndex = 5
-        bridge.trackChanged()
+        bridge.trackIdentityChanged()
     }
 }
 )QML"), baseUrl, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
-    QCOMPARE(root->property("trackChangedCount").toInt(), 0);
+    QCOMPARE(root->property("trackIdentityChangedCount").toInt(), 0);
 
-    QVERIFY(QMetaObject::invokeMethod(root.data(), "emitTrackChanged"));
-    QCOMPARE(root->property("trackChangedCount").toInt(), 1);
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "emitTrackIdentityChanged"));
+    QCOMPARE(root->property("trackIdentityChangedCount").toInt(), 1);
 }
 
 int main(int argc, char **argv) {

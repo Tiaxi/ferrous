@@ -236,7 +236,8 @@ Kirigami.ApplicationWindow {
         property string diagnosticsLogPath: ""
         property bool connected: false
         signal playbackChanged()
-        signal trackChanged()
+        signal trackIdentityChanged()
+        signal trackMetadataChanged()
         signal snapshotChanged()
         signal analysisChanged()
         signal libraryTreeFrameReceived(int version, var treeBytes)
@@ -1185,28 +1186,35 @@ Kirigami.ApplicationWindow {
                 queueController.handleBridgeSnapshotUpdate()
             }
         }
-        function onTrackChanged() {
+        function onTrackIdentityChanged() {
             if (uiBridge.profileLogsEnabled) {
                 const t0 = Date.now()
                 playbackController.handleSnapshotChanged(
                     function() { spectrogramSurface.haltForCurrentMode() },
                     function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
                 const t1 = Date.now()
-                viewerController.handleSnapshotChanged()
-                const t2 = Date.now()
                 queueController.handleBridgeSnapshotUpdate()
-                const t3 = Date.now()
-                const total = t3 - t0
+                const t2 = Date.now()
+                const total = t2 - t0
                 if (total >= 5)
-                    console.warn("[qml-signal-profile] onTrackChanged total=" + total
-                        + "ms playback=" + (t1-t0) + " viewer=" + (t2-t1)
-                        + " queueUpdate=" + (t3-t2))
+                    console.warn("[qml-signal-profile] onTrackIdentityChanged total=" + total
+                        + "ms playback=" + (t1-t0) + " queueUpdate=" + (t2-t1))
             } else {
                 playbackController.handleSnapshotChanged(
                     function() { spectrogramSurface.haltForCurrentMode() },
                     function(forceReset) { spectrogramSurface.resetForCurrentMode(forceReset) })
-                viewerController.handleSnapshotChanged()
                 queueController.handleBridgeSnapshotUpdate()
+            }
+        }
+        function onTrackMetadataChanged() {
+            if (uiBridge.profileLogsEnabled) {
+                const t0 = Date.now()
+                viewerController.handleSnapshotChanged()
+                const ms = Date.now() - t0
+                if (ms >= 5)
+                    console.warn("[qml-signal-profile] onTrackMetadataChanged viewer=" + ms + "ms")
+            } else {
+                viewerController.handleSnapshotChanged()
             }
         }
         function onPlaybackChanged() {
