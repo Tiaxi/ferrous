@@ -441,58 +441,6 @@ Kirigami.ApplicationWindow {
         wheel.accepted = true
     }
 
-    function playlistStatusSummary() {
-        const count = Math.max(0, Number(uiBridge.queueLength) || 0)
-        const noun = count === 1 ? "track" : "tracks"
-        return count.toString() + " " + noun + " (" + (uiBridge.queueDurationText || "00:00") + ")"
-    }
-
-    function statusBarSections() {
-        if (root.transientBridgeError.length > 0) {
-            return [{
-                text: "Error: " + root.transientBridgeError,
-                emphasis: true,
-                kind: "error"
-            }]
-        }
-        if (!uiBridge.connected) {
-            return [{ text: "Bridge disconnected" }]
-        }
-
-        const sections = [
-            { text: uiBridge.playbackState || "Stopped" },
-            { text: (uiBridge.positionText || "00:00") + "/" + (uiBridge.durationText || "00:00") }
-        ]
-
-        const formatLabel = (uiBridge.currentTrackFormatLabel || "").trim()
-        if (formatLabel.length > 0) {
-            sections.push({ text: formatLabel })
-        }
-
-        const channelText = (uiBridge.currentTrackChannelLayoutText || "").trim()
-        if (channelText.length > 0) {
-            sections.push({
-                text: channelText,
-                iconKey: (uiBridge.currentTrackChannelLayoutIconKey || "").trim()
-            })
-        }
-
-        const bitDepthSampleRateText = FormatUtils.formatBitDepthSampleRateText(
-            uiBridge.currentTrackBitDepth,
-            uiBridge.currentTrackSampleRateHz)
-        if (bitDepthSampleRateText.length > 0) {
-            sections.push({ text: bitDepthSampleRateText })
-        }
-
-        const bitrateKbps = Number(uiBridge.currentTrackCurrentBitrateKbps)
-        if (isFinite(bitrateKbps) && bitrateKbps > 0) {
-            sections.push({ text: Math.round(bitrateKbps).toString() + " kbps" })
-        }
-
-        sections.push({ text: playlistStatusSummary(), stretch: true })
-        return sections
-    }
-
     function channelStatusIconSource(iconKey) {
         switch (iconKey) {
         case "mono":
@@ -983,10 +931,11 @@ Kirigami.ApplicationWindow {
     }
 
     footer: Panes.StatusBar {
+        uiBridge: root.uiBridge
         uiPalette: root.uiPalette
-        sections: root.statusBarSections()
         channelStatusIconSource: root.channelStatusIconSource
         themeIsDark: root.themeIsDark
+        transientError: root.transientBridgeError
     }
 
     ColumnLayout {

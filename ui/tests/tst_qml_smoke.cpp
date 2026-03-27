@@ -741,8 +741,8 @@ Item {
     Panes.StatusBar {
         id: statusBar
         width: harness.width
+        uiBridge: bridge
         uiPalette: palette
-        sections: [{ text: "Ready", emphasis: false, stretch: true }]
         channelStatusIconSource: function(key) { return "" }
         themeIsDark: palette.themeIsDark
     }
