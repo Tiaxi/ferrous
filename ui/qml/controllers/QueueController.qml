@@ -120,16 +120,21 @@ QtObject {
             && root.lastAutoCenterPlaybackState === "Stopped"
         const needsInitialCenter = root.lastCenteredIndex < 0
         if (targetIndex >= 0 && (trackChanged || resumedFromStop || needsInitialCenter)) {
-            if (root.uiBridge.profileLogsEnabled) {
-                const t0 = Date.now()
-                playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
-                const ms = Date.now() - t0
-                if (ms >= 2)
-                    console.warn("[qml-signal-profile] positionViewAtIndex idx=" + targetIndex
-                        + " queueLen=" + root.uiBridge.queueLength + " ms=" + ms)
-            } else {
-                playlistView.positionViewAtIndex(targetIndex, ListView.Contain)
-            }
+            const capturedIndex = targetIndex
+            const capturedView = playlistView
+            Qt.callLater(function() {
+                if (!capturedView) return
+                if (root.uiBridge.profileLogsEnabled) {
+                    const t0 = Date.now()
+                    capturedView.positionViewAtIndex(capturedIndex, ListView.Contain)
+                    const ms = Date.now() - t0
+                    if (ms >= 2)
+                        console.warn("[qml-signal-profile] positionViewAtIndex(deferred) idx="
+                            + capturedIndex + " queueLen=" + root.uiBridge.queueLength + " ms=" + ms)
+                } else {
+                    capturedView.positionViewAtIndex(capturedIndex, ListView.Contain)
+                }
+            })
             root.lastCenteredIndex = targetIndex
         }
         root.lastAutoCenterPlaybackState = playbackState
