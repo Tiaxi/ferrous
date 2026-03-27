@@ -2197,12 +2197,11 @@ Item {
 
     QtObject {
         id: stubView
+        objectName: "stubView"
         property bool visible: true
         property real height: 400
-        function positionViewAtIndex(index, mode) {
-            harness.positionViewCalled = true
-            harness.positionViewIndex = index
-        }
+        property real contentY: 0
+        property real contentHeight: 2400
     }
 
     Controllers.QueueController {
@@ -2228,15 +2227,22 @@ Item {
     QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
 
     // Trigger a track change — handleSnapshotChanged detects path changed
-    // and should defer positionViewAtIndex via a 0ms Timer.
+    // and should defer scroll via a 0ms Timer.
+    QObject *stubView = root->findChild<QObject *>(QStringLiteral("stubView"));
+    QVERIFY(stubView != nullptr);
+    QCOMPARE(stubView->property("contentY").toDouble(), 0.0);
+
     QVERIFY(QMetaObject::invokeMethod(root.data(), "triggerTrackChange"));
 
-    // Immediately after handler returns: positionViewAtIndex must NOT have run yet.
-    QVERIFY(!root->property("positionViewCalled").toBool());
+    // Immediately after handler returns: contentY must NOT have changed yet.
+    QCOMPARE(stubView->property("contentY").toDouble(), 0.0);
 
     // Process the event loop so the 0ms Timer fires.
-    QTRY_VERIFY_WITH_TIMEOUT(root->property("positionViewCalled").toBool(), 100);
-    QCOMPARE(root->property("positionViewIndex").toInt(), 42);
+    // Index 42 * 24px row height = 1008px row top. Since row is below
+    // the viewport (400px), contentY should be set to rowBottom - viewHeight
+    // = 1008 + 24 - 400 = 632.
+    QTRY_VERIFY_WITH_TIMEOUT(stubView->property("contentY").toDouble() > 0.0, 100);
+    QCOMPARE(stubView->property("contentY").toDouble(), 632.0);
 }
 
 int main(int argc, char **argv) {

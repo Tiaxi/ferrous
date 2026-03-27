@@ -22,6 +22,8 @@ QtObject {
     property int _pendingScrollIndex: -1
     property var _pendingScrollView: null
 
+    readonly property int _rowHeight: 24
+
     property Timer _scrollTimer: Timer {
         interval: 0
         onTriggered: {
@@ -30,17 +32,26 @@ QtObject {
             root._pendingScrollIndex = -1
             root._pendingScrollView = null
             if (!view || idx < 0) return
-            if (root.uiBridge.profileLogsEnabled) {
-                const t0 = Date.now()
-                view.positionViewAtIndex(idx, ListView.Contain)
-                const ms = Date.now() - t0
-                if (ms >= 2)
-                    console.warn("[qml-signal-profile] positionViewAtIndex(deferred) idx="
-                        + idx + " queueLen=" + root.uiBridge.queueLength + " ms=" + ms)
-            } else {
-                view.positionViewAtIndex(idx, ListView.Contain)
-            }
+            root._containIndex(view, idx)
         }
+    }
+
+    function _containIndex(view, index) {
+        const rowTop = index * root._rowHeight
+        const rowBottom = rowTop + root._rowHeight
+        const viewTop = view.contentY
+        const viewBottom = viewTop + view.height
+        if (rowTop >= viewTop && rowBottom <= viewBottom) {
+            return
+        }
+        const maxY = Math.max(0, view.contentHeight - view.height)
+        let targetY
+        if (rowTop < viewTop) {
+            targetY = rowTop
+        } else {
+            targetY = rowBottom - view.height
+        }
+        view.contentY = Math.max(0, Math.min(maxY, targetY))
     }
 
     function registerView(view) {
@@ -329,15 +340,7 @@ QtObject {
         if (!root.view || index < 0) {
             return
         }
-        const firstVisible = root.view.indexAt(0, 0)
-        const lastVisible = root.view.indexAt(0, root.view.height - 1)
-        if (firstVisible >= 0
-                && lastVisible >= 0
-                && index >= firstVisible
-                && index <= lastVisible) {
-            return
-        }
-        root.view.positionViewAtIndex(index, ListView.Contain)
+        root._containIndex(root.view, index)
     }
 
     function selectAllItems() {
