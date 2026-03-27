@@ -19,6 +19,29 @@ QtObject {
     property real viewportRestoreUntilMs: 0
     property real viewportRestoreContentY: 0
     property bool autoCenterSelection: true
+    property int _pendingScrollIndex: -1
+    property var _pendingScrollView: null
+
+    property Timer _scrollTimer: Timer {
+        interval: 0
+        onTriggered: {
+            const view = root._pendingScrollView
+            const idx = root._pendingScrollIndex
+            root._pendingScrollIndex = -1
+            root._pendingScrollView = null
+            if (!view || idx < 0) return
+            if (root.uiBridge.profileLogsEnabled) {
+                const t0 = Date.now()
+                view.positionViewAtIndex(idx, ListView.Contain)
+                const ms = Date.now() - t0
+                if (ms >= 2)
+                    console.warn("[qml-signal-profile] positionViewAtIndex(deferred) idx="
+                        + idx + " queueLen=" + root.uiBridge.queueLength + " ms=" + ms)
+            } else {
+                view.positionViewAtIndex(idx, ListView.Contain)
+            }
+        }
+    }
 
     function registerView(view) {
         root.view = view
@@ -120,21 +143,11 @@ QtObject {
             && root.lastAutoCenterPlaybackState === "Stopped"
         const needsInitialCenter = root.lastCenteredIndex < 0
         if (targetIndex >= 0 && (trackChanged || resumedFromStop || needsInitialCenter)) {
-            const capturedIndex = targetIndex
-            const capturedView = playlistView
-            Qt.callLater(function() {
-                if (!capturedView) return
-                if (root.uiBridge.profileLogsEnabled) {
-                    const t0 = Date.now()
-                    capturedView.positionViewAtIndex(capturedIndex, ListView.Contain)
-                    const ms = Date.now() - t0
-                    if (ms >= 2)
-                        console.warn("[qml-signal-profile] positionViewAtIndex(deferred) idx="
-                            + capturedIndex + " queueLen=" + root.uiBridge.queueLength + " ms=" + ms)
-                } else {
-                    capturedView.positionViewAtIndex(capturedIndex, ListView.Contain)
-                }
-            })
+            if (playlistView.visible && playlistView.height > 0) {
+                root._pendingScrollIndex = targetIndex
+                root._pendingScrollView = playlistView
+                root._scrollTimer.restart()
+            }
             root.lastCenteredIndex = targetIndex
         }
         root.lastAutoCenterPlaybackState = playbackState

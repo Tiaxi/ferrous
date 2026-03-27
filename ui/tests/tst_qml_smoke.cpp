@@ -2197,6 +2197,8 @@ Item {
 
     QtObject {
         id: stubView
+        property bool visible: true
+        property real height: 400
         function positionViewAtIndex(index, mode) {
             harness.positionViewCalled = true
             harness.positionViewIndex = index
@@ -2226,15 +2228,14 @@ Item {
     QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
 
     // Trigger a track change — handleSnapshotChanged detects path changed
-    // and should defer positionViewAtIndex via Qt.callLater().
+    // and should defer positionViewAtIndex via a 0ms Timer.
     QVERIFY(QMetaObject::invokeMethod(root.data(), "triggerTrackChange"));
 
     // Immediately after handler returns: positionViewAtIndex must NOT have run yet.
     QVERIFY(!root->property("positionViewCalled").toBool());
 
-    // Process the event loop so Qt.callLater() fires.
-    QCoreApplication::processEvents();
-    QVERIFY(root->property("positionViewCalled").toBool());
+    // Process the event loop so the 0ms Timer fires.
+    QTRY_VERIFY_WITH_TIMEOUT(root->property("positionViewCalled").toBool(), 100);
     QCOMPARE(root->property("positionViewIndex").toInt(), 42);
 }
 
