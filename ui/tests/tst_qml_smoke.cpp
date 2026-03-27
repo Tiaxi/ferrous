@@ -388,6 +388,7 @@ private slots:
     void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
     void spectrogramCenteredModeSeekPreservesRing();
     void spectrogramCenteredGaplessPreStagedFill();
+    void spectrogramCenteredGaplessSnapsAnchorToZero();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -1952,6 +1953,54 @@ void QmlSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
     // Ring populated, not growing from zero.
     QVERIFY(item.m_ringWriteSeq >= 800);
     QVERIFY(item.m_ringCapacity > 0);
+}
+
+void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {
+    // In centered mode, a gapless token change must immediately reset the
+    // position anchor to 0 so the display snaps to the beginning of the
+    // new track.  Without this, the anchor lingers at the old track's
+    // position (~428 s) for ~1 s, rendering at a wrong column.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int total = 1024;
+    constexpr quint64 oldToken = 5;
+    constexpr quint64 newToken = 6;
+
+    // Set up old track: reset + some data, position deep into the track.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total, 48000, 1024, false, true, oldToken);
+    QByteArray oldData(100 * bins, '\x10');
+    item.feedPrecomputedChunk(
+        oldData, bins, 0, 100, 0, total, 48000, 1024, false, false, oldToken);
+    item.setPositionSeconds(428.0);
+    QVERIFY(std::abs(item.m_positionAnchorSeconds - 428.0) < 1.0);
+
+    // Simulate GStreamer position resetting to near 0 right before the
+    // gapless data arrives.  This should activate a jump hold.
+    item.setPositionSeconds(0.04);
+    QVERIFY(item.m_positionJumpHoldActive);
+
+    // Gapless token change — first chunk with the new token.
+    QByteArray newData(50 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        newData, bins, 0, 50, 0, total, 48000, 1024, false, false, newToken);
+    QCOMPARE(item.m_precomputedTrackToken, newToken);
+
+    // After the gapless transition, anchor must be at 0 and hold cleared.
+    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.01);
+    QVERIFY(!item.m_positionJumpHoldActive);
+
+    // Subsequent small position updates must be accepted normally
+    // (not held or snapped to the old position).
+    item.setPositionSeconds(0.08);
+    QVERIFY(!item.m_positionJumpHoldActive);
+    // Anchor should be near the incoming position, not 428.
+    QVERIFY(item.m_positionAnchorSeconds < 1.0);
 }
 
 void QmlSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding() {

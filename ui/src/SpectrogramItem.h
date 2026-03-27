@@ -228,6 +228,7 @@ private:
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     double m_gaplessPositionOffset{0.0};
+    std::chrono::steady_clock::time_point m_centeredGaplessTransitionAt{};
     int m_debugPaintCounter{0};
 
     mutable QMutex m_stateMutex;

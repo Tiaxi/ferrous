@@ -314,8 +314,16 @@ void SpectrogramItem::setPositionSeconds(double value) {
         // resets to near zero from deep in the track), not same-track
         // seeks.  Seeks must apply immediately because the full-track
         // ring already has data at the target position.
+        // Suppress the exemption briefly after a centered gapless
+        // transition so that any stale GStreamer positions still in the
+        // old track's coordinate space are held rather than applied.
+        const bool recentCenteredGapless =
+            m_centeredGaplessTransitionAt.time_since_epoch().count() != 0
+            && std::chrono::duration<double>(
+                   now - m_centeredGaplessTransitionAt).count() < 2.0;
         const bool centeredSeek = m_displayMode == 1
-            && clamped >= 1.0;
+            && clamped >= 1.0
+            && !recentCenteredGapless;
         if (largeJump && !centeredSeek) {
             // Update the target position unconditionally, but only stamp the
             // start time on the *first* activation.  Without this guard, each
@@ -546,6 +554,15 @@ void SpectrogramItem::feedPrecomputedChunk(
             if (m_positionJumpHoldActive) {
                 m_positionJumpHoldActive = false;
             }
+        } else {
+            // Centered mode: the new track uses 0-based position
+            // coordinates.  Snap the anchor to 0 immediately so the
+            // display jumps to column 0 instead of lingering at the
+            // old track's position until GStreamer reports >= 1 s.
+            const auto now = Clock::now();
+            setPositionAnchorLocked(0.0, now);
+            m_positionJumpHoldActive = false;
+            m_centeredGaplessTransitionAt = now;
         }
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
@@ -804,6 +821,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedTrackToken = 0;
     m_gaplessPositionOffset = 0.0;
     m_positionJumpHoldActive = false;
+    m_centeredGaplessTransitionAt = {};
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
     invalidateCanvas();
@@ -824,6 +842,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     // per-track column tracking, and canvas display range so the
     // centered-mode monotonic clamp doesn't stick at old positions.
     m_gaplessPositionOffset = 0.0;
+    m_centeredGaplessTransitionAt = {};
     m_precomputedMaxColumnIndex = -1;
     m_precomputedCanvasDisplayLeft = 0;
     m_precomputedCanvasDisplayRight = -1;
