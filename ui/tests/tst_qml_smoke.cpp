@@ -394,6 +394,9 @@ private slots:
     void playbackControllerInterpolationDeactivatesOnStop();
     void trackIdentityChangedSignalTriggersQmlHandler();
     void queueAutoCenterIsDeferredOffHandlerStack();
+    void queueContainIndexSkipsScrollWhenVisible();
+    void queueContainIndexScrollsUpWhenAboveViewport();
+    void queueContainIndexClampsAtListEnd();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2243,6 +2246,119 @@ Item {
     // = 1008 + 24 - 400 = 632.
     QTRY_VERIFY_WITH_TIMEOUT(stubView->property("contentY").toDouble() > 0.0, 100);
     QCOMPARE(stubView->property("contentY").toDouble(), 632.0);
+}
+
+// Helper: create a QueueController + stub view and invoke _containIndex.
+// Returns the resulting contentY.
+static double invokeContainIndex(
+    QQmlApplicationEngine &engine,
+    const QUrl &baseUrl,
+    double initialContentY,
+    double viewHeight,
+    double contentHeight,
+    int targetIndex)
+{
+    QString errorText;
+    const QByteArray qml = QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    id: harness
+
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property string currentTrackPath: "/music/track.flac"
+        property int playingQueueIndex: 0
+        property int queueLength: 1000
+        property int queueVersion: 1
+        property int selectedQueueIndex: -1
+        property bool profileLogsEnabled: false
+    }
+
+    QtObject {
+        id: stubView
+        objectName: "stubView"
+        property bool visible: true
+        property real height: 400
+        property real contentY: 0
+        property real contentHeight: 24000
+    }
+
+    Controllers.QueueController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        tagEditorApi: QtObject { function openSelection(sel) { return false } }
+        openTagEditorDialog: function() {}
+    }
+
+    function callContainIndex(index) {
+        controller._containIndex(stubView, index)
+    }
+}
+)QML");
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, qml, baseUrl, &errorText));
+    if (!root) {
+        qWarning("invokeContainIndex: %s", qPrintable(errorText));
+        return -1.0;
+    }
+    QObject *view = root->findChild<QObject *>(QStringLiteral("stubView"));
+    view->setProperty("contentY", initialContentY);
+    view->setProperty("height", viewHeight);
+    view->setProperty("contentHeight", contentHeight);
+    QMetaObject::invokeMethod(root.data(), "callContainIndex",
+        Q_ARG(QVariant, targetIndex));
+    return view->property("contentY").toDouble();
+}
+
+void QmlSmokeTest::queueContainIndexSkipsScrollWhenVisible() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR)
+        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+
+    // Index 5 → rowTop = 120, rowBottom = 144.
+    // Viewport: contentY=100, height=400 → visible range [100, 500].
+    // Row is fully inside viewport → contentY must not change.
+    const double result = invokeContainIndex(engine, baseUrl,
+        /*initialContentY=*/100.0, /*viewHeight=*/400.0,
+        /*contentHeight=*/24000.0, /*targetIndex=*/5);
+    QCOMPARE(result, 100.0);
+}
+
+void QmlSmokeTest::queueContainIndexScrollsUpWhenAboveViewport() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR)
+        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+
+    // Index 2 → rowTop = 48.
+    // Viewport: contentY=200, height=400 → visible range [200, 600].
+    // Row is above viewport → contentY should snap to rowTop = 48.
+    const double result = invokeContainIndex(engine, baseUrl,
+        /*initialContentY=*/200.0, /*viewHeight=*/400.0,
+        /*contentHeight=*/24000.0, /*targetIndex=*/2);
+    QCOMPARE(result, 48.0);
+}
+
+void QmlSmokeTest::queueContainIndexClampsAtListEnd() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR)
+        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+
+    // Index 999 → rowTop = 23976, rowBottom = 24000.
+    // contentHeight = 24000, viewHeight = 400.
+    // maxY = 24000 - 400 = 23600.
+    // Target would be rowBottom - viewHeight = 24000 - 400 = 23600.
+    // Clamped to maxY = 23600.
+    const double result = invokeContainIndex(engine, baseUrl,
+        /*initialContentY=*/0.0, /*viewHeight=*/400.0,
+        /*contentHeight=*/24000.0, /*targetIndex=*/999);
+    QCOMPARE(result, 23600.0);
 }
 
 int main(int argc, char **argv) {
