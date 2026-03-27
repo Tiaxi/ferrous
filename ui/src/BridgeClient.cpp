@@ -13,6 +13,7 @@
 #include <limits>
 
 #include <QDateTime>
+#include <QQmlEngine>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -4038,6 +4039,16 @@ void BridgeClient::scheduleTrackMetadataChanged() {
                 return;
             }
             m_trackMetadataChangedPending = false;
+            // Reset the V4 JS engine's allocation counter before emitting.
+            // Without this, accumulated allocations from prior transitions
+            // can push the counter past the automatic-GC threshold during
+            // the binding cascade, causing 160-200 ms stalls (~1 in 10
+            // transitions). The collection itself is near-zero cost because
+            // there is almost no garbage at this point — we are only
+            // resetting the heuristic trigger.
+            if (auto *engine = qmlEngine(this)) {
+                engine->collectGarbage();
+            }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             QElapsedTimer t; t.start();
 #endif
