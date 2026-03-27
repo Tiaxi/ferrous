@@ -113,7 +113,7 @@ Item {
                 smooth: true
                 asynchronous: true
                 cache: true
-                retainWhileLoading: false
+                retainWhileLoading: true
                 sourceSize.width: root.viewerDecodeWidth
                 sourceSize.height: root.viewerDecodeHeight
                 onStatusChanged: root.applyInitialView()
