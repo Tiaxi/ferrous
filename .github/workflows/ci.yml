@@ -1,6 +1,9 @@
-name: UI CI
+name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, master]
+  pull_request:
 
 jobs:
   rust-backend:
@@ -8,10 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Install Linux deps for gst feature
         run: |
@@ -22,12 +28,17 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
-      - name: Rust fmt/check/test/clippy
-        run: |
-          cargo fmt --check
-          cargo check --features gst
-          cargo test --features gst
-          cargo clippy --features gst -- -D clippy::pedantic
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --features gst -- -D clippy::pedantic
+
+      - name: Test (GStreamer backend)
+        run: cargo test --features gst
+
+      - name: Test (mock backend)
+        run: cargo test
 
   ui:
     name: UI Build + Smoke Tests
@@ -37,7 +48,6 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          dnf -y update
           dnf -y install \
             git \
             cmake \
@@ -56,7 +66,7 @@ jobs:
             kf6-kirigami-devel
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure UI
         run: cmake -S ui -B ui/build -G Ninja
