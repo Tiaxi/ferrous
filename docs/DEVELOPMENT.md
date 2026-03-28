@@ -92,7 +92,7 @@ Current optional values include:
 - `FERROUS_LASTFM_SHARED_SECRET`
 - `FERROUS_DNF_CMD`
 
-Last.fm support is intended for local experimentation at this stage, not as a polished published feature.
+Last.fm credentials are optional and only needed if you want scrobbling enabled in your build.
 
 ## Runtime Knobs
 
