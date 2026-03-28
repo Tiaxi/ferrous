@@ -56,7 +56,7 @@ jobs:
     name: Build deb (Ubuntu)
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:24.04
+      image: ubuntu:25.04
     steps:
       - name: Install build dependencies
         env:
@@ -80,7 +80,7 @@ jobs:
             qt6-base-dev \
             qt6-declarative-dev \
             qml6-module-qtquick-controls \
-            libkf6kirigami-dev
+            libkirigami-dev
 
       - name: Checkout
         uses: actions/checkout@v5
