@@ -32,9 +32,11 @@ Ferrous treats UI responsiveness as a correctness requirement. No work blocks th
 
 MP3, FLAC, M4A/AAC, Ogg Vorbis, Opus, WAV, AC-3, DTS, and M3U/M3U8 playlists. Actual codec support depends on the GStreamer plugins installed on the host system.
 
-## Quick Start
+## Installation
 
-Install the prerequisites for your distro (Rust, zsh, CMake, Ninja, a C++20 compiler, Qt 6.6+, KDE Kirigami 6, GStreamer + plugins), then:
+Prebuilt RPM (Fedora) and deb (Ubuntu/Debian) packages are available from [GitHub Releases](https://github.com/Tiaxi/ferrous/releases).
+
+To build from source, install the prerequisites for your distro (Rust, zsh, CMake, Ninja, a C++20 compiler, Qt 6.6+, KDE Kirigami 6, GStreamer + plugins), then:
 
 ```bash
 git clone https://github.com/Tiaxi/ferrous.git
@@ -42,13 +44,7 @@ cd ferrous
 ./scripts/run-ui.sh
 ```
 
-For Fedora, a local RPM can be built and installed in one step:
-
-```bash
-./scripts/build-rpm.sh --install
-```
-
-See the [installation guide](docs/INSTALL.md) for full dependency lists, manual build steps, and data locations.
+See the [installation guide](docs/INSTALL.md) for full dependency lists, manual build steps, and local package builds.
 
 ## Status
 

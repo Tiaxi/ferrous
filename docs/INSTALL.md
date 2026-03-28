@@ -2,12 +2,21 @@
 
 Ferrous is currently a Linux-first project. The supported runtime path today is the Qt6/Kirigami desktop app in `ui/`, backed by the in-process Rust library.
 
-## Packaging Status
+## Option 1: Prebuilt Packages
 
-- Prebuilt RPM and deb packages are attached to [GitHub Releases](https://github.com/Tiaxi/ferrous/releases).
-- The repository also supports building from source or building packages locally.
+Prebuilt RPM (Fedora) and deb (Ubuntu/Debian) packages are attached to each [GitHub Release](https://github.com/Tiaxi/ferrous/releases). Download the package for your distro and install it with your package manager:
 
-## Requirements
+```bash
+# Fedora
+sudo dnf install ./ferrous-*.rpm
+
+# Ubuntu/Debian
+sudo apt install ./ferrous_*.deb
+```
+
+## Building From Source
+
+### Requirements
 
 Install the equivalent of these tools and development packages for your distro:
 
@@ -42,7 +51,7 @@ For Fedora-like systems, the package names typically map closely to:
 
 Depending on the codecs you need, you may also want the distro-specific GStreamer plugin packages that provide MP3, AAC, Opus, and similar formats.
 
-## Option 1: Run From Source
+## Option 2: Run From Source
 
 This is the simplest path today.
 
@@ -69,7 +78,7 @@ Useful variants:
 ./scripts/run-ui.sh --nuke-all
 ```
 
-## Option 2: Build Manually
+## Option 3: Build Manually
 
 If you want the explicit build steps:
 
@@ -88,7 +97,7 @@ cmake --install ui/build --prefix "$HOME/.local"
 
 That install path also places the desktop file and icon under the prefix.
 
-## Option 3: Build A Local RPM
+## Option 4: Build A Local RPM
 
 On Fedora-like systems:
 
@@ -104,7 +113,7 @@ To build and install immediately:
 
 The generated RPM is written under `dist/rpm/RPMS/`.
 
-## Option 4: Build A Local deb
+## Option 5: Build A Local deb
 
 On Debian/Ubuntu-like systems:
 
