@@ -2404,6 +2404,15 @@ impl ImportExpandOutcome {
     }
 }
 
+/// Decode playlist file bytes. Tries UTF-8 first; falls back to ISO-8859-1
+/// (the legacy default for `.m3u` files, where every byte maps 1:1 to a Unicode code point).
+fn decode_playlist_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+    }
+}
+
 fn is_playlist_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -2489,7 +2498,7 @@ fn append_import_path(path: &Path, outcome: &mut ImportExpandOutcome) {
             outcome.push_unreadable();
             return;
         };
-        let mut reader = Cursor::new(String::from_utf8_lossy(&bytes).into_owned());
+        let mut reader = Cursor::new(decode_playlist_bytes(&bytes));
         let base_dir = path.parent().unwrap_or_else(|| Path::new(""));
         let mut line = String::new();
         while let Ok(read) = reader.read_line(&mut line) {
@@ -5734,6 +5743,30 @@ mod tests {
         assert_eq!(outcome.missing_count, 1);
         assert_eq!(outcome.unsupported_count, 0);
         assert_eq!(outcome.unreadable_count, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn expand_import_paths_decodes_latin1_m3u() {
+        let root = test_dir("latin1-playlist");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let track_ascii = root.join("01 - Svefnsund.flac");
+        let track_latin = root.join("02 - Grasi vaxin göng.flac");
+        write_stub(&track_ascii, b"a");
+        write_stub(&track_latin, b"b");
+
+        // Write an M3U file in ISO-8859-1 encoding where ö = 0xF6.
+        let playlist = root.join("test.m3u");
+        let mut m3u_bytes = b"#EXTM3U\r\n01 - Svefnsund.flac\r\n".to_vec();
+        m3u_bytes.extend_from_slice(b"02 - Grasi vaxin g");
+        m3u_bytes.push(0xF6); // ö in ISO-8859-1
+        m3u_bytes.extend_from_slice(b"ng.flac\r\n");
+        fs::write(&playlist, &m3u_bytes).expect("write playlist");
+
+        let outcome = expand_import_paths(vec![playlist]);
+        assert_eq!(outcome.tracks, vec![track_ascii, track_latin]);
+        assert_eq!(outcome.missing_count, 0);
 
         let _ = fs::remove_dir_all(root);
     }
