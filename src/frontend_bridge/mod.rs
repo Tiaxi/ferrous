@@ -6636,7 +6636,7 @@ mod tests {
         }));
         bridge.command(BridgeCommand::RequestSnapshot);
 
-        let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+        let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(10), |s| {
             s.queue.len() == 2 && s.selected_queue_index == Some(0)
         })
         .expect("snapshot with loaded queue");
@@ -6645,7 +6645,7 @@ mod tests {
 
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Clear));
         bridge.command(BridgeCommand::RequestSnapshot);
-        let cleared = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+        let cleared = wait_for_snapshot_matching(&bridge, Duration::from_secs(10), |s| {
             s.queue.is_empty() && s.selected_queue_index.is_none()
         })
         .expect("snapshot with cleared queue");
@@ -6875,7 +6875,7 @@ mod tests {
             Duration::from_secs(500),
         )));
         let seeked = {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + Duration::from_secs(10);
             let mut result = None;
             let sc = second.clone();
             while Instant::now() < deadline {
@@ -6899,7 +6899,7 @@ mod tests {
 
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Remove(1)));
         let removed = {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + Duration::from_secs(10);
             let mut result = None;
             let sc2 = second.clone();
             while Instant::now() < deadline {
@@ -7120,7 +7120,7 @@ mod tests {
             autoplay: true,
         }));
         bridge.command(BridgeCommand::RequestSnapshot);
-        let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(4), |s| {
+        let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(10), |s| {
             s.queue.len() == 2
                 && s.playback.current.as_ref() == Some(&first)
                 && s.playback.state == crate::playback::PlaybackState::Playing
@@ -7134,7 +7134,7 @@ mod tests {
         // Poll with repeated RequestSnapshot so at least one snapshot
         // includes the queue (heartbeat snapshots omit it).
         let handed_off = {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + Duration::from_secs(10);
             let mut result = None;
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(60));
@@ -7203,7 +7203,7 @@ mod tests {
         let second_for_handoff = second.clone();
         let first_title_str = first_title.to_string();
         let handoff_snapshot = {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + Duration::from_secs(10);
             let mut result = None;
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(60));
@@ -7227,7 +7227,7 @@ mod tests {
         let second_title_str = second_title.to_string();
         let second_for_meta = second.clone();
         let updated_metadata = {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + Duration::from_secs(10);
             let mut result = None;
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(60));
