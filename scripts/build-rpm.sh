@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RPM_TOPDIR="${REPO_ROOT}/dist/rpm"
 SPEC_FILE="${REPO_ROOT}/packaging/rpm/ferrous.spec"
-DEFAULT_LICENSE="LicenseRef-Local-Placeholder"
+DEFAULT_LICENSE="GPL-3.0-or-later"
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/load-build-env.sh"

@@ -53,5 +53,5 @@ update-desktop-database %{_datadir}/applications >/dev/null 2>&1 || :
 %{_datadir}/icons/hicolor/scalable/apps/ferrous.svg
 
 %changelog
-* Fri Mar 06 2026 Codex <codex@openai.local> - %{version}-%{release}
-- Local RPM packaging bootstrap
+* Fri Mar 28 2026 Ferrous contributors - %{version}-%{release}
+- Initial RPM packaging
