@@ -62,7 +62,10 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: rpm-package-fc${{ matrix.fedora }}
-          path: dist/rpm/RPMS/**/*.rpm
+          path: |
+            dist/rpm/RPMS/**/*.rpm
+            !dist/rpm/RPMS/**/*-debuginfo-*.rpm
+            !dist/rpm/RPMS/**/*-debugsource-*.rpm
 
   build-deb:
     name: Build deb (Ubuntu)
