@@ -12,6 +12,7 @@ Item {
     property double positionSeconds: 0
 
     property var channelDescriptors: []
+    property double _crosshairSharedX: -1.0
 
     // Standard channel labels for common layouts.
     readonly property var standardChannelLabels: [
@@ -188,6 +189,11 @@ Item {
                     positionSeconds: root.positionSeconds
                     playing: (root.uiBridge.playbackState || "") === "Playing"
                     displayMode: root.uiBridge.spectrogramDisplayMode
+                    crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
+                    gridEnabled: root.uiBridge.showSpectrogramScale
+                    showTimeLabels: index === spectrogramRepeater.count - 1
+                    crosshairSharedX: root._crosshairSharedX
+                    onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                 }
 
                 Rectangle {

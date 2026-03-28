@@ -2090,6 +2090,14 @@ bool BridgeClient::showFps() const {
     return m_showFps;
 }
 
+bool BridgeClient::showSpectrogramCrosshair() const {
+    return m_showSpectrogramCrosshair;
+}
+
+bool BridgeClient::showSpectrogramScale() const {
+    return m_showSpectrogramScale;
+}
+
 bool BridgeClient::systemMediaControlsEnabled() const {
     return m_systemMediaControlsEnabled;
 }
@@ -2449,6 +2457,26 @@ void BridgeClient::setShowFps(bool value) {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetShowFps,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setShowSpectrogramCrosshair(bool value) {
+    if (m_showSpectrogramCrosshair != value) {
+        m_showSpectrogramCrosshair = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramCrosshair,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setShowSpectrogramScale(bool value) {
+    if (m_showSpectrogramScale != value) {
+        m_showSpectrogramScale = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramScale,
         static_cast<quint8>(value ? 1 : 0)));
 }
 
@@ -4836,6 +4864,24 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
     if (m_showFps != showFps) {
         m_showFps = showFps;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const bool showSpectrogramCrosshair = snapshot.settings.present
+        ? snapshot.settings.showSpectrogramCrosshair
+        : m_showSpectrogramCrosshair;
+    if (m_showSpectrogramCrosshair != showSpectrogramCrosshair) {
+        m_showSpectrogramCrosshair = showSpectrogramCrosshair;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const bool showSpectrogramScale = snapshot.settings.present
+        ? snapshot.settings.showSpectrogramScale
+        : m_showSpectrogramScale;
+    if (m_showSpectrogramScale != showSpectrogramScale) {
+        m_showSpectrogramScale = showSpectrogramScale;
         changed = true;
         snapshotSignalChanged = true;
     }

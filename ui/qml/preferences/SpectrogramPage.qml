@@ -152,6 +152,20 @@ ScrollView {
                     checked: root.uiBridge.showFps
                     onToggled: root.uiBridge.setShowFps(checked)
                 }
+
+                CheckBox {
+                    text: "Show Crosshair on Hover"
+                    focusPolicy: Qt.NoFocus
+                    checked: root.uiBridge.showSpectrogramCrosshair
+                    onToggled: root.uiBridge.setShowSpectrogramCrosshair(checked)
+                }
+
+                CheckBox {
+                    text: "Show Frequency/Time Scale"
+                    focusPolicy: Qt.NoFocus
+                    checked: root.uiBridge.showSpectrogramScale
+                    onToggled: root.uiBridge.setShowSpectrogramScale(checked)
+                }
             }
         }
     }

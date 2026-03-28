@@ -384,6 +384,14 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&spectrogramDisplayMode)) {
         return false;
     }
+    quint8 showSpectrogramCrosshair = 0;
+    if (!reader.atEnd() && !reader.readU8(&showSpectrogramCrosshair)) {
+        return false;
+    }
+    quint8 showSpectrogramScale = 0;
+    if (!reader.atEnd() && !reader.readU8(&showSpectrogramScale)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -396,6 +404,8 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->showFps = showFps != 0;
     out->librarySortMode = static_cast<int>(librarySortMode);
     out->systemMediaControlsEnabled = systemMediaControlsEnabled != 0;
+    out->showSpectrogramCrosshair = showSpectrogramCrosshair != 0;
+    out->showSpectrogramScale = showSpectrogramScale != 0;
     return true;
 }
 

@@ -61,6 +61,8 @@ private slots:
     void mprisPublishesPlaybackStateOnPlaybackSignal();
     void mprisCanPauseOnlyWhilePlaying();
     void mprisControllerConstructionDoesNotCrash();
+    void spectrogramOverlaySettingsApplyFromSnapshot();
+    void spectrogramOverlaySettingsDecodeFromBinaryPayload();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -681,6 +683,87 @@ void BridgeClientTest::mprisControllerConstructionDoesNotCrash() {
     }
 }
 
+
+void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    // Defaults should be false.
+    QCOMPARE(client.showSpectrogramCrosshair(), false);
+    QCOMPARE(client.showSpectrogramScale(), false);
+
+    // Apply a snapshot with both enabled.
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.showSpectrogramCrosshair = true;
+    snapshot.settings.showSpectrogramScale = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+
+    QCOMPARE(client.showSpectrogramCrosshair(), true);
+    QCOMPARE(client.showSpectrogramScale(), true);
+
+    // Apply a snapshot with both disabled.
+    snapshot.settings.showSpectrogramCrosshair = false;
+    snapshot.settings.showSpectrogramScale = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+
+    QCOMPARE(client.showSpectrogramCrosshair(), false);
+    QCOMPARE(client.showSpectrogramScale(), false);
+}
+
+void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
+    // Build a settings section payload matching the Rust encode layout:
+    // volume(f32), fftSize(u32), viewMode(u8), dbRange(f32),
+    // logScale(u8), showFps(u8), sortMode(i32), sysMC(u8),
+    // viewerFS(u8), displayMode(u8), crosshair(u8), scale(u8).
+    QByteArray settingsPayload;
+    QDataStream ds(&settingsPayload, QIODevice::WriteOnly);
+    ds.setByteOrder(QDataStream::LittleEndian);
+    ds.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    ds << float(1.0f);     // volume
+    ds << quint32(8192);   // fftSize
+    ds << quint8(0);       // spectrogramViewMode
+    ds << float(132.0f);   // dbRange
+    ds << quint8(0);       // logScale
+    ds << quint8(0);       // showFps
+    ds << qint32(0);       // librarySortMode
+    ds << quint8(1);       // systemMediaControlsEnabled
+    ds << quint8(0);       // viewerFullscreenMode
+    ds << quint8(0);       // spectrogramDisplayMode
+    ds << quint8(1);       // showSpectrogramCrosshair
+    ds << quint8(1);       // showSpectrogramScale
+
+    // Wrap in a full snapshot packet:
+    // header: magic(u32) + totalLength(u32) + sectionMask(u16) + reserved(u16)
+    // section: length(u32) + payload
+    const quint32 magic = 0xFE550001u;
+    const quint16 mask = 1u << 5; // SectionSettings
+    const quint32 sectionLen = static_cast<quint32>(settingsPayload.size());
+    const quint32 totalLen = 12 + 4 + sectionLen; // header + section header + payload
+
+    QByteArray packet;
+    QDataStream ps(&packet, QIODevice::WriteOnly);
+    ps.setByteOrder(QDataStream::LittleEndian);
+    ps << magic;
+    ps << totalLen;
+    ps << mask;
+    ps << quint16(0); // reserved
+    ps << sectionLen;
+    packet.append(settingsPayload);
+
+    // Decode through the real decodeSnapshotPacket path.
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
+             qPrintable(error));
+
+    QVERIFY(decoded.settings.present);
+    QCOMPARE(decoded.settings.showSpectrogramCrosshair, true);
+    QCOMPARE(decoded.settings.showSpectrogramScale, true);
+    // Verify other fields survived too.
+    QCOMPARE(decoded.settings.systemMediaControlsEnabled, true);
+    QCOMPARE(decoded.settings.fftSize, 8192);
+}
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);

@@ -76,6 +76,8 @@ enum CommandId : quint16 {
     CmdReplaceRootByPath = 48,
     CmdAppendRootByPath = 49,
     CmdSetSpectrogramDisplayMode = 50,
+    CmdSetSpectrogramCrosshair = 51,
+    CmdSetSpectrogramScale = 52,
 };
 
 struct DecodedPlayback {
@@ -165,6 +167,8 @@ struct DecodedSettings {
     bool showFps{false};
     int librarySortMode{0};
     bool systemMediaControlsEnabled{true};
+    bool showSpectrogramCrosshair{false};
+    bool showSpectrogramScale{false};
 };
 
 struct DecodedLastFm {

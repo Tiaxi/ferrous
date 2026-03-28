@@ -189,6 +189,8 @@ pub enum BridgeSettingsCommand {
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
+    SetShowSpectrogramCrosshair(bool),
+    SetShowSpectrogramScale(bool),
     SetSystemMediaControlsEnabled(bool),
     SetLibrarySortMode(LibrarySortMode),
     SetLastFmScrobblingEnabled(bool),
@@ -347,10 +349,14 @@ pub struct BridgeSnapshot {
     pub lastfm: LastFmRuntimeState,
 }
 
+// Settings struct with individual toggle fields — not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct BridgeDisplaySettings {
     pub log_scale: bool,
     pub show_fps: bool,
+    pub show_spectrogram_crosshair: bool,
+    pub show_spectrogram_scale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -388,6 +394,8 @@ impl Default for BridgeSettings {
             display: BridgeDisplaySettings {
                 log_scale: false,
                 show_fps,
+                show_spectrogram_crosshair: false,
+                show_spectrogram_scale: false,
             },
             library_sort_mode: LibrarySortMode::Year,
             integrations: BridgeIntegrationSettings {
@@ -1867,6 +1875,29 @@ fn apply_analysis_spectrogram_settings(state: &mut BridgeState, analysis: &Analy
     ));
 }
 
+fn handle_load_settings_from_disk(state: &mut BridgeState, context: &mut BridgeCommandContext<'_>) {
+    load_settings_into(&mut state.settings);
+    state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
+    context
+        .playback
+        .command(PlaybackCommand::SetVolume(state.settings.volume));
+    apply_analysis_spectrogram_settings(state, context.analysis);
+    context.lastfm.command(LastFmCommand::SetEnabled(
+        state.settings.integrations.lastfm_scrobbling_enabled,
+    ));
+    if !state
+        .settings
+        .integrations
+        .lastfm_username
+        .trim()
+        .is_empty()
+    {
+        context.lastfm.command(LastFmCommand::LoadStoredSession {
+            username: state.settings.integrations.lastfm_username.clone(),
+        });
+    }
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -1874,26 +1905,7 @@ fn handle_settings_bridge_command(
 ) {
     match cmd {
         BridgeSettingsCommand::LoadFromDisk => {
-            load_settings_into(&mut state.settings);
-            state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
-            context
-                .playback
-                .command(PlaybackCommand::SetVolume(state.settings.volume));
-            apply_analysis_spectrogram_settings(state, context.analysis);
-            context.lastfm.command(LastFmCommand::SetEnabled(
-                state.settings.integrations.lastfm_scrobbling_enabled,
-            ));
-            if !state
-                .settings
-                .integrations
-                .lastfm_username
-                .trim()
-                .is_empty()
-            {
-                context.lastfm.command(LastFmCommand::LoadStoredSession {
-                    username: state.settings.integrations.lastfm_username.clone(),
-                });
-            }
+            handle_load_settings_from_disk(state, context);
         }
         BridgeSettingsCommand::SaveToDisk => {
             save_settings(&state.settings);
@@ -1939,6 +1951,14 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SetShowFps(enabled) => {
             state.settings.display.show_fps = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetShowSpectrogramCrosshair(enabled) => {
+            state.settings.display.show_spectrogram_crosshair = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetShowSpectrogramScale(enabled) => {
+            state.settings.display.show_spectrogram_scale = *enabled;
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetSystemMediaControlsEnabled(enabled) => {
@@ -5236,6 +5256,16 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.display.show_fps = x != 0;
                 }
             }
+            "show_spectrogram_crosshair" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.display.show_spectrogram_crosshair = x != 0;
+                }
+            }
+            "show_spectrogram_scale" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.display.show_spectrogram_scale = x != 0;
+                }
+            }
             "system_media_controls_enabled" => {
                 if let Ok(x) = value.parse::<i32>() {
                     settings.integrations.system_media_controls_enabled = x != 0;
@@ -5272,7 +5302,7 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
@@ -5281,6 +5311,8 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.db_range,
         i32::from(settings.display.log_scale),
         i32::from(settings.display.show_fps),
+        i32::from(settings.display.show_spectrogram_crosshair),
+        i32::from(settings.display.show_spectrogram_scale),
         i32::from(settings.integrations.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
         i32::from(settings.integrations.lastfm_scrobbling_enabled),
@@ -5581,6 +5613,8 @@ mod tests {
             display: BridgeDisplaySettings {
                 log_scale: true,
                 show_fps: true,
+                show_spectrogram_crosshair: true,
+                show_spectrogram_scale: true,
             },
             library_sort_mode: LibrarySortMode::Title,
             integrations: BridgeIntegrationSettings {
@@ -5605,6 +5639,8 @@ mod tests {
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.display.log_scale);
         assert!(parsed.display.show_fps);
+        assert!(parsed.display.show_spectrogram_crosshair);
+        assert!(parsed.display.show_spectrogram_scale);
         assert!(!parsed.integrations.system_media_controls_enabled);
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
         assert!(parsed.integrations.lastfm_scrobbling_enabled);
@@ -5650,6 +5686,30 @@ mod tests {
             settings.viewer_fullscreen_mode,
             ViewerFullscreenMode::WholeScreen
         );
+    }
+
+    #[test]
+    fn settings_roundtrip_crosshair_and_scale() {
+        let settings = BridgeSettings {
+            display: BridgeDisplaySettings {
+                log_scale: false,
+                show_fps: false,
+                show_spectrogram_crosshair: true,
+                show_spectrogram_scale: true,
+            },
+            ..BridgeSettings::default()
+        };
+        let text = format_settings_text(&settings);
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert!(parsed.display.show_spectrogram_crosshair);
+        assert!(parsed.display.show_spectrogram_scale);
+
+        // Verify defaults when keys are absent.
+        let mut empty_parsed = BridgeSettings::default();
+        parse_settings_text(&mut empty_parsed, "volume=1.0\n");
+        assert!(!empty_parsed.display.show_spectrogram_crosshair);
+        assert!(!empty_parsed.display.show_spectrogram_scale);
     }
 
     #[test]

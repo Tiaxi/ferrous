@@ -1260,6 +1260,8 @@ fn parse_settings_command(
             1 => SpectrogramDisplayMode::Centered,
             _ => SpectrogramDisplayMode::Rolling,
         }),
+        51 => BridgeSettingsCommand::SetShowSpectrogramCrosshair(reader.read_u8()? != 0),
+        52 => BridgeSettingsCommand::SetShowSpectrogramScale(reader.read_u8()? != 0),
         40 => BridgeSettingsCommand::SetLastFmScrobblingEnabled(reader.read_u8()? != 0),
         41 => BridgeSettingsCommand::BeginLastFmAuth,
         42 => BridgeSettingsCommand::CompleteLastFmAuth,
@@ -1765,6 +1767,14 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
             SpectrogramDisplayMode::Centered => 1,
         },
     );
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.display.show_spectrogram_crosshair),
+    );
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.display.show_spectrogram_scale),
+    );
     out
 }
 
@@ -2112,6 +2122,8 @@ mod tests {
                 display: super::super::BridgeDisplaySettings {
                     log_scale: false,
                     show_fps: false,
+                    show_spectrogram_crosshair: false,
+                    show_spectrogram_scale: false,
                 },
                 library_sort_mode: LibrarySortMode::Year,
                 integrations: super::super::BridgeIntegrationSettings {
@@ -2305,6 +2317,28 @@ mod tests {
         assert!(matches!(
             cmd,
             BridgeCommand::Settings(BridgeSettingsCommand::DisconnectLastFm)
+        ));
+    }
+
+    #[test]
+    fn parse_set_spectrogram_crosshair_command() {
+        let cmd = parse_binary_command(&encode_command(51, &[1]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetShowSpectrogramCrosshair(true))
+        ));
+    }
+
+    #[test]
+    fn parse_set_spectrogram_scale_command() {
+        let cmd = parse_binary_command(&encode_command(52, &[0]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetShowSpectrogramScale(false))
         ));
     }
 
@@ -2566,10 +2600,36 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 3 bytes: system_media_controls(0), viewer_fullscreen(1), display_mode(0)
-        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0));
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1));
-        assert_eq!(settings.last().copied(), Some(0));
+        // Last 5 bytes: system_media_controls(0), viewer_fullscreen(1),
+        // display_mode(0), show_spectrogram_crosshair(0), show_spectrogram_scale(0)
+        assert_eq!(settings.iter().rev().nth(4).copied(), Some(0)); // system_media_controls
+        assert_eq!(settings.iter().rev().nth(3).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
+        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0)); // display_mode
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(0)); // show_spectrogram_crosshair
+        assert_eq!(settings.last().copied(), Some(0)); // show_spectrogram_scale
+    }
+
+    #[test]
+    fn settings_section_encodes_overlay_flags() {
+        let mut snapshot = sample_snapshot();
+        snapshot.settings.display.show_spectrogram_crosshair = true;
+        snapshot.settings.display.show_spectrogram_scale = true;
+        let queue_section = compute_queue_section_data(&snapshot);
+        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
+        let mut offset = 12usize;
+        let playback_len = usize_from_u32(read_u32(&packet, &mut offset));
+        offset += playback_len;
+        let queue_len = usize_from_u32(read_u32(&packet, &mut offset));
+        offset += queue_len;
+        let library_len = usize_from_u32(read_u32(&packet, &mut offset));
+        offset += library_len;
+        let metadata_len = usize_from_u32(read_u32(&packet, &mut offset));
+        offset += metadata_len;
+        let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
+        let settings = &packet[offset..offset + settings_len];
+        // Last 2 bytes should be the new overlay flags, both enabled.
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // crosshair
+        assert_eq!(settings.last().copied(), Some(1)); // scale
     }
 
     #[test]

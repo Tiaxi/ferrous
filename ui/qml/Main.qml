@@ -197,6 +197,8 @@ Kirigami.ApplicationWindow {
         property int repeatMode: 0
         property bool shuffleEnabled: false
         property bool showFps: false
+        property bool showSpectrogramCrosshair: false
+        property bool showSpectrogramScale: false
         property bool systemMediaControlsEnabled: true
         property bool lastFmScrobblingEnabled: false
         property bool lastFmBuildConfigured: false
@@ -267,6 +269,8 @@ Kirigami.ApplicationWindow {
         function setRepeatMode(mode) {}
         function setShuffleEnabled(value) {}
         function setShowFps(value) {}
+        function setShowSpectrogramCrosshair(value) {}
+        function setShowSpectrogramScale(value) {}
         function setSystemMediaControlsEnabled(value) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

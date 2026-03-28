@@ -30,6 +30,10 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool playing READ isPlaying WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
     Q_PROPERTY(int displayMode READ displayMode WRITE setDisplayMode NOTIFY displayModeChanged)
+    Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
+    Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
+    Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
+    Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -61,6 +65,20 @@ public:
     int displayMode() const;
     void setDisplayMode(int value);
 
+    bool crosshairEnabled() const;
+    void setCrosshairEnabled(bool value);
+
+    bool gridEnabled() const;
+    void setGridEnabled(bool value);
+
+    bool showTimeLabels() const;
+    void setShowTimeLabels(bool value);
+
+    double crosshairSharedX() const;
+    void setCrosshairSharedX(double value);
+
+    double pixelToFrequencyHz(int pixelY, int viewHeight) const;
+
     Q_INVOKABLE void feedPrecomputedChunk(
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
@@ -83,9 +101,17 @@ signals:
     void playingChanged();
     void precomputedReadyChanged();
     void displayModeChanged();
+    void crosshairEnabledChanged();
+    void gridEnabledChanged();
+    void showTimeLabelsChanged();
+    void crosshairSharedXChanged();
+    void crosshairHoverChanged(double x);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    void hoverMoveEvent(QHoverEvent *event) override;
+    void hoverEnterEvent(QHoverEvent *event) override;
+    void hoverLeaveEvent(QHoverEvent *event) override;
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
     void releaseResources() override;
 
@@ -130,6 +156,17 @@ private:
     void markTileDirtyLocked(int x);
     void markAllTilesDirtyLocked();
     void updateOverlayImageLocked();
+    void updateCrosshairOverlayLocked(
+        int width, int height,
+        qint64 displayLeft, bool rollingMode,
+        double columnsPerSecond, double drawX);
+    void updateFreqGridOverlayLocked(int width, int height);
+    void updateTimeGridOverlayLocked(
+        int width, int height, int padding,
+        qint64 displayLeft,
+        bool rollingMode, double columnsPerSecond, double drawX);
+    double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
+    int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
@@ -229,6 +266,41 @@ private:
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
+
+    // Crosshair overlay state.
+    bool m_crosshairEnabled{false};
+    bool m_hoverActive{false};
+    QPointF m_hoverPosition;
+    double m_crosshairSharedX{-1.0};
+    QImage m_crosshairImage;
+    bool m_crosshairDirty{true};
+    qint64 m_crosshairCachedDisplayLeft{0};
+    double m_crosshairCachedDrawX{0.0};
+    bool m_crosshairCachedRollingMode{false};
+    int m_crosshairCachedBinsPerColumn{0};
+
+    // Grid overlay state — split into static frequency grid and dynamic time grid.
+    bool m_gridEnabled{false};
+    bool m_showTimeLabels{false};
+
+    // Frequency grid: horizontal lines + labels. Only depends on
+    // height/sampleRate/binsPerColumn/logScale. Never rebuilt during playback.
+    QImage m_freqGridImage;
+    bool m_freqGridDirty{true};
+    int m_freqGridCachedSampleRateHz{0};
+    int m_freqGridCachedBinsPerColumn{0};
+
+    // Time grid: vertical lines + labels (bottom pane only). Rendered
+    // wider than the widget with right-side padding so the texture
+    // source rect can be shifted cheaply on each frame. Only rebuilt
+    // when the shift exhausts the padding (~every 8-10 seconds).
+    QImage m_timeGridImage;
+    bool m_timeGridDirty{true};
+    qint64 m_timeGridRenderDisplayLeft{0};
+    double m_timeGridRenderDrawX{0.0};
+    bool m_timeGridCachedRollingMode{false};
+    int m_timeGridPadding{0};
+
     double m_gaplessPositionOffset{0.0};
     std::chrono::steady_clock::time_point m_centeredGaplessTransitionAt{};
     int m_debugPaintCounter{0};

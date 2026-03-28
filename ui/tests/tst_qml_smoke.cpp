@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QHoverEvent>
 #include <QImage>
 #include <QPainter>
 #include <QQuickWindow>
@@ -22,10 +23,12 @@
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/SpectrogramSeekTrace.h"
+#define protected public
 #define private public
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformItem.h"
 #undef private
+#undef protected
 
 namespace {
 
@@ -400,6 +403,16 @@ private slots:
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
+    void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
+    void spectrogramPixelToFrequency();
+    void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramGridOverlayGeneratesWhenEnabled();
+    void spectrogramOverlayDisabledProducesNullImage();
+    void spectrogramOverlayDirtiedByGeometryChange();
+    void spectrogramOverlayDirtiedByLogScaleChange();
+    void spectrogramOverlayStalenessDetectsBinChange();
+    void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
+    void spectrogramOverlayStalenessDetectsDisplayRangeChange();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -514,6 +527,8 @@ Item {
         property real dbRange: 90
         property bool logScale: false
         property bool showFps: false
+        property bool showSpectrogramCrosshair: false
+        property bool showSpectrogramScale: false
         property int viewerFullscreenMode: 0
         property int libraryArtistCount: 0
         property int libraryAlbumCount: 0
@@ -560,6 +575,8 @@ Item {
         function setDbRange(value) {}
         function setLogScale(value) {}
         function setShowFps(value) {}
+        function setShowSpectrogramCrosshair(value) {}
+        function setShowSpectrogramScale(value) {}
         function setViewerFullscreenMode(mode) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}
@@ -2409,6 +2426,386 @@ void QmlSmokeTest::queueContainIndexClampsAtListEnd() {
         /*initialContentY=*/0.0, /*viewHeight=*/400.0,
         /*contentHeight=*/24000.0, /*targetIndex=*/999);
     QCOMPARE(result, 23600.0);
+}
+
+void QmlSmokeTest::spectrogramCrosshairAndGridPropertiesAndHoverTracking() {
+    // Verify crosshairEnabled/gridEnabled properties default to false,
+    // emit change signals, and that hover events update internal state.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    // Default state: both overlays disabled, no hover.
+    QCOMPARE(item.crosshairEnabled(), false);
+    QCOMPARE(item.gridEnabled(), false);
+    QCOMPARE(item.m_hoverActive, false);
+
+    // Enable crosshair — signal fires, dirty flag set.
+    QSignalSpy crosshairSpy(&item, &SpectrogramItem::crosshairEnabledChanged);
+    item.setCrosshairEnabled(true);
+    QCOMPARE(item.crosshairEnabled(), true);
+    QCOMPARE(crosshairSpy.count(), 1);
+    QCOMPARE(item.m_crosshairDirty, true);
+
+    // No-op when setting same value.
+    item.setCrosshairEnabled(true);
+    QCOMPARE(crosshairSpy.count(), 1);
+
+    // Enable grid.
+    QSignalSpy gridSpy(&item, &SpectrogramItem::gridEnabledChanged);
+    item.setGridEnabled(true);
+    QCOMPARE(item.gridEnabled(), true);
+    QCOMPARE(gridSpy.count(), 1);
+    QVERIFY(item.m_freqGridDirty || item.m_timeGridDirty);
+
+    // Simulate hover enter — m_hoverActive should become true.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_crosshairDirty = false;
+    }
+    QHoverEvent enterEvent(QEvent::HoverEnter, QPointF(100.0, 50.0), QPointF(100.0, 50.0), QPointF());
+    item.hoverEnterEvent(&enterEvent);
+    QCOMPARE(item.m_hoverActive, true);
+    QVERIFY(std::abs(item.m_hoverPosition.x() - 100.0) < 0.01);
+    QVERIFY(std::abs(item.m_hoverPosition.y() - 50.0) < 0.01);
+    QCOMPARE(item.m_crosshairDirty, true); // crosshair enabled → dirty
+
+    // Simulate hover move.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_crosshairDirty = false;
+    }
+    QHoverEvent moveEvent(QEvent::HoverMove, QPointF(150.0, 75.0), QPointF(150.0, 75.0), QPointF(100.0, 50.0));
+    item.hoverMoveEvent(&moveEvent);
+    QCOMPARE(item.m_hoverActive, true);
+    QVERIFY(std::abs(item.m_hoverPosition.x() - 150.0) < 0.01);
+    QVERIFY(std::abs(item.m_hoverPosition.y() - 75.0) < 0.01);
+    QCOMPARE(item.m_crosshairDirty, true);
+
+    // Simulate hover leave — m_hoverActive becomes false.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_crosshairDirty = false;
+    }
+    QHoverEvent leaveEvent(QEvent::HoverLeave, QPointF(), QPointF(), QPointF(150.0, 75.0));
+    item.hoverLeaveEvent(&leaveEvent);
+    QCOMPARE(item.m_hoverActive, false);
+    QCOMPARE(item.m_crosshairDirty, true);
+
+    // When crosshair is disabled, hover events do NOT mark dirty.
+    item.setCrosshairEnabled(false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_crosshairDirty = false;
+    }
+    QHoverEvent enterEvent2(QEvent::HoverEnter, QPointF(50.0, 30.0), QPointF(50.0, 30.0), QPointF());
+    item.hoverEnterEvent(&enterEvent2);
+    QCOMPARE(item.m_hoverActive, true); // position still tracked
+    QCOMPARE(item.m_crosshairDirty, false); // but NOT dirty
+}
+
+void QmlSmokeTest::spectrogramPixelToFrequency() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    // Feed data to set binsPerColumn = 4097 (FFT size 8192).
+    const int bins = 4097;
+    QByteArray data(bins, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 1, 0, 100, 48000, 1024, false, true, 1, false);
+
+    // In linear mode, bottom pixel maps to 0 Hz (DC),
+    // top pixel maps to Nyquist (24000 Hz).
+    // pixelY=0 -> top -> ~24000 Hz
+    // pixelY=99 -> bottom -> 0 Hz
+    QVERIFY(item.pixelToFrequencyHz(0, 100) > 20000.0);
+    QVERIFY(item.pixelToFrequencyHz(99, 100) < 500.0);
+
+    // Mid-height should be roughly half Nyquist in linear mode.
+    const double midFreq = item.pixelToFrequencyHz(50, 100);
+    QVERIFY(midFreq > 10000.0 && midFreq < 14000.0);
+}
+
+void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setCrosshairEnabled(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_crosshairDirty = true;
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+    }
+
+    QVERIFY(!item.m_crosshairImage.isNull());
+    QCOMPARE(item.m_crosshairImage.width(), 200);
+    QCOMPARE(item.m_crosshairImage.height(), 100);
+
+    // The image must contain visible content (lines + labels).
+    bool hasContent = false;
+    for (int y = 0; y < item.m_crosshairImage.height() && !hasContent; ++y) {
+        for (int x = 0; x < item.m_crosshairImage.width(); ++x) {
+            if (qAlpha(item.m_crosshairImage.pixel(x, y)) > 0) {
+                hasContent = true;
+                break;
+            }
+        }
+    }
+    QVERIFY(hasContent);
+}
+
+void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setGridEnabled(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        // Sync bins from precomputed state (normally done in updatePaintNode).
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateFreqGridOverlayLocked(200, 100);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+    }
+
+    QVERIFY(!item.m_freqGridImage.isNull());
+    QCOMPARE(item.m_freqGridImage.width(), 200);
+    QCOMPARE(item.m_freqGridImage.height(), 100);
+
+    bool hasContent = false;
+    for (int y = 0; y < item.m_freqGridImage.height() && !hasContent; ++y) {
+        for (int x = 0; x < item.m_freqGridImage.width(); ++x) {
+            if (qAlpha(item.m_freqGridImage.pixel(x, y)) > 0) {
+                hasContent = true;
+                break;
+            }
+        }
+    }
+    QVERIFY(hasContent);
+}
+
+void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    // Both overlays default to disabled.
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    // Crosshair disabled + hover active: null image.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+    }
+    QVERIFY(item.m_crosshairImage.isNull());
+
+    // Grid disabled: null image.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateFreqGridOverlayLocked(200, 100);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+    }
+    QVERIFY(item.m_freqGridImage.isNull());
+}
+
+void QmlSmokeTest::spectrogramOverlayDirtiedByGeometryChange() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setCrosshairEnabled(true);
+    item.setGridEnabled(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+        item.updateFreqGridOverlayLocked(200, 100);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+    }
+    QVERIFY(!item.m_crosshairDirty);
+    QVERIFY(!item.m_freqGridDirty);
+    QVERIFY(!item.m_timeGridDirty);
+
+    item.geometryChange(QRectF(0, 0, 300, 150), QRectF(0, 0, 200, 100));
+
+    QVERIFY(item.m_crosshairDirty);
+    QVERIFY(item.m_freqGridDirty || item.m_timeGridDirty);
+}
+
+void QmlSmokeTest::spectrogramOverlayDirtiedByLogScaleChange() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setCrosshairEnabled(true);
+    item.setGridEnabled(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+        item.updateFreqGridOverlayLocked(200, 100);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+    }
+    QVERIFY(!item.m_crosshairDirty);
+    QVERIFY(!item.m_freqGridDirty);
+    QVERIFY(!item.m_timeGridDirty);
+
+    item.setLogScale(true);
+
+    QVERIFY(item.m_crosshairDirty);
+    QVERIFY(item.m_freqGridDirty || item.m_timeGridDirty);
+}
+
+void QmlSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setCrosshairEnabled(true);
+    item.setGridEnabled(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+        item.updateFreqGridOverlayLocked(200, 100);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = 2049;
+    }
+
+    QVERIFY(item.m_binsPerColumn != item.m_crosshairCachedBinsPerColumn);
+    QVERIFY(item.m_binsPerColumn != item.m_freqGridCachedBinsPerColumn);
+}
+
+void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setSampleRateHz(48000);
+    item.setDisplayMode(1); // Centered
+    item.setCrosshairEnabled(true);
+    item.setGridEnabled(true);
+
+    const int bins = 4097;
+    const int columns = 500;
+    QByteArray data(bins * columns, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, columns, 0, columns, 48000, 1024,
+                               false, true, 1, false);
+
+    item.setPositionSeconds(1.0);
+    item.setPlaying(false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(100.0, 50.0);
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    qint64 firstGridDisplayLeft;
+    qint64 firstCrosshairDisplayLeft;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        QVERIFY(!item.m_freqGridImage.isNull());
+        QVERIFY(!item.m_crosshairDirty);
+        QVERIFY(!item.m_freqGridDirty);
+    QVERIFY(!item.m_timeGridDirty);
+        firstGridDisplayLeft = item.m_timeGridRenderDisplayLeft;
+        firstCrosshairDisplayLeft = item.m_crosshairCachedDisplayLeft;
+    }
+
+    item.setPositionSeconds(5.0);
+
+    QSGNode *node2 = item.updatePaintNode(node, nullptr);
+    QVERIFY(node2 != nullptr);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        QVERIFY(!item.m_freqGridImage.isNull());
+        QVERIFY(item.m_timeGridRenderDisplayLeft != firstGridDisplayLeft);
+        QVERIFY(item.m_crosshairCachedDisplayLeft != firstCrosshairDisplayLeft);
+    }
+
+    delete node2;
+}
+
+void QmlSmokeTest::spectrogramOverlayStalenessDetectsDisplayRangeChange() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setGridEnabled(true);
+    item.setCrosshairEnabled(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        const double cps = 48000.0 / 1024.0;
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+        item.updateFreqGridOverlayLocked(200, 100);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+    }
+
+    QCOMPARE(item.m_crosshairCachedDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_timeGridRenderDisplayLeft, static_cast<qint64>(0));
 }
 
 int main(int argc, char **argv) {

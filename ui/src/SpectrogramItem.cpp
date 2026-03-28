@@ -6,6 +6,7 @@
 
 #include <QFontMetrics>
 #include <QDateTime>
+#include <QHoverEvent>
 #include <QMutexLocker>
 #include <QPainter>
 #include <QQuickWindow>
@@ -115,11 +116,17 @@ struct SpectrogramSceneNode final : public QSGNode {
         tilesRoot = new QSGNode();
         latest = new QSGSimpleTextureNode();
         playhead = new QSGSimpleRectNode();
+        freqGridOverlay = new QSGSimpleTextureNode();
+        timeGridOverlay = new QSGSimpleTextureNode();
+        crosshairOverlay = new QSGSimpleTextureNode();
         overlay = new QSGSimpleTextureNode();
         appendChildNode(background);
         appendChildNode(tilesRoot);
         appendChildNode(latest);
         appendChildNode(playhead);
+        appendChildNode(freqGridOverlay);
+        appendChildNode(timeGridOverlay);
+        appendChildNode(crosshairOverlay);
         appendChildNode(overlay);
         // Visible segments can outnumber source tiles when the ring buffer wraps inside a tile.
         tileFragments.reserve(kMaxTileFragments);
@@ -133,6 +140,9 @@ struct SpectrogramSceneNode final : public QSGNode {
     ~SpectrogramSceneNode() override {
         qDeleteAll(tileTextures);
         delete overlayTexture;
+        delete freqGridOverlayTexture;
+        delete timeGridOverlayTexture;
+        delete crosshairOverlayTexture;
         delete placeholderTexture;
     }
 
@@ -140,10 +150,16 @@ struct SpectrogramSceneNode final : public QSGNode {
     QSGNode *tilesRoot{nullptr};
     QSGSimpleTextureNode *latest{nullptr};
     QSGSimpleRectNode *playhead{nullptr};
+    QSGSimpleTextureNode *freqGridOverlay{nullptr};
+    QSGSimpleTextureNode *timeGridOverlay{nullptr};
+    QSGSimpleTextureNode *crosshairOverlay{nullptr};
     QSGSimpleTextureNode *overlay{nullptr};
     QVector<QSGSimpleTextureNode *> tileFragments;
     QVector<QSGTexture *> tileTextures;
     QSGTexture *overlayTexture{nullptr};
+    QSGTexture *freqGridOverlayTexture{nullptr};
+    QSGTexture *timeGridOverlayTexture{nullptr};
+    QSGTexture *crosshairOverlayTexture{nullptr};
     QSGTexture *placeholderTexture{nullptr};
     quintptr ownerWindowId{0};
     quint64 generation{0};
@@ -178,11 +194,130 @@ void configureTextureNode(
     node->setRect(target);
     node->setSourceRect(QRectF(source));
 }
+QString formatFrequencyLabel(double hz) {
+    if (hz < 0.0) {
+        return {};
+    }
+    if (hz >= 1000.0) {
+        const double kHz = hz / 1000.0;
+        if (kHz >= 10.0) {
+            return QStringLiteral("%1 kHz").arg(qRound(kHz));
+        }
+        return QStringLiteral("%1 kHz").arg(kHz, 0, 'f', 1);
+    }
+    return QStringLiteral("%1 Hz").arg(qRound(hz));
+}
+
+QString formatTimeLabel(double seconds) {
+    if (seconds < 0.0) {
+        return {};
+    }
+    const int totalSeconds = static_cast<int>(std::floor(seconds));
+    const int h = totalSeconds / 3600;
+    const int m = (totalSeconds % 3600) / 60;
+    const int s = totalSeconds % 60;
+    if (h > 0) {
+        return QStringLiteral("%1:%2:%3")
+            .arg(h)
+            .arg(m, 2, 10, QLatin1Char('0'))
+            .arg(s, 2, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2")
+        .arg(m)
+        .arg(s, 2, 10, QLatin1Char('0'));
+}
+
+// Precise frequency label for crosshair: always 1 Hz resolution.
+QString formatFrequencyLabelPrecise(double hz) {
+    if (hz < 0.0) {
+        return {};
+    }
+    if (hz >= 1000.0) {
+        return QStringLiteral("%1 Hz").arg(qRound(hz));
+    }
+    return QStringLiteral("%1 Hz").arg(qRound(hz));
+}
+
+// Precise time label for crosshair: (HH:)MM:SS.mmm with milliseconds.
+QString formatTimeLabelPrecise(double seconds) {
+    if (seconds < 0.0) {
+        return {};
+    }
+    const int totalMs = static_cast<int>(std::round(seconds * 1000.0));
+    const int ms = totalMs % 1000;
+    const int totalSec = totalMs / 1000;
+    const int h = totalSec / 3600;
+    const int m = (totalSec % 3600) / 60;
+    const int s = totalSec % 60;
+    if (h > 0) {
+        return QStringLiteral("%1:%2:%3.%4")
+            .arg(h)
+            .arg(m, 2, 10, QLatin1Char('0'))
+            .arg(s, 2, 10, QLatin1Char('0'))
+            .arg(ms, 3, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2.%3")
+        .arg(m)
+        .arg(s, 2, 10, QLatin1Char('0'))
+        .arg(ms, 3, 10, QLatin1Char('0'));
+}
+
+// Convert widget pixel X to track time, accounting for sub-pixel scroll phase.
+// drawX is the widget X where canvas column displayLeft is rendered.
+double pixelToTimeSeconds(
+    double pixelX,
+    qint64 displayLeft,
+    bool rollingMode,
+    qint64 rollingEpoch,
+    double columnsPerSecond,
+    double drawX) {
+    if (columnsPerSecond <= 0.0) {
+        return -1.0;
+    }
+    const double columnF = static_cast<double>(displayLeft) + (pixelX - drawX);
+    double trackColumn = columnF;
+    if (rollingMode) {
+        trackColumn -= static_cast<double>(rollingEpoch);
+    }
+    return trackColumn / columnsPerSecond;
+}
+
+// Convert track time to widget pixel X, accounting for sub-pixel scroll phase.
+double timeToPixelX(
+    double timeSeconds,
+    qint64 displayLeft,
+    bool rollingMode,
+    qint64 rollingEpoch,
+    double columnsPerSecond,
+    double drawX) {
+    double column = timeSeconds * columnsPerSecond;
+    if (rollingMode) {
+        column += static_cast<double>(rollingEpoch);
+    }
+    return drawX + (column - static_cast<double>(displayLeft));
+}
+
+// Select the smallest grid interval that keeps at least minPixelSpacing
+// pixels between adjacent lines.
+double selectGridInterval(
+    const double *candidates,
+    int candidateCount,
+    double unitsPerPixel,
+    int minPixelSpacing) {
+    for (int i = 0; i < candidateCount; ++i) {
+        if (candidates[i] / unitsPerPixel >= static_cast<double>(minPixelSpacing)) {
+            return candidates[i];
+        }
+    }
+    return candidates[candidateCount - 1];
+}
+
 } // namespace
 
 SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
+    setAcceptHoverEvents(true);
     m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_forceFpsOverlay = m_forceFpsOverlay
@@ -231,6 +366,9 @@ void SpectrogramItem::setLogScale(bool value) {
     emit logScaleChanged();
     invalidateMapping();
     invalidateCanvas();
+    m_freqGridDirty = true;
+    m_timeGridDirty = true;
+    m_crosshairDirty = true;
     update();
 }
 
@@ -271,6 +409,9 @@ void SpectrogramItem::setSampleRateHz(int value) {
     emit sampleRateHzChanged();
     invalidateMapping();
     invalidateCanvas();
+    m_freqGridDirty = true;
+    m_timeGridDirty = true;
+    m_crosshairDirty = true;
     update();
 }
 
@@ -424,6 +565,80 @@ void SpectrogramItem::setDisplayMode(int value) {
     }
 }
 
+bool SpectrogramItem::crosshairEnabled() const {
+    return m_crosshairEnabled;
+}
+
+void SpectrogramItem::setCrosshairEnabled(bool value) {
+    if (m_crosshairEnabled == value) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_crosshairEnabled = value;
+        m_crosshairDirty = true;
+    }
+    emit crosshairEnabledChanged();
+    update();
+}
+
+bool SpectrogramItem::gridEnabled() const {
+    return m_gridEnabled;
+}
+
+void SpectrogramItem::setGridEnabled(bool value) {
+    if (m_gridEnabled == value) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_gridEnabled = value;
+        m_freqGridDirty = true;
+        m_timeGridDirty = true;
+    }
+    emit gridEnabledChanged();
+    update();
+}
+
+bool SpectrogramItem::showTimeLabels() const {
+    return m_showTimeLabels;
+}
+
+void SpectrogramItem::setShowTimeLabels(bool value) {
+    if (m_showTimeLabels == value) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_showTimeLabels = value;
+        m_timeGridDirty = true;
+        m_crosshairDirty = true;
+    }
+    emit showTimeLabelsChanged();
+    update();
+}
+
+double SpectrogramItem::crosshairSharedX() const {
+    return m_crosshairSharedX;
+}
+
+void SpectrogramItem::setCrosshairSharedX(double value) {
+    if (qFuzzyCompare(m_crosshairSharedX + 1.0, value + 1.0)) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_crosshairSharedX = value;
+        if (m_crosshairEnabled) {
+            m_crosshairDirty = true;
+        }
+    }
+    emit crosshairSharedXChanged();
+    if (m_crosshairEnabled) {
+        update();
+    }
+}
+
 void SpectrogramItem::feedPrecomputedChunk(
     const QByteArray &data, int bins, int channelIndex,
     int columns, int startIndex, int totalEstimate,
@@ -568,6 +783,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
+        m_timeGridDirty = true;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         m_debugLastTransitionFeedAt = Clock::now();
         {
@@ -824,6 +1040,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_gaplessPositionOffset = 0.0;
     m_positionJumpHoldActive = false;
     m_centeredGaplessTransitionAt = {};
+    m_timeGridDirty = true;
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
     invalidateCanvas();
@@ -877,6 +1094,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     }
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
+    m_timeGridDirty = true;
     invalidateCanvas();
 }
 
@@ -1108,6 +1326,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     bool overlayChanged = false;
     QImage overlayImage;
     QSize overlaySize;
+
+    bool showFreqGridOverlay = false;
+    bool freqGridOverlayChanged = false;
+    QImage freqGridOverlayImage;
+    QSize freqGridOverlaySize;
+
+    bool showTimeGridOverlay = false;
+    bool timeGridOverlayChanged = false;
+    QImage timeGridOverlayImage;
+    int timeGridSourceShift = 0;
+    int timeGridImageHeight = 0;
+
+    bool showCrosshairOverlay = false;
+    bool crosshairOverlayChanged = false;
+    QImage crosshairOverlayImage;
+    QSize crosshairOverlaySize;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     size_t profilePendingColumns = 0;
     size_t profileColumnCount = 0;
@@ -1382,6 +1616,94 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     1.0,
                     static_cast<double>(h));
             }
+
+            // Frequency grid — only depends on static parameters.
+            // Never rebuilt during normal playback.
+            if (m_gridEnabled && m_binsPerColumn > 1) {
+                const bool freqStale = m_freqGridDirty
+                    || m_freqGridImage.isNull()
+                    || m_freqGridImage.width() != w
+                    || m_freqGridImage.height() != h
+                    || m_sampleRateHz != m_freqGridCachedSampleRateHz
+                    || m_binsPerColumn != m_freqGridCachedBinsPerColumn
+                    || node->freqGridOverlayTexture == nullptr;
+                if (freqStale) {
+                    updateFreqGridOverlayLocked(w, h);
+                    freqGridOverlayImage = m_freqGridImage;
+                    freqGridOverlaySize = m_freqGridImage.size();
+                    freqGridOverlayChanged = true;
+                } else {
+                    freqGridOverlaySize = m_freqGridImage.size();
+                }
+                showFreqGridOverlay = !m_freqGridImage.isNull();
+            }
+
+            // Time grid — vertical lines + labels (bottom only).
+            // Rendered wider than the widget with right-side padding.
+            // On each frame the source rect shifts by the combined
+            // displayLeft + drawX delta — a free coordinate change.
+            // Only rebuilt when the shift exhausts the padding.
+            if (m_gridEnabled && m_binsPerColumn > 1) {
+                constexpr int kTimeGridPadding = 400;
+                // The pixel shift accounts for both displayLeft advancement
+                // and drawX changes (critical in rolling mode where drawX
+                // varies during the initial canvas fill phase).
+                const double rawShift =
+                    static_cast<double>(displayLeft - m_timeGridRenderDisplayLeft)
+                    - (drawX - m_timeGridRenderDrawX);
+                const int shift = static_cast<int>(std::round(rawShift));
+                const bool timeStale = m_timeGridDirty
+                    || m_timeGridImage.isNull()
+                    || m_timeGridImage.height() != h
+                    || shift < 0 || shift > m_timeGridPadding
+                    || rollingMode != m_timeGridCachedRollingMode
+                    || node->timeGridOverlayTexture == nullptr;
+                if (timeStale) {
+                    const double cps =
+                        static_cast<double>(m_precomputedSampleRateHz)
+                        / static_cast<double>(m_precomputedHopSize);
+                    updateTimeGridOverlayLocked(w, h, kTimeGridPadding, displayLeft, rollingMode, cps, drawX);
+                    timeGridOverlayImage = m_timeGridImage;
+                    timeGridOverlayChanged = true;
+                    timeGridSourceShift = 0;
+                } else {
+                    timeGridSourceShift = shift;
+                }
+                timeGridImageHeight = m_timeGridImage.height();
+                showTimeGridOverlay = !m_timeGridImage.isNull();
+            }
+
+            // Crosshair overlay — rebuild on mouse move or display parameter change.
+            // Renders on the hovered pane (full crosshair) and on non-hovered
+            // panes when crosshairSharedX >= 0 (vertical line + bottom time label).
+            if (m_crosshairEnabled && (m_hoverActive || m_crosshairSharedX >= 0.0)) {
+                bool crosshairTimeStale = false;
+                if (m_showTimeLabels) {
+                    crosshairTimeStale =
+                        displayLeft != m_crosshairCachedDisplayLeft
+                        || !qFuzzyCompare(drawX + 1.0, m_crosshairCachedDrawX + 1.0)
+                        || rollingMode != m_crosshairCachedRollingMode;
+                }
+                const bool crosshairStale = m_crosshairDirty
+                    || m_crosshairImage.isNull()
+                    || m_crosshairImage.width() != w
+                    || m_crosshairImage.height() != h
+                    || crosshairTimeStale
+                    || m_binsPerColumn != m_crosshairCachedBinsPerColumn
+                    || node->crosshairOverlayTexture == nullptr;
+                if (crosshairStale) {
+                    const double cps =
+                        static_cast<double>(m_precomputedSampleRateHz)
+                        / static_cast<double>(m_precomputedHopSize);
+                    updateCrosshairOverlayLocked(w, h, displayLeft, rollingMode, cps, drawX);
+                    crosshairOverlayImage = m_crosshairImage;
+                    crosshairOverlaySize = m_crosshairImage.size();
+                    crosshairOverlayChanged = true;
+                } else {
+                    crosshairOverlaySize = m_crosshairImage.size();
+                }
+                showCrosshairOverlay = !m_crosshairImage.isNull();
+            }
         } else if (!m_columns.empty() && m_binsPerColumn > 0) {
             ensureCanvas(w, h);
             if (!m_canvas.isNull() && m_canvasDirty) {
@@ -1441,6 +1763,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QVector<QSGTexture *> retiredTileTextures;
     retiredTileTextures.reserve(std::max(tileCount, static_cast<int>(node->tileTextures.size())));
     QSGTexture *oldOverlayTexture = nullptr;
+    QSGTexture *oldFreqGridOverlayTexture = nullptr;
+    QSGTexture *oldTimeGridOverlayTexture = nullptr;
+    QSGTexture *oldCrosshairOverlayTexture = nullptr;
 
     if (node->tileTextures.size() > tileCount) {
         for (int i = tileCount; i < node->tileTextures.size(); ++i) {
@@ -1475,6 +1800,39 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->overlayTexture = currentWindow->createTextureFromImage(overlayImage);
             if (node->overlayTexture != nullptr) {
                 node->overlayTexture->setFiltering(QSGTexture::Linear);
+            }
+        }
+    }
+
+    if (freqGridOverlayChanged) {
+        oldFreqGridOverlayTexture = node->freqGridOverlayTexture;
+        node->freqGridOverlayTexture = nullptr;
+        if (!freqGridOverlayImage.isNull() && currentWindow != nullptr) {
+            node->freqGridOverlayTexture = currentWindow->createTextureFromImage(freqGridOverlayImage);
+            if (node->freqGridOverlayTexture != nullptr) {
+                node->freqGridOverlayTexture->setFiltering(QSGTexture::Linear);
+            }
+        }
+    }
+
+    if (timeGridOverlayChanged) {
+        oldTimeGridOverlayTexture = node->timeGridOverlayTexture;
+        node->timeGridOverlayTexture = nullptr;
+        if (!timeGridOverlayImage.isNull() && currentWindow != nullptr) {
+            node->timeGridOverlayTexture = currentWindow->createTextureFromImage(timeGridOverlayImage);
+            if (node->timeGridOverlayTexture != nullptr) {
+                node->timeGridOverlayTexture->setFiltering(QSGTexture::Linear);
+            }
+        }
+    }
+
+    if (crosshairOverlayChanged) {
+        oldCrosshairOverlayTexture = node->crosshairOverlayTexture;
+        node->crosshairOverlayTexture = nullptr;
+        if (!crosshairOverlayImage.isNull() && currentWindow != nullptr) {
+            node->crosshairOverlayTexture = currentWindow->createTextureFromImage(crosshairOverlayImage);
+            if (node->crosshairOverlayTexture != nullptr) {
+                node->crosshairOverlayTexture->setFiltering(QSGTexture::Linear);
             }
         }
     }
@@ -1577,6 +1935,52 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         node->playhead->setRect(QRectF());
     }
 
+    // Frequency grid overlay — covers full widget.
+    if (showFreqGridOverlay && node->freqGridOverlayTexture != nullptr && !freqGridOverlaySize.isEmpty()) {
+        const QRectF target(0.0, 0.0,
+                            static_cast<double>(freqGridOverlaySize.width()),
+                            static_cast<double>(freqGridOverlaySize.height()));
+        configureTextureNode(
+            node->freqGridOverlay,
+            node->freqGridOverlayTexture,
+            target,
+            QRect(0, 0, freqGridOverlaySize.width(), freqGridOverlaySize.height()),
+            node->placeholderTexture);
+    } else {
+        configureTextureNode(
+            node->freqGridOverlay, nullptr, QRectF(), QRect(), node->placeholderTexture);
+    }
+
+    // Time grid overlay — covers full widget, source rect shifted by scroll delta.
+    if (showTimeGridOverlay && node->timeGridOverlayTexture != nullptr && timeGridImageHeight > 0) {
+        configureTextureNode(
+            node->timeGridOverlay,
+            node->timeGridOverlayTexture,
+            QRectF(0.0, 0.0, static_cast<double>(w), static_cast<double>(timeGridImageHeight)),
+            QRect(timeGridSourceShift, 0, w, timeGridImageHeight),
+            node->placeholderTexture);
+    } else {
+        configureTextureNode(
+            node->timeGridOverlay, nullptr, QRectF(), QRect(), node->placeholderTexture);
+    }
+
+    // Crosshair overlay — covers full widget.
+    if (showCrosshairOverlay && node->crosshairOverlayTexture != nullptr
+        && !crosshairOverlaySize.isEmpty()) {
+        const QRectF target(0.0, 0.0,
+                            static_cast<double>(crosshairOverlaySize.width()),
+                            static_cast<double>(crosshairOverlaySize.height()));
+        configureTextureNode(
+            node->crosshairOverlay,
+            node->crosshairOverlayTexture,
+            target,
+            QRect(0, 0, crosshairOverlaySize.width(), crosshairOverlaySize.height()),
+            node->placeholderTexture);
+    } else {
+        configureTextureNode(
+            node->crosshairOverlay, nullptr, QRectF(), QRect(), node->placeholderTexture);
+    }
+
     if (showOverlay && node->overlayTexture != nullptr && !overlaySize.isEmpty()) {
         const QRectF target(
             static_cast<double>(w - overlaySize.width() - 8),
@@ -1599,6 +2003,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     }
 
     delete oldOverlayTexture;
+    delete oldFreqGridOverlayTexture;
+    delete oldTimeGridOverlayTexture;
+    delete oldCrosshairOverlayTexture;
     qDeleteAll(retiredTileTextures);
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -1647,6 +2054,9 @@ void SpectrogramItem::releaseResources() {
     m_sceneGraphGeneration += 1;
     markAllTilesDirtyLocked();
     m_overlayDirty = true;
+    m_freqGridDirty = true;
+    m_timeGridDirty = true;
+    m_crosshairDirty = true;
 }
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
@@ -1655,8 +2065,393 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
         QMutexLocker lock(&m_stateMutex);
         invalidateMapping();
         invalidateCanvas();
+        m_freqGridDirty = true;
+        m_timeGridDirty = true;
+        m_crosshairDirty = true;
     }
     update();
+}
+
+double SpectrogramItem::pixelToFrequencyHz(int pixelY, int viewHeight) const {
+    QMutexLocker lock(&m_stateMutex);
+    // Synchronize bins from precomputed state (normally done in updatePaintNode).
+    auto *self = const_cast<SpectrogramItem *>(this);
+    if (m_precomputedBinsPerColumn > 0 && m_binsPerColumn != m_precomputedBinsPerColumn) {
+        self->m_binsPerColumn = m_precomputedBinsPerColumn;
+        self->invalidateMapping();
+    }
+    if (viewHeight <= 0 || m_binsPerColumn <= 1) {
+        return -1.0;
+    }
+    self->ensureMapping(viewHeight);
+    return pixelToFrequencyHzLocked(pixelY, viewHeight);
+}
+
+void SpectrogramItem::hoverMoveEvent(QHoverEvent *event) {
+    QMutexLocker lock(&m_stateMutex);
+    m_hoverActive = true;
+    m_hoverPosition = event->position();
+    if (m_crosshairEnabled) {
+        m_crosshairDirty = true;
+    }
+    lock.unlock();
+    if (m_crosshairEnabled) {
+        emit crosshairHoverChanged(event->position().x());
+        update();
+    }
+}
+
+void SpectrogramItem::hoverEnterEvent(QHoverEvent *event) {
+    QMutexLocker lock(&m_stateMutex);
+    m_hoverActive = true;
+    m_hoverPosition = event->position();
+    if (m_crosshairEnabled) {
+        m_crosshairDirty = true;
+    }
+    lock.unlock();
+    if (m_crosshairEnabled) {
+        emit crosshairHoverChanged(event->position().x());
+        update();
+    }
+}
+
+void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
+    QMutexLocker lock(&m_stateMutex);
+    m_hoverActive = false;
+    if (m_crosshairEnabled) {
+        m_crosshairDirty = true;
+    }
+    lock.unlock();
+    if (m_crosshairEnabled) {
+        emit crosshairHoverChanged(-1.0);
+        update();
+    }
+}
+
+double SpectrogramItem::pixelToFrequencyHzLocked(int pixelY, int viewHeight) const {
+    if (viewHeight <= 0 || m_binsPerColumn <= 1
+        || static_cast<int>(m_iToBin.size()) != viewHeight) {
+        return -1.0;
+    }
+    const int row = viewHeight - 1 - pixelY;
+    if (row < 0 || row >= static_cast<int>(m_iToBin.size())) {
+        return -1.0;
+    }
+    const int bin = m_iToBin[static_cast<size_t>(row)];
+    const double freqRes =
+        static_cast<double>(m_sampleRateHz)
+        / (2.0 * static_cast<double>(std::max(1, m_binsPerColumn - 1)));
+    return static_cast<double>(bin) * freqRes;
+}
+
+int SpectrogramItem::frequencyToPixelYLocked(double freqHz, int viewHeight) const {
+    if (viewHeight <= 0 || m_binsPerColumn <= 1
+        || static_cast<int>(m_iToBin.size()) != viewHeight) {
+        return -1;
+    }
+    const double freqRes =
+        static_cast<double>(m_sampleRateHz)
+        / (2.0 * static_cast<double>(std::max(1, m_binsPerColumn - 1)));
+    const int targetBin = std::clamp(
+        static_cast<int>(std::round(freqHz / freqRes)), 0, m_binsPerColumn - 1);
+    // m_iToBin is non-decreasing: binary search for targetBin.
+    auto it = std::lower_bound(m_iToBin.begin(), m_iToBin.end(), targetBin);
+    if (it == m_iToBin.end()) {
+        return 0; // above range -> top pixel
+    }
+    int row = static_cast<int>(std::distance(m_iToBin.begin(), it));
+    // If previous row's bin is closer, prefer it.
+    if (row > 0
+        && std::abs(m_iToBin[static_cast<size_t>(row - 1)] - targetBin)
+               < std::abs(*it - targetBin)) {
+        --row;
+    }
+    return viewHeight - 1 - row;
+}
+
+void SpectrogramItem::updateCrosshairOverlayLocked(
+    int width, int height,
+    qint64 displayLeft, bool rollingMode,
+    double columnsPerSecond, double drawX) {
+    // Determine the effective X for the vertical crosshair line.
+    // Hovered pane uses its own mouse position; non-hovered panes
+    // use the shared X coordinate propagated from the hovered pane.
+    const bool localHover = m_hoverActive;
+    const bool hasSharedX = m_crosshairSharedX >= 0.0;
+    if (!m_crosshairEnabled || (!localHover && !hasSharedX)
+        || width <= 0 || height <= 0) {
+        m_crosshairImage = QImage();
+        m_crosshairDirty = false;
+        m_crosshairCachedDisplayLeft = displayLeft;
+        m_crosshairCachedDrawX = drawX;
+        m_crosshairCachedRollingMode = rollingMode;
+        m_crosshairCachedBinsPerColumn = m_binsPerColumn;
+        return;
+    }
+
+    const int effectiveX = localHover
+        ? std::clamp(static_cast<int>(m_hoverPosition.x()), 0, width - 1)
+        : std::clamp(static_cast<int>(m_crosshairSharedX), 0, width - 1);
+
+    m_crosshairImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+    m_crosshairImage.fill(Qt::transparent);
+
+    QPainter painter(&m_crosshairImage);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+
+    const QColor lineColor(255, 255, 255, 140);
+    QPen dotPen(lineColor);
+    dotPen.setStyle(Qt::DotLine);
+    dotPen.setWidthF(1.0);
+    painter.setPen(dotPen);
+
+    // Vertical line: full height on all panes (spans across panes visually).
+    painter.drawLine(effectiveX, 0, effectiveX, height - 1);
+
+    if (localHover) {
+        const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
+        // Horizontal line: full width on the hovered pane.
+        painter.drawLine(0, mouseY, width - 1, mouseY);
+
+        // Frequency label at RIGHT edge, aligned to cursor Y.
+        QFont font;
+        font.setPixelSize(10);
+        painter.setFont(font);
+        const QFontMetrics fm(font);
+
+        const QColor labelBg(0, 0, 10, 160);
+        const QColor labelFg(255, 255, 255, 220);
+        constexpr int pad = 3;
+
+        const double freqHz = pixelToFrequencyHzLocked(mouseY, height);
+        if (freqHz >= 0.0) {
+            const QString freqText = formatFrequencyLabelPrecise(freqHz);
+            const int textW = fm.horizontalAdvance(freqText);
+            const int textH = fm.height();
+            const int labelY = std::clamp(mouseY - textH / 2, 0, height - textH - 2 * pad);
+            const int labelX = width - textW - 2 * pad - 2;
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(labelBg);
+            painter.drawRoundedRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad, 3, 3);
+            painter.setPen(labelFg);
+            painter.drawText(labelX + pad, labelY + pad + fm.ascent(), freqText);
+        }
+    }
+
+    // Time label at BOTTOM edge — only on the bottom-most pane,
+    // shown whenever any pane is hovered (via shared X).
+    // Subtract gapless offset to show per-track time.
+    if (m_showTimeLabels) {
+        const double continuousTime = pixelToTimeSeconds(
+            static_cast<double>(effectiveX), displayLeft, rollingMode,
+            m_rollingEpoch, columnsPerSecond, drawX);
+        const double trackTime = continuousTime - m_gaplessPositionOffset;
+        if (trackTime >= 0.0) {
+            QFont font;
+            font.setPixelSize(10);
+            painter.setFont(font);
+            const QFontMetrics fm(font);
+
+            const QColor labelBg(0, 0, 10, 160);
+            const QColor labelFg(255, 255, 255, 220);
+            constexpr int pad = 3;
+
+            const QString timeText = formatTimeLabelPrecise(trackTime);
+            const int textW = fm.horizontalAdvance(timeText);
+            const int textH = fm.height();
+            const int labelX = std::clamp(effectiveX - textW / 2, 0, width - textW - 2 * pad);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(labelBg);
+            painter.drawRoundedRect(labelX, height - textH - 2 * pad - 2,
+                                     textW + 2 * pad, textH + 2 * pad, 3, 3);
+            painter.setPen(labelFg);
+            painter.drawText(labelX + pad, height - pad - 2 - fm.descent(), timeText);
+        }
+    }
+
+    painter.end();
+    m_crosshairDirty = false;
+    m_crosshairCachedDisplayLeft = displayLeft;
+    m_crosshairCachedDrawX = drawX;
+    m_crosshairCachedRollingMode = rollingMode;
+    m_crosshairCachedBinsPerColumn = m_binsPerColumn;
+}
+
+void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
+    if (!m_gridEnabled || width <= 0 || height <= 0 || m_binsPerColumn <= 1) {
+        m_freqGridImage = QImage();
+        m_freqGridDirty = false;
+        m_freqGridCachedSampleRateHz = m_sampleRateHz;
+        m_freqGridCachedBinsPerColumn = m_binsPerColumn;
+        return;
+    }
+
+    m_freqGridImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+    m_freqGridImage.fill(Qt::transparent);
+
+    QPainter painter(&m_freqGridImage);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+
+    QFont font;
+    font.setPixelSize(9);
+    painter.setFont(font);
+    const QFontMetrics fm(font);
+
+    const QColor gridLineColor(255, 255, 255, 50);
+    const QColor labelBg(0, 0, 10, 180);
+    const QColor labelFg(220, 220, 235, 240);
+    constexpr int pad = 2;
+    constexpr int minPixelSpacing = 50;
+
+    const double nyquist = 0.5 * static_cast<double>(m_sampleRateHz);
+
+    static constexpr double kFreqCandidates[] = {
+        50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000
+    };
+    const double hzPerPixel = nyquist / static_cast<double>(std::max(1, height));
+    const double freqInterval = selectGridInterval(
+        kFreqCandidates,
+        static_cast<int>(std::size(kFreqCandidates)),
+        hzPerPixel,
+        minPixelSpacing);
+
+    QPen gridPen(gridLineColor);
+    gridPen.setWidthF(1.0);
+
+    int prevPixelY = -1;
+    for (double freq = freqInterval; freq < nyquist; freq += freqInterval) {
+        const int pixelY = frequencyToPixelYLocked(freq, height);
+        if (pixelY < 0 || pixelY >= height) {
+            continue;
+        }
+        if (prevPixelY >= 0 && std::abs(pixelY - prevPixelY) < minPixelSpacing) {
+            continue;
+        }
+        prevPixelY = pixelY;
+
+        painter.setPen(gridPen);
+        painter.drawLine(0, pixelY, width - 1, pixelY);
+
+        const QString label = formatFrequencyLabel(freq);
+        const int textW = fm.horizontalAdvance(label);
+        const int textH = fm.height();
+        const int labelY = std::clamp(pixelY - textH / 2, 0, height - textH - 2 * pad);
+        const int labelX = width - textW - 2 * pad - 2;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(labelBg);
+        painter.drawRoundedRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad, 2, 2);
+        painter.setPen(labelFg);
+        painter.drawText(labelX + pad, labelY + pad + fm.ascent(), label);
+    }
+
+    painter.end();
+    m_freqGridDirty = false;
+    m_freqGridCachedSampleRateHz = m_sampleRateHz;
+    m_freqGridCachedBinsPerColumn = m_binsPerColumn;
+}
+
+void SpectrogramItem::updateTimeGridOverlayLocked(
+    int width, int height, int padding,
+    qint64 displayLeft,
+    bool rollingMode, double columnsPerSecond, double drawX) {
+    if (!m_gridEnabled || width <= 0 || height <= 0 || columnsPerSecond <= 0.0) {
+        m_timeGridImage = QImage();
+        m_timeGridDirty = false;
+        m_timeGridRenderDisplayLeft = displayLeft;
+        m_timeGridRenderDrawX = drawX;
+        m_timeGridCachedRollingMode = rollingMode;
+        m_timeGridPadding = 0;
+        return;
+    }
+
+    // Render wider than the widget so the texture source rect can be
+    // shifted cheaply on each frame without rebuilding.
+    const int renderWidth = width + padding;
+    m_timeGridImage = QImage(renderWidth, height, QImage::Format_ARGB32_Premultiplied);
+    m_timeGridImage.fill(Qt::transparent);
+
+    QPainter painter(&m_timeGridImage);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+
+    const QColor gridLineColor(255, 255, 255, 50);
+    constexpr int minPixelSpacing = 50;
+
+    static constexpr double kTimeCandidates[] = {
+        1, 2, 5, 10, 15, 30, 60, 120, 300, 600
+    };
+    const double secondsPerPixel = 1.0 / columnsPerSecond;
+    const double timeInterval = selectGridInterval(
+        kTimeCandidates,
+        static_cast<int>(std::size(kTimeCandidates)),
+        secondsPerPixel,
+        minPixelSpacing);
+
+    // Compute time range for the full padded width.
+    // These are in continuous (cross-track) time.
+    const double timeLeft = pixelToTimeSeconds(
+        0.0, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX);
+    const double timeRight = pixelToTimeSeconds(
+        static_cast<double>(renderWidth - 1), displayLeft, rollingMode,
+        m_rollingEpoch, columnsPerSecond, drawX);
+
+    // Convert to per-track time for grid line snapping and labels.
+    // m_gaplessPositionOffset is the continuous-time value where the
+    // current track starts (0 when no gapless transition has occurred).
+    const double trackTimeLeft = timeLeft - m_gaplessPositionOffset;
+    const double trackTimeRight = timeRight - m_gaplessPositionOffset;
+
+    const double startTrackTime = std::max(0.0,
+        std::ceil(std::max(0.0, trackTimeLeft) / timeInterval) * timeInterval);
+
+    QPen gridPen(gridLineColor);
+    gridPen.setWidthF(1.0);
+
+    QFont font;
+    QFontMetrics fm(font);
+    QColor labelBg;
+    QColor labelFg;
+    constexpr int pad = 2;
+    if (m_showTimeLabels) {
+        font.setPixelSize(9);
+        fm = QFontMetrics(font);
+        labelBg = QColor(0, 0, 10, 180);
+        labelFg = QColor(220, 220, 235, 240);
+        painter.setFont(font);
+    }
+
+    for (double trackT = startTrackTime; trackT <= trackTimeRight; trackT += timeInterval) {
+        // Convert per-track time back to continuous time for pixel positioning.
+        const double continuousT = trackT + m_gaplessPositionOffset;
+        const double pxF = timeToPixelX(
+            continuousT, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX);
+        const int pixelX = static_cast<int>(std::round(pxF));
+        if (pixelX < 0 || pixelX >= renderWidth) {
+            continue;
+        }
+
+        painter.setPen(gridPen);
+        painter.drawLine(pixelX, 0, pixelX, height - 1);
+
+        if (m_showTimeLabels) {
+            const QString label = formatTimeLabel(trackT);
+            const int textW = fm.horizontalAdvance(label);
+            const int textH = fm.height();
+            const int labelX = std::clamp(pixelX - textW / 2, 0, renderWidth - textW - 2 * pad);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(labelBg);
+            painter.drawRoundedRect(labelX, height - textH - 2 * pad - 2,
+                                     textW + 2 * pad, textH + 2 * pad, 2, 2);
+            painter.setPen(labelFg);
+            painter.drawText(labelX + pad, height - pad - 2 - fm.descent(), label);
+        }
+    }
+
+    painter.end();
+    m_timeGridDirty = false;
+    m_timeGridRenderDisplayLeft = displayLeft;
+    m_timeGridRenderDrawX = drawX;
+    m_timeGridCachedRollingMode = rollingMode;
+    m_timeGridPadding = padding;
 }
 
 void SpectrogramItem::rebuildPalette() {
