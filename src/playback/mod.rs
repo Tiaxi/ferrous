@@ -1089,6 +1089,10 @@ mod backend {
         /// thread has been started for the likely next track.  Checked on
         /// cancellation paths to send `CancelStagedContinuation`.
         staged_continuation_active: Arc<AtomicBool>,
+        /// Set when `set_state(Playing)` is called in `switch_track`.
+        /// Cleared when the bus handler sees `StateChanged(_, Playing)` for
+        /// the playbin.  Used by `poll()` to detect stuck state transitions.
+        playing_state_requested_at: Option<Instant>,
     }
 
     pub fn spawn_engine(
@@ -1160,6 +1164,7 @@ mod backend {
                 pending_eos_track_switch,
                 pending_gapless_duration: None,
                 staged_continuation_active,
+                playing_state_requested_at: None,
             }
         }
 
@@ -1427,6 +1432,7 @@ mod backend {
             }
             self.buffering_active = false;
             if self.playbin.set_state(gst::State::Playing).is_ok() {
+                self.playing_state_requested_at = Some(Instant::now());
                 if was_stopped {
                     // Re-assert mute after state transition to close the race
                     // window where new internal elements may not have volume=0.
@@ -1444,6 +1450,7 @@ mod backend {
             if self.snapshot.state != PlaybackState::Playing {
                 return;
             }
+            self.playing_state_requested_at = None;
             self.buffering_active = false;
             if self.playbin.set_state(gst::State::Paused).is_ok() {
                 self.snapshot.state = PlaybackState::Paused;
@@ -1453,6 +1460,7 @@ mod backend {
 
         fn stop(&mut self) {
             self.soft_mute();
+            self.playing_state_requested_at = None;
             if self.playbin.set_state(gst::State::Ready).is_ok() {
                 self.startup_gain_ramp = false;
                 self.startup_ramp_hold_until = None;
@@ -1740,7 +1748,63 @@ mod backend {
                     snapshot_changed = true;
                 }
             }
+            if self.check_stuck_state_change() {
+                // Pipeline was stuck; recovery already emitted a snapshot.
+                return;
+            }
             if snapshot_changed {
+                self.emit_snapshot();
+            }
+        }
+
+        /// Maximum time to wait for `GStreamer` to confirm the Playing state
+        /// change via a bus `StateChanged` message.  If this expires, the
+        /// pipeline is stuck (e.g. audio backend failed to negotiate) and
+        /// we advance to the next track.
+        const PLAYING_STATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+        /// Returns `true` if the pipeline was stuck and recovery was attempted.
+        fn check_stuck_state_change(&mut self) -> bool {
+            let Some(requested_at) = self.playing_state_requested_at else {
+                return false;
+            };
+            if requested_at.elapsed() < Self::PLAYING_STATE_TIMEOUT {
+                return false;
+            }
+            let current_path = self.snapshot.current.as_ref().map_or("?", |p| {
+                p.file_name().unwrap_or_default().to_str().unwrap_or("?")
+            });
+            eprintln!(
+                "[ferrous] pipeline stuck: Playing state not confirmed within {}s for {current_path}, advancing",
+                Self::PLAYING_STATE_TIMEOUT.as_secs(),
+            );
+            self.playing_state_requested_at = None;
+            // Force the pipeline to a clean state.
+            let _ = self.playbin.set_state(gst::State::Null);
+            self.advance_after_stuck_pipeline();
+            true
+        }
+
+        /// After detecting a stuck pipeline, try the next track in the queue.
+        /// If no next track exists, stop playback.
+        fn advance_after_stuck_pipeline(&mut self) {
+            let Ok(mut state) = self.queue_state.lock() else {
+                self.snapshot.state = PlaybackState::Stopped;
+                self.emit_snapshot();
+                return;
+            };
+            let repeat_mode = state.repeat_mode;
+            let shuffle_enabled = state.shuffle_enabled;
+            let next = state.next_manual();
+            let current_index = state.current_index().unwrap_or(0);
+            drop(state);
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+            if let Some(path) = next {
+                self.switch_to_path(path, current_index, TrackChangeKind::Manual, true);
+            } else {
+                self.snapshot.state = PlaybackState::Stopped;
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.duration = Duration::ZERO;
                 self.emit_snapshot();
             }
         }
@@ -1797,6 +1861,7 @@ mod backend {
                         }
                     }
                     // Normal EOS: end of queue
+                    self.playing_state_requested_at = None;
                     self.buffering_active = false;
                     self.seek_hold = None;
                     self.startup_gain_ramp = false;
@@ -1813,6 +1878,7 @@ mod backend {
                         err.error(),
                         err.debug()
                     );
+                    self.playing_state_requested_at = None;
                     self.buffering_active = false;
                     self.snapshot.state = PlaybackState::Stopped;
                     // Tear down the faulted pipeline fully so subsequent
@@ -1831,15 +1897,16 @@ mod backend {
                     );
                 }
                 gst::MessageView::StateChanged(sc) => {
-                    if cfg!(feature = "profiling-logs") {
-                        // Only log playbin-level state changes, not every
-                        // internal element, to keep output manageable.
-                        if sc.src().is_some_and(|s| s == &self.playbin) {
+                    if sc.src().is_some_and(|s| s == &self.playbin) {
+                        if cfg!(feature = "profiling-logs") {
                             eprintln!(
                                 "[ferrous] playbin state: {:?} → {:?}",
                                 sc.old(),
                                 sc.current()
                             );
+                        }
+                        if sc.current() == gst::State::Playing {
+                            self.playing_state_requested_at = None;
                         }
                     }
                 }
@@ -1874,11 +1941,13 @@ mod backend {
         fn switch_track(&mut self, path: &Path, uri: &str, force_play: bool) {
             let was_playing = self.snapshot.state == PlaybackState::Playing || force_play;
             self.soft_mute();
+            self.playing_state_requested_at = None;
             let _ = self.playbin.set_state(gst::State::Null);
             let _ = self.playbin.set_state(gst::State::Ready);
             self.playbin.set_property("uri", uri);
             if was_playing {
                 let _ = self.playbin.set_state(gst::State::Playing);
+                self.playing_state_requested_at = Some(Instant::now());
                 // Re-assert mute after state transition to close the race window
                 // where new internal elements may not have volume=0.
                 self.playbin.set_property("volume", 0.0_f64);
