@@ -3797,7 +3797,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
     m_analysisBuffer += chunk;
 
     bool changed = false;
-    int parsedFrames = 0;
+    [[maybe_unused]] int parsedFrames = 0;
     qsizetype readOffset = m_analysisBufferReadOffset;
     const qsizetype totalSize = m_analysisBuffer.size();
     const auto *base = reinterpret_cast<const uchar *>(m_analysisBuffer.constData());
