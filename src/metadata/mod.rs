@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::{fs::File, io::ErrorKind};

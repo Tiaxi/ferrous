@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 #
 # find-unusual-flac.sh — find albums containing FLAC files with non-standard
 # block sizes and optionally re-encode them in-place with modern settings.

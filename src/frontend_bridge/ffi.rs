@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::ffi::c_uchar;
 use std::hash::{Hash, Hasher};

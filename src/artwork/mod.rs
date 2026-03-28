@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};

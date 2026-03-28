@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 pub mod analysis;
 pub mod artwork;
 pub mod frontend_bridge;

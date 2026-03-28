@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Fuzzy relevance scoring for iTunes artwork search results.
 //!
 //! Computes a combined album + artist similarity score using Jaro-Winkler,

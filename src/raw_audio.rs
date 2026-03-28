@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
