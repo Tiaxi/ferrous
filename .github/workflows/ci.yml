@@ -44,7 +44,7 @@ jobs:
     name: UI Build + Smoke Tests
     runs-on: ubuntu-latest
     container:
-      image: fedora:42
+      image: fedora:43
     steps:
       - name: Install system dependencies
         run: |
