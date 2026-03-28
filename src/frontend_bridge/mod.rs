@@ -7119,13 +7119,26 @@ mod tests {
             tracks: vec![first.clone(), second.clone()],
             autoplay: true,
         }));
-        bridge.command(BridgeCommand::RequestSnapshot);
-        let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(10), |s| {
-            s.queue.len() == 2
-                && s.playback.current.as_ref() == Some(&first)
-                && s.playback.state == crate::playback::PlaybackState::Playing
-        })
-        .expect("loaded first track");
+        let loaded = {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut result = None;
+            let fc = first.clone();
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(60));
+                bridge.command(BridgeCommand::RequestSnapshot);
+                if let Some(snap) =
+                    wait_for_snapshot_matching(&bridge, Duration::from_millis(200), |s| {
+                        s.queue.len() == 2
+                            && s.playback.current.as_ref() == Some(&fc)
+                            && s.playback.state == crate::playback::PlaybackState::Playing
+                    })
+                {
+                    result = Some(snap);
+                    break;
+                }
+            }
+            result.expect("loaded first track")
+        };
         assert_eq!(loaded.playback.current.as_ref(), Some(&first));
 
         bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
