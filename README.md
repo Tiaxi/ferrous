@@ -2,7 +2,7 @@
 
 A fast, KDE-native desktop music player built with Rust and Qt6.
 
-Ferrous pairs a Rust backend for playback, analysis, and library management with a Qt6/QML + KDE Kirigami frontend. Developed with KDE Plasma in mind, it targets responsive local-library workflows, gapless playback, and rich real-time visualization. Ferrous is opinionated about library organization — your folder structure *is* your library.
+Ferrous is a personal project built for my own daily listening. It pairs a Rust backend for playback, analysis, and library management with a Qt6/QML + KDE Kirigami frontend. Developed with KDE Plasma in mind, it targets responsive local-library workflows, gapless playback, and rich real-time visualization. Ferrous is opinionated about library organization — your folder structure *is* your library.
 
 ![Ferrous screenshot](docs/assets/screenshot.png)
 
@@ -14,11 +14,19 @@ Ferrous pairs a Rust backend for playback, analysis, and library management with
 
 **Queue** — Open files, add folders, import M3U playlists, drag-to-reorder, and automatic session restore on launch.
 
+**Tag editor** — Multi-file tag editing with bulk operations and auto-numbering.
+
+**Album art** — Embedded cover art display with the option to fetch high-resolution artwork from the iTunes catalog.
+
 **Visualization** — Live spectrogram and waveform displays rendered in real time alongside embedded cover art.
 
 **Desktop integration** — MPRIS media controls, media key support, single-instance file opening, and `.desktop`/MIME registration.
 
 **Scrobbling** — Last.fm integration with desktop authentication and batched submissions.
+
+## Design priorities
+
+Ferrous treats UI responsiveness as a correctness requirement. No work blocks the main thread — playback, analysis, metadata extraction, library indexing, and search all run on dedicated background threads. The spectrogram and waveform render at display refresh rate with no hitching. If something feels sluggish, it's a bug.
 
 ## Supported Formats
 
@@ -44,7 +52,9 @@ See the [installation guide](docs/INSTALL.md) for full dependency lists, manual 
 
 ## Status
 
-Ferrous is usable for daily listening but still under active development. Playback, queue management, library indexing, search, visualization, and session persistence all work. Areas still in progress include ReplayGain, crossfade, output-device selection, and deeper visualization customization. See the [roadmap](docs/ROADMAP.md) for details.
+Ferrous is a personal project tailored for my specific needs and workflow. It is usable for daily listening but still under active development. Contributions and feedback are welcome, though the project direction follows my own priorities.
+
+Areas still in progress include ReplayGain, crossfade, output-device selection, and deeper visualization customization. See the [roadmap](docs/ROADMAP.md) for details.
 
 ## Tech Stack
 
