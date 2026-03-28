@@ -39,6 +39,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Mark repo safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Build RPM
         env:
           FERROUS_LASTFM_API_KEY: ${{ secrets.FERROUS_LASTFM_API_KEY }}
@@ -94,7 +97,7 @@ jobs:
           FERROUS_LASTFM_SHARED_SECRET: ${{ secrets.FERROUS_LASTFM_SHARED_SECRET }}
         run: |
           cp -r packaging/debian .
-          dpkg-buildpackage -us -uc -b --no-check
+          DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
