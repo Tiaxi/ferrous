@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	cmake -S ui -B ui/build -G Ninja \
+		-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+		-DCMAKE_INSTALL_PREFIX=/usr
+
+override_dh_auto_build:
+	cmake --build ui/build --parallel
+
+override_dh_auto_test:
+	ctest --test-dir ui/build --output-on-failure
+
+override_dh_auto_install:
+	DESTDIR=$(CURDIR)/debian/ferrous cmake --install ui/build

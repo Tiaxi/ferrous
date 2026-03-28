@@ -105,6 +105,17 @@ To build and install immediately:
 
 The generated RPM is written under `dist/rpm/RPMS/`.
 
+## Option 4: Build A Local deb
+
+On Debian/Ubuntu-like systems:
+
+```bash
+cp -r packaging/debian .
+dpkg-buildpackage -us -uc -b
+```
+
+The generated `.deb` is written to the parent directory.
+
 ## Supported Formats
 
 Ferrous currently handles common local audio and playlist formats, including:
