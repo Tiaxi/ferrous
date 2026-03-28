@@ -680,7 +680,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_binary_event(ptr: *mut c_uchar,
     if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Vec::from_raw_parts(ptr, len, len));
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
 #[no_mangle]
@@ -724,7 +724,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_analysis_frame(ptr: *mut c_ucha
     if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Vec::from_raw_parts(ptr, len, len));
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
 #[no_mangle]
@@ -771,7 +771,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_precomputed_spectrogram(
     if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Vec::from_raw_parts(ptr, len, len));
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
 #[no_mangle]
@@ -822,7 +822,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_library_tree(ptr: *mut c_uchar,
     if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Vec::from_raw_parts(ptr, len, len));
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
 #[no_mangle]
@@ -873,7 +873,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_search_results(ptr: *mut c_ucha
     if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Vec::from_raw_parts(ptr, len, len));
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
 #[no_mangle]
@@ -1016,7 +1016,7 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_free_buffer(ptr: *mut c_uchar, l
     if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Vec::from_raw_parts(ptr, len, len));
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
 #[no_mangle]
