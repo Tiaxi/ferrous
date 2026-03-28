@@ -1,8 +1,8 @@
 # Ferrous
 
-A fast, Linux-native desktop music player built with Rust and Qt6.
+A fast, KDE-native desktop music player built with Rust and Qt6.
 
-Ferrous pairs a Rust backend for playback, analysis, and library management with a Qt6/QML + KDE Kirigami frontend. It targets responsive local-library workflows, gapless playback, and rich real-time visualization. Ferrous is opinionated about library organization — your folder structure *is* your library.
+Ferrous pairs a Rust backend for playback, analysis, and library management with a Qt6/QML + KDE Kirigami frontend. Developed with KDE Plasma in mind, it targets responsive local-library workflows, gapless playback, and rich real-time visualization. Ferrous is opinionated about library organization — your folder structure *is* your library.
 
 ![Ferrous screenshot](docs/assets/screenshot.png)
 
