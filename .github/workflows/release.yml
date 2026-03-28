@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-rpm:
+    name: Build RPM (Fedora)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:42
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y install \
+            git \
+            cmake \
+            ninja-build \
+            gcc-c++ \
+            zsh \
+            rust \
+            cargo \
+            rpm-build \
+            desktop-file-validate \
+            pkgconf-pkg-config \
+            glib2-devel \
+            gstreamer1-devel \
+            gstreamer1-plugins-base-devel \
+            qt6-qtbase-devel \
+            qt6-qtdeclarative-devel \
+            qt6-qtquickcontrols2-devel \
+            kf6-kirigami-devel
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build RPM
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ./scripts/build-rpm.sh \
+            --release "1%{?dist}" \
+            --no-check
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: dist/rpm/RPMS/**/*.rpm
+
+  build-deb:
+    name: Build deb (Ubuntu)
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y \
+            git \
+            cmake \
+            ninja-build \
+            g++ \
+            zsh \
+            cargo \
+            rustc \
+            pkg-config \
+            dpkg-dev \
+            debhelper \
+            libglib2.0-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            qt6-base-dev \
+            qt6-declarative-dev \
+            qml6-module-qtquick-controls \
+            libkf6kirigami-dev
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build deb
+        run: |
+          cp -r packaging/debian .
+          dpkg-buildpackage -us -uc -b --no-check
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: ../*.deb
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-rpm, build-deb]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: packages
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            packages/rpm-package/**/*.rpm
+            packages/deb-package/**/*.deb
