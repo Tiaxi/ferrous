@@ -1,11 +1,11 @@
 %{!?ferrous_version:%global ferrous_version 0.1.0}
 %{!?ferrous_release:%global ferrous_release 0.local}
-%{!?ferrous_license:%global ferrous_license LicenseRef-Local-Placeholder}
+%{!?ferrous_license:%global ferrous_license GPL-3.0-or-later}
 
 Name:           ferrous
 Version:        %{ferrous_version}
 Release:        %{ferrous_release}
-Summary:        High-performance Linux audio player prototype
+Summary:        A fast, Linux-native desktop music player
 License:        %{ferrous_license}
 Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  cargo
@@ -24,7 +24,7 @@ BuildRequires:  pkgconfig(gstreamer-audio-1.0)
 BuildRequires:  pkgconfig(gstreamer-pbutils-1.0)
 
 %description
-Ferrous is a high-performance Linux audio player prototype with a Qt6/Kirigami
+Ferrous is a fast, Linux-native desktop music player with a Qt6/Kirigami
 frontend and a Rust backend.
 
 %prep

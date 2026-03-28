@@ -44,7 +44,7 @@ See the [installation guide](docs/INSTALL.md) for full dependency lists, manual 
 
 ## Status
 
-Ferrous is usable for daily listening but should be treated as a prototype rather than a polished release. Playback, queue management, library indexing, search, visualization, and session persistence all work. Areas still in progress include ReplayGain, crossfade, output-device selection, and deeper visualization customization. See the [roadmap](docs/ROADMAP.md) for details.
+Ferrous is usable for daily listening but still under active development. Playback, queue management, library indexing, search, visualization, and session persistence all work. Areas still in progress include ReplayGain, crossfade, output-device selection, and deeper visualization customization. See the [roadmap](docs/ROADMAP.md) for details.
 
 ## Tech Stack
 

@@ -20,7 +20,7 @@ Dialog {
     contentItem: Label {
         width: parent.width
         wrapMode: Text.Wrap
-        text: "Ferrous is a KDE-first audio player prototype with a Qt/QML UI and Rust backend."
+        text: "Ferrous is a fast, Linux-native desktop music player with a Qt/QML UI and Rust backend."
         color: Kirigami.Theme.textColor
     }
 }
