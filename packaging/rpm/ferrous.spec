@@ -23,6 +23,15 @@ BuildRequires:  pkgconfig(gstreamer-app-1.0)
 BuildRequires:  pkgconfig(gstreamer-audio-1.0)
 BuildRequires:  pkgconfig(gstreamer-pbutils-1.0)
 
+Requires:       qt6-qtbase
+Requires:       qt6-qtdeclarative
+Requires:       qt6-qtquickcontrols2
+Requires:       kf6-kirigami
+Requires:       gstreamer1
+Requires:       gstreamer1-plugins-base
+Requires:       gstreamer1-plugins-good
+Requires:       gstreamer1-plugins-bad-free
+
 %description
 Ferrous is a fast, Linux-native desktop music player with a Qt6/Kirigami
 frontend and a Rust backend.
