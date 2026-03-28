@@ -40,6 +40,9 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Build RPM
+        env:
+          FERROUS_LASTFM_API_KEY: ${{ secrets.FERROUS_LASTFM_API_KEY }}
+          FERROUS_LASTFM_SHARED_SECRET: ${{ secrets.FERROUS_LASTFM_SHARED_SECRET }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           ./scripts/build-rpm.sh \
@@ -86,6 +89,9 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Build deb
+        env:
+          FERROUS_LASTFM_API_KEY: ${{ secrets.FERROUS_LASTFM_API_KEY }}
+          FERROUS_LASTFM_SHARED_SECRET: ${{ secrets.FERROUS_LASTFM_SHARED_SECRET }}
         run: |
           cp -r packaging/debian .
           dpkg-buildpackage -us -uc -b --no-check
