@@ -6857,6 +6857,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "gst"))]
     #[test]
     fn bridge_queue_play_seek_clamp_and_remove_integration() {
         let _guard = test_guard();
