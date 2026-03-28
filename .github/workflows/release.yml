@@ -55,7 +55,7 @@ jobs:
             --no-check
 
       - name: Upload RPM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: rpm-package
           path: dist/rpm/RPMS/**/*.rpm
@@ -106,7 +106,7 @@ jobs:
           cp ../*.deb dist/deb/
 
       - name: Upload deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: deb-package
           path: dist/deb/*.deb
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: packages
 
