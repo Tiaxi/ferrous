@@ -4,9 +4,8 @@ Ferrous is currently a Linux-first project. The supported runtime path today is 
 
 ## Packaging Status
 
-- No official prebuilt packages are published yet.
-- The repository supports running from source.
-- The repository also includes local RPM packaging for Fedora-like systems.
+- Prebuilt RPM and deb packages are attached to [GitHub Releases](https://github.com/Tiaxi/ferrous/releases).
+- The repository also supports building from source or building packages locally.
 
 ## Requirements
 
