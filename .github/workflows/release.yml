@@ -10,10 +10,13 @@ permissions:
 
 jobs:
   build-rpm:
-    name: Build RPM (Fedora)
+    name: Build RPM (Fedora ${{ matrix.fedora }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fedora: [43, 44]
     container:
-      image: fedora:43
+      image: fedora:${{ matrix.fedora }}
     steps:
       - name: Install build dependencies
         run: |
@@ -57,7 +60,7 @@ jobs:
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v5
         with:
-          name: rpm-package
+          name: rpm-package-fc${{ matrix.fedora }}
           path: dist/rpm/RPMS/**/*.rpm
 
   build-deb:
@@ -126,5 +129,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            packages/rpm-package/**/*.rpm
+            packages/rpm-package-fc*/**/*.rpm
             packages/deb-package/**/*.deb
