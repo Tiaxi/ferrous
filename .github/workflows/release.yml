@@ -102,12 +102,14 @@ jobs:
           . "$HOME/.cargo/env"
           cp -r packaging/debian .
           DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b
+          mkdir -p dist/deb
+          cp ../*.deb dist/deb/
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: deb-package
-          path: ../*.deb
+          path: dist/deb/*.deb
 
   create-release:
     name: Create GitHub Release
