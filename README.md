@@ -18,7 +18,7 @@ Ferrous is a personal project built for my own daily listening. It pairs a Rust 
 
 **Album art** — Embedded cover art display with the option to fetch high-resolution artwork from the iTunes catalog.
 
-**Visualization** — Live spectrogram and waveform displays rendered in real time alongside embedded cover art. The spectrogram is inspired by Adobe Audition's spectral view — something I've spent countless hours using to analyze songs. It renders with precise playback sync, supports mono downmix or per-channel display, fullscreen viewing, logarithmic or linear frequency scale, adjustable dB range, configurable FFT window size, and centered or rolling display modes.
+**Visualization** — Live spectrogram and waveform displays rendered in real time alongside embedded cover art. The spectrogram is inspired by Adobe Audition's spectral view — something I've spent countless hours using to analyze songs. It renders with precise playback sync, supports mono downmix or per-channel display, fullscreen viewing, logarithmic or linear frequency scale, adjustable dB range, configurable FFT window size, and centered or rolling display modes. Rolling mode scrolls continuously like a traditional spectrogram; centered mode shows the full track with the playback position fixed in the middle, giving context of what's ahead.
 
 **Desktop integration** — MPRIS media controls, media key support, single-instance file opening, and `.desktop`/MIME registration.
 
