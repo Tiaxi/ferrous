@@ -48,7 +48,7 @@ Depending on the codecs you need, you may also want the distro-specific GStreame
 This is the simplest path today.
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Tiaxi/ferrous.git
 cd ferrous
 ./scripts/run-ui.sh
 ```

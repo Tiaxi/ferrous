@@ -1,7 +1,6 @@
 # Ferrous Roadmap
 
 This document tracks upcoming work for Ferrous.
-Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`).
 
 ## Product Direction
 
@@ -12,23 +11,15 @@ Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`)
 
 ## Current Baseline
 
-- Gapless playback works.
-- Repeat/shuffle modes work.
-- Waveform cache persists in SQLite.
-- Spectrogram rendering is in C++ with packed binary analysis transport.
-- Library roots configuration, folder-first tree browsing, and queue workflows are in place.
-- Global search is backend-driven with dedicated binary result frames and stale-frame dropping.
-- In-process FFI runtime path is the production default.
-- Seek-drag floating timestamp overlay is implemented.
+- Gapless playback with repeat and shuffle modes.
+- Waveform cache persisted in SQLite.
+- Live spectrogram rendering with binary analysis transport.
+- Configurable library roots, folder-first tree browsing, and queue workflows.
+- Global search across artists, albums, and tracks.
+- Last.fm scrobbling with desktop authentication.
+- Seek-drag floating timestamp overlay.
 
-## Supporting Plans
-
-- Test coverage plan: `docs/TEST_PLAN.md`
-- Optimization backlog: `docs/OPTIMIZATION_PLAN.md`
-- Library performance plan: `docs/LIBRARY_PERFORMANCE_PLAN.md`
-- Spectrogram timing analysis: `docs/DEADBEEF_SPECTROGRAM_SYNC_ANALYSIS.md`
-
-## Active Priorities (2026-03-05)
+## Active Priorities
 
 ### P0
 
@@ -47,7 +38,6 @@ Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`)
 ### P2
 
 - [ ] Add optional crossfade and buffer tuning controls.
-- [ ] Add Last.fm scrobbling support.
 - [ ] Plan and execute Rust edition upgrade to `2024` (`cargo fix --edition`, cleanup, full verification).
 
 ## Backlog by Area
@@ -61,8 +51,8 @@ Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`)
 - [ ] Add ReplayGain support.
 - [ ] Add preamp/volume dB behavior options.
 - [ ] Add output device selector persistence.
+- [x] Add Last.fm scrobbling support.
 - [ ] Add optional crossfade and buffer tuning controls.
-- [ ] Add Last.fm scrobbling support.
 
 ### Library/Metadata
 
@@ -81,7 +71,3 @@ Reference baseline for UX: DeaDBeeF screenshot (`assets/deadbeef_reference.png`)
 - [ ] Promote profiling logs to structured, regression-friendly telemetry counters.
 - [ ] Plan and execute Rust edition upgrade to `2024` (`cargo fix --edition`, cleanup, full verification).
 
-## Working Rules
-
-- Keep items concrete and testable.
-- Keep this file current as work lands or priorities change.

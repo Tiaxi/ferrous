@@ -1,100 +1,66 @@
 # Ferrous
 
-Ferrous is a Linux desktop audio player prototype built with a Rust backend and a Qt6/Kirigami frontend. It is aimed at fast local-library playback, responsive queue workflows, and rich playback visualization.
+A fast, Linux-native desktop music player built with Rust and Qt6.
 
-## Highlights
+Ferrous pairs a Rust backend for playback, analysis, and library management with a Qt6/QML + KDE Kirigami frontend. It targets responsive local-library workflows, gapless playback, and rich real-time visualization. Ferrous is opinionated about library organization — your folder structure *is* your library.
 
-- Linux-first desktop UI built with Qt6/QML and KDE Kirigami
-- Real playback through GStreamer, including seeking, repeat, shuffle, volume control, and gapless queue handoff
-- Local library indexing from one or more folders, backed by SQLite
-- Folder-first library browsing with artist, album, and track grouping
-- Global search across artists, albums, and tracks
-- Queue workflows for opening files, adding folders, importing playlists, reordering tracks, and restoring the previous session
-- Embedded cover art extraction plus live waveform and spectrogram views
-- KDE/Plasma integration through MPRIS media controls, media keys, and single-instance file opening
+![Ferrous screenshot](docs/assets/screenshot.png)
 
-## Supported Content
+## Features
 
-Ferrous currently targets local audio playback on Linux. The UI and desktop integration are wired for common audio and playlist formats including:
+**Playback** — GStreamer-backed engine with seeking, gapless queue transitions, repeat, shuffle, and volume control.
 
-- MP3
-- FLAC
-- M4A / AAC / MP4 audio
-- Ogg Vorbis and Opus
-- WAV
-- AC-3 and DTS
-- M3U / M3U8 playlists
+**Library** — Folder-first browsing that mirrors your filesystem. Add one or more root directories, and Ferrous indexes them into a navigable tree with artist, album, and track grouping. Global search spans the entire library.
 
-Actual playback support depends on the GStreamer plugins installed on the host system.
+**Queue** — Open files, add folders, import M3U playlists, drag-to-reorder, and automatic session restore on launch.
 
-## Status
+**Visualization** — Live spectrogram and waveform displays rendered in real time alongside embedded cover art.
 
-Ferrous is usable today, but it should still be treated as a prototype rather than a polished end-user release.
+**Desktop integration** — MPRIS media controls, media key support, single-instance file opening, and `.desktop`/MIME registration.
 
-What is already in place:
+**Scrobbling** — Last.fm integration with desktop authentication and batched submissions.
 
-- Playback, queue management, library indexing, global search, and visualization
-- Persistent settings and queue/session restore
-- Desktop-file and MIME integration for installed builds
-- Local RPM packaging for Fedora-like systems
+## Supported Formats
 
-What is still in progress:
+MP3, FLAC, M4A/AAC, Ogg Vorbis, Opus, WAV, AC-3, DTS, and M3U/M3U8 playlists. Actual codec support depends on the GStreamer plugins installed on the host system.
 
-- ReplayGain and preamp behavior
-- Crossfade and output-device tuning
-- Deeper visualization customization
-- General polish expected from a mature public release
+## Quick Start
 
-## Installation
-
-Prebuilt packages are not published yet. Right now Ferrous is best installed from source or from a locally built RPM.
-
-### Quick Start From Source
-
-Install these prerequisites for your distro:
-
-- Rust toolchain
-- `zsh`
-- CMake and Ninja
-- A C++20-capable compiler
-- Qt 6.6+ development packages, including Quick Controls 2
-- KDE Frameworks 6 Kirigami development packages
-- GStreamer runtime and development packages
-- GStreamer codec plugins for the formats you want to play
-
-Then run:
+Install the prerequisites for your distro (Rust, zsh, CMake, Ninja, a C++20 compiler, Qt 6.6+, KDE Kirigami 6, GStreamer + plugins), then:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Tiaxi/ferrous.git
 cd ferrous
 ./scripts/run-ui.sh
 ```
 
-That script builds the Rust backend, configures the Qt UI, builds the app, and launches Ferrous.
-
-### Local RPM Build
-
-For Fedora-like systems, the repository includes local RPM packaging:
+For Fedora, a local RPM can be built and installed in one step:
 
 ```bash
-./scripts/build-rpm.sh
 ./scripts/build-rpm.sh --install
 ```
 
-## Development And Docs
+See the [installation guide](docs/INSTALL.md) for full dependency lists, manual build steps, and data locations.
 
-- [Installation guide](docs/INSTALL.md)
-- [Development guide](docs/DEVELOPMENT.md)
-- [UI-specific notes](ui/README.md)
-- [Roadmap](docs/ROADMAP.md)
+## Status
+
+Ferrous is usable for daily listening but should be treated as a prototype rather than a polished release. Playback, queue management, library indexing, search, visualization, and session persistence all work. Areas still in progress include ReplayGain, crossfade, output-device selection, and deeper visualization customization. See the [roadmap](docs/ROADMAP.md) for details.
 
 ## Tech Stack
 
-- Rust for playback, metadata, library, search, and analysis
-- Qt6/QML + Kirigami for the desktop UI
-- GStreamer for playback
-- SQLite for library and waveform cache persistence
+| Layer | Technology |
+|-------|------------|
+| Backend | Rust (playback, metadata, library, search, analysis) |
+| Frontend | Qt6/QML + KDE Kirigami |
+| Audio | GStreamer |
+| Storage | SQLite |
+
+## Documentation
+
+- [Installation guide](docs/INSTALL.md) — dependencies, build options, data locations
+- [Development guide](docs/DEVELOPMENT.md) — building, testing, debugging, profiling
+- [Roadmap](docs/ROADMAP.md) — priorities and backlog
 
 ## License
 
-Licensing is not finalized yet. This repository does not currently ship a public open-source license.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).

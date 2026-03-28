@@ -60,15 +60,3 @@ xdg-mime default ferrous.desktop audio/flac
 xdg-open /path/to/file.flac
 ```
 
-## Scope (Milestone A)
-
-- UI shell window and menu/footer scaffolding
-- Top transport controls wired to backend bridge
-- Live bridge status/snapshot display
-- Placeholder panes for playlist/library/spectrogram until later milestones
-
-## Scope (Milestone B progress)
-
-- Split layout matches Ferrous/DeaDBeeF structure with placeholder content
-- Centralized playback actions are shared by toolbar + menu + shortcuts
-- Seek and volume sliders are wired to bridge commands
