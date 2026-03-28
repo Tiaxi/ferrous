@@ -17,7 +17,6 @@ Rectangle {
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var openAlbumArtViewer
-    required property var queueTrackNumberText
     required property int popupTransitionMs
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
@@ -49,7 +48,6 @@ Rectangle {
             uiBridge: root.uiBridge
             libraryModel: root.libraryModel
             uiPalette: root.uiPalette
-            queueTrackNumberText: root.queueTrackNumberText
             snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
             snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
             popupTransitionMs: root.popupTransitionMs

@@ -325,6 +325,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     quint32 currentBitrateKbps = 0;
     quint16 channels = 0;
     quint16 bitDepth = 0;
+    quint32 trackNumber = 0;
     if (!reader.readUtf8U16(&out->sourcePath)
         || !reader.readUtf8U16(&out->title)
         || !reader.readUtf8U16(&out->artist)
@@ -338,6 +339,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
         || !reader.readUtf8U16(&out->formatLabel)
         || !reader.readU32(&currentBitrateKbps)
         || !reader.readUtf8U16(&out->coverPath)
+        || !reader.readU32(&trackNumber)
         || !reader.atEnd()) {
         return false;
     }
@@ -347,6 +349,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     out->channels = static_cast<int>(channels);
     out->bitDepth = static_cast<int>(bitDepth);
     out->currentBitrateKbps = static_cast<int>(currentBitrateKbps);
+    out->trackNumber = static_cast<int>(trackNumber);
     return true;
 }
 

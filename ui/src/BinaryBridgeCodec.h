@@ -150,6 +150,7 @@ struct DecodedMetadata {
     QString formatLabel;
     int currentBitrateKbps{0};
     QString coverPath;
+    int trackNumber{0};
 };
 
 struct DecodedSettings {

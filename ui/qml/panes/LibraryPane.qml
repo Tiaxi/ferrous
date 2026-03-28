@@ -13,7 +13,6 @@ Rectangle {
     required property var uiBridge
     required property var libraryModel
     required property var uiPalette
-    required property var queueTrackNumberText
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property int popupTransitionMs
@@ -33,7 +32,6 @@ Rectangle {
             Layout.fillWidth: true
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
-            queueTrackNumberText: root.queueTrackNumberText
         }
 
         RowLayout {

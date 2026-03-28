@@ -41,6 +41,7 @@ pub struct TrackMetadata {
     pub album: String,
     pub genre: String,
     pub year: Option<i32>,
+    pub track_number: Option<u32>,
     pub sample_rate_hz: Option<u32>,
     pub bitrate_kbps: Option<u32>,
     pub channels: Option<u8>,
@@ -183,6 +184,7 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
         .genre()
         .map_or_else(String::new, std::borrow::Cow::into_owned);
     metadata.year = tag.date().map(|value| i32::from(value.year));
+    metadata.track_number = tag.track();
 
     if let Some(pic) = tag.pictures().first() {
         if let Some((cover_path, width, height, raw)) =

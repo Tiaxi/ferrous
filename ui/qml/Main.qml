@@ -390,13 +390,6 @@ Kirigami.ApplicationWindow {
             playlistOrderFontMetrics.boundingRect("Alternative country").width) + 8))
     readonly property int playlistIndicatorColumnWidth: 18
 
-    function queueTrackNumberText(index) {
-        if (index === undefined || index === null || index < 0) {
-            return "--"
-        }
-        return FormatUtils.metadataTrackNumberText(uiBridge.queueTrackNumberAt(index))
-    }
-
     FontMetrics {
         id: menuFontMetrics
         font: root.font
@@ -978,7 +971,6 @@ Kirigami.ApplicationWindow {
                 replaceFromItunesAction: replaceFromItunesAction
                 currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
                 openAlbumArtViewer: viewerController.openAlbumArtViewer
-                queueTrackNumberText: root.queueTrackNumberText
                 popupTransitionMs: root.uiPopupTransitionMs
                 snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                 snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity

@@ -11,7 +11,6 @@ Components.SurfaceCard {
 
     required property var uiBridge
     required property var uiPalette
-    required property var queueTrackNumberText
 
     readonly property bool hasTrackContext: {
         const hasResolvedMetadata = (root.uiBridge.currentTrackTitle || "").trim().length > 0
@@ -70,15 +69,9 @@ Components.SurfaceCard {
         if (!hasTrackContext) {
             return "—"
         }
-        if (root.uiBridge.playingQueueIndex !== undefined
-                && root.uiBridge.playingQueueIndex !== null
-                && root.uiBridge.playingQueueIndex >= 0) {
-            return root.queueTrackNumberText(root.uiBridge.playingQueueIndex)
-        }
-        if (root.uiBridge.selectedQueueIndex !== undefined
-                && root.uiBridge.selectedQueueIndex !== null
-                && root.uiBridge.selectedQueueIndex >= 0) {
-            return root.queueTrackNumberText(root.uiBridge.selectedQueueIndex)
+        const trackNum = root.uiBridge.currentTrackNumber
+        if (trackNum > 0) {
+            return String(trackNum)
         }
         return "--"
     }

@@ -625,6 +625,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         album: metadata.album.clone(),
         genre: metadata.genre.clone(),
         year: metadata.year,
+        track_number: metadata.track_number,
         sample_rate_hz: metadata.sample_rate_hz,
         bitrate_kbps: metadata.bitrate_kbps,
         channels: metadata.channels,

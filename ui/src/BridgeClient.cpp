@@ -2010,6 +2010,10 @@ QVariant BridgeClient::currentTrackYear() const {
     return m_currentTrackYear;
 }
 
+int BridgeClient::currentTrackNumber() const {
+    return m_currentTrackNumber;
+}
+
 QString BridgeClient::currentTrackFormatLabel() const {
     return m_currentTrackFormatLabel;
 }
@@ -4344,6 +4348,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const int metadataYear = snapshot.metadata.present
         ? snapshot.metadata.year
         : std::numeric_limits<int>::min();
+    const int metadataTrackNumber = snapshot.metadata.present ? snapshot.metadata.trackNumber : 0;
     const QString metadataFormatLabel =
         snapshot.metadata.present ? snapshot.metadata.formatLabel : QString{};
     const int metadataChannels = snapshot.metadata.present ? snapshot.metadata.channels : 0;
@@ -4596,6 +4601,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     QString nextTrackAlbum = m_currentTrackAlbum;
     QString nextTrackGenre = m_currentTrackGenre;
     QVariant nextTrackYear = m_currentTrackYear;
+    int nextTrackNumber = currentPath.isEmpty() ? 0 : m_currentTrackNumber;
     const bool metadataMatchesCurrentPath =
         !currentPath.isEmpty() && snapshot.metadata.present && metadataSourcePath == currentPath;
     QString nextTrackFormatLabel = currentPath.isEmpty()
@@ -4630,6 +4636,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             if (track.year != std::numeric_limits<int>::min()) {
                 nextTrackYear = track.year;
             }
+            if (track.trackNumber > 0) {
+                nextTrackNumber = track.trackNumber;
+            }
         } else if (const QueueRowData *row = m_queueRowsModel.rowAt(detailIndex)) {
             nextTrackTitle = row->title;
             nextTrackArtist = row->artist;
@@ -4638,6 +4647,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             queueTrackCover = coverUrlForPath(row->coverPath);
             if (row->year != std::numeric_limits<int>::min()) {
                 nextTrackYear = row->year;
+            }
+            if (row->trackNumber > 0) {
+                nextTrackNumber = row->trackNumber;
             }
         }
 
@@ -4656,6 +4668,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             }
             if (metadataYear != std::numeric_limits<int>::min()) {
                 nextTrackYear = metadataYear;
+            }
+            if (metadataTrackNumber > 0) {
+                nextTrackNumber = metadataTrackNumber;
             }
         }
 
@@ -4696,6 +4711,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_currentTrackYear != nextTrackYear) {
         m_currentTrackYear = nextTrackYear;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (m_currentTrackNumber != nextTrackNumber) {
+        m_currentTrackNumber = nextTrackNumber;
         changed = true;
         trackMetadataSignalChanged = true;
     }

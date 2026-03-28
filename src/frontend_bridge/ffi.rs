@@ -1734,6 +1734,7 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
             .as_deref()
             .unwrap_or_default(),
     );
+    push_u32(&mut out, snapshot.metadata.track_number.unwrap_or(0));
     out
 }
 
@@ -2067,6 +2068,7 @@ mod tests {
                 album: "Sample Album".to_string(),
                 genre: "Rock".to_string(),
                 year: Some(2020),
+                track_number: Some(3),
                 sample_rate_hz: Some(48_000),
                 bitrate_kbps: Some(320),
                 channels: Some(2),
@@ -2524,6 +2526,7 @@ mod tests {
         assert_eq!(read_u16_string(&encoded, &mut offset), "FLAC");
         assert_eq!(read_u32(&encoded, &mut offset), 905);
         assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.cover.png");
+        assert_eq!(read_u32(&encoded, &mut offset), 3);
         assert_eq!(offset, encoded.len());
     }
 

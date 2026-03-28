@@ -502,6 +502,7 @@ Item {
         property string currentTrackAlbum: ""
         property string currentTrackGenre: ""
         property var currentTrackYear: null
+        property int currentTrackNumber: 0
         property var itunesArtworkResults: []
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
@@ -777,7 +778,6 @@ Item {
         width: 420
         uiBridge: bridge
         uiPalette: palette
-        queueTrackNumberText: function(index) { return "--" }
     }
 
     Viewers.AlbumArtViewerShell {
@@ -828,7 +828,6 @@ Item {
         replaceFromItunesAction: replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: function() { return "" }
         openAlbumArtViewer: function() {}
-        queueTrackNumberText: function(index) { return "--" }
         popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
