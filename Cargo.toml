@@ -2,6 +2,9 @@
 name = "ferrous"
 version = "0.1.0"
 edition = "2021"
+description = "A fast, Linux-native desktop music player"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Tiaxi/ferrous"
 
 [lib]
 crate-type = ["rlib", "staticlib"]
