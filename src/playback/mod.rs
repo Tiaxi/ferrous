@@ -67,6 +67,7 @@ pub enum PlaybackCommand {
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
     ToggleChannelMute(u8),
+    SoloChannel(u8),
     Poll,
 }
 
@@ -194,6 +195,12 @@ mod tests {
             }
         }
         None
+    }
+
+    fn make_test_engine() -> (PlaybackEngine, crossbeam_channel::Receiver<PlaybackEvent>) {
+        let (analysis_tx, _) = unbounded();
+        let (pcm_tx, _) = unbounded();
+        PlaybackEngine::new(analysis_tx, pcm_tx)
     }
 
     #[test]
@@ -503,6 +510,81 @@ mod tests {
         assert_eq!(snap.state, PlaybackState::Stopped);
         assert_eq!(snap.position, Duration::ZERO);
     }
+
+    #[test]
+    fn solo_channel_mutes_all_others() {
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, u64::MAX ^ (1 << 1));
+    }
+
+    #[test]
+    fn unsolo_restores_previous_mask() {
+        let (engine, rx) = make_test_engine();
+        // Mute channel 0 first.
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 2 — should save mask with bit 0 set.
+        engine.command(PlaybackCommand::SoloChannel(2));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Un-solo channel 2 — should restore: only bit 0 set.
+        engine.command(PlaybackCommand::SoloChannel(2));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 1 << 0);
+    }
+
+    #[test]
+    fn solo_switch_to_different_channel_keeps_original_pre_mask() {
+        let (engine, rx) = make_test_engine();
+        // Mute channel 3.
+        engine.command(PlaybackCommand::ToggleChannelMute(3));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 0.
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Switch solo to channel 1.
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Un-solo channel 1 — should restore original pre-mask (bit 3 set).
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 1 << 3);
+    }
+
+    #[test]
+    fn manual_toggle_clears_solo_state() {
+        let (engine, rx) = make_test_engine();
+        // Solo channel 0.
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Manual toggle channel 2 — should clear solo, XOR bit 2 into current mask.
+        engine.command(PlaybackCommand::ToggleChannelMute(2));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Mask was all-except-0; toggling bit 2 clears it.
+        let expected = (u64::MAX ^ (1 << 0)) ^ (1 << 2);
+        assert_eq!(snap.muted_channels_mask, expected);
+        // Now "solo channel 0 again" should act as a fresh solo (no restore).
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap2 = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap2.muted_channels_mask, u64::MAX ^ (1 << 0));
+        // Un-solo should restore the post-toggle mask, not the original.
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap3 = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap3.muted_channels_mask, expected);
+    }
 }
 
 #[cfg(not(feature = "gst"))]
@@ -535,6 +617,8 @@ mod backend {
                 let mut queue_idx = 0usize;
                 let mut last_tick = Instant::now();
                 let mut phase = 0.0f32;
+                let mut solo_pre_mask: Option<u64> = None;
+                let mut soloed_channel: Option<u8> = None;
 
                 while let Ok(cmd) = cmd_rx.recv() {
                     if snapshot.state == PlaybackState::Playing {
@@ -718,6 +802,23 @@ mod backend {
                         PlaybackCommand::ToggleChannelMute(ch) => {
                             let ch = ch.min(63);
                             snapshot.muted_channels_mask ^= 1u64 << ch;
+                            solo_pre_mask = None;
+                            soloed_channel = None;
+                        }
+                        PlaybackCommand::SoloChannel(ch) => {
+                            let ch = ch.min(63);
+                            if soloed_channel == Some(ch) {
+                                if let Some(pre) = solo_pre_mask.take() {
+                                    snapshot.muted_channels_mask = pre;
+                                }
+                                soloed_channel = None;
+                            } else {
+                                if soloed_channel.is_none() {
+                                    solo_pre_mask = Some(snapshot.muted_channels_mask);
+                                }
+                                snapshot.muted_channels_mask = u64::MAX ^ (1u64 << ch);
+                                soloed_channel = Some(ch);
+                            }
                         }
                         PlaybackCommand::Poll => {
                             if snapshot.state == PlaybackState::Playing {
@@ -1108,6 +1209,8 @@ mod backend {
         /// the playbin.  Used by `poll()` to detect stuck state transitions.
         playing_state_requested_at: Option<Instant>,
         channel_mute_mask: Arc<AtomicU64>,
+        solo_pre_mask: Option<u64>,
+        soloed_channel: Option<u8>,
     }
 
     pub fn spawn_engine(
@@ -1182,6 +1285,8 @@ mod backend {
                 staged_continuation_active,
                 playing_state_requested_at: None,
                 channel_mute_mask,
+                solo_pre_mask: None,
+                soloed_channel: None,
             }
         }
 
@@ -1853,6 +1958,30 @@ mod backend {
                     let prev = self.channel_mute_mask.load(Ordering::Relaxed);
                     self.channel_mute_mask
                         .store(prev ^ (1u64 << ch), Ordering::Relaxed);
+                    self.solo_pre_mask = None;
+                    self.soloed_channel = None;
+                    self.snapshot.muted_channels_mask =
+                        self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.emit_snapshot();
+                }
+                PlaybackCommand::SoloChannel(ch) => {
+                    let ch = ch.min(63);
+                    if self.soloed_channel == Some(ch) {
+                        // Un-solo: restore saved mask.
+                        if let Some(pre) = self.solo_pre_mask.take() {
+                            self.channel_mute_mask.store(pre, Ordering::Relaxed);
+                        }
+                        self.soloed_channel = None;
+                    } else {
+                        // Solo (fresh or switching target).
+                        if self.soloed_channel.is_none() {
+                            self.solo_pre_mask =
+                                Some(self.channel_mute_mask.load(Ordering::Relaxed));
+                        }
+                        self.channel_mute_mask
+                            .store(u64::MAX ^ (1u64 << ch), Ordering::Relaxed);
+                        self.soloed_channel = Some(ch);
+                    }
                     self.snapshot.muted_channels_mask =
                         self.channel_mute_mask.load(Ordering::Relaxed);
                     self.emit_snapshot();
