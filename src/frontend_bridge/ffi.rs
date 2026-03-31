@@ -2064,6 +2064,7 @@ mod tests {
                 volume: 0.75,
                 repeat_mode: RepeatMode::Off,
                 shuffle_enabled: false,
+                muted_channels_mask: 0,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],

@@ -46,6 +46,7 @@ pub struct PlaybackSnapshot {
     pub volume: f32,
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
+    pub muted_channels_mask: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ pub enum PlaybackCommand {
     SetVolume(f32),
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
+    ToggleChannelMute(u8),
     Poll,
 }
 
@@ -122,6 +124,12 @@ mod shared_tests {
     use std::time::Duration;
 
     use super::{stop_snapshot_at_terminal_eos, PlaybackSnapshot, PlaybackState};
+
+    #[test]
+    fn muted_channels_mask_defaults_to_zero() {
+        let snapshot = PlaybackSnapshot::default();
+        assert_eq!(snapshot.muted_channels_mask, 0);
+    }
 
     #[test]
     fn terminal_eos_stop_preserves_current_track_context_for_replay() {
@@ -707,6 +715,10 @@ mod backend {
                         PlaybackCommand::SetShuffle(enabled) => {
                             snapshot.shuffle_enabled = enabled;
                         }
+                        PlaybackCommand::ToggleChannelMute(ch) => {
+                            let ch = ch.min(63);
+                            snapshot.muted_channels_mask ^= 1u64 << ch;
+                        }
                         PlaybackCommand::Poll => {
                             if snapshot.state == PlaybackState::Playing {
                                 // Generate synthetic PCM when GStreamer is disabled, so visuals remain testable.
@@ -1095,6 +1107,7 @@ mod backend {
         /// Cleared when the bus handler sees `StateChanged(_, Playing)` for
         /// the playbin.  Used by `poll()` to detect stuck state transitions.
         playing_state_requested_at: Option<Instant>,
+        channel_mute_mask: Arc<AtomicU64>,
     }
 
     pub fn spawn_engine(
@@ -1145,6 +1158,7 @@ mod backend {
             event_tx: Sender<PlaybackEvent>,
             pending_eos_track_switch: Arc<AtomicBool>,
             staged_continuation_active: Arc<AtomicBool>,
+            channel_mute_mask: Arc<AtomicU64>,
         ) -> Self {
             Self {
                 playbin,
@@ -1167,6 +1181,7 @@ mod backend {
                 pending_gapless_duration: None,
                 staged_continuation_active,
                 playing_state_requested_at: None,
+                channel_mute_mask,
             }
         }
 
@@ -1750,6 +1765,11 @@ mod backend {
                     snapshot_changed = true;
                 }
             }
+            let current_mask = self.channel_mute_mask.load(Ordering::Relaxed);
+            if self.snapshot.muted_channels_mask != current_mask {
+                self.snapshot.muted_channels_mask = current_mask;
+                snapshot_changed = true;
+            }
             if self.check_stuck_state_change() {
                 // Pipeline was stuck; recovery already emitted a snapshot.
                 return;
@@ -1828,6 +1848,15 @@ mod backend {
                 PlaybackCommand::SetVolume(volume) => self.set_volume(volume),
                 PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
                 PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
+                PlaybackCommand::ToggleChannelMute(ch) => {
+                    let ch = ch.min(63);
+                    let prev = self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.channel_mute_mask
+                        .store(prev ^ (1u64 << ch), Ordering::Relaxed);
+                    self.snapshot.muted_channels_mask =
+                        self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.emit_snapshot();
+                }
                 PlaybackCommand::Poll => self.poll(),
             }
         }
@@ -1994,10 +2023,13 @@ mod backend {
             .map_err(|_| anyhow!("failed to create playbin3"))?;
         configure_playbin_buffering(&playbin);
 
+        let channel_mute_mask = Arc::new(AtomicU64::new(0));
+
         let analysis_sink = build_analysis_audio_sink(
             analysis_tx.clone(),
             pcm_tx,
             Arc::clone(&analysis_track_token),
+            Arc::clone(&channel_mute_mask),
         )?;
         playbin.set_property("audio-sink", &analysis_sink);
 
@@ -2063,6 +2095,7 @@ mod backend {
             event_tx,
             pending_eos_track_switch,
             staged_continuation_active,
+            channel_mute_mask,
         );
         runtime
             .playbin
@@ -2636,7 +2669,9 @@ mod backend {
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
         track_token: Arc<AtomicU64>,
+        channel_mute_mask: Arc<AtomicU64>,
     ) -> anyhow::Result<gst::Bin> {
+        let _ = &channel_mute_mask; // used in Task 2 (pad probe)
         let bin = gst::Bin::new();
         let raw_audio_caps = build_raw_audio_caps();
         let analysis_caps = build_analysis_audio_caps();
