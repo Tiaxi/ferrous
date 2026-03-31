@@ -11,11 +11,6 @@ Rectangle {
     color: "#0b0b0f"
     border.color: Qt.rgba(0, 0, 0, 0.25)
 
-    Item {
-        id: spectrogramMainHost
-        anchors.fill: parent
-    }
-
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton
@@ -24,5 +19,10 @@ Rectangle {
                 root.openViewer()
             }
         }
+    }
+
+    Item {
+        id: spectrogramMainHost
+        anchors.fill: parent
     }
 }

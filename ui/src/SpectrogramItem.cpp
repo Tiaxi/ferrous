@@ -653,6 +653,7 @@ void SpectrogramItem::setChannelMuted(bool muted) {
         QMutexLocker lock(&m_stateMutex);
         markAllTilesDirtyLocked();
         m_canvasDirty = true;
+        m_precomputedCanvasDirty = true;
     }
     update();
 }
