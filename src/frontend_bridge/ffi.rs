@@ -1133,6 +1133,10 @@ fn parse_playback_command(
             BridgeCommand::Playback(BridgePlaybackCommand::SetRepeatMode(mode))
         }
         26 => BridgeCommand::Playback(BridgePlaybackCommand::SetShuffle(reader.read_u8()? != 0)),
+        53 => {
+            let ch = reader.read_u8()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::ToggleChannelMute(ch))
+        }
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -1478,6 +1482,7 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(&mut out, u8::from(snapshot.playback.shuffle_enabled));
     push_i32(&mut out, current_queue_index);
     push_u16_string(&mut out, &current_path);
+    push_u64(&mut out, snapshot.playback.muted_channels_mask);
     out
 }
 
@@ -1869,6 +1874,10 @@ fn push_f32(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
+fn push_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
 fn push_f64(out: &mut Vec<u8>, value: f64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
@@ -2064,6 +2073,7 @@ mod tests {
                 volume: 0.75,
                 repeat_mode: RepeatMode::Off,
                 shuffle_enabled: false,
+                muted_channels_mask: 0,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
@@ -2979,5 +2989,48 @@ mod tests {
         assert!(ffi_send_binary(handle, &encode_command(33, &[])));
         let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    struct DecodedSnapshotForTest {
+        playback_muted_channels_mask: u64,
+    }
+
+    fn decode_binary_snapshot_for_test(data: &[u8]) -> DecodedSnapshotForTest {
+        // Skip 12-byte header (magic 4 + total_len 4 + section_mask 2 + reserved 2).
+        let section_mask = u16::from_le_bytes([data[8], data[9]]);
+        let mut offset = 12;
+        if section_mask & 1 != 0 {
+            // Playback section present — parse field-by-field in encoding order.
+            let section_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            let s = &data[offset..offset + section_len];
+            let mut p = 0;
+            p += 1; // u8   state
+            p += 8; // f64  position
+            p += 8; // f64  duration
+            p += 4; // f32  volume
+            p += 1; // u8   repeat_mode
+            p += 1; // u8   shuffle
+            p += 4; // i32  queue_index
+            let path_len = u16::from_le_bytes(s[p..p + 2].try_into().unwrap()) as usize;
+            p += 2 + path_len; // skip path bytes
+            let mask = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+            return DecodedSnapshotForTest {
+                playback_muted_channels_mask: mask,
+            };
+        }
+        DecodedSnapshotForTest {
+            playback_muted_channels_mask: 0,
+        }
+    }
+
+    #[test]
+    fn snapshot_encodes_muted_channels_mask() {
+        let mut snapshot = sample_snapshot();
+        snapshot.playback.muted_channels_mask = 0b101; // channels 0 and 2 muted
+        let encoded = encode_binary_snapshot(&snapshot, None);
+        let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.playback_muted_channels_mask, 0b101);
     }
 }

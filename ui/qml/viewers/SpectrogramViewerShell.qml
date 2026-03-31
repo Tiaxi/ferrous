@@ -85,11 +85,6 @@ Item {
             color: "#0b0b0f"
             border.color: Qt.rgba(1, 1, 1, 0.12)
 
-            Item {
-                id: spectrogramPopupHost
-                anchors.fill: parent
-            }
-
             MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
@@ -98,6 +93,11 @@ Item {
                         root.closeViewer()
                     }
                 }
+            }
+
+            Item {
+                id: spectrogramPopupHost
+                anchors.fill: parent
             }
         }
     }
@@ -161,11 +161,6 @@ Item {
             anchors.fill: parent
             color: "#0b0b0f"
 
-            Item {
-                id: spectrogramWindowHost
-                anchors.fill: parent
-            }
-
             MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
@@ -175,6 +170,11 @@ Item {
                         root.closeViewer()
                     }
                 }
+            }
+
+            Item {
+                id: spectrogramWindowHost
+                anchors.fill: parent
             }
         }
     }

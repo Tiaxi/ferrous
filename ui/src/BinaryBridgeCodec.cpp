@@ -74,6 +74,16 @@ public:
         return true;
     }
 
+    bool readU64(quint64 *out) {
+        if (!out || m_offset + 8 > m_bytes.size()) {
+            return false;
+        }
+        *out = qFromLittleEndian<quint64>(
+            reinterpret_cast<const uchar *>(m_bytes.constData() + m_offset));
+        m_offset += 8;
+        return true;
+    }
+
     bool readF64(double *out) {
         if (!out || m_offset + 8 > m_bytes.size()) {
             return false;
@@ -159,6 +169,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     quint8 shuffleEnabled = 0;
     qint32 currentQueueIndex = -1;
     QString currentPath;
+    quint64 mutedMask = 0;
     if (!reader.readU8(&state)
         || !reader.readF64(&out->positionSeconds)
         || !reader.readF64(&out->durationSeconds)
@@ -167,6 +178,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
         || !reader.readU8(&shuffleEnabled)
         || !reader.readI32(&currentQueueIndex)
         || !reader.readUtf8U16(&currentPath)
+        || !reader.readU64(&mutedMask)
         || !reader.atEnd()) {
         return false;
     }
@@ -176,6 +188,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     out->shuffleEnabled = shuffleEnabled != 0;
     out->currentQueueIndex = static_cast<int>(currentQueueIndex);
     out->currentPath = currentPath;
+    out->mutedChannelsMask = mutedMask;
     return true;
 }
 

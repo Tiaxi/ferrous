@@ -46,6 +46,7 @@ pub struct PlaybackSnapshot {
     pub volume: f32,
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
+    pub muted_channels_mask: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ pub enum PlaybackCommand {
     SetVolume(f32),
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
+    ToggleChannelMute(u8),
     Poll,
 }
 
@@ -122,6 +124,12 @@ mod shared_tests {
     use std::time::Duration;
 
     use super::{stop_snapshot_at_terminal_eos, PlaybackSnapshot, PlaybackState};
+
+    #[test]
+    fn muted_channels_mask_defaults_to_zero() {
+        let snapshot = PlaybackSnapshot::default();
+        assert_eq!(snapshot.muted_channels_mask, 0);
+    }
 
     #[test]
     fn terminal_eos_stop_preserves_current_track_context_for_replay() {
@@ -707,6 +715,10 @@ mod backend {
                         PlaybackCommand::SetShuffle(enabled) => {
                             snapshot.shuffle_enabled = enabled;
                         }
+                        PlaybackCommand::ToggleChannelMute(ch) => {
+                            let ch = ch.min(63);
+                            snapshot.muted_channels_mask ^= 1u64 << ch;
+                        }
                         PlaybackCommand::Poll => {
                             if snapshot.state == PlaybackState::Playing {
                                 // Generate synthetic PCM when GStreamer is disabled, so visuals remain testable.
@@ -1095,6 +1107,7 @@ mod backend {
         /// Cleared when the bus handler sees `StateChanged(_, Playing)` for
         /// the playbin.  Used by `poll()` to detect stuck state transitions.
         playing_state_requested_at: Option<Instant>,
+        channel_mute_mask: Arc<AtomicU64>,
     }
 
     pub fn spawn_engine(
@@ -1145,6 +1158,7 @@ mod backend {
             event_tx: Sender<PlaybackEvent>,
             pending_eos_track_switch: Arc<AtomicBool>,
             staged_continuation_active: Arc<AtomicBool>,
+            channel_mute_mask: Arc<AtomicU64>,
         ) -> Self {
             Self {
                 playbin,
@@ -1167,6 +1181,7 @@ mod backend {
                 pending_gapless_duration: None,
                 staged_continuation_active,
                 playing_state_requested_at: None,
+                channel_mute_mask,
             }
         }
 
@@ -1750,6 +1765,11 @@ mod backend {
                     snapshot_changed = true;
                 }
             }
+            let current_mask = self.channel_mute_mask.load(Ordering::Relaxed);
+            if self.snapshot.muted_channels_mask != current_mask {
+                self.snapshot.muted_channels_mask = current_mask;
+                snapshot_changed = true;
+            }
             if self.check_stuck_state_change() {
                 // Pipeline was stuck; recovery already emitted a snapshot.
                 return;
@@ -1828,6 +1848,15 @@ mod backend {
                 PlaybackCommand::SetVolume(volume) => self.set_volume(volume),
                 PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
                 PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
+                PlaybackCommand::ToggleChannelMute(ch) => {
+                    let ch = ch.min(63);
+                    let prev = self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.channel_mute_mask
+                        .store(prev ^ (1u64 << ch), Ordering::Relaxed);
+                    self.snapshot.muted_channels_mask =
+                        self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.emit_snapshot();
+                }
                 PlaybackCommand::Poll => self.poll(),
             }
         }
@@ -1994,10 +2023,13 @@ mod backend {
             .map_err(|_| anyhow!("failed to create playbin3"))?;
         configure_playbin_buffering(&playbin);
 
+        let channel_mute_mask = Arc::new(AtomicU64::new(0));
+
         let analysis_sink = build_analysis_audio_sink(
             analysis_tx.clone(),
             pcm_tx,
             Arc::clone(&analysis_track_token),
+            &channel_mute_mask,
         )?;
         playbin.set_property("audio-sink", &analysis_sink);
 
@@ -2063,6 +2095,7 @@ mod backend {
             event_tx,
             pending_eos_track_switch,
             staged_continuation_active,
+            channel_mute_mask,
         );
         runtime
             .playbin
@@ -2543,6 +2576,82 @@ mod backend {
         vec![SpectrogramChannelLabel::Mono]
     }
 
+    /// Installs a buffer probe on `capsfilter`'s src pad that zeroes samples
+    /// for muted channels.  Placed after `audioconvert` + `audioresample` so
+    /// the format is fully negotiated.
+    fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc<AtomicU64>) {
+        let Some(src_pad) = capsfilter.static_pad("src") else {
+            return;
+        };
+        let mute_mask = Arc::clone(channel_mute_mask);
+        src_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let mask = mute_mask.load(Ordering::Relaxed);
+            if mask == 0 {
+                return gst::PadProbeReturn::Ok;
+            }
+            let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(caps) = pad.current_caps() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(structure) = caps.structure(0) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            // Only process interleaved audio.  Planar layouts have a
+            // different memory arrangement; skip gracefully (no common
+            // audio sink negotiates planar).
+            let layout: &str = structure.get::<&str>("layout").unwrap_or("interleaved");
+            if layout != "interleaved" {
+                return gst::PadProbeReturn::Ok;
+            }
+            let channels: i32 = structure.get("channels").unwrap_or(1);
+            if channels <= 0 {
+                return gst::PadProbeReturn::Ok;
+            }
+            let format_str: &str = structure.get::<&str>("format").unwrap_or("S16LE");
+            let bps = gst_audio_format_bytes_per_sample(format_str);
+            if bps == 0 {
+                return gst::PadProbeReturn::Ok;
+            }
+            // channels is guaranteed positive by the check above.
+            let num_channels = channels.cast_unsigned() as usize;
+            let frame_size = num_channels * bps;
+            let buffer = buffer.make_mut();
+            if let Ok(mut map) = buffer.map_writable() {
+                let data = map.as_mut_slice();
+                for frame in data.chunks_exact_mut(frame_size) {
+                    for ch in 0..num_channels {
+                        if mask & (1u64 << ch) != 0 {
+                            let start = ch * bps;
+                            let end = start + bps;
+                            if end <= frame.len() {
+                                frame[start..end].fill(0);
+                            }
+                        }
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
+    /// Returns the number of bytes per sample for a `GStreamer` audio format
+    /// string (e.g. "F32LE" → 4, "S16LE" → 2).  Returns 0 for unknown
+    /// formats.
+    fn gst_audio_format_bytes_per_sample(format: &str) -> usize {
+        match format {
+            "S8" | "U8" => 1,
+            "S16LE" | "S16BE" | "U16LE" | "U16BE" => 2,
+            "S24LE" | "S24BE" | "U24LE" | "U24BE" => 3,
+            // 24-bit audio packed in 32-bit containers uses 4 bytes per sample.
+            "S24_32LE" | "S24_32BE" | "U24_32LE" | "U24_32BE" | "S32LE" | "S32BE" | "U32LE"
+            | "U32BE" | "F32LE" | "F32BE" => 4,
+            "F64LE" | "F64BE" => 8,
+            _ => 0,
+        }
+    }
+
     fn build_output_sink() -> anyhow::Result<gst::Element> {
         let output_sink_name = std::env::var("FERROUS_GST_OUTPUT_SINK")
             .ok()
@@ -2636,6 +2745,7 @@ mod backend {
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
         track_token: Arc<AtomicU64>,
+        channel_mute_mask: &Arc<AtomicU64>,
     ) -> anyhow::Result<gst::Bin> {
         let bin = gst::Bin::new();
         let raw_audio_caps = build_raw_audio_caps();
@@ -2723,6 +2833,11 @@ mod backend {
             &sink_out,
         ])
         .context("failed to link output branch")?;
+
+        // Channel-mute probe: zeroes samples for muted channels in the output
+        // branch.  The analysis branch is unaffected — spectrograms show all
+        // channels regardless of mute state.
+        install_channel_mute_probe(&output_capsfilter, &channel_mute_mask);
         gst::Element::link_many([
             &queue_tap,
             &conv,

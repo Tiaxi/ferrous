@@ -34,6 +34,7 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
+    Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -77,6 +78,9 @@ public:
     double crosshairSharedX() const;
     void setCrosshairSharedX(double value);
 
+    bool channelMuted() const;
+    void setChannelMuted(bool muted);
+
     double pixelToFrequencyHz(int pixelY, int viewHeight) const;
 
     Q_INVOKABLE void feedPrecomputedChunk(
@@ -106,6 +110,7 @@ signals:
     void showTimeLabelsChanged();
     void crosshairSharedXChanged();
     void crosshairHoverChanged(double x);
+    void channelMutedChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -193,6 +198,8 @@ private:
     int m_binsPerColumn{0};
 
     std::array<QRgb, kGradientTableSize> m_palette32{};
+    std::array<QRgb, kGradientTableSize> m_palette32Gray{};
+    bool m_channelMuted{false};
     std::vector<int> m_iToBin;
     int m_mappingHeight{-1};
     int m_lowResEnd{0};

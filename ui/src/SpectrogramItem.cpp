@@ -639,6 +639,25 @@ void SpectrogramItem::setCrosshairSharedX(double value) {
     }
 }
 
+bool SpectrogramItem::channelMuted() const {
+    return m_channelMuted;
+}
+
+void SpectrogramItem::setChannelMuted(bool muted) {
+    if (m_channelMuted == muted) {
+        return;
+    }
+    m_channelMuted = muted;
+    emit channelMutedChanged();
+    {
+        QMutexLocker lock(&m_stateMutex);
+        markAllTilesDirtyLocked();
+        m_canvasDirty = true;
+        m_precomputedCanvasDirty = true;
+    }
+    update();
+}
+
 void SpectrogramItem::feedPrecomputedChunk(
     const QByteArray &data, int bins, int channelIndex,
     int columns, int startIndex, int totalEstimate,
@@ -2500,6 +2519,18 @@ void SpectrogramItem::rebuildPalette() {
             std::clamp(static_cast<int>(0.5 + 255.0 * c1), 0, 255),
             std::clamp(static_cast<int>(0.5 + 255.0 * c2), 0, 255));
     }
+
+    // Build matching grayscale palette using luminance weights.
+    for (int i = 0; i < kGradientTableSize; ++i) {
+        const int r = qRed(m_palette32[static_cast<size_t>(i)]);
+        const int g = qGreen(m_palette32[static_cast<size_t>(i)]);
+        const int b = qBlue(m_palette32[static_cast<size_t>(i)]);
+        // ITU-R BT.709 luminance.
+        const int lum = std::clamp(
+            static_cast<int>(0.2126 * r + 0.7152 * g + 0.0722 * b + 0.5),
+            0, 255);
+        m_palette32Gray[static_cast<size_t>(i)] = qRgb(lum, lum, lum);
+    }
 }
 
 void SpectrogramItem::invalidateMapping() {
@@ -2698,8 +2729,9 @@ void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
         int paletteIndex = kGradientTableSize
             - static_cast<int>(std::lround((static_cast<double>(kGradientTableSize) / 255.0) * intensity));
         paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
+        const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
         auto *line = reinterpret_cast<QRgb *>(m_canvas.scanLine(y));
-        line[x] = m_palette32[static_cast<size_t>(paletteIndex)];
+        line[x] = palette[static_cast<size_t>(paletteIndex)];
     }
 }
 
@@ -2826,8 +2858,9 @@ void SpectrogramItem::drawPrecomputedColumnAtLocked(
         int paletteIndex = kGradientTableSize
             - static_cast<int>(std::lround(gradScale * static_cast<double>(intensity)));
         paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
+        const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
         reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
-            m_palette32[static_cast<size_t>(paletteIndex)];
+            palette[static_cast<size_t>(paletteIndex)];
     }
 }
 
