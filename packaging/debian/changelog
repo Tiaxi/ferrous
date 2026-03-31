@@ -1,3 +1,9 @@
+ferrous (0.1.2-1) unstable; urgency=low
+
+  * Add per-channel audio muting via clickable spectrogram labels.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Tue, 31 Mar 2026 22:00:00 +0000
+
 ferrous (0.1.1-1) unstable; urgency=low
 
   * Add spectrogram crosshair and frequency/time grid overlays.
