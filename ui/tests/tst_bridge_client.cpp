@@ -64,6 +64,7 @@ private slots:
     void mprisControllerConstructionDoesNotCrash();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
+    void testSoloChannelCommandEncoding();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -808,6 +809,22 @@ void BridgeClientTest::testMutedChannelsMaskDecoding()
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.playback.mutedChannelsMask, quint64(0b10101));
+}
+
+void BridgeClientTest::testSoloChannelCommandEncoding()
+{
+    // Verify that CmdSoloChannel encodes as command ID 54 + 1-byte channel index,
+    // using the same encodeCommandU8 helper as CmdToggleChannelMute.
+    QByteArray cmd = BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSoloChannel, 3);
+    // Format: u16 cmd_id (LE) + u16 payload_len (LE) + u8 channel
+    QCOMPARE(cmd.size(), 5);
+    quint16 cmdId = qFromLittleEndian<quint16>(cmd.constData());
+    quint16 payloadLen = qFromLittleEndian<quint16>(cmd.constData() + 2);
+    quint8 channel = static_cast<quint8>(cmd.at(4));
+    QCOMPARE(cmdId, quint16(BinaryBridgeCodec::CmdSoloChannel));
+    QCOMPARE(payloadLen, quint16(1));
+    QCOMPARE(channel, quint8(3));
 }
 
 int main(int argc, char **argv) {
