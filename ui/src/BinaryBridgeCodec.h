@@ -78,6 +78,7 @@ enum CommandId : quint16 {
     CmdSetSpectrogramDisplayMode = 50,
     CmdSetSpectrogramCrosshair = 51,
     CmdSetSpectrogramScale = 52,
+    CmdToggleChannelMute = 53,
 };
 
 struct DecodedPlayback {
@@ -90,6 +91,7 @@ struct DecodedPlayback {
     bool shuffleEnabled{false};
     int currentQueueIndex{-1};
     QString currentPath;
+    quint64 mutedChannelsMask{0};
 };
 
 struct DecodedQueueTrack {

@@ -52,6 +52,7 @@ private slots:
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
+    void testMutedChannelsMaskDecoding();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
@@ -763,6 +764,50 @@ void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
     // Verify other fields survived too.
     QCOMPARE(decoded.settings.systemMediaControlsEnabled, true);
     QCOMPARE(decoded.settings.fftSize, 8192);
+}
+
+void BridgeClientTest::testMutedChannelsMaskDecoding()
+{
+    // Build a minimal snapshot packet with a playback section that
+    // includes a muted_channels_mask field (u64 LE at the end).
+    // Write raw LE bytes to avoid QDataStream floating-point precision quirks.
+    QByteArray payload;
+    auto appendLe = [&payload](auto value) {
+        const auto le = qToLittleEndian(value);
+        payload.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+
+    appendLe(quint8(1));          // state = Playing
+    appendLe(double(10.0));       // position (f64)
+    appendLe(double(200.0));      // duration (f64)
+    appendLe(float(0.8f));        // volume   (f32)
+    appendLe(quint8(0));          // repeat mode
+    appendLe(quint8(0));          // shuffle
+    appendLe(qint32(2));          // currentQueueIndex
+    // u16-prefixed string (path)
+    QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
+    appendLe(quint16(pathUtf8.size()));
+    payload.append(pathUtf8);
+    // muted_channels_mask
+    appendLe(quint64(0b10101));   // channels 0, 2, 4 muted
+
+    // Wrap in snapshot packet.
+    QByteArray packet;
+    QDataStream ps(&packet, QIODevice::WriteOnly);
+    ps.setByteOrder(QDataStream::LittleEndian);
+    ps << quint32(0xFE550001u);       // magic
+    quint32 totalLen = 12 + 4 + payload.size(); // header + section_len + payload
+    ps << quint32(totalLen);
+    ps << quint16(BinaryBridgeCodec::SectionPlayback); // section mask
+    ps << quint16(0);                 // reserved
+    ps << quint32(payload.size());
+    packet.append(payload);
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.playback.mutedChannelsMask, quint64(0b10101));
 }
 
 int main(int argc, char **argv) {
