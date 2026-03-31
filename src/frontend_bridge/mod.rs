@@ -98,6 +98,7 @@ pub enum BridgePlaybackCommand {
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
     ToggleChannelMute(u8),
+    SoloChannel(u8),
 }
 
 #[derive(Debug, Clone)]
@@ -1865,6 +1866,9 @@ fn handle_playback_bridge_command(
             context
                 .playback
                 .command(PlaybackCommand::ToggleChannelMute(*ch));
+        }
+        BridgePlaybackCommand::SoloChannel(ch) => {
+            context.playback.command(PlaybackCommand::SoloChannel(*ch));
         }
     }
 }

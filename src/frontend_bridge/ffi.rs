@@ -1137,6 +1137,10 @@ fn parse_playback_command(
             let ch = reader.read_u8()?;
             BridgeCommand::Playback(BridgePlaybackCommand::ToggleChannelMute(ch))
         }
+        54 => {
+            let ch = reader.read_u8()?;
+            BridgeCommand::Playback(BridgePlaybackCommand::SoloChannel(ch))
+        }
         _ => return Ok(None),
     };
     reader.expect_done()?;
