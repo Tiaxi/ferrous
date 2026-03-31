@@ -32,10 +32,19 @@ Item {
         const labels = count > 0 && count <= standardChannelLabels.length
             ? standardChannelLabels[count - 1]
             : null
+        // JS bitwise operators work on 32-bit integers; channels 32+ would
+        // wrap.  No consumer audio exceeds 32 discrete channels.
+        const mask = root.uiBridge.mutedChannelsMask
         let result = []
         for (let i = 0; i < Math.max(count, 1); ++i) {
             const lbl = labels ? labels[i] || "" : (count === 0 ? "M" : "")
-            result.push({ label: lbl, showLabel: showLabels && lbl.length > 0 })
+            const muted = (mask & (1 << i)) !== 0
+            result.push({
+                label: lbl,
+                showLabel: showLabels && lbl.length > 0,
+                muted: muted,
+                channelIndex: i
+            })
         }
         return result
     }
@@ -50,7 +59,8 @@ Item {
         }
         for (let i = 0; i < next.length; ++i) {
             if (root.channelDescriptors[i].label !== next[i].label
-                    || root.channelDescriptors[i].showLabel !== next[i].showLabel) {
+                    || root.channelDescriptors[i].showLabel !== next[i].showLabel
+                    || root.channelDescriptors[i].muted !== next[i].muted) {
                 return false
             }
         }
@@ -61,11 +71,15 @@ Item {
         let next = []
         if (channels && channels.length > 0) {
             const showLabels = root.uiBridge.spectrogramViewMode === 1
+            const mask = root.uiBridge.mutedChannelsMask
             for (let i = 0; i < channels.length; ++i) {
                 const labelText = (channels[i].label || "").trim()
+                const muted = (mask & (1 << i)) !== 0
                 next.push({
                     label: labelText,
-                    showLabel: showLabels && labelText.length > 0
+                    showLabel: showLabels && labelText.length > 0,
+                    muted: muted,
+                    channelIndex: i
                 })
             }
         }
@@ -155,6 +169,22 @@ Item {
         }
     }
 
+    Connections {
+        target: root.uiBridge
+        function onPlaybackChanged() {
+            if (spectrogramRepeater.count <= 0) {
+                return
+            }
+            const mask = root.uiBridge.mutedChannelsMask
+            for (let i = 0; i < spectrogramRepeater.count; ++i) {
+                const pane = spectrogramRepeater.itemAt(i)
+                if (pane && pane.spectrogramItem) {
+                    pane.spectrogramItem.channelMuted = (mask & (1 << i)) !== 0
+                }
+            }
+        }
+    }
+
     Component.onCompleted: resetForCurrentMode()
 
     ColumnLayout {
@@ -181,6 +211,7 @@ Item {
                 SpectrogramItem {
                     id: spectrogramPaneItem
                     anchors.fill: parent
+                    channelMuted: modelData.muted || false
                     maxColumns: Math.max(Math.floor(width), Screen.desktopAvailableWidth)
                     dbRange: root.uiBridge.dbRange
                     logScale: root.uiBridge.logScale
@@ -203,16 +234,32 @@ Item {
                     width: labelText.implicitWidth + 8
                     height: labelText.implicitHeight + 2
                     radius: 4
-                    color: Qt.rgba(0.0, 0.0, 0.0, 0.18)
+                    color: spectrogramPaneItem.channelMuted
+                        ? Qt.rgba(0.4, 0.0, 0.0, 0.35)
+                        : Qt.rgba(0.0, 0.0, 0.0, 0.18)
                     visible: modelData.showLabel
+                    opacity: labelMouse.containsMouse ? 1.0 : 0.85
 
                     Text {
                         id: labelText
                         anchors.centerIn: parent
                         text: modelData.label
-                        color: Qt.rgba(0.90, 0.93, 0.98, 0.74)
+                        color: spectrogramPaneItem.channelMuted
+                            ? Qt.rgba(0.65, 0.35, 0.35, 0.9)
+                            : Qt.rgba(0.90, 0.93, 0.98, 0.74)
                         font.pixelSize: 12
                         font.weight: Font.Medium
+                        font.strikeout: spectrogramPaneItem.channelMuted
+                    }
+
+                    MouseArea {
+                        id: labelMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.uiBridge.toggleChannelMute(modelData.channelIndex)
+                        }
                     }
                 }
             }
