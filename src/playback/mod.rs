@@ -808,6 +808,7 @@ mod backend {
                         PlaybackCommand::SoloChannel(ch) => {
                             let ch = ch.min(63);
                             if soloed_channel == Some(ch) {
+                                // solo_pre_mask is always Some when soloed_channel is Some.
                                 if let Some(pre) = solo_pre_mask.take() {
                                     snapshot.muted_channels_mask = pre;
                                 }
@@ -1967,7 +1968,8 @@ mod backend {
                 PlaybackCommand::SoloChannel(ch) => {
                     let ch = ch.min(63);
                     if self.soloed_channel == Some(ch) {
-                        // Un-solo: restore saved mask.
+                        // Un-solo: restore saved mask.  solo_pre_mask is always
+                        // Some when soloed_channel is Some (set on entry).
                         if let Some(pre) = self.solo_pre_mask.take() {
                             self.channel_mute_mask.store(pre, Ordering::Relaxed);
                         }
