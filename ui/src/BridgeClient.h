@@ -264,6 +264,7 @@ public:
     Q_INVOKABLE void setRepeatMode(int mode);
     Q_INVOKABLE void setShuffleEnabled(bool value);
     Q_INVOKABLE void toggleChannelMute(int channelIndex);
+    Q_INVOKABLE void soloChannel(int channelIndex);
     Q_INVOKABLE void setShowFps(bool value);
     Q_INVOKABLE void setShowSpectrogramCrosshair(bool value);
     Q_INVOKABLE void setShowSpectrogramScale(bool value);

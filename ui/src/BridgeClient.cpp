@@ -2463,6 +2463,15 @@ void BridgeClient::toggleChannelMute(int channelIndex) {
         static_cast<quint8>(channelIndex)));
 }
 
+void BridgeClient::soloChannel(int channelIndex) {
+    if (channelIndex < 0 || channelIndex > 63) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSoloChannel,
+        static_cast<quint8>(channelIndex)));
+}
+
 void BridgeClient::setShowFps(bool value) {
     if (m_showFps != value) {
         m_showFps = value;

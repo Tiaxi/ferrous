@@ -79,6 +79,7 @@ enum CommandId : quint16 {
     CmdSetSpectrogramCrosshair = 51,
     CmdSetSpectrogramScale = 52,
     CmdToggleChannelMute = 53,
+    CmdSoloChannel = 54,
 };
 
 struct DecodedPlayback {
