@@ -2086,6 +2086,10 @@ bool BridgeClient::shuffleEnabled() const {
     return m_shuffleEnabled;
 }
 
+quint64 BridgeClient::mutedChannelsMask() const {
+    return m_mutedChannelsMask;
+}
+
 bool BridgeClient::showFps() const {
     return m_showFps;
 }
@@ -2448,6 +2452,15 @@ void BridgeClient::setShuffleEnabled(bool value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetShuffle,
         static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::toggleChannelMute(int channelIndex) {
+    if (channelIndex < 0 || channelIndex > 63) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdToggleChannelMute,
+        static_cast<quint8>(channelIndex)));
 }
 
 void BridgeClient::setShowFps(bool value) {
@@ -4489,6 +4502,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_shuffleEnabled = shuffleEnabled;
         changed = true;
         snapshotSignalChanged = true;
+    }
+
+    // Uses playbackSignalChanged (not snapshotSignalChanged like shuffleEnabled)
+    // because the QML imperative mute sync handler connects to onPlaybackChanged.
+    const quint64 mutedMask = snapshot.playback.present
+        ? snapshot.playback.mutedChannelsMask
+        : m_mutedChannelsMask;
+    if (m_mutedChannelsMask != mutedMask) {
+        m_mutedChannelsMask = mutedMask;
+        changed = true;
+        playbackSignalChanged = true;
     }
 
     const double settingsVolume = snapshot.settings.present
