@@ -257,8 +257,21 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+
+                        Timer {
+                            id: clickTimer
+                            interval: 250
+                            onTriggered: {
+                                root.uiBridge.toggleChannelMute(modelData.channelIndex)
+                            }
+                        }
+
                         onClicked: {
-                            root.uiBridge.toggleChannelMute(modelData.channelIndex)
+                            clickTimer.restart()
+                        }
+                        onDoubleClicked: {
+                            clickTimer.stop()
+                            root.uiBridge.soloChannel(modelData.channelIndex)
                         }
                     }
                 }
