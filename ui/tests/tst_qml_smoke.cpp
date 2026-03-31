@@ -552,6 +552,7 @@ Item {
         property int lastFmPendingScrobbleCount: 0
         property string lastFmUsername: ""
         property bool systemMediaControlsEnabled: true
+        property var mutedChannelsMask: 0
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property int sampleRateHz: 48000
@@ -564,7 +565,9 @@ Item {
         signal trackIdentityChanged()
         signal trackMetadataChanged()
         signal snapshotChanged()
+        signal playbackChanged()
         function setVolume(value) {}
+        function toggleChannelMute(channelIndex) {}
         function setLibrarySortMode(mode) {}
         function rescanAllLibraryRoots() {}
         function openInFileBrowser(path) {}

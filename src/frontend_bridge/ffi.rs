@@ -3001,9 +3001,8 @@ mod tests {
         let mut offset = 12;
         if section_mask & 1 != 0 {
             // Playback section present — parse field-by-field in encoding order.
-            let section_len = u32::from_le_bytes(
-                data[offset..offset + 4].try_into().unwrap(),
-            ) as usize;
+            let section_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
             let s = &data[offset..offset + section_len];
             let mut p = 0;
@@ -3014,13 +3013,9 @@ mod tests {
             p += 1; // u8   repeat_mode
             p += 1; // u8   shuffle
             p += 4; // i32  queue_index
-            let path_len = u16::from_le_bytes(
-                s[p..p + 2].try_into().unwrap(),
-            ) as usize;
+            let path_len = u16::from_le_bytes(s[p..p + 2].try_into().unwrap()) as usize;
             p += 2 + path_len; // skip path bytes
-            let mask = u64::from_le_bytes(
-                s[p..p + 8].try_into().unwrap(),
-            );
+            let mask = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
             return DecodedSnapshotForTest {
                 playback_muted_channels_mask: mask,
             };

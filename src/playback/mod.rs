@@ -2029,7 +2029,7 @@ mod backend {
             analysis_tx.clone(),
             pcm_tx,
             Arc::clone(&analysis_track_token),
-            Arc::clone(&channel_mute_mask),
+            &channel_mute_mask,
         )?;
         playbin.set_property("audio-sink", &analysis_sink);
 
@@ -2576,7 +2576,67 @@ mod backend {
         vec![SpectrogramChannelLabel::Mono]
     }
 
-    /// Returns the number of bytes per sample for a GStreamer audio format
+    /// Installs a buffer probe on `capsfilter`'s src pad that zeroes samples
+    /// for muted channels.  Placed after `audioconvert` + `audioresample` so
+    /// the format is fully negotiated.
+    fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc<AtomicU64>) {
+        let Some(src_pad) = capsfilter.static_pad("src") else {
+            return;
+        };
+        let mute_mask = Arc::clone(channel_mute_mask);
+        src_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let mask = mute_mask.load(Ordering::Relaxed);
+            if mask == 0 {
+                return gst::PadProbeReturn::Ok;
+            }
+            let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(caps) = pad.current_caps() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(structure) = caps.structure(0) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            // Only process interleaved audio.  Planar layouts have a
+            // different memory arrangement; skip gracefully (no common
+            // audio sink negotiates planar).
+            let layout: &str = structure.get::<&str>("layout").unwrap_or("interleaved");
+            if layout != "interleaved" {
+                return gst::PadProbeReturn::Ok;
+            }
+            let channels: i32 = structure.get("channels").unwrap_or(1);
+            if channels <= 0 {
+                return gst::PadProbeReturn::Ok;
+            }
+            let format_str: &str = structure.get::<&str>("format").unwrap_or("S16LE");
+            let bps = gst_audio_format_bytes_per_sample(format_str);
+            if bps == 0 {
+                return gst::PadProbeReturn::Ok;
+            }
+            // channels is guaranteed positive by the check above.
+            let num_channels = channels.cast_unsigned() as usize;
+            let frame_size = num_channels * bps;
+            let buffer = buffer.make_mut();
+            if let Ok(mut map) = buffer.map_writable() {
+                let data = map.as_mut_slice();
+                for frame in data.chunks_exact_mut(frame_size) {
+                    for ch in 0..num_channels {
+                        if mask & (1u64 << ch) != 0 {
+                            let start = ch * bps;
+                            let end = start + bps;
+                            if end <= frame.len() {
+                                frame[start..end].fill(0);
+                            }
+                        }
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
+    /// Returns the number of bytes per sample for a `GStreamer` audio format
     /// string (e.g. "F32LE" → 4, "S16LE" → 2).  Returns 0 for unknown
     /// formats.
     fn gst_audio_format_bytes_per_sample(format: &str) -> usize {
@@ -2685,7 +2745,7 @@ mod backend {
         analysis_tx: Sender<AnalysisCommand>,
         pcm_tx: Sender<AnalysisPcmChunk>,
         track_token: Arc<AtomicU64>,
-        channel_mute_mask: Arc<AtomicU64>,
+        channel_mute_mask: &Arc<AtomicU64>,
     ) -> anyhow::Result<gst::Bin> {
         let bin = gst::Bin::new();
         let raw_audio_caps = build_raw_audio_caps();
@@ -2777,60 +2837,7 @@ mod backend {
         // Channel-mute probe: zeroes samples for muted channels in the output
         // branch.  The analysis branch is unaffected — spectrograms show all
         // channels regardless of mute state.
-        //
-        // Placed on output_capsfilter's src pad (after audioconvert +
-        // audioresample) so the format is fully negotiated.
-        if let Some(src_pad) = output_capsfilter.static_pad("src") {
-            let mute_mask = Arc::clone(&channel_mute_mask);
-            src_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-                let mask = mute_mask.load(Ordering::Relaxed);
-                if mask == 0 {
-                    return gst::PadProbeReturn::Ok;
-                }
-                let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data else {
-                    return gst::PadProbeReturn::Ok;
-                };
-                let Some(caps) = pad.current_caps() else {
-                    return gst::PadProbeReturn::Ok;
-                };
-                let Some(structure) = caps.structure(0) else {
-                    return gst::PadProbeReturn::Ok;
-                };
-                // Only process interleaved audio.  Planar layouts have a
-                // different memory arrangement; skip gracefully (no common
-                // audio sink negotiates planar).
-                let layout: &str = structure.get::<&str>("layout").unwrap_or("interleaved");
-                if layout != "interleaved" {
-                    return gst::PadProbeReturn::Ok;
-                }
-                let channels: i32 = structure.get("channels").unwrap_or(1);
-                if channels <= 0 {
-                    return gst::PadProbeReturn::Ok;
-                }
-                let format_str: &str = structure.get::<&str>("format").unwrap_or("S16LE");
-                let bps = gst_audio_format_bytes_per_sample(format_str);
-                if bps == 0 {
-                    return gst::PadProbeReturn::Ok;
-                }
-                let frame_size = channels as usize * bps;
-                let buffer = buffer.make_mut();
-                if let Ok(mut map) = buffer.map_writable() {
-                    let data = map.as_mut_slice();
-                    for frame in data.chunks_exact_mut(frame_size) {
-                        for ch in 0..channels as usize {
-                            if mask & (1u64 << ch) != 0 {
-                                let start = ch * bps;
-                                let end = start + bps;
-                                if end <= frame.len() {
-                                    frame[start..end].fill(0);
-                                }
-                            }
-                        }
-                    }
-                }
-                gst::PadProbeReturn::Ok
-            });
-        }
+        install_channel_mute_probe(&output_capsfilter, &channel_mute_mask);
         gst::Element::link_many([
             &queue_tap,
             &conv,
