@@ -374,6 +374,7 @@ private slots:
     void artistPrefixSearchUsesModelLookup();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
+    void testMutedChannelRendersGrayscale();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
@@ -2806,6 +2807,43 @@ void QmlSmokeTest::spectrogramOverlayStalenessDetectsDisplayRangeChange() {
 
     QCOMPARE(item.m_crosshairCachedDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_timeGridRenderDisplayLeft, static_cast<qint64>(0));
+}
+
+void QmlSmokeTest::testMutedChannelRendersGrayscale()
+{
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    // Palette is built in the constructor.  Verify that the color palette
+    // has colored entries and the gray palette has grayscale entries at
+    // the same index (a mid-intensity entry, not the near-black tail).
+    constexpr int midIndex = SpectrogramItem::kGradientTableSize / 4;
+    const QRgb colorEntry = item.m_palette32[midIndex];
+    const QRgb grayEntry = item.m_palette32Gray[midIndex];
+
+    // Color palette entry should have differing R/G/B channels.
+    const int cr = qRed(colorEntry), cg = qGreen(colorEntry), cb = qBlue(colorEntry);
+    QVERIFY2(!(cr == cg && cg == cb),
+             qPrintable(QStringLiteral("Color palette entry at %1 should not be grayscale: R=%2 G=%3 B=%4")
+                            .arg(midIndex).arg(cr).arg(cg).arg(cb)));
+
+    // Gray palette entry should have equal R/G/B channels.
+    const int gr = qRed(grayEntry), gg = qGreen(grayEntry), gb = qBlue(grayEntry);
+    QVERIFY2(gr == gg && gg == gb,
+             qPrintable(QStringLiteral("Gray palette entry at %1 should be grayscale: R=%2 G=%3 B=%4")
+                            .arg(midIndex).arg(gr).arg(gg).arg(gb)));
+
+    // channelMuted property defaults to false and round-trips.
+    QCOMPARE(item.channelMuted(), false);
+    item.setChannelMuted(true);
+    QCOMPARE(item.channelMuted(), true);
+    // Setting the same value again should not re-emit.
+    QSignalSpy spy(&item, &SpectrogramItem::channelMutedChanged);
+    item.setChannelMuted(true);
+    QCOMPARE(spy.count(), 0);
+    item.setChannelMuted(false);
+    QCOMPARE(spy.count(), 1);
 }
 
 int main(int argc, char **argv) {
