@@ -222,51 +222,105 @@ Item {
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                 }
 
-                Rectangle {
+                // Pane-level hover detection for M/S button visibility.
+                // HoverHandler is Qt 6-idiomatic and doesn't interfere with
+                // SpectrogramItem's C++ hoverMoveEvent for crosshair overlay.
+                HoverHandler {
+                    id: paneHover
+                }
+
+                Row {
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.margins: 8
-                    width: labelText.implicitWidth + 8
-                    height: labelText.implicitHeight + 2
-                    radius: 4
-                    color: spectrogramPaneItem.channelMuted
-                        ? Qt.rgba(0.4, 0.0, 0.0, 0.35)
-                        : Qt.rgba(0.0, 0.0, 0.0, 0.18)
+                    spacing: 4
                     visible: modelData.showLabel
-                    opacity: labelMouse.containsMouse ? 1.0 : 0.85
 
-                    Text {
-                        id: labelText
-                        anchors.centerIn: parent
-                        text: modelData.label
+                    // Channel label (always visible).
+                    Rectangle {
+                        width: labelText.implicitWidth + 8
+                        height: labelText.implicitHeight + 2
+                        radius: 4
                         color: spectrogramPaneItem.channelMuted
-                            ? Qt.rgba(0.65, 0.35, 0.35, 0.9)
-                            : Qt.rgba(0.90, 0.93, 0.98, 0.74)
-                        font.pixelSize: 12
-                        font.weight: Font.Medium
-                        font.strikeout: spectrogramPaneItem.channelMuted
+                            ? Qt.rgba(0.4, 0.0, 0.0, 0.35)
+                            : Qt.rgba(0.0, 0.0, 0.0, 0.18)
+
+                        Text {
+                            id: labelText
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: spectrogramPaneItem.channelMuted
+                                ? Qt.rgba(0.65, 0.35, 0.35, 0.9)
+                                : Qt.rgba(0.90, 0.93, 0.98, 0.74)
+                            font.pixelSize: 12
+                            font.weight: Font.Medium
+                            font.strikeout: spectrogramPaneItem.channelMuted
+                        }
                     }
 
-                    MouseArea {
-                        id: labelMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
+                    // M (mute) button.
+                    Rectangle {
+                        property bool active: spectrogramPaneItem.channelMuted
+                        visible: {
+                            const vis = root.uiBridge.channelButtonsVisibility
+                            return vis === 2 || (vis === 1 && paneHover.hovered)
+                        }
+                        width: muteText.implicitWidth + 10
+                        height: muteText.implicitHeight + 2
+                        radius: 3
+                        color: active
+                            ? Qt.rgba(0.78, 0.24, 0.24, 0.5)
+                            : Qt.rgba(0.0, 0.0, 0.0, 0.35)
 
-                        Timer {
-                            id: clickTimer
-                            interval: 150
-                            onTriggered: {
-                                root.uiBridge.toggleChannelMute(modelData.channelIndex)
-                            }
+                        Text {
+                            id: muteText
+                            anchors.centerIn: parent
+                            text: "M"
+                            color: parent.active
+                                ? Qt.rgba(1.0, 0.78, 0.78, 0.95)
+                                : Qt.rgba(0.71, 0.71, 0.78, 0.8)
+                            font.pixelSize: 10
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 0.5
                         }
 
-                        onClicked: {
-                            clickTimer.restart()
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.uiBridge.toggleChannelMute(modelData.channelIndex)
                         }
-                        onDoubleClicked: {
-                            clickTimer.stop()
-                            root.uiBridge.soloChannel(modelData.channelIndex)
+                    }
+
+                    // S (solo) button.
+                    Rectangle {
+                        property bool active: root.uiBridge.soloedChannel === modelData.channelIndex
+                        visible: {
+                            const vis = root.uiBridge.channelButtonsVisibility
+                            return vis === 2 || (vis === 1 && paneHover.hovered)
+                        }
+                        width: soloText.implicitWidth + 10
+                        height: soloText.implicitHeight + 2
+                        radius: 3
+                        color: active
+                            ? Qt.rgba(0.71, 0.63, 0.16, 0.55)
+                            : Qt.rgba(0.0, 0.0, 0.0, 0.35)
+
+                        Text {
+                            id: soloText
+                            anchors.centerIn: parent
+                            text: "S"
+                            color: parent.active
+                                ? Qt.rgba(1.0, 0.94, 0.55, 0.95)
+                                : Qt.rgba(0.71, 0.71, 0.78, 0.8)
+                            font.pixelSize: 10
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 0.5
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.uiBridge.soloChannel(modelData.channelIndex)
                         }
                     }
                 }

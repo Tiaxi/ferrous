@@ -530,6 +530,8 @@ Item {
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
+        property int soloedChannel: -1
+        property int channelButtonsVisibility: 1
         property int viewerFullscreenMode: 0
         property int libraryArtistCount: 0
         property int libraryAlbumCount: 0
@@ -570,6 +572,7 @@ Item {
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
         function isChannelMuted(channelIndex) { return false }
+        function setChannelButtonsVisibility(value) {}
         function setLibrarySortMode(mode) {}
         function rescanAllLibraryRoots() {}
         function openInFileBrowser(path) {}

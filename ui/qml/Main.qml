@@ -199,6 +199,8 @@ Kirigami.ApplicationWindow {
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
+        property int soloedChannel: -1
+        property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
         property bool lastFmScrobblingEnabled: false
         property bool lastFmBuildConfigured: false
@@ -323,6 +325,7 @@ Kirigami.ApplicationWindow {
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
         function isChannelMuted(channelIndex) { return false }
+        function setChannelButtonsVisibility(value) {}
     }
 
     QtObject {
