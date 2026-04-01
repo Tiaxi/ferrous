@@ -2238,6 +2238,10 @@ quint32 BridgeClient::globalSearchSeq() const {
     return m_globalSearchSeq;
 }
 
+bool BridgeClient::globalSearchModelRetained() const {
+    return m_globalSearchModelRetained;
+}
+
 QObject *BridgeClient::globalSearchModel() const {
     return const_cast<GlobalSearchResultsModel *>(&m_globalSearchModel);
 }
@@ -2901,6 +2905,7 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
     m_pendingGlobalSearchQuery = nextQuery;
 
     if (nextQuery.trimmed().isEmpty()) {
+        m_globalSearchModel.cancelBatchedInsertion();
         bool changed = false;
         if (m_publishLegacySearchLists) {
             if (!m_globalSearchArtistResults.isEmpty()) {
@@ -2923,11 +2928,13 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
             m_globalSearchTrackCount = 0;
             changed = true;
         }
-        if (m_globalSearchModel.rowCount() > 0
-            || m_searchModelApplyTimer.isActive()) {
+        if (m_searchModelApplyTimer.isActive()) {
             m_searchModelApplyTimer.stop();
             m_deferredSearchDisplayRows.clear();
-            m_globalSearchModel.replaceRows({});
+            changed = true;
+        }
+        if (m_globalSearchModel.rowCount() > 0 && !m_globalSearchModelRetained) {
+            m_globalSearchModelRetained = true;
             changed = true;
         }
         if (changed) {
@@ -3761,6 +3768,9 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     m_globalSearchArtistCount = artistCount;
     m_globalSearchAlbumCount = albumCount;
     m_globalSearchTrackCount = trackCount;
+    if (m_globalSearchModelRetained) {
+        m_globalSearchModelRetained = false;
+    }
     if (m_publishLegacySearchLists) {
         m_globalSearchArtistResults = std::move(frame.artistRows);
         m_globalSearchAlbumResults = std::move(frame.albumRows);
@@ -3820,7 +3830,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
 }
 
 void BridgeClient::applyDeferredSearchDisplayRows() {
-    m_globalSearchModel.replaceRows(std::move(m_deferredSearchDisplayRows));
+    m_globalSearchModel.replaceRowsBatched(std::move(m_deferredSearchDisplayRows));
 }
 
 void BridgeClient::flushGlobalSearchQuery() {

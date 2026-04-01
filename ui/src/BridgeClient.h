@@ -154,6 +154,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int globalSearchAlbumCount READ globalSearchAlbumCount NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(int globalSearchTrackCount READ globalSearchTrackCount NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(quint32 globalSearchSeq READ globalSearchSeq NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(bool globalSearchModelRetained READ globalSearchModelRetained NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QObject* globalSearchModel READ globalSearchModel CONSTANT)
     Q_PROPERTY(QVariantList itunesArtworkResults READ itunesArtworkResults NOTIFY itunesArtworkChanged)
     Q_PROPERTY(bool itunesArtworkLoading READ itunesArtworkLoading NOTIFY itunesArtworkChanged)
@@ -243,6 +244,7 @@ public:
     int globalSearchAlbumCount() const;
     int globalSearchTrackCount() const;
     quint32 globalSearchSeq() const;
+    bool globalSearchModelRetained() const;
     QObject *globalSearchModel() const;
     QVariantList itunesArtworkResults() const;
     bool itunesArtworkLoading() const;
@@ -586,6 +588,7 @@ private:
     int m_globalSearchAlbumCount{0};
     int m_globalSearchTrackCount{0};
     quint32 m_globalSearchSeq{0};
+    bool m_globalSearchModelRetained{false};
     GlobalSearchResultsModel m_globalSearchModel;
     quint32 m_nextGlobalSearchSeq{1};
     quint32 m_latestGlobalSearchSeqSent{0};
