@@ -1270,6 +1270,10 @@ fn parse_settings_command(
         }),
         51 => BridgeSettingsCommand::SetShowSpectrogramCrosshair(reader.read_u8()? != 0),
         52 => BridgeSettingsCommand::SetShowSpectrogramScale(reader.read_u8()? != 0),
+        55 => {
+            let v = reader.read_u8()?.min(2);
+            BridgeSettingsCommand::SetChannelButtonsVisibility(v)
+        }
         40 => BridgeSettingsCommand::SetLastFmScrobblingEnabled(reader.read_u8()? != 0),
         41 => BridgeSettingsCommand::BeginLastFmAuth,
         42 => BridgeSettingsCommand::CompleteLastFmAuth,
@@ -1487,6 +1491,10 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_i32(&mut out, current_queue_index);
     push_u16_string(&mut out, &current_path);
     push_u64(&mut out, snapshot.playback.muted_channels_mask);
+    push_u8(
+        &mut out,
+        snapshot.playback.soloed_channel.map_or(0xFF, |ch| ch),
+    );
     out
 }
 
@@ -1783,6 +1791,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(
         &mut out,
         u8::from(snapshot.settings.display.show_spectrogram_scale),
+    );
+    push_u8(
+        &mut out,
+        snapshot.settings.display.channel_buttons_visibility,
     );
     out
 }
@@ -2139,6 +2151,7 @@ mod tests {
                     show_fps: false,
                     show_spectrogram_crosshair: false,
                     show_spectrogram_scale: false,
+                    channel_buttons_visibility: 1,
                 },
                 library_sort_mode: LibrarySortMode::Year,
                 integrations: super::super::BridgeIntegrationSettings {
@@ -2615,13 +2628,14 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 5 bytes: system_media_controls(0), viewer_fullscreen(1),
-        // display_mode(0), show_spectrogram_crosshair(0), show_spectrogram_scale(0)
-        assert_eq!(settings.iter().rev().nth(4).copied(), Some(0)); // system_media_controls
-        assert_eq!(settings.iter().rev().nth(3).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
-        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0)); // display_mode
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(0)); // show_spectrogram_crosshair
-        assert_eq!(settings.last().copied(), Some(0)); // show_spectrogram_scale
+        // Last 6 bytes: system_media_controls(0), viewer_fullscreen(1),
+        // display_mode(0), crosshair(0), scale(0), channel_buttons_visibility(1)
+        assert_eq!(settings.iter().rev().nth(5).copied(), Some(0)); // system_media_controls
+        assert_eq!(settings.iter().rev().nth(4).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
+        assert_eq!(settings.iter().rev().nth(3).copied(), Some(0)); // display_mode
+        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0)); // crosshair
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(0)); // scale
+        assert_eq!(settings.last().copied(), Some(1)); // channel_buttons_visibility (default=1)
     }
 
     #[test]
@@ -2642,9 +2656,10 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 2 bytes should be the new overlay flags, both enabled.
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // crosshair
-        assert_eq!(settings.last().copied(), Some(1)); // scale
+        // Last 3 bytes: crosshair(1), scale(1), channel_buttons_visibility(1)
+        assert_eq!(settings.iter().rev().nth(2).copied(), Some(1)); // crosshair
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // scale
+        assert_eq!(settings.last().copied(), Some(1)); // channel_buttons_visibility (default=1)
     }
 
     #[test]
@@ -2998,13 +3013,20 @@ mod tests {
 
     struct DecodedSnapshotForTest {
         playback_muted_channels_mask: u64,
+        playback_soloed_channel: Option<u8>,
+        settings_channel_buttons_visibility: u8,
     }
 
     fn decode_binary_snapshot_for_test(data: &[u8]) -> DecodedSnapshotForTest {
+        let mut result = DecodedSnapshotForTest {
+            playback_muted_channels_mask: 0,
+            playback_soloed_channel: None,
+            settings_channel_buttons_visibility: 1,
+        };
         // Skip 12-byte header (magic 4 + total_len 4 + section_mask 2 + reserved 2).
         let section_mask = u16::from_le_bytes([data[8], data[9]]);
         let mut offset = 12;
-        if section_mask & 1 != 0 {
+        if section_mask & SECTION_PLAYBACK != 0 {
             // Playback section present — parse field-by-field in encoding order.
             let section_len =
                 u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
@@ -3020,14 +3042,44 @@ mod tests {
             p += 4; // i32  queue_index
             let path_len = u16::from_le_bytes(s[p..p + 2].try_into().unwrap()) as usize;
             p += 2 + path_len; // skip path bytes
-            let mask = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
-            return DecodedSnapshotForTest {
-                playback_muted_channels_mask: mask,
+            result.playback_muted_channels_mask =
+                u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+            p += 8;
+            let soloed_raw = s[p];
+            result.playback_soloed_channel = if soloed_raw == 0xFF {
+                None
+            } else {
+                Some(soloed_raw)
             };
+            offset += section_len;
         }
-        DecodedSnapshotForTest {
-            playback_muted_channels_mask: 0,
+        // Skip remaining sections before settings.  Sections appear in
+        // encoding order: playback (already consumed), [queue if present],
+        // library_meta, metadata — then settings.
+        let sections_before_settings: &[u16] =
+            &[SECTION_QUEUE, SECTION_LIBRARY_META, SECTION_METADATA];
+        for &bit in sections_before_settings {
+            if section_mask & bit != 0 {
+                let section_len =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4 + section_len;
+            }
         }
+        // Settings section (SECTION_SETTINGS).
+        if section_mask & SECTION_SETTINGS != 0 {
+            let section_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            let s = &data[offset..offset + section_len];
+            // Settings encoding order: volume(4) + fft_size(4) + view_mode(1)
+            // + db_range(4) + log_scale(1) + show_fps(1) + library_sort_mode(4)
+            // + system_media_controls(1) + viewer_fullscreen(1)
+            // + display_mode(1) + crosshair(1) + scale(1)
+            // + channel_buttons_visibility(1)
+            let p = 4 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 1 + 1 + 1 + 1;
+            result.settings_channel_buttons_visibility = s[p];
+        }
+        result
     }
 
     #[test]
@@ -3037,5 +3089,32 @@ mod tests {
         let encoded = encode_binary_snapshot(&snapshot, None);
         let decoded = decode_binary_snapshot_for_test(&encoded);
         assert_eq!(decoded.playback_muted_channels_mask, 0b101);
+    }
+
+    #[test]
+    fn snapshot_encodes_soloed_channel() {
+        let mut snapshot = sample_snapshot();
+        snapshot.playback.soloed_channel = Some(3);
+        let encoded = encode_binary_snapshot(&snapshot, None);
+        let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.playback_soloed_channel, Some(3));
+    }
+
+    #[test]
+    fn snapshot_encodes_soloed_channel_none() {
+        let mut snapshot = sample_snapshot();
+        snapshot.playback.soloed_channel = None;
+        let encoded = encode_binary_snapshot(&snapshot, None);
+        let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.playback_soloed_channel, None);
+    }
+
+    #[test]
+    fn snapshot_encodes_channel_buttons_visibility() {
+        let mut snapshot = sample_snapshot();
+        snapshot.settings.display.channel_buttons_visibility = 2;
+        let encoded = encode_binary_snapshot(&snapshot, None);
+        let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.settings_channel_buttons_visibility, 2);
     }
 }

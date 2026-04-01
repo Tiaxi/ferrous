@@ -5284,8 +5284,8 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                 }
             }
             "channel_buttons_visibility" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.channel_buttons_visibility = x.clamp(0, 2) as u8;
+                if let Ok(x) = value.parse::<u8>() {
+                    settings.display.channel_buttons_visibility = x.min(2);
                 }
             }
             "system_media_controls_enabled" => {
