@@ -258,8 +258,6 @@ Item {
                             root.uiBridge.toggleChannelMute(modelData.channelIndex)
                         }
                         onDoubleClicked: {
-                            // Undo the toggle from the first click, then solo.
-                            root.uiBridge.toggleChannelMute(modelData.channelIndex)
                             root.uiBridge.soloChannel(modelData.channelIndex)
                         }
                     }

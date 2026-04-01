@@ -585,6 +585,22 @@ mod tests {
         let snap3 = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap3.muted_channels_mask, expected);
     }
+
+    #[test]
+    fn toggle_soloed_channel_unsolos() {
+        let (engine, rx) = make_test_engine();
+        // Mute channel 1 first, then solo channel 0.
+        engine.command(PlaybackCommand::ToggleChannelMute(1));
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Single-click (toggle) the soloed channel — should unsolo,
+        // restoring the pre-solo mask (bit 1 set).
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 1 << 1);
+    }
 }
 
 #[cfg(not(feature = "gst"))]
@@ -801,9 +817,16 @@ mod backend {
                         }
                         PlaybackCommand::ToggleChannelMute(ch) => {
                             let ch = ch.min(63);
-                            snapshot.muted_channels_mask ^= 1u64 << ch;
-                            solo_pre_mask = None;
-                            soloed_channel = None;
+                            if soloed_channel == Some(ch) {
+                                if let Some(pre) = solo_pre_mask.take() {
+                                    snapshot.muted_channels_mask = pre;
+                                }
+                                soloed_channel = None;
+                            } else {
+                                snapshot.muted_channels_mask ^= 1u64 << ch;
+                                solo_pre_mask = None;
+                                soloed_channel = None;
+                            }
                         }
                         PlaybackCommand::SoloChannel(ch) => {
                             let ch = ch.min(63);
@@ -1956,11 +1979,19 @@ mod backend {
                 PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
                 PlaybackCommand::ToggleChannelMute(ch) => {
                     let ch = ch.min(63);
-                    let prev = self.channel_mute_mask.load(Ordering::Relaxed);
-                    self.channel_mute_mask
-                        .store(prev ^ (1u64 << ch), Ordering::Relaxed);
-                    self.solo_pre_mask = None;
-                    self.soloed_channel = None;
+                    if self.soloed_channel == Some(ch) {
+                        // Clicking the soloed channel unsolos (restores pre-mask).
+                        if let Some(pre) = self.solo_pre_mask.take() {
+                            self.channel_mute_mask.store(pre, Ordering::Relaxed);
+                        }
+                        self.soloed_channel = None;
+                    } else {
+                        let prev = self.channel_mute_mask.load(Ordering::Relaxed);
+                        self.channel_mute_mask
+                            .store(prev ^ (1u64 << ch), Ordering::Relaxed);
+                        self.solo_pre_mask = None;
+                        self.soloed_channel = None;
+                    }
                     self.snapshot.muted_channels_mask =
                         self.channel_mute_mask.load(Ordering::Relaxed);
                     self.emit_snapshot();
