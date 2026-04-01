@@ -6801,6 +6801,12 @@ mod tests {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        // The playback engine may emit its initial snapshot after a small
+        // delay (thread scheduling).  Drain twice with a brief gap so the
+        // initial playback snapshot does not arrive *during* handle_wake
+        // and overwrite the manually-set state below.
+        let _ = runtime.drain_pending_updates(&event_tx);
+        std::thread::sleep(Duration::from_millis(5));
         let _ = runtime.drain_pending_updates(&event_tx);
         runtime.flags.pending_snapshot = SnapshotUrgency::None;
         while event_rx.try_recv().is_ok() {}

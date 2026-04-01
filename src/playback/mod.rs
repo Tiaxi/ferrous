@@ -1354,6 +1354,10 @@ mod backend {
             }
         }
 
+        // All arguments are distinct shared-state handles passed from the
+        // pipeline builder — grouping them would add indirection without
+        // reducing real complexity.
+        #[allow(clippy::too_many_arguments)]
         fn new(
             playbin: gst::Element,
             queue_state: Arc<Mutex<GaplessQueue>>,
@@ -3164,7 +3168,7 @@ mod backend {
         // Channel-mute probe: zeroes samples for muted channels in the output
         // branch.  The analysis branch is unaffected — spectrograms show all
         // channels regardless of mute state.
-        install_channel_mute_probe(&output_capsfilter, &channel_mute_mask);
+        install_channel_mute_probe(&output_capsfilter, channel_mute_mask);
         gst::Element::link_many([
             &queue_tap,
             &conv,
