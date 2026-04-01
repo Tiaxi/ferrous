@@ -638,6 +638,28 @@ mod tests {
         assert_eq!(snap.muted_channels_mask, 0);
         assert_eq!(snap.soloed_channel, None);
     }
+
+    #[test]
+    fn play_pause_preserves_mute_and_solo() {
+        let (engine, rx) = make_test_engine();
+        let a = PathBuf::from("/tmp/a.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a]));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 2.
+        engine.command(PlaybackCommand::SoloChannel(2));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.soloed_channel, Some(2));
+        assert_ne!(snap.muted_channels_mask, 0);
+        // Pause and resume — mute/solo must survive.
+        engine.command(PlaybackCommand::Pause);
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.soloed_channel, Some(2));
+        assert_ne!(snap.muted_channels_mask, 0);
+    }
 }
 
 #[cfg(not(feature = "gst"))]
@@ -1434,7 +1456,9 @@ mod backend {
                 return;
             };
             let track_token = self.advance_track_token();
-            self.reset_channel_mute_state();
+            if matches!(kind, TrackChangeKind::Manual) {
+                self.reset_channel_mute_state();
+            }
             self.snapshot.current_queue_index = Some(queue_index);
             self.switch_track(path.as_path(), &uri, force_play);
             self.buffering_active = false;

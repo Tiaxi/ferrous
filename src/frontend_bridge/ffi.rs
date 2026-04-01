@@ -2371,6 +2371,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_set_channel_buttons_visibility_command() {
+        let cmd = parse_binary_command(&encode_command(55, &[2]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetChannelButtonsVisibility(2))
+        ));
+    }
+
+    #[test]
+    fn parse_set_channel_buttons_visibility_clamps_to_max() {
+        let cmd = parse_binary_command(&encode_command(55, &[99]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetChannelButtonsVisibility(2))
+        ));
+    }
+
+    #[test]
     fn parse_binary_command_supports_library_batch_commands() {
         let mut payload = Vec::new();
         let first = b"/music/a.flac";

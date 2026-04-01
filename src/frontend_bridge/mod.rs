@@ -5748,6 +5748,18 @@ mod tests {
     }
 
     #[test]
+    fn channel_buttons_visibility_clamps_out_of_range() {
+        let mut settings = BridgeSettings::default();
+        // Parse an out-of-range value — should clamp to 2.
+        parse_settings_text(&mut settings, "channel_buttons_visibility=99\n");
+        assert_eq!(settings.display.channel_buttons_visibility, 2);
+        // Parse a negative string — u8 parse fails, default stays.
+        let mut settings2 = BridgeSettings::default();
+        parse_settings_text(&mut settings2, "channel_buttons_visibility=-1\n");
+        assert_eq!(settings2.display.channel_buttons_visibility, 1); // default
+    }
+
+    #[test]
     fn session_roundtrip_text_format() {
         let session = SessionSnapshot {
             queue: vec![p("/a.flac"), p("/b.flac")],
