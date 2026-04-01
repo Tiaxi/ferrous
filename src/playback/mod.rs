@@ -47,6 +47,7 @@ pub struct PlaybackSnapshot {
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
     pub muted_channels_mask: u64,
+    pub soloed_channel: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -827,6 +828,7 @@ mod backend {
                                 solo_pre_mask = None;
                                 soloed_channel = None;
                             }
+                            snapshot.soloed_channel = soloed_channel;
                         }
                         PlaybackCommand::SoloChannel(ch) => {
                             let ch = ch.min(63);
@@ -843,6 +845,7 @@ mod backend {
                                 snapshot.muted_channels_mask = u64::MAX ^ (1u64 << ch);
                                 soloed_channel = Some(ch);
                             }
+                            snapshot.soloed_channel = soloed_channel;
                         }
                         PlaybackCommand::Poll => {
                             if snapshot.state == PlaybackState::Playing {
@@ -1994,6 +1997,7 @@ mod backend {
                     }
                     self.snapshot.muted_channels_mask =
                         self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.snapshot.soloed_channel = self.soloed_channel;
                     self.emit_snapshot();
                 }
                 PlaybackCommand::SoloChannel(ch) => {
@@ -2017,6 +2021,7 @@ mod backend {
                     }
                     self.snapshot.muted_channels_mask =
                         self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.snapshot.soloed_channel = self.soloed_channel;
                     self.emit_snapshot();
                 }
                 PlaybackCommand::Poll => self.poll(),
