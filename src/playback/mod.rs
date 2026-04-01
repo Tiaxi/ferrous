@@ -2742,10 +2742,11 @@ mod backend {
     /// muted channels.  Placed after `audioconvert` + `audioresample` so
     /// the format is fully negotiated.
     ///
-    /// Muted samples are set to 1 LSB (integer formats) or a tiny float
-    /// (~1.4e-45) rather than hard zero.  Pure digital zero triggers the
-    /// auto-mute circuit on ESS Sabre DACs (e.g. Topping DX3 Pro+) after
-    /// ~10 seconds of sustained silence, killing the analog output.
+    /// Muted samples are replaced with inaudible low-level noise rather
+    /// than hard zero.  Sustained digital silence triggers the auto-mute
+    /// circuit on ESS Sabre DACs (e.g. Topping DX3 Pro+) after ~10 s,
+    /// killing the analog output.  The alternating ±1-LSB pattern keeps
+    /// the detector seeing AC energy without producing audible sound.
     fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc<AtomicU64>) {
         let Some(src_pad) = capsfilter.static_pad("src") else {
             return;
@@ -2781,20 +2782,41 @@ mod backend {
             if bps == 0 {
                 return gst::PadProbeReturn::Ok;
             }
-            let mute_fill = MUTE_FILL_BYTE;
+            let is_float = matches!(format_str, "F32LE" | "F32BE" | "F64LE" | "F64BE");
+            let is_big_endian = matches!(
+                format_str,
+                "S16BE"
+                    | "U16BE"
+                    | "S24BE"
+                    | "U24BE"
+                    | "S24_32BE"
+                    | "U24_32BE"
+                    | "S32BE"
+                    | "U32BE"
+                    | "F32BE"
+                    | "F64BE"
+            );
             // channels is guaranteed positive by the check above.
             let num_channels = channels.cast_unsigned() as usize;
             let frame_size = num_channels * bps;
             let buffer = buffer.make_mut();
             if let Ok(mut map) = buffer.map_writable() {
                 let data = map.as_mut_slice();
+                let mut toggle = false;
                 for frame in data.chunks_exact_mut(frame_size) {
+                    toggle = !toggle;
                     for ch in 0..num_channels {
                         if mask & (1u64 << ch) != 0 {
                             let start = ch * bps;
                             let end = start + bps;
                             if end <= frame.len() {
-                                frame[start..end].fill(mute_fill);
+                                write_mute_sample(
+                                    &mut frame[start..end],
+                                    bps,
+                                    is_float,
+                                    is_big_endian,
+                                    toggle,
+                                );
                             }
                         }
                     }
@@ -2804,13 +2826,50 @@ mod backend {
         });
     }
 
-    /// Byte used to fill muted samples.  For integer formats `0x01` in the
-    /// least-significant byte gives 1 LSB (−90 to −186 dB depending on bit
-    /// depth).  For float formats the same byte pattern produces a
-    /// denormalized value (~1.4e-45 for F32LE).  Both are completely
-    /// inaudible but prevent DAC auto-mute circuits from engaging on
-    /// sustained digital silence.
-    const MUTE_FILL_BYTE: u8 = 0x01;
+    /// Write an inaudible sample that alternates polarity each frame,
+    /// producing a ~24 kHz square wave at ±1 LSB (integer) or ±1e-20
+    /// (float).  The AC energy prevents DAC auto-mute from engaging.
+    fn write_mute_sample(
+        dst: &mut [u8],
+        bps: usize,
+        is_float: bool,
+        is_big_endian: bool,
+        positive: bool,
+    ) {
+        dst.fill(0);
+        if is_float {
+            // ±1e-20: ~−400 dB, well below any audible threshold.
+            if bps == 4 {
+                let val: f32 = if positive { 1e-20 } else { -1e-20 };
+                let bytes = if is_big_endian {
+                    val.to_be_bytes()
+                } else {
+                    val.to_le_bytes()
+                };
+                dst[..4].copy_from_slice(&bytes);
+            } else {
+                let val: f64 = if positive { 1e-20 } else { -1e-20 };
+                let bytes = if is_big_endian {
+                    val.to_be_bytes()
+                } else {
+                    val.to_le_bytes()
+                };
+                dst[..8].copy_from_slice(&bytes);
+            }
+        } else {
+            // Integer: ±1 LSB.  Two's complement: +1 = 0x01 in LSB,
+            // −1 = 0xFF in all bytes (sign-extended).
+            if positive {
+                if is_big_endian {
+                    dst[bps - 1] = 0x01;
+                } else {
+                    dst[0] = 0x01;
+                }
+            } else {
+                dst.fill(0xFF);
+            }
+        }
+    }
 
     /// Returns the number of bytes per sample for a `GStreamer` audio format
     /// string (e.g. "F32LE" → 4, "S16LE" → 2).  Returns 0 for unknown
