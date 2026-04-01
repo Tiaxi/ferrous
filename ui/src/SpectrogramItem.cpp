@@ -1567,14 +1567,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || static_cast<qint64>(visibleCols) > m_canvas.width());
 
             if (visibleCols > 0) {
-                if (needsFullRebuild) {
+                if (needsFullRebuild || m_precomputedCanvasDirty) {
                     rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
                 } else if (rangeChanged) {
                     if (!advancePrecomputedCanvasLocked(displayLeft, displayRight, rollingMode)) {
                         rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
                     }
-                } else if (m_precomputedCanvasDirty) {
-                    rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
                 }
                 m_precomputedLastRightCol = nowCol;
                 m_precomputedLastDisplaySeq = rollingMode
