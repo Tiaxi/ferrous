@@ -2090,6 +2090,14 @@ quint64 BridgeClient::mutedChannelsMask() const {
     return m_mutedChannelsMask;
 }
 
+int BridgeClient::soloedChannel() const {
+    return m_soloedChannel;
+}
+
+int BridgeClient::channelButtonsVisibility() const {
+    return m_channelButtonsVisibility;
+}
+
 bool BridgeClient::showFps() const {
     return m_showFps;
 }
@@ -2470,6 +2478,17 @@ void BridgeClient::soloChannel(int channelIndex) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSoloChannel,
         static_cast<quint8>(channelIndex)));
+}
+
+void BridgeClient::setChannelButtonsVisibility(int value) {
+    const int clamped = std::clamp(value, 0, 2);
+    if (m_channelButtonsVisibility != clamped) {
+        m_channelButtonsVisibility = clamped;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetChannelButtonsVisibility,
+        static_cast<quint8>(clamped)));
 }
 
 bool BridgeClient::isChannelMuted(int channelIndex) const {
@@ -4531,6 +4550,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         playbackSignalChanged = true;
     }
 
+    const int soloedChannel = snapshot.playback.present
+        ? snapshot.playback.soloedChannel
+        : m_soloedChannel;
+    if (m_soloedChannel != soloedChannel) {
+        m_soloedChannel = soloedChannel;
+        changed = true;
+        playbackSignalChanged = true;
+    }
+
     const double settingsVolume = snapshot.settings.present
         ? static_cast<double>(snapshot.settings.volume)
         : m_volume;
@@ -4922,6 +4950,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : m_showSpectrogramScale;
     if (m_showSpectrogramScale != showSpectrogramScale) {
         m_showSpectrogramScale = showSpectrogramScale;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const int channelButtonsVisibility = std::clamp(
+        snapshot.settings.present
+            ? snapshot.settings.channelButtonsVisibility
+            : m_channelButtonsVisibility,
+        0, 2);
+    if (m_channelButtonsVisibility != channelButtonsVisibility) {
+        m_channelButtonsVisibility = channelButtonsVisibility;
         changed = true;
         snapshotSignalChanged = true;
     }

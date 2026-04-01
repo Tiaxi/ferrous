@@ -80,6 +80,7 @@ enum CommandId : quint16 {
     CmdSetSpectrogramScale = 52,
     CmdToggleChannelMute = 53,
     CmdSoloChannel = 54,
+    CmdSetChannelButtonsVisibility = 55,
 };
 
 struct DecodedPlayback {
@@ -93,6 +94,7 @@ struct DecodedPlayback {
     int currentQueueIndex{-1};
     QString currentPath;
     quint64 mutedChannelsMask{0};
+    int soloedChannel{-1};
 };
 
 struct DecodedQueueTrack {
@@ -172,6 +174,7 @@ struct DecodedSettings {
     bool systemMediaControlsEnabled{true};
     bool showSpectrogramCrosshair{false};
     bool showSpectrogramScale{false};
+    int channelButtonsVisibility{1};
 };
 
 struct DecodedLastFm {

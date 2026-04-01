@@ -178,8 +178,14 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
         || !reader.readU8(&shuffleEnabled)
         || !reader.readI32(&currentQueueIndex)
         || !reader.readUtf8U16(&currentPath)
-        || !reader.readU64(&mutedMask)
-        || !reader.atEnd()) {
+        || !reader.readU64(&mutedMask)) {
+        return false;
+    }
+    quint8 soloedRaw = 0xFF;
+    if (!reader.atEnd() && !reader.readU8(&soloedRaw)) {
+        return false;
+    }
+    if (!reader.atEnd()) {
         return false;
     }
     out->present = true;
@@ -189,6 +195,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     out->currentQueueIndex = static_cast<int>(currentQueueIndex);
     out->currentPath = currentPath;
     out->mutedChannelsMask = mutedMask;
+    out->soloedChannel = (soloedRaw == 0xFF) ? -1 : static_cast<int>(soloedRaw);
     return true;
 }
 
@@ -405,6 +412,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&showSpectrogramScale)) {
         return false;
     }
+    quint8 channelButtonsVisibility = 1;
+    if (!reader.atEnd() && !reader.readU8(&channelButtonsVisibility)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -419,6 +430,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->systemMediaControlsEnabled = systemMediaControlsEnabled != 0;
     out->showSpectrogramCrosshair = showSpectrogramCrosshair != 0;
     out->showSpectrogramScale = showSpectrogramScale != 0;
+    out->channelButtonsVisibility = std::clamp(static_cast<int>(channelButtonsVisibility), 0, 2);
     return true;
 }
 
