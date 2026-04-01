@@ -47,6 +47,7 @@ pub struct PlaybackSnapshot {
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
     pub muted_channels_mask: u64,
+    pub soloed_channel: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +68,7 @@ pub enum PlaybackCommand {
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
     ToggleChannelMute(u8),
+    SoloChannel(u8),
     Poll,
 }
 
@@ -194,6 +196,12 @@ mod tests {
             }
         }
         None
+    }
+
+    fn make_test_engine() -> (PlaybackEngine, crossbeam_channel::Receiver<PlaybackEvent>) {
+        let (analysis_tx, _) = unbounded();
+        let (pcm_tx, _) = unbounded();
+        PlaybackEngine::new(analysis_tx, pcm_tx)
     }
 
     #[test]
@@ -503,6 +511,155 @@ mod tests {
         assert_eq!(snap.state, PlaybackState::Stopped);
         assert_eq!(snap.position, Duration::ZERO);
     }
+
+    #[test]
+    fn solo_channel_mutes_all_others() {
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, u64::MAX ^ (1 << 1));
+    }
+
+    #[test]
+    fn unsolo_restores_previous_mask() {
+        let (engine, rx) = make_test_engine();
+        // Mute channel 0 first.
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 2 — should save mask with bit 0 set.
+        engine.command(PlaybackCommand::SoloChannel(2));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Un-solo channel 2 — should restore: only bit 0 set.
+        engine.command(PlaybackCommand::SoloChannel(2));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 1 << 0);
+    }
+
+    #[test]
+    fn solo_switch_to_different_channel_keeps_original_pre_mask() {
+        let (engine, rx) = make_test_engine();
+        // Mute channel 3.
+        engine.command(PlaybackCommand::ToggleChannelMute(3));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 0.
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Switch solo to channel 1.
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Un-solo channel 1 — should restore original pre-mask (bit 3 set).
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 1 << 3);
+    }
+
+    #[test]
+    fn manual_toggle_clears_solo_state() {
+        let (engine, rx) = make_test_engine();
+        // Solo channel 0.
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Manual toggle channel 2 — should clear solo, XOR bit 2 into current mask.
+        engine.command(PlaybackCommand::ToggleChannelMute(2));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Mask was all-except-0; toggling bit 2 clears it.
+        let expected = (u64::MAX ^ (1 << 0)) ^ (1 << 2);
+        assert_eq!(snap.muted_channels_mask, expected);
+        // Now "solo channel 0 again" should act as a fresh solo (no restore).
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap2 = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap2.muted_channels_mask, u64::MAX ^ (1 << 0));
+        // Un-solo should restore the post-toggle mask, not the original.
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap3 = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap3.muted_channels_mask, expected);
+    }
+
+    #[test]
+    fn toggle_soloed_channel_unsolos() {
+        let (engine, rx) = make_test_engine();
+        // Mute channel 1 first, then solo channel 0.
+        engine.command(PlaybackCommand::ToggleChannelMute(1));
+        engine.command(PlaybackCommand::SoloChannel(0));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Single-click (toggle) the soloed channel — should unsolo,
+        // restoring the pre-solo mask (bit 1 set).
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 1 << 1);
+    }
+
+    #[test]
+    fn manual_track_switch_resets_mute_and_solo() {
+        let (engine, rx) = make_test_engine();
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a, b]));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 1.
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_ne!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.soloed_channel, Some(1));
+        // Switch to track B via Next.
+        engine.command(PlaybackCommand::Next);
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.soloed_channel, None);
+    }
+
+    #[test]
+    fn stop_resets_mute_and_solo() {
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_ne!(snap.muted_channels_mask, 0);
+        engine.command(PlaybackCommand::Stop);
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.soloed_channel, None);
+    }
+
+    #[test]
+    fn play_pause_preserves_mute_and_solo() {
+        let (engine, rx) = make_test_engine();
+        let a = PathBuf::from("/tmp/a.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a]));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 2.
+        engine.command(PlaybackCommand::SoloChannel(2));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.soloed_channel, Some(2));
+        assert_ne!(snap.muted_channels_mask, 0);
+        // Pause and resume — mute/solo must survive.
+        engine.command(PlaybackCommand::Pause);
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.soloed_channel, Some(2));
+        assert_ne!(snap.muted_channels_mask, 0);
+    }
 }
 
 #[cfg(not(feature = "gst"))]
@@ -535,6 +692,17 @@ mod backend {
                 let mut queue_idx = 0usize;
                 let mut last_tick = Instant::now();
                 let mut phase = 0.0f32;
+                let mut solo_pre_mask: Option<u64> = None;
+                let mut soloed_channel: Option<u8> = None;
+
+                macro_rules! reset_mute {
+                    () => {
+                        snapshot.muted_channels_mask = 0;
+                        snapshot.soloed_channel = None;
+                        solo_pre_mask = None;
+                        soloed_channel = None;
+                    };
+                }
 
                 while let Ok(cmd) = cmd_rx.recv() {
                     if snapshot.state == PlaybackState::Playing {
@@ -547,6 +715,7 @@ mod backend {
                         PlaybackCommand::LoadQueue(paths) => {
                             queue = paths;
                             queue_idx = 0;
+                            reset_mute!();
                             snapshot.position = Duration::ZERO;
                             snapshot.duration = Duration::from_secs(180);
                             snapshot.current = queue.first().cloned();
@@ -571,6 +740,7 @@ mod backend {
                         PlaybackCommand::RemoveAt(idx) => {
                             if idx < queue.len() {
                                 queue.remove(idx);
+                                reset_mute!();
                                 if queue.is_empty() {
                                     queue_idx = 0;
                                     snapshot.current = None;
@@ -621,6 +791,7 @@ mod backend {
                         PlaybackCommand::ClearQueue => {
                             queue.clear();
                             queue_idx = 0;
+                            reset_mute!();
                             snapshot.current = None;
                             snapshot.current_queue_index = None;
                             snapshot.state = PlaybackState::Stopped;
@@ -630,6 +801,7 @@ mod backend {
                         PlaybackCommand::PlayAt(idx) => {
                             if let Some(path) = queue.get(idx).cloned() {
                                 queue_idx = idx;
+                                reset_mute!();
                                 snapshot.current = Some(path.clone());
                                 snapshot.current_queue_index = Some(queue_idx);
                                 snapshot.position = Duration::ZERO;
@@ -645,6 +817,7 @@ mod backend {
                         PlaybackCommand::Next => {
                             if queue_idx + 1 < queue.len() {
                                 queue_idx += 1;
+                                reset_mute!();
                                 if let Some(next) = queue.get(queue_idx).cloned() {
                                     snapshot.current = Some(next.clone());
                                     snapshot.current_queue_index = Some(queue_idx);
@@ -665,6 +838,7 @@ mod backend {
                         PlaybackCommand::Previous => {
                             if queue_idx > 0 {
                                 queue_idx -= 1;
+                                reset_mute!();
                                 if let Some(prev) = queue.get(queue_idx).cloned() {
                                     snapshot.current = Some(prev.clone());
                                     snapshot.current_queue_index = Some(queue_idx);
@@ -696,6 +870,7 @@ mod backend {
                             }
                         }
                         PlaybackCommand::Stop => {
+                            reset_mute!();
                             snapshot.state = PlaybackState::Stopped;
                             snapshot.position = Duration::ZERO;
                             snapshot.current_queue_index = None;
@@ -717,7 +892,34 @@ mod backend {
                         }
                         PlaybackCommand::ToggleChannelMute(ch) => {
                             let ch = ch.min(63);
-                            snapshot.muted_channels_mask ^= 1u64 << ch;
+                            if soloed_channel == Some(ch) {
+                                if let Some(pre) = solo_pre_mask.take() {
+                                    snapshot.muted_channels_mask = pre;
+                                }
+                                soloed_channel = None;
+                            } else {
+                                snapshot.muted_channels_mask ^= 1u64 << ch;
+                                solo_pre_mask = None;
+                                soloed_channel = None;
+                            }
+                            snapshot.soloed_channel = soloed_channel;
+                        }
+                        PlaybackCommand::SoloChannel(ch) => {
+                            let ch = ch.min(63);
+                            if soloed_channel == Some(ch) {
+                                // solo_pre_mask is always Some when soloed_channel is Some.
+                                if let Some(pre) = solo_pre_mask.take() {
+                                    snapshot.muted_channels_mask = pre;
+                                }
+                                soloed_channel = None;
+                            } else {
+                                if soloed_channel.is_none() {
+                                    solo_pre_mask = Some(snapshot.muted_channels_mask);
+                                }
+                                snapshot.muted_channels_mask = u64::MAX ^ (1u64 << ch);
+                                soloed_channel = Some(ch);
+                            }
+                            snapshot.soloed_channel = soloed_channel;
                         }
                         PlaybackCommand::Poll => {
                             if snapshot.state == PlaybackState::Playing {
@@ -1108,6 +1310,8 @@ mod backend {
         /// the playbin.  Used by `poll()` to detect stuck state transitions.
         playing_state_requested_at: Option<Instant>,
         channel_mute_mask: Arc<AtomicU64>,
+        solo_pre_mask: Option<u64>,
+        soloed_channel: Option<u8>,
     }
 
     pub fn spawn_engine(
@@ -1150,6 +1354,10 @@ mod backend {
             }
         }
 
+        // All arguments are distinct shared-state handles passed from the
+        // pipeline builder — grouping them would add indirection without
+        // reducing real complexity.
+        #[allow(clippy::too_many_arguments)]
         fn new(
             playbin: gst::Element,
             queue_state: Arc<Mutex<GaplessQueue>>,
@@ -1182,6 +1390,8 @@ mod backend {
                 staged_continuation_active,
                 playing_state_requested_at: None,
                 channel_mute_mask,
+                solo_pre_mask: None,
+                soloed_channel: None,
             }
         }
 
@@ -1231,6 +1441,14 @@ mod backend {
             self.snapshot.shuffle_enabled = shuffle_enabled;
         }
 
+        fn reset_channel_mute_state(&mut self) {
+            self.channel_mute_mask.store(0, Ordering::Relaxed);
+            self.solo_pre_mask = None;
+            self.soloed_channel = None;
+            self.snapshot.muted_channels_mask = 0;
+            self.snapshot.soloed_channel = None;
+        }
+
         fn switch_to_path(
             &mut self,
             path: PathBuf,
@@ -1242,6 +1460,9 @@ mod backend {
                 return;
             };
             let track_token = self.advance_track_token();
+            if matches!(kind, TrackChangeKind::Manual) {
+                self.reset_channel_mute_state();
+            }
             self.snapshot.current_queue_index = Some(queue_index);
             self.switch_track(path.as_path(), &uri, force_play);
             self.buffering_active = false;
@@ -1263,6 +1484,7 @@ mod backend {
                 .store(false, Ordering::Release);
             self.pending_gapless_duration = None;
             self.clear_staged_spectrogram();
+            self.reset_channel_mute_state();
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
@@ -1486,6 +1708,7 @@ mod backend {
                 self.pending_eos_track_switch
                     .store(false, Ordering::Release);
                 self.clear_staged_spectrogram();
+                self.reset_channel_mute_state();
                 self.snapshot.state = PlaybackState::Stopped;
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
@@ -1850,11 +2073,46 @@ mod backend {
                 PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
                 PlaybackCommand::ToggleChannelMute(ch) => {
                     let ch = ch.min(63);
-                    let prev = self.channel_mute_mask.load(Ordering::Relaxed);
-                    self.channel_mute_mask
-                        .store(prev ^ (1u64 << ch), Ordering::Relaxed);
+                    if self.soloed_channel == Some(ch) {
+                        // Clicking the soloed channel unsolos (restores pre-mask).
+                        if let Some(pre) = self.solo_pre_mask.take() {
+                            self.channel_mute_mask.store(pre, Ordering::Relaxed);
+                        }
+                        self.soloed_channel = None;
+                    } else {
+                        let prev = self.channel_mute_mask.load(Ordering::Relaxed);
+                        self.channel_mute_mask
+                            .store(prev ^ (1u64 << ch), Ordering::Relaxed);
+                        self.solo_pre_mask = None;
+                        self.soloed_channel = None;
+                    }
                     self.snapshot.muted_channels_mask =
                         self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.snapshot.soloed_channel = self.soloed_channel;
+                    self.emit_snapshot();
+                }
+                PlaybackCommand::SoloChannel(ch) => {
+                    let ch = ch.min(63);
+                    if self.soloed_channel == Some(ch) {
+                        // Un-solo: restore saved mask.  solo_pre_mask is always
+                        // Some when soloed_channel is Some (set on entry).
+                        if let Some(pre) = self.solo_pre_mask.take() {
+                            self.channel_mute_mask.store(pre, Ordering::Relaxed);
+                        }
+                        self.soloed_channel = None;
+                    } else {
+                        // Solo (fresh or switching target).
+                        if self.soloed_channel.is_none() {
+                            self.solo_pre_mask =
+                                Some(self.channel_mute_mask.load(Ordering::Relaxed));
+                        }
+                        self.channel_mute_mask
+                            .store(u64::MAX ^ (1u64 << ch), Ordering::Relaxed);
+                        self.soloed_channel = Some(ch);
+                    }
+                    self.snapshot.muted_channels_mask =
+                        self.channel_mute_mask.load(Ordering::Relaxed);
+                    self.snapshot.soloed_channel = self.soloed_channel;
                     self.emit_snapshot();
                 }
                 PlaybackCommand::Poll => self.poll(),
@@ -2576,9 +2834,15 @@ mod backend {
         vec![SpectrogramChannelLabel::Mono]
     }
 
-    /// Installs a buffer probe on `capsfilter`'s src pad that zeroes samples
-    /// for muted channels.  Placed after `audioconvert` + `audioresample` so
+    /// Installs a buffer probe on `capsfilter`'s src pad that silences
+    /// muted channels.  Placed after `audioconvert` + `audioresample` so
     /// the format is fully negotiated.
+    ///
+    /// Muted samples are replaced with inaudible low-level noise rather
+    /// than hard zero.  Sustained digital silence triggers the auto-mute
+    /// circuit on ESS Sabre DACs (e.g. Topping DX3 Pro+) after ~10 s,
+    /// killing the analog output.  The alternating ±1-LSB pattern keeps
+    /// the detector seeing AC energy without producing audible sound.
     fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc<AtomicU64>) {
         let Some(src_pad) = capsfilter.static_pad("src") else {
             return;
@@ -2614,19 +2878,41 @@ mod backend {
             if bps == 0 {
                 return gst::PadProbeReturn::Ok;
             }
+            let is_float = matches!(format_str, "F32LE" | "F32BE" | "F64LE" | "F64BE");
+            let is_big_endian = matches!(
+                format_str,
+                "S16BE"
+                    | "U16BE"
+                    | "S24BE"
+                    | "U24BE"
+                    | "S24_32BE"
+                    | "U24_32BE"
+                    | "S32BE"
+                    | "U32BE"
+                    | "F32BE"
+                    | "F64BE"
+            );
             // channels is guaranteed positive by the check above.
             let num_channels = channels.cast_unsigned() as usize;
             let frame_size = num_channels * bps;
             let buffer = buffer.make_mut();
             if let Ok(mut map) = buffer.map_writable() {
                 let data = map.as_mut_slice();
+                let mut toggle = false;
                 for frame in data.chunks_exact_mut(frame_size) {
+                    toggle = !toggle;
                     for ch in 0..num_channels {
                         if mask & (1u64 << ch) != 0 {
                             let start = ch * bps;
                             let end = start + bps;
                             if end <= frame.len() {
-                                frame[start..end].fill(0);
+                                write_mute_sample(
+                                    &mut frame[start..end],
+                                    bps,
+                                    is_float,
+                                    is_big_endian,
+                                    toggle,
+                                );
                             }
                         }
                     }
@@ -2634,6 +2920,51 @@ mod backend {
             }
             gst::PadProbeReturn::Ok
         });
+    }
+
+    /// Write an inaudible sample that alternates polarity each frame,
+    /// producing a ~24 kHz square wave at ±1 LSB (integer) or ±1e-20
+    /// (float).  The AC energy prevents DAC auto-mute from engaging.
+    fn write_mute_sample(
+        dst: &mut [u8],
+        bps: usize,
+        is_float: bool,
+        is_big_endian: bool,
+        positive: bool,
+    ) {
+        dst.fill(0);
+        if is_float {
+            // ±1e-20: ~−400 dB, well below any audible threshold.
+            if bps == 4 {
+                let val: f32 = if positive { 1e-20 } else { -1e-20 };
+                let bytes = if is_big_endian {
+                    val.to_be_bytes()
+                } else {
+                    val.to_le_bytes()
+                };
+                dst[..4].copy_from_slice(&bytes);
+            } else {
+                let val: f64 = if positive { 1e-20 } else { -1e-20 };
+                let bytes = if is_big_endian {
+                    val.to_be_bytes()
+                } else {
+                    val.to_le_bytes()
+                };
+                dst[..8].copy_from_slice(&bytes);
+            }
+        } else {
+            // Integer: ±1 LSB.  Two's complement: +1 = 0x01 in LSB,
+            // −1 = 0xFF in all bytes (sign-extended).
+            if positive {
+                if is_big_endian {
+                    dst[bps - 1] = 0x01;
+                } else {
+                    dst[0] = 0x01;
+                }
+            } else {
+                dst.fill(0xFF);
+            }
+        }
     }
 
     /// Returns the number of bytes per sample for a `GStreamer` audio format
@@ -2837,7 +3168,7 @@ mod backend {
         // Channel-mute probe: zeroes samples for muted channels in the output
         // branch.  The analysis branch is unaffected — spectrograms show all
         // channels regardless of mute state.
-        install_channel_mute_probe(&output_capsfilter, &channel_mute_mask);
+        install_channel_mute_probe(&output_capsfilter, channel_mute_mask);
         gst::Element::link_many([
             &queue_tap,
             &conv,

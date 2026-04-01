@@ -98,6 +98,7 @@ pub enum BridgePlaybackCommand {
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
     ToggleChannelMute(u8),
+    SoloChannel(u8),
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +196,7 @@ pub enum BridgeSettingsCommand {
     SetSystemMediaControlsEnabled(bool),
     SetLibrarySortMode(LibrarySortMode),
     SetLastFmScrobblingEnabled(bool),
+    SetChannelButtonsVisibility(u8),
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
@@ -358,6 +360,7 @@ pub struct BridgeDisplaySettings {
     pub show_fps: bool,
     pub show_spectrogram_crosshair: bool,
     pub show_spectrogram_scale: bool,
+    pub channel_buttons_visibility: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +400,7 @@ impl Default for BridgeSettings {
                 show_fps,
                 show_spectrogram_crosshair: false,
                 show_spectrogram_scale: false,
+                channel_buttons_visibility: 1,
             },
             library_sort_mode: LibrarySortMode::Year,
             integrations: BridgeIntegrationSettings {
@@ -1866,6 +1870,9 @@ fn handle_playback_bridge_command(
                 .playback
                 .command(PlaybackCommand::ToggleChannelMute(*ch));
         }
+        BridgePlaybackCommand::SoloChannel(ch) => {
+            context.playback.command(PlaybackCommand::SoloChannel(*ch));
+        }
     }
 }
 
@@ -1965,6 +1972,10 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SetShowSpectrogramScale(enabled) => {
             state.settings.display.show_spectrogram_scale = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetChannelButtonsVisibility(value) => {
+            state.settings.display.channel_buttons_visibility = (*value).min(2);
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetSystemMediaControlsEnabled(enabled) => {
@@ -5272,6 +5283,11 @@ fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.display.show_spectrogram_scale = x != 0;
                 }
             }
+            "channel_buttons_visibility" => {
+                if let Ok(x) = value.parse::<u8>() {
+                    settings.display.channel_buttons_visibility = x.min(2);
+                }
+            }
             "system_media_controls_enabled" => {
                 if let Ok(x) = value.parse::<i32>() {
                     settings.integrations.system_media_controls_enabled = x != 0;
@@ -5308,7 +5324,7 @@ fn save_settings(settings: &BridgeSettings) {
 
 fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
@@ -5319,6 +5335,7 @@ fn format_settings_text(settings: &BridgeSettings) -> String {
         i32::from(settings.display.show_fps),
         i32::from(settings.display.show_spectrogram_crosshair),
         i32::from(settings.display.show_spectrogram_scale),
+        settings.display.channel_buttons_visibility,
         i32::from(settings.integrations.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
         i32::from(settings.integrations.lastfm_scrobbling_enabled),
@@ -5621,6 +5638,7 @@ mod tests {
                 show_fps: true,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
+                channel_buttons_visibility: 1,
             },
             library_sort_mode: LibrarySortMode::Title,
             integrations: BridgeIntegrationSettings {
@@ -5702,6 +5720,7 @@ mod tests {
                 show_fps: false,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
+                channel_buttons_visibility: 1,
             },
             ..BridgeSettings::default()
         };
@@ -5716,6 +5735,28 @@ mod tests {
         parse_settings_text(&mut empty_parsed, "volume=1.0\n");
         assert!(!empty_parsed.display.show_spectrogram_crosshair);
         assert!(!empty_parsed.display.show_spectrogram_scale);
+    }
+
+    #[test]
+    fn channel_buttons_visibility_persists() {
+        let mut settings = BridgeSettings::default();
+        settings.display.channel_buttons_visibility = 2;
+        let text = format_settings_text(&settings);
+        let mut restored = BridgeSettings::default();
+        parse_settings_text(&mut restored, &text);
+        assert_eq!(restored.display.channel_buttons_visibility, 2);
+    }
+
+    #[test]
+    fn channel_buttons_visibility_clamps_out_of_range() {
+        let mut settings = BridgeSettings::default();
+        // Parse an out-of-range value — should clamp to 2.
+        parse_settings_text(&mut settings, "channel_buttons_visibility=99\n");
+        assert_eq!(settings.display.channel_buttons_visibility, 2);
+        // Parse a negative string — u8 parse fails, default stays.
+        let mut settings2 = BridgeSettings::default();
+        parse_settings_text(&mut settings2, "channel_buttons_visibility=-1\n");
+        assert_eq!(settings2.display.channel_buttons_visibility, 1); // default
     }
 
     #[test]
@@ -6760,6 +6801,12 @@ mod tests {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        // The playback engine may emit its initial snapshot after a small
+        // delay (thread scheduling).  Drain twice with a brief gap so the
+        // initial playback snapshot does not arrive *during* handle_wake
+        // and overwrite the manually-set state below.
+        let _ = runtime.drain_pending_updates(&event_tx);
+        std::thread::sleep(Duration::from_millis(5));
         let _ = runtime.drain_pending_updates(&event_tx);
         runtime.flags.pending_snapshot = SnapshotUrgency::None;
         while event_rx.try_recv().is_ok() {}

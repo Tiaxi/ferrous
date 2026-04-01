@@ -64,6 +64,10 @@ private slots:
     void mprisControllerConstructionDoesNotCrash();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
+    void testSoloChannelCommandEncoding();
+    void testSoloedChannelDecoding();
+    void testSoloedChannelDecodingNone();
+    void testChannelButtonsVisibilityDecoding();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -808,6 +812,146 @@ void BridgeClientTest::testMutedChannelsMaskDecoding()
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.playback.mutedChannelsMask, quint64(0b10101));
+}
+
+void BridgeClientTest::testSoloChannelCommandEncoding()
+{
+    // Verify that CmdSoloChannel encodes as command ID 54 + 1-byte channel index,
+    // using the same encodeCommandU8 helper as CmdToggleChannelMute.
+    QByteArray cmd = BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSoloChannel, 3);
+    // Format: u16 cmd_id (LE) + u16 payload_len (LE) + u8 channel
+    QCOMPARE(cmd.size(), 5);
+    quint16 cmdId = qFromLittleEndian<quint16>(cmd.constData());
+    quint16 payloadLen = qFromLittleEndian<quint16>(cmd.constData() + 2);
+    quint8 channel = static_cast<quint8>(cmd.at(4));
+    QCOMPARE(cmdId, quint16(BinaryBridgeCodec::CmdSoloChannel));
+    QCOMPARE(payloadLen, quint16(1));
+    QCOMPARE(channel, quint8(3));
+}
+
+void BridgeClientTest::testSoloedChannelDecoding()
+{
+    QByteArray payload;
+    auto appendLe = [&payload](auto value) {
+        const auto le = qToLittleEndian(value);
+        payload.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+
+    appendLe(quint8(1));          // state = Playing
+    appendLe(double(5.0));        // position
+    appendLe(double(100.0));      // duration
+    appendLe(float(0.8f));        // volume
+    appendLe(quint8(0));          // repeat mode
+    appendLe(quint8(0));          // shuffle
+    appendLe(qint32(0));          // currentQueueIndex
+    QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
+    appendLe(quint16(pathUtf8.size()));
+    payload.append(pathUtf8);
+    appendLe(quint64(0));         // mutedChannelsMask
+    payload.append(static_cast<char>(3)); // soloedChannel = 3
+
+    QByteArray packet;
+    QDataStream ps(&packet, QIODevice::WriteOnly);
+    ps.setByteOrder(QDataStream::LittleEndian);
+    ps << quint32(0xFE550001u);
+    quint32 totalLen = 12 + 4 + payload.size();
+    ps << quint32(totalLen);
+    ps << quint16(BinaryBridgeCodec::SectionPlayback);
+    ps << quint16(0);
+    ps << quint32(payload.size());
+    packet.append(payload);
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.playback.soloedChannel, 3);
+}
+
+void BridgeClientTest::testSoloedChannelDecodingNone()
+{
+    QByteArray payload;
+    auto appendLe = [&payload](auto value) {
+        const auto le = qToLittleEndian(value);
+        payload.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+
+    appendLe(quint8(1));
+    appendLe(double(5.0));
+    appendLe(double(100.0));
+    appendLe(float(0.8f));
+    appendLe(quint8(0));
+    appendLe(quint8(0));
+    appendLe(qint32(0));
+    QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
+    appendLe(quint16(pathUtf8.size()));
+    payload.append(pathUtf8);
+    appendLe(quint64(0));
+    payload.append(static_cast<char>(0xFF)); // no solo
+
+    QByteArray packet;
+    QDataStream ps(&packet, QIODevice::WriteOnly);
+    ps.setByteOrder(QDataStream::LittleEndian);
+    ps << quint32(0xFE550001u);
+    quint32 totalLen = 12 + 4 + payload.size();
+    ps << quint32(totalLen);
+    ps << quint16(BinaryBridgeCodec::SectionPlayback);
+    ps << quint16(0);
+    ps << quint32(payload.size());
+    packet.append(payload);
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.playback.soloedChannel, -1);
+}
+
+void BridgeClientTest::testChannelButtonsVisibilityDecoding()
+{
+    // Build a minimal settings section with channelButtonsVisibility = 2.
+    // Encoding order: volume(f32) + fft_size(u32) + view_mode(u8)
+    // + db_range(f32) + log_scale(u8) + show_fps(u8)
+    // + library_sort_mode(i32) + system_media_controls(u8)
+    // + viewer_fullscreen(u8) + display_mode(u8)
+    // + crosshair(u8) + scale(u8) + channel_buttons_visibility(u8)
+    QByteArray payload;
+    auto appendLe = [&payload](auto value) {
+        const auto le = qToLittleEndian(value);
+        payload.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+
+    appendLe(float(0.75f));      // volume
+    appendLe(quint32(4096));     // fft_size
+    payload.append(char(0));     // view_mode (downmix)
+    appendLe(float(132.0f));     // db_range
+    payload.append(char(0));     // log_scale
+    payload.append(char(0));     // show_fps
+    appendLe(qint32(0));         // library_sort_mode
+    payload.append(char(1));     // system_media_controls
+    payload.append(char(0));     // viewer_fullscreen
+    payload.append(char(0));     // display_mode
+    payload.append(char(0));     // crosshair
+    payload.append(char(0));     // scale
+    payload.append(char(2));     // channel_buttons_visibility = 2
+
+    QByteArray packet;
+    QDataStream ps(&packet, QIODevice::WriteOnly);
+    ps.setByteOrder(QDataStream::LittleEndian);
+    ps << quint32(0xFE550001u);
+    quint32 totalLen = 12 + 4 + payload.size();
+    ps << quint32(totalLen);
+    ps << quint16(BinaryBridgeCodec::SectionSettings);
+    ps << quint16(0);
+    ps << quint32(payload.size());
+    packet.append(payload);
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.settings.channelButtonsVisibility, 2);
 }
 
 int main(int argc, char **argv) {

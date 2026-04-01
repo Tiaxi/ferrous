@@ -117,6 +117,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int repeatMode READ repeatMode NOTIFY snapshotChanged)
     Q_PROPERTY(bool shuffleEnabled READ shuffleEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(quint64 mutedChannelsMask READ mutedChannelsMask NOTIFY playbackChanged)
+    Q_PROPERTY(int soloedChannel READ soloedChannel NOTIFY playbackChanged)
+    Q_PROPERTY(int channelButtonsVisibility READ channelButtonsVisibility NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(bool showSpectrogramCrosshair READ showSpectrogramCrosshair NOTIFY snapshotChanged)
     Q_PROPERTY(bool showSpectrogramScale READ showSpectrogramScale NOTIFY snapshotChanged)
@@ -204,6 +206,8 @@ public:
     int repeatMode() const;
     bool shuffleEnabled() const;
     quint64 mutedChannelsMask() const;
+    int soloedChannel() const;
+    int channelButtonsVisibility() const;
     bool showFps() const;
     bool showSpectrogramCrosshair() const;
     bool showSpectrogramScale() const;
@@ -264,6 +268,9 @@ public:
     Q_INVOKABLE void setRepeatMode(int mode);
     Q_INVOKABLE void setShuffleEnabled(bool value);
     Q_INVOKABLE void toggleChannelMute(int channelIndex);
+    Q_INVOKABLE void soloChannel(int channelIndex);
+    Q_INVOKABLE void setChannelButtonsVisibility(int value);
+    Q_INVOKABLE bool isChannelMuted(int channelIndex) const;
     Q_INVOKABLE void setShowFps(bool value);
     Q_INVOKABLE void setShowSpectrogramCrosshair(bool value);
     Q_INVOKABLE void setShowSpectrogramScale(bool value);
@@ -531,6 +538,8 @@ private:
     int m_repeatMode{0};
     bool m_shuffleEnabled{false};
     quint64 m_mutedChannelsMask{0};
+    int m_soloedChannel{-1};
+    int m_channelButtonsVisibility{1};
     bool m_showFps{false};
     bool m_showSpectrogramCrosshair{false};
     bool m_showSpectrogramScale{false};
