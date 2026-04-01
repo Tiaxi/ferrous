@@ -49,6 +49,11 @@ QtObject {
         }
     }
 
+    function selectFirstItem() {
+        const firstIndex = root.nextSelectableIndex(-1, 1, false)
+        root.selectedDisplayIndex = firstIndex
+    }
+
     function searchFirstSelectableIndex() {
         return root.nextSelectableIndex(-1, 1, false)
     }
