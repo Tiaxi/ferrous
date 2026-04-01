@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QTimer>
 #include <QVariantMap>
 #include <QVector>
 
@@ -109,6 +110,7 @@ public:
         CountRole,
         LengthSecondsRole,
         LengthTextRole,
+        DelegateTypeRole,
     };
     Q_ENUM(Role)
 
@@ -119,6 +121,8 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     void replaceRows(QVector<SearchDisplayRow> rows);
+    void replaceRowsBatched(QVector<SearchDisplayRow> rows, int batchSize = 10);
+    void cancelBatchedInsertion();
 
     Q_INVOKABLE QVariantMap rowDataAt(int index) const;
     Q_INVOKABLE bool isSelectableIndex(int index) const;
@@ -126,4 +130,11 @@ public:
 
 private:
     QVector<SearchDisplayRow> m_rows;
+
+    QVector<SearchDisplayRow> m_pendingBatchRows;
+    int m_batchInsertOffset{0};
+    int m_batchSize{10};
+    QTimer m_batchTimer;
+
+    void insertNextBatch();
 };

@@ -13,6 +13,7 @@
 
 #define private public
 #include "../src/BridgeClient.h"
+#include "../src/GlobalSearchResultsModel.h"
 #include "../src/MprisController.h"
 #undef private
 
@@ -68,6 +69,14 @@ private slots:
     void testSoloedChannelDecoding();
     void testSoloedChannelDecodingNone();
     void testChannelButtonsVisibilityDecoding();
+    void searchModelDelegateTypeRoleIsExposed();
+    void searchModelDelegateTypeValuesCorrect();
+    void clearSearchQueryRetainsModelRows();
+    void newSearchResultsClearRetainedFlag();
+    void searchModelBatchedInsertionFromEmpty();
+    void searchModelBatchedInsertionSmallSetSkipsBatching();
+    void searchModelReplaceRowsCancelsBatchInProgress();
+    void searchRetainAndReuseIntegration();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -952,6 +961,205 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.settings.channelButtonsVisibility, 2);
+}
+
+void BridgeClientTest::searchModelDelegateTypeRoleIsExposed() {
+    GlobalSearchResultsModel model;
+    const auto roles = model.roleNames();
+    QVERIFY(roles.values().contains("delegateType"));
+}
+
+void BridgeClientTest::searchModelDelegateTypeValuesCorrect() {
+    GlobalSearchResultsModel model;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+
+    GlobalSearchResultsModel::SearchDisplayRow section;
+    section.kind = QStringLiteral("section");
+    section.rowType = QStringLiteral("artist");
+    rows.push_back(section);
+
+    GlobalSearchResultsModel::SearchDisplayRow columns;
+    columns.kind = QStringLiteral("columns");
+    columns.rowType = QStringLiteral("album");
+    rows.push_back(columns);
+
+    GlobalSearchResultsModel::SearchDisplayRow item;
+    item.kind = QStringLiteral("item");
+    item.rowType = QStringLiteral("track");
+    rows.push_back(item);
+
+    model.replaceRows(rows);
+
+    const int dtRole = GlobalSearchResultsModel::DelegateTypeRole;
+    QCOMPARE(model.data(model.index(0), dtRole).toString(), QStringLiteral("section"));
+    QCOMPARE(model.data(model.index(1), dtRole).toString(), QStringLiteral("columns-album"));
+    QCOMPARE(model.data(model.index(2), dtRole).toString(), QStringLiteral("track"));
+}
+
+void BridgeClientTest::clearSearchQueryRetainsModelRows() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    // Simulate having an active search with results.
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+    GlobalSearchResultsModel::SearchDisplayRow row;
+    row.kind = QStringLiteral("item");
+    row.rowType = QStringLiteral("track");
+    row.label = QStringLiteral("Test Track");
+    rows.push_back(row);
+    client.m_globalSearchModel.replaceRows(rows);
+    client.m_globalSearchArtistCount = 0;
+    client.m_globalSearchAlbumCount = 0;
+    client.m_globalSearchTrackCount = 1;
+    // Set non-empty pending query so the empty→clear transition path runs.
+    client.m_pendingGlobalSearchQuery = QStringLiteral("test");
+    client.m_lastGlobalSearchQuerySent = QStringLiteral("test");
+
+    client.setGlobalSearchQuery(QStringLiteral(""));
+
+    QCOMPARE(client.m_globalSearchModel.rowCount(), 1); // Rows preserved
+    QVERIFY(client.m_globalSearchModelRetained);         // Flag set
+    QCOMPARE(client.m_globalSearchTrackCount, 0);        // Counts zeroed
+}
+
+void BridgeClientTest::newSearchResultsClearRetainedFlag() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    // Set up retained state.
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+    GlobalSearchResultsModel::SearchDisplayRow row;
+    row.kind = QStringLiteral("item");
+    row.rowType = QStringLiteral("track");
+    rows.push_back(row);
+    client.m_globalSearchModel.replaceRows(rows);
+    client.m_globalSearchModelRetained = true;
+
+    // Simulate new results arriving via applyPreparedSearchResultsFrame.
+    BridgeClient::SearchWorkerOutputFrame frame;
+    frame.seq = 1;
+    frame.artistCount = 0;
+    frame.albumCount = 0;
+    frame.trackCount = 1;
+    GlobalSearchResultsModel::SearchDisplayRow newRow;
+    newRow.kind = QStringLiteral("item");
+    newRow.rowType = QStringLiteral("track");
+    newRow.label = QStringLiteral("New Track");
+    frame.displayRows.push_back(newRow);
+    client.m_latestGlobalSearchSeqSent = 1;
+    client.applyPreparedSearchResultsFrame(std::move(frame));
+
+    QVERIFY(!client.m_globalSearchModelRetained); // Flag cleared
+}
+
+void BridgeClientTest::searchModelBatchedInsertionFromEmpty() {
+    GlobalSearchResultsModel model;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+    for (int i = 0; i < 30; ++i) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = QStringLiteral("item");
+        row.rowType = QStringLiteral("track");
+        row.label = QStringLiteral("Track %1").arg(i);
+        rows.push_back(row);
+    }
+
+    QSignalSpy insertSpy(&model, SIGNAL(rowsInserted(QModelIndex,int,int)));
+    model.replaceRowsBatched(rows, 10);
+
+    QCOMPARE(model.rowCount(), 10);   // First batch immediate
+    QCOMPARE(insertSpy.count(), 1);
+
+    QCoreApplication::processEvents();
+    QCOMPARE(model.rowCount(), 20);   // Second batch after event loop
+    QCOMPARE(insertSpy.count(), 2);
+
+    QCoreApplication::processEvents();
+    QCOMPARE(model.rowCount(), 30);   // Third batch
+    QCOMPARE(insertSpy.count(), 3);
+}
+
+void BridgeClientTest::searchModelBatchedInsertionSmallSetSkipsBatching() {
+    GlobalSearchResultsModel model;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+    for (int i = 0; i < 8; ++i) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = QStringLiteral("item");
+        row.rowType = QStringLiteral("track");
+        rows.push_back(row);
+    }
+
+    QSignalSpy insertSpy(&model, SIGNAL(rowsInserted(QModelIndex,int,int)));
+    model.replaceRowsBatched(rows, 10);
+
+    QCOMPARE(model.rowCount(), 8);    // All at once, no batching
+    QCOMPARE(insertSpy.count(), 1);
+}
+
+void BridgeClientTest::searchModelReplaceRowsCancelsBatchInProgress() {
+    GlobalSearchResultsModel model;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+    for (int i = 0; i < 30; ++i) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = QStringLiteral("item");
+        row.rowType = QStringLiteral("track");
+        rows.push_back(row);
+    }
+    model.replaceRowsBatched(rows, 10);
+    QCOMPARE(model.rowCount(), 10); // First batch
+
+    // Now replace with new data mid-batch
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> newRows;
+    GlobalSearchResultsModel::SearchDisplayRow newRow;
+    newRow.kind = QStringLiteral("item");
+    newRow.rowType = QStringLiteral("artist");
+    newRow.label = QStringLiteral("New Artist");
+    newRows.push_back(newRow);
+
+    model.replaceRows(newRows);
+    QCOMPARE(model.rowCount(), 1); // Batch cancelled, new data applied
+
+    QCoreApplication::processEvents(); // No stale batch fires
+    QCOMPARE(model.rowCount(), 1);
+}
+
+void BridgeClientTest::searchRetainAndReuseIntegration() {
+    GlobalSearchResultsModel model;
+
+    // Phase 1: Cold start — batched insertion
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> initialRows;
+    for (int i = 0; i < 30; ++i) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = QStringLiteral("item");
+        row.rowType = QStringLiteral("track");
+        row.label = QStringLiteral("Track %1").arg(i);
+        initialRows.push_back(row);
+    }
+    model.replaceRowsBatched(initialRows, 10);
+    QCOMPARE(model.rowCount(), 10); // First batch
+    QTRY_COMPARE(model.rowCount(), 30); // Drain remaining batches
+
+    // Phase 2: Simulate clear — model stays populated, no replaceRows({})
+    // (In real code, BridgeClient sets m_globalSearchModelRetained instead)
+    QCOMPARE(model.rowCount(), 30);
+
+    // Phase 3: New results arrive — diff-based update (N→M), no batching
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> newRows;
+    for (int i = 0; i < 20; ++i) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = QStringLiteral("item");
+        row.rowType = QStringLiteral("artist");
+        row.label = QStringLiteral("Artist %1").arg(i);
+        newRows.push_back(row);
+    }
+    // Model is non-empty → replaceRowsBatched falls through to replaceRows.
+    // rowType changes (track→artist), so replaceRows does a full rebuild
+    // (remove+insert) to force DelegateChooser to re-evaluate delegate types.
+    model.replaceRowsBatched(newRows, 10);
+
+    QCOMPARE(model.rowCount(), 20); // Immediate update, no batching
+    // Verify data is from the new set
+    QCOMPARE(model.data(model.index(0), GlobalSearchResultsModel::LabelRole).toString(),
+             QStringLiteral("Artist 0"));
 }
 
 int main(int argc, char **argv) {
