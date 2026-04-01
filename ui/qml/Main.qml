@@ -320,6 +320,9 @@ Kirigami.ApplicationWindow {
         function shutdown() {}
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
+        function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+        function isChannelMuted(channelIndex) { return false }
     }
 
     QtObject {

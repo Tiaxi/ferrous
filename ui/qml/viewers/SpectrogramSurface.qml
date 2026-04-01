@@ -32,13 +32,10 @@ Item {
         const labels = count > 0 && count <= standardChannelLabels.length
             ? standardChannelLabels[count - 1]
             : null
-        // JS bitwise operators work on 32-bit integers; channels 32+ would
-        // wrap.  No consumer audio exceeds 32 discrete channels.
-        const mask = root.uiBridge.mutedChannelsMask
         let result = []
         for (let i = 0; i < Math.max(count, 1); ++i) {
             const lbl = labels ? labels[i] || "" : (count === 0 ? "M" : "")
-            const muted = (mask & (1 << i)) !== 0
+            const muted = root.uiBridge.isChannelMuted(i)
             result.push({
                 label: lbl,
                 showLabel: showLabels && lbl.length > 0,
@@ -175,11 +172,10 @@ Item {
             if (spectrogramRepeater.count <= 0) {
                 return
             }
-            const mask = root.uiBridge.mutedChannelsMask
             for (let i = 0; i < spectrogramRepeater.count; ++i) {
                 const pane = spectrogramRepeater.itemAt(i)
                 if (pane && pane.spectrogramItem) {
-                    pane.spectrogramItem.channelMuted = (mask & (1 << i)) !== 0
+                    pane.spectrogramItem.channelMuted = root.uiBridge.isChannelMuted(i)
                 }
             }
         }
@@ -258,21 +254,12 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
 
-                        Timer {
-                            id: clickTimer
-                            interval: Qt.styleHints.mouseDoubleClickInterval
-                            onTriggered: {
-                                root.uiBridge.toggleChannelMute(modelData.channelIndex)
-                            }
-                        }
-
-                        // First click of a potential double-click arms the timer.
-                        // onDoubleClicked cancels it synchronously before it fires.
                         onClicked: {
-                            clickTimer.restart()
+                            root.uiBridge.toggleChannelMute(modelData.channelIndex)
                         }
                         onDoubleClicked: {
-                            clickTimer.stop()
+                            // Undo the toggle from the first click, then solo.
+                            root.uiBridge.toggleChannelMute(modelData.channelIndex)
                             root.uiBridge.soloChannel(modelData.channelIndex)
                         }
                     }

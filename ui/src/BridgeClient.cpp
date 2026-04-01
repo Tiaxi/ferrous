@@ -2472,6 +2472,13 @@ void BridgeClient::soloChannel(int channelIndex) {
         static_cast<quint8>(channelIndex)));
 }
 
+bool BridgeClient::isChannelMuted(int channelIndex) const {
+    if (channelIndex < 0 || channelIndex > 63) {
+        return false;
+    }
+    return (m_mutedChannelsMask & (1ULL << channelIndex)) != 0;
+}
+
 void BridgeClient::setShowFps(bool value) {
     if (m_showFps != value) {
         m_showFps = value;

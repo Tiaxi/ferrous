@@ -568,6 +568,8 @@ Item {
         signal playbackChanged()
         function setVolume(value) {}
         function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+        function isChannelMuted(channelIndex) { return false }
         function setLibrarySortMode(mode) {}
         function rescanAllLibraryRoots() {}
         function openInFileBrowser(path) {}
