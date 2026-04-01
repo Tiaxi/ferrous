@@ -2738,9 +2738,14 @@ mod backend {
         vec![SpectrogramChannelLabel::Mono]
     }
 
-    /// Installs a buffer probe on `capsfilter`'s src pad that zeroes samples
-    /// for muted channels.  Placed after `audioconvert` + `audioresample` so
+    /// Installs a buffer probe on `capsfilter`'s src pad that silences
+    /// muted channels.  Placed after `audioconvert` + `audioresample` so
     /// the format is fully negotiated.
+    ///
+    /// Muted samples are set to 1 LSB (integer formats) or a tiny float
+    /// (~1.4e-45) rather than hard zero.  Pure digital zero triggers the
+    /// auto-mute circuit on ESS Sabre DACs (e.g. Topping DX3 Pro+) after
+    /// ~10 seconds of sustained silence, killing the analog output.
     fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc<AtomicU64>) {
         let Some(src_pad) = capsfilter.static_pad("src") else {
             return;
@@ -2776,6 +2781,7 @@ mod backend {
             if bps == 0 {
                 return gst::PadProbeReturn::Ok;
             }
+            let mute_fill = MUTE_FILL_BYTE;
             // channels is guaranteed positive by the check above.
             let num_channels = channels.cast_unsigned() as usize;
             let frame_size = num_channels * bps;
@@ -2788,7 +2794,7 @@ mod backend {
                             let start = ch * bps;
                             let end = start + bps;
                             if end <= frame.len() {
-                                frame[start..end].fill(0);
+                                frame[start..end].fill(mute_fill);
                             }
                         }
                     }
@@ -2797,6 +2803,14 @@ mod backend {
             gst::PadProbeReturn::Ok
         });
     }
+
+    /// Byte used to fill muted samples.  For integer formats `0x01` in the
+    /// least-significant byte gives 1 LSB (−90 to −186 dB depending on bit
+    /// depth).  For float formats the same byte pattern produces a
+    /// denormalized value (~1.4e-45 for F32LE).  Both are completely
+    /// inaudible but prevent DAC auto-mute circuits from engaging on
+    /// sustained digital silence.
+    const MUTE_FILL_BYTE: u8 = 0x01;
 
     /// Returns the number of bytes per sample for a `GStreamer` audio format
     /// string (e.g. "F32LE" → 4, "S16LE" → 2).  Returns 0 for unknown
