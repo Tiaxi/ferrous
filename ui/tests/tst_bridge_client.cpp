@@ -65,6 +65,8 @@ private slots:
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
+    void testSoloedChannelDecoding();
+    void testSoloedChannelDecodingNone();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -825,6 +827,84 @@ void BridgeClientTest::testSoloChannelCommandEncoding()
     QCOMPARE(cmdId, quint16(BinaryBridgeCodec::CmdSoloChannel));
     QCOMPARE(payloadLen, quint16(1));
     QCOMPARE(channel, quint8(3));
+}
+
+void BridgeClientTest::testSoloedChannelDecoding()
+{
+    QByteArray payload;
+    auto appendLe = [&payload](auto value) {
+        const auto le = qToLittleEndian(value);
+        payload.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+
+    appendLe(quint8(1));          // state = Playing
+    appendLe(double(5.0));        // position
+    appendLe(double(100.0));      // duration
+    appendLe(float(0.8f));        // volume
+    appendLe(quint8(0));          // repeat mode
+    appendLe(quint8(0));          // shuffle
+    appendLe(qint32(0));          // currentQueueIndex
+    QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
+    appendLe(quint16(pathUtf8.size()));
+    payload.append(pathUtf8);
+    appendLe(quint64(0));         // mutedChannelsMask
+    payload.append(static_cast<char>(3)); // soloedChannel = 3
+
+    QByteArray packet;
+    QDataStream ps(&packet, QIODevice::WriteOnly);
+    ps.setByteOrder(QDataStream::LittleEndian);
+    ps << quint32(0xFE550001u);
+    quint32 totalLen = 12 + 4 + payload.size();
+    ps << quint32(totalLen);
+    ps << quint16(BinaryBridgeCodec::SectionPlayback);
+    ps << quint16(0);
+    ps << quint32(payload.size());
+    packet.append(payload);
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.playback.soloedChannel, 3);
+}
+
+void BridgeClientTest::testSoloedChannelDecodingNone()
+{
+    QByteArray payload;
+    auto appendLe = [&payload](auto value) {
+        const auto le = qToLittleEndian(value);
+        payload.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+
+    appendLe(quint8(1));
+    appendLe(double(5.0));
+    appendLe(double(100.0));
+    appendLe(float(0.8f));
+    appendLe(quint8(0));
+    appendLe(quint8(0));
+    appendLe(qint32(0));
+    QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
+    appendLe(quint16(pathUtf8.size()));
+    payload.append(pathUtf8);
+    appendLe(quint64(0));
+    payload.append(static_cast<char>(0xFF)); // no solo
+
+    QByteArray packet;
+    QDataStream ps(&packet, QIODevice::WriteOnly);
+    ps.setByteOrder(QDataStream::LittleEndian);
+    ps << quint32(0xFE550001u);
+    quint32 totalLen = 12 + 4 + payload.size();
+    ps << quint32(totalLen);
+    ps << quint16(BinaryBridgeCodec::SectionPlayback);
+    ps << quint16(0);
+    ps << quint32(payload.size());
+    packet.append(payload);
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.playback.soloedChannel, -1);
 }
 
 int main(int argc, char **argv) {
