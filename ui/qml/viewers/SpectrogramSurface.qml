@@ -220,13 +220,15 @@ Item {
                     showTimeLabels: index === spectrogramRepeater.count - 1
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
-                }
-
-                // Pane-level hover detection for M/S button visibility.
-                // HoverHandler is Qt 6-idiomatic and doesn't interfere with
-                // SpectrogramItem's C++ hoverMoveEvent for crosshair overlay.
-                HoverHandler {
-                    id: paneHover
+                    // Pane-level hover detection for M/S button visibility.
+                    // Attached to SpectrogramItem (not the parent Item) because
+                    // SpectrogramItem accepts hover events for crosshair overlay,
+                    // so a HoverHandler on the parent never sees hover.
+                    // HoverHandler is passive and doesn't interfere with the C++
+                    // hoverMoveEvent.
+                    HoverHandler {
+                        id: paneHover
+                    }
                 }
 
                 Row {
