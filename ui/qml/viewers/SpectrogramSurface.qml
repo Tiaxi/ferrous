@@ -68,10 +68,9 @@ Item {
         let next = []
         if (channels && channels.length > 0) {
             const showLabels = root.uiBridge.spectrogramViewMode === 1
-            const mask = root.uiBridge.mutedChannelsMask
             for (let i = 0; i < channels.length; ++i) {
                 const labelText = (channels[i].label || "").trim()
-                const muted = (mask & (1 << i)) !== 0
+                const muted = root.uiBridge.isChannelMuted(i)
                 next.push({
                     label: labelText,
                     showLabel: showLabels && labelText.length > 0,
