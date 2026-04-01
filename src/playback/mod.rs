@@ -602,6 +602,42 @@ mod tests {
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.muted_channels_mask, 1 << 1);
     }
+
+    #[test]
+    fn manual_track_switch_resets_mute_and_solo() {
+        let (engine, rx) = make_test_engine();
+        let a = PathBuf::from("/tmp/a.flac");
+        let b = PathBuf::from("/tmp/b.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![a, b]));
+        engine.command(PlaybackCommand::Poll);
+        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        // Solo channel 1.
+        engine.command(PlaybackCommand::SoloChannel(1));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_ne!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.soloed_channel, Some(1));
+        // Switch to track B via Next.
+        engine.command(PlaybackCommand::Next);
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.soloed_channel, None);
+    }
+
+    #[test]
+    fn stop_resets_mute_and_solo() {
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_ne!(snap.muted_channels_mask, 0);
+        engine.command(PlaybackCommand::Stop);
+        engine.command(PlaybackCommand::Poll);
+        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+        assert_eq!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.soloed_channel, None);
+    }
 }
 
 #[cfg(not(feature = "gst"))]
@@ -637,6 +673,15 @@ mod backend {
                 let mut solo_pre_mask: Option<u64> = None;
                 let mut soloed_channel: Option<u8> = None;
 
+                macro_rules! reset_mute {
+                    () => {
+                        snapshot.muted_channels_mask = 0;
+                        snapshot.soloed_channel = None;
+                        solo_pre_mask = None;
+                        soloed_channel = None;
+                    };
+                }
+
                 while let Ok(cmd) = cmd_rx.recv() {
                     if snapshot.state == PlaybackState::Playing {
                         let delta = last_tick.elapsed();
@@ -648,6 +693,7 @@ mod backend {
                         PlaybackCommand::LoadQueue(paths) => {
                             queue = paths;
                             queue_idx = 0;
+                            reset_mute!();
                             snapshot.position = Duration::ZERO;
                             snapshot.duration = Duration::from_secs(180);
                             snapshot.current = queue.first().cloned();
@@ -672,6 +718,7 @@ mod backend {
                         PlaybackCommand::RemoveAt(idx) => {
                             if idx < queue.len() {
                                 queue.remove(idx);
+                                reset_mute!();
                                 if queue.is_empty() {
                                     queue_idx = 0;
                                     snapshot.current = None;
@@ -722,6 +769,7 @@ mod backend {
                         PlaybackCommand::ClearQueue => {
                             queue.clear();
                             queue_idx = 0;
+                            reset_mute!();
                             snapshot.current = None;
                             snapshot.current_queue_index = None;
                             snapshot.state = PlaybackState::Stopped;
@@ -731,6 +779,7 @@ mod backend {
                         PlaybackCommand::PlayAt(idx) => {
                             if let Some(path) = queue.get(idx).cloned() {
                                 queue_idx = idx;
+                                reset_mute!();
                                 snapshot.current = Some(path.clone());
                                 snapshot.current_queue_index = Some(queue_idx);
                                 snapshot.position = Duration::ZERO;
@@ -746,6 +795,7 @@ mod backend {
                         PlaybackCommand::Next => {
                             if queue_idx + 1 < queue.len() {
                                 queue_idx += 1;
+                                reset_mute!();
                                 if let Some(next) = queue.get(queue_idx).cloned() {
                                     snapshot.current = Some(next.clone());
                                     snapshot.current_queue_index = Some(queue_idx);
@@ -766,6 +816,7 @@ mod backend {
                         PlaybackCommand::Previous => {
                             if queue_idx > 0 {
                                 queue_idx -= 1;
+                                reset_mute!();
                                 if let Some(prev) = queue.get(queue_idx).cloned() {
                                     snapshot.current = Some(prev.clone());
                                     snapshot.current_queue_index = Some(queue_idx);
@@ -797,6 +848,7 @@ mod backend {
                             }
                         }
                         PlaybackCommand::Stop => {
+                            reset_mute!();
                             snapshot.state = PlaybackState::Stopped;
                             snapshot.position = Duration::ZERO;
                             snapshot.current_queue_index = None;
@@ -1363,6 +1415,14 @@ mod backend {
             self.snapshot.shuffle_enabled = shuffle_enabled;
         }
 
+        fn reset_channel_mute_state(&mut self) {
+            self.channel_mute_mask.store(0, Ordering::Relaxed);
+            self.solo_pre_mask = None;
+            self.soloed_channel = None;
+            self.snapshot.muted_channels_mask = 0;
+            self.snapshot.soloed_channel = None;
+        }
+
         fn switch_to_path(
             &mut self,
             path: PathBuf,
@@ -1374,6 +1434,7 @@ mod backend {
                 return;
             };
             let track_token = self.advance_track_token();
+            self.reset_channel_mute_state();
             self.snapshot.current_queue_index = Some(queue_index);
             self.switch_track(path.as_path(), &uri, force_play);
             self.buffering_active = false;
@@ -1395,6 +1456,7 @@ mod backend {
                 .store(false, Ordering::Release);
             self.pending_gapless_duration = None;
             self.clear_staged_spectrogram();
+            self.reset_channel_mute_state();
             self.snapshot.current = None;
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
@@ -1618,6 +1680,7 @@ mod backend {
                 self.pending_eos_track_switch
                     .store(false, Ordering::Release);
                 self.clear_staged_spectrogram();
+                self.reset_channel_mute_state();
                 self.snapshot.state = PlaybackState::Stopped;
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
