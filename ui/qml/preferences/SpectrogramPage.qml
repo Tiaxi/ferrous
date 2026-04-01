@@ -166,6 +166,25 @@ ScrollView {
                     checked: root.uiBridge.showSpectrogramScale
                     onToggled: root.uiBridge.setShowSpectrogramScale(checked)
                 }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    Label {
+                        text: "Channel Buttons"
+                        Layout.preferredWidth: 120
+                    }
+
+                    ComboBox {
+                        Layout.preferredWidth: 220
+                        model: ["Disabled", "On Hover", "Always"]
+                        currentIndex: Math.max(0, Math.min(2, root.uiBridge.channelButtonsVisibility))
+                        onActivated: root.uiBridge.setChannelButtonsVisibility(currentIndex)
+                    }
+
+                    Item { Layout.fillWidth: true }
+                }
             }
         }
     }
