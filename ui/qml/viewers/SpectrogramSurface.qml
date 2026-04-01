@@ -260,12 +260,14 @@ Item {
 
                         Timer {
                             id: clickTimer
-                            interval: 250
+                            interval: Qt.styleHints.mouseDoubleClickInterval
                             onTriggered: {
                                 root.uiBridge.toggleChannelMute(modelData.channelIndex)
                             }
                         }
 
+                        // First click of a potential double-click arms the timer.
+                        // onDoubleClicked cancels it synchronously before it fires.
                         onClicked: {
                             clickTimer.restart()
                         }
