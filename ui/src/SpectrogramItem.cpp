@@ -1431,8 +1431,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
 
         if (usePrecomputed) {
+            bool needInvalidateMapping = false;
             if (m_binsPerColumn != m_precomputedBinsPerColumn) {
                 m_binsPerColumn = m_precomputedBinsPerColumn;
+                needInvalidateMapping = true;
+            }
+            if (m_precomputedSampleRateHz > 0
+                && m_sampleRateHz != m_precomputedSampleRateHz) {
+                m_sampleRateHz = m_precomputedSampleRateHz;
+                needInvalidateMapping = true;
+                m_freqGridDirty = true;
+                m_crosshairDirty = true;
+            }
+            if (needInvalidateMapping) {
                 invalidateMapping();
             }
             ensureMapping(h);
@@ -2091,10 +2102,19 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
 
 double SpectrogramItem::pixelToFrequencyHz(int pixelY, int viewHeight) const {
     QMutexLocker lock(&m_stateMutex);
-    // Synchronize bins from precomputed state (normally done in updatePaintNode).
+    // Synchronize bins and sample rate from precomputed state (normally done in updatePaintNode).
     auto *self = const_cast<SpectrogramItem *>(this);
+    bool needInvalidateMapping = false;
     if (m_precomputedBinsPerColumn > 0 && m_binsPerColumn != m_precomputedBinsPerColumn) {
         self->m_binsPerColumn = m_precomputedBinsPerColumn;
+        needInvalidateMapping = true;
+    }
+    if (m_precomputedSampleRateHz > 0
+        && m_sampleRateHz != m_precomputedSampleRateHz) {
+        self->m_sampleRateHz = m_precomputedSampleRateHz;
+        needInvalidateMapping = true;
+    }
+    if (needInvalidateMapping) {
         self->invalidateMapping();
     }
     if (viewHeight <= 0 || m_binsPerColumn <= 1) {

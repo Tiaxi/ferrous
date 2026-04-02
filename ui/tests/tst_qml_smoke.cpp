@@ -406,6 +406,7 @@ private slots:
     void queueContainIndexClampsAtListEnd();
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
     void spectrogramPixelToFrequency();
+    void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramCrosshairOverlayGeneratesOnHover();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramOverlayDisabledProducesNullImage();
@@ -2531,6 +2532,27 @@ void QmlSmokeTest::spectrogramPixelToFrequency() {
     // Mid-height should be roughly half Nyquist in linear mode.
     const double midFreq = item.pixelToFrequencyHz(50, 100);
     QVERIFY(midFreq > 10000.0 && midFreq < 14000.0);
+}
+
+void QmlSmokeTest::spectrogramSampleRateSyncsFromPrecomputedChunks() {
+    SpectrogramItem item;
+    // Start with default 48 kHz property — simulates QML binding.
+    item.setSampleRateHz(48000);
+
+    const int bins = 4097; // FFT size 8192
+    QByteArray data(bins, '\x80');
+
+    // Feed a chunk with 44100 Hz sample rate.
+    item.feedPrecomputedChunk(data, bins, 0, 1, 0, 100, 44100, 1024,
+                               false, true, 1, false);
+
+    // pixelToFrequencyHz triggers the sync path.
+    // Top pixel should map to Nyquist = 22050, not 24000.
+    const double topFreq = item.pixelToFrequencyHz(0, 100);
+    QVERIFY2(topFreq < 23000.0,
+             qPrintable(QStringLiteral("Expected Nyquist ~22050 but got %1").arg(topFreq)));
+    QVERIFY2(topFreq > 21000.0,
+             qPrintable(QStringLiteral("Expected Nyquist ~22050 but got %1").arg(topFreq)));
 }
 
 void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
