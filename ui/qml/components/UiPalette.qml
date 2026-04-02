@@ -9,19 +9,11 @@ QtObject {
 
     required property var windowRoot
 
-    readonly property bool themeIsDark: ColorUtils.colorLuma(Kirigami.Theme.backgroundColor) < 0.45
-    readonly property color uiPaneColor: themeIsDark
-        ? ColorUtils.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.08)
-        : ColorUtils.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.20)
-    readonly property color uiSurfaceColor: themeIsDark
-        ? ColorUtils.mixColor(Kirigami.Theme.backgroundColor, "#ffffff", 0.14)
-        : "#ffffff"
-    readonly property color uiSurfaceAltColor: themeIsDark
-        ? ColorUtils.mixColor(uiSurfaceColor, Kirigami.Theme.textColor, 0.08)
-        : ColorUtils.mixColor(uiSurfaceColor, Kirigami.Theme.textColor, 0.07)
-    readonly property color uiSurfaceRaisedColor: themeIsDark
-        ? ColorUtils.mixColor(uiSurfaceColor, "#ffffff", 0.08)
-        : "#ffffff"
+    readonly property bool themeIsDark: ColorUtils.colorLuma(root.windowRoot.palette.window) < 0.45
+    readonly property color uiPaneColor: root.windowRoot.palette.window
+    readonly property color uiSurfaceColor: root.windowRoot.palette.window
+    readonly property color uiSurfaceAltColor: root.windowRoot.palette.alternateBase
+    readonly property color uiSurfaceRaisedColor: root.windowRoot.palette.base
     readonly property color uiHeaderColor: ColorUtils.mixColor(
         uiSurfaceAltColor,
         Kirigami.Theme.highlightColor,
@@ -37,7 +29,7 @@ QtObject {
     readonly property color uiBorderColor: ColorUtils.mixColor(
         uiSurfaceColor,
         Kirigami.Theme.textColor,
-        themeIsDark ? 0.22 : 0.18)
+        themeIsDark ? 0.30 : 0.18)
     readonly property color uiTextColor: Kirigami.Theme.textColor
     readonly property color uiMutedTextColor: ColorUtils.mixColor(
         Kirigami.Theme.disabledTextColor,

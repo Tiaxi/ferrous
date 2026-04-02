@@ -29,7 +29,6 @@ Rectangle {
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight
     SplitView.minimumHeight: 220
-    border.color: root.uiPalette.uiBorderColor
 
     ColumnLayout {
         anchors.fill: parent
@@ -39,7 +38,14 @@ Rectangle {
             Layout.fillWidth: true
             implicitHeight: 26
             color: root.uiPalette.uiHeaderColor
-            border.color: root.uiPalette.uiBorderColor
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 1
+                color: root.uiPalette.uiBorderColor
+            }
 
             RowLayout {
                 anchors.fill: parent

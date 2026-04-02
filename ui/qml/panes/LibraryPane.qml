@@ -21,7 +21,6 @@ Rectangle {
     required property var appendAllLibraryTracksAction
 
     color: root.uiPalette.uiPaneColor
-    border.color: root.uiPalette.uiBorderColor
 
     ColumnLayout {
         anchors.fill: parent

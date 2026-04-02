@@ -22,6 +22,17 @@ ToolBar {
     topPadding: 2
     bottomPadding: 2
 
+    background: Rectangle {
+        color: root.uiPalette.uiPaneColor
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: 1
+            color: root.uiPalette.uiBorderColor
+        }
+    }
+
     readonly property bool hasError: root.transientError.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.hasError
     readonly property bool showTrackSections: !root.hasError && !root.isDisconnected
@@ -103,14 +114,11 @@ ToolBar {
                 Layout.preferredWidth: visible ? 22 : 0
                 Layout.preferredHeight: 20
 
-                Image {
+                Kirigami.Icon {
                     anchors.fill: parent
                     source: root.channelIconPath
-                    asynchronous: false
-                    fillMode: Image.PreserveAspectFit
-                    smooth: false
-                    sourceSize.width: 44
-                    sourceSize.height: 40
+                    color: root.uiPalette.uiTextColor
+                    isMask: true
                 }
             }
 

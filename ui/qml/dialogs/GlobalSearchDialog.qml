@@ -139,7 +139,7 @@ Dialog {
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: root.uiPalette.uiSurfaceRaisedColor
+            color: "transparent"
             border.color: root.uiPalette.uiBorderColor
 
             ListView {

@@ -20,7 +20,7 @@ Dialog {
 
     background: Rectangle {
         radius: 16
-        color: root.uiPalette.uiSurfaceRaisedColor
+        color: root.uiPalette.uiPaneColor
         border.color: root.uiPalette.uiBorderColor
     }
 

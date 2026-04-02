@@ -21,7 +21,7 @@ Dialog {
     property string operationText: ""
     readonly property string keepText: "<keep>"
     readonly property color uiSurfaceColor: root.uiPalette.uiSurfaceColor
-    readonly property color uiSurfaceRaisedColor: root.uiPalette.uiSurfaceRaisedColor
+    readonly property color uiSurfaceRaisedColor: root.uiPalette.uiPaneColor
     readonly property color uiHeaderColor: root.uiPalette.uiHeaderColor
     readonly property color uiColumnsColor: root.uiPalette.uiColumnsColor
     readonly property color uiBorderColor: root.uiPalette.uiBorderColor
