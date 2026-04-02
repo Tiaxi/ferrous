@@ -163,6 +163,46 @@ void WaveformItem::setDurationSeconds(double value) {
     update(dirtyRect);
 }
 
+QColor WaveformItem::barColor() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_barColor;
+}
+
+void WaveformItem::setBarColor(const QColor &color) {
+    QRect dirtyRect;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_barColor == color) {
+            return;
+        }
+        m_barColor = color;
+        markDirtyAllLocked();
+        dirtyRect = m_dirtyRect;
+    }
+    emit barColorChanged();
+    update(dirtyRect);
+}
+
+QColor WaveformItem::bgColor() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_bgColor;
+}
+
+void WaveformItem::setBgColor(const QColor &color) {
+    QRect dirtyRect;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_bgColor == color) {
+            return;
+        }
+        m_bgColor = color;
+        markDirtyAllLocked();
+        dirtyRect = m_dirtyRect;
+    }
+    emit bgColorChanged();
+    update(dirtyRect);
+}
+
 void WaveformItem::paint(QPainter *painter) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto paint_start = std::chrono::steady_clock::now();
@@ -254,7 +294,7 @@ void WaveformItem::ensureCacheLocked(int width, int height) {
         return;
     }
     m_waveformCache = QImage(width, height, QImage::Format_RGB32);
-    m_waveformCache.fill(Qt::white);
+    m_waveformCache.fill(m_bgColor);
     m_dirtyRect = QRect(0, 0, width, height);
     m_cacheDirty = true;
 }
@@ -298,10 +338,10 @@ void WaveformItem::updateWaveformCacheLocked() {
     }
 
     QPainter cachePainter(&m_waveformCache);
-    cachePainter.fillRect(dirty, QColor("#ffffff"));
+    cachePainter.fillRect(dirty, m_bgColor);
     if (!m_peaksData.isEmpty()) {
         cachePainter.setPen(Qt::NoPen);
-        cachePainter.setBrush(QColor("#0f2e5d"));
+        cachePainter.setBrush(m_barColor);
         const int count = m_peaksData.size();
         const double half = static_cast<double>(m_waveformCache.height()) / 2.0;
         const auto *src = reinterpret_cast<const uchar *>(m_peaksData.constData());

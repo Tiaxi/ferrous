@@ -128,7 +128,7 @@ ScrollView {
                             width: ListView.view.width
                             height: 52
                             radius: 6
-                            color: root.uiPalette.uiSurfaceRaisedColor
+                            color: root.uiPalette.uiPaneColor
                             border.color: Qt.rgba(0, 0, 0, 0.06)
 
                             RowLayout {

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QColor>
 #include <QImage>
 #include <QMutex>
 #include <QQuickPaintedItem>
@@ -16,6 +17,8 @@ class WaveformItem : public QQuickPaintedItem {
     Q_PROPERTY(bool waveformComplete READ waveformComplete WRITE setWaveformComplete NOTIFY waveformCompleteChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
+    Q_PROPERTY(QColor barColor READ barColor WRITE setBarColor NOTIFY barColorChanged)
+    Q_PROPERTY(QColor bgColor READ bgColor WRITE setBgColor NOTIFY bgColorChanged)
 
 public:
     explicit WaveformItem(QQuickItem *parent = nullptr);
@@ -35,6 +38,12 @@ public:
     double durationSeconds() const;
     void setDurationSeconds(double value);
 
+    QColor barColor() const;
+    void setBarColor(const QColor &color);
+
+    QColor bgColor() const;
+    void setBgColor(const QColor &color);
+
     void paint(QPainter *painter) override;
 
 signals:
@@ -43,6 +52,8 @@ signals:
     void waveformCompleteChanged();
     void positionSecondsChanged();
     void durationSecondsChanged();
+    void barColorChanged();
+    void bgColorChanged();
 
 private:
     int currentWidthLocked() const;
@@ -62,6 +73,8 @@ private:
     double m_durationSeconds{0.0};
     QImage m_waveformCache;
     QRect m_dirtyRect;
+    QColor m_barColor{0x0f, 0x2e, 0x5d};
+    QColor m_bgColor{Qt::white};
     bool m_cacheDirty{true};
     bool m_profileEnabled{false};
     std::chrono::steady_clock::time_point m_profileLast{};

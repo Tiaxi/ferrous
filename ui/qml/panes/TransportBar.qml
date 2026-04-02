@@ -75,8 +75,8 @@ ToolBar {
 
                 Rectangle {
                     anchors.fill: parent
-                    color: "white"
-                    border.color: "#a0a9b3"
+                    color: root.themeIsDark ? "#1a1e24" : "white"
+                    border.color: root.themeIsDark ? "#404854" : "#a0a9b3"
                     radius: 1
                 }
 
@@ -92,6 +92,8 @@ ToolBar {
                     waveformComplete: root.uiBridge.waveformComplete
                     positionSeconds: root.displayedPositionSeconds
                     durationSeconds: root.uiBridge.durationSeconds
+                    barColor: root.themeIsDark ? "#a8bcd0" : "#0f2e5d"
+                    bgColor: root.themeIsDark ? "#1a1e24" : "#ffffff"
                 }
 
                 Rectangle {
