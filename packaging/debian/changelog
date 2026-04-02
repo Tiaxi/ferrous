@@ -1,3 +1,7 @@
+ferrous (0.1.4-1) unstable; urgency=low
+
+  * Fix spectrogram frequency axis for 44.1k-family sample rates.
+
 ferrous (0.1.3-1) unstable; urgency=low
 
   * Search performance optimizations and UI polish.
