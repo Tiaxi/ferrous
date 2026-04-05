@@ -2766,14 +2766,6 @@ fn handle_import_library_command(
     }
 }
 
-fn library_track_paths(library: &LibrarySnapshot) -> Vec<PathBuf> {
-    library
-        .tracks
-        .iter()
-        .map(|track| track.path.clone())
-        .collect()
-}
-
 fn handle_library_root_command(
     cmd: &BridgeLibraryCommand,
     library: &LibraryService,
@@ -2998,20 +2990,12 @@ fn queue_root_by_path(
     root_path: &str,
     mode: QueueMode,
 ) -> bool {
-    let paths = collect_root_paths_for_queue(&state.library, root_path);
+    let paths = library_tree::collect_root_paths_tree_order(
+        &state.library,
+        root_path,
+        state.settings.library_sort_mode,
+    );
     queue_paths(state, runtime, paths, mode)
-}
-
-fn collect_root_paths_for_queue(library: &LibrarySnapshot, root_path: &str) -> Vec<PathBuf> {
-    let root = std::path::Path::new(root_path);
-    let mut paths: Vec<PathBuf> = library
-        .tracks
-        .iter()
-        .filter(|track| track.path.starts_with(root))
-        .map(|track| track.path.clone())
-        .collect();
-    paths.sort();
-    paths
 }
 
 fn queue_all_tracks(
@@ -3019,7 +3003,11 @@ fn queue_all_tracks(
     runtime: &LibraryCommandRuntime<'_>,
     mode: QueueMode,
 ) -> bool {
-    queue_paths(state, runtime, library_track_paths(&state.library), mode)
+    let paths = library_tree::collect_all_paths_tree_order(
+        &state.library,
+        state.settings.library_sort_mode,
+    );
+    queue_paths(state, runtime, paths, mode)
 }
 
 fn queue_paths(

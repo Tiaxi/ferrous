@@ -1057,6 +1057,74 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
 /// or title).  Within each album: root tracks first, then disc sections
 /// in alphabetical order, then non-disc sections sorted by year (or
 /// name when year is absent).
+/// Emit one artist's tracks in tree display order into `out`.
+fn emit_artist_paths(
+    artist: &ArtistNodeBuilder,
+    sort_mode: LibrarySortMode,
+    out: &mut Vec<PathBuf>,
+) {
+    // Loose tracks (directly under the artist folder).
+    let loose = order_tracks(&artist.loose_tracks);
+    for track in &loose {
+        out.push(PathBuf::from(&track.path));
+    }
+
+    // Resolve and sort albums identically to the tree.
+    let mut resolved_albums: Vec<ResolvedAlbum> =
+        artist.albums.values().map(resolve_album).collect();
+    sort_resolved_albums(&mut resolved_albums, sort_mode);
+
+    for album in &resolved_albums {
+        // Root-level album tracks.
+        for track in &album.root_tracks {
+            out.push(PathBuf::from(&track.path));
+        }
+
+        // Disc sections first (alphabetical, already sorted by
+        // resolve_album which sorts sections by natural_cmp).
+        for section in &album.sections {
+            if super::is_main_album_disc_section(&section.name) {
+                for track in &section.tracks {
+                    out.push(PathBuf::from(&track.path));
+                }
+            }
+        }
+
+        // Non-disc sections: sort by year (or name if no year).
+        let mut non_disc: Vec<&ResolvedSection> = album
+            .sections
+            .iter()
+            .filter(|s| !super::is_main_album_disc_section(&s.name))
+            .collect();
+        non_disc.sort_by(|a, b| {
+            let a_unknown = a.year.is_none();
+            let b_unknown = b.year.is_none();
+            a_unknown
+                .cmp(&b_unknown)
+                .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
+                .then_with(|| natural_cmp(&a.name, &b.name))
+        });
+        for section in non_disc {
+            for track in &section.tracks {
+                out.push(PathBuf::from(&track.path));
+            }
+        }
+    }
+}
+
+/// Emit all artists in a root builder in alphabetical order into `out`.
+fn emit_root_artists_paths(
+    root_builder: &RootNodeBuilder,
+    sort_mode: LibrarySortMode,
+    out: &mut Vec<PathBuf>,
+) {
+    let mut artists: Vec<&ArtistNodeBuilder> = root_builder.artists.values().collect();
+    artists.sort_by(|a, b| natural_cmp(&a.artist_name, &b.artist_name));
+    for artist in artists {
+        emit_artist_paths(artist, sort_mode, out);
+    }
+}
+
 pub(crate) fn collect_artist_paths_tree_order(
     library: &LibrarySnapshot,
     artist_selector: &str,
@@ -1080,54 +1148,37 @@ pub(crate) fn collect_artist_paths_tree_order(
                 continue;
             }
 
-            // Loose tracks (directly under the artist folder).
-            let loose = order_tracks(&artist.loose_tracks);
-            for track in &loose {
-                out.push(PathBuf::from(&track.path));
-            }
-
-            // Resolve and sort albums identically to the tree.
-            let mut resolved_albums: Vec<ResolvedAlbum> =
-                artist.albums.values().map(resolve_album).collect();
-            sort_resolved_albums(&mut resolved_albums, sort_mode);
-
-            for album in &resolved_albums {
-                // Root-level album tracks.
-                for track in &album.root_tracks {
-                    out.push(PathBuf::from(&track.path));
-                }
-
-                // Disc sections first (alphabetical, already sorted by
-                // resolve_album which sorts sections by natural_cmp).
-                for section in &album.sections {
-                    if super::is_main_album_disc_section(&section.name) {
-                        for track in &section.tracks {
-                            out.push(PathBuf::from(&track.path));
-                        }
-                    }
-                }
-
-                // Non-disc sections: sort by year (or name if no year).
-                let mut non_disc: Vec<&ResolvedSection> = album
-                    .sections
-                    .iter()
-                    .filter(|s| !super::is_main_album_disc_section(&s.name))
-                    .collect();
-                non_disc.sort_by(|a, b| {
-                    let a_unknown = a.year.is_none();
-                    let b_unknown = b.year.is_none();
-                    a_unknown
-                        .cmp(&b_unknown)
-                        .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
-                        .then_with(|| natural_cmp(&a.name, &b.name))
-                });
-                for section in non_disc {
-                    for track in &section.tracks {
-                        out.push(PathBuf::from(&track.path));
-                    }
-                }
-            }
+            emit_artist_paths(artist, sort_mode, &mut out);
         }
+    }
+    out
+}
+
+/// Collect all tracks under a single library root in tree display order
+/// (artists alphabetical, albums sorted by `sort_mode`).
+pub(crate) fn collect_root_paths_tree_order(
+    library: &LibrarySnapshot,
+    root_path: &str,
+    sort_mode: LibrarySortMode,
+) -> Vec<PathBuf> {
+    let builders = build_root_builders(&library.roots, &library.tracks);
+    let mut out = Vec::new();
+    if let Some(root_builder) = builders.get(root_path) {
+        emit_root_artists_paths(root_builder, sort_mode, &mut out);
+    }
+    out
+}
+
+/// Collect all library tracks across all roots in tree display order
+/// (roots in `BTreeMap` order, artists alphabetical, albums sorted by `sort_mode`).
+pub(crate) fn collect_all_paths_tree_order(
+    library: &LibrarySnapshot,
+    sort_mode: LibrarySortMode,
+) -> Vec<PathBuf> {
+    let builders = build_root_builders(&library.roots, &library.tracks);
+    let mut out = Vec::new();
+    for root_builder in builders.values() {
+        emit_root_artists_paths(root_builder, sort_mode, &mut out);
     }
     out
 }
@@ -1952,6 +2003,196 @@ mod tests {
                 // Album A (2000) — root tracks in track_no order
                 PathBuf::from("/music/TestArtist/Album A/01.flac"),
                 PathBuf::from("/music/TestArtist/Album A/02.flac"),
+            ]
+        );
+    }
+
+    fn track_in_root(
+        path: &str,
+        root_path: &str,
+        album: &str,
+        year: Option<i32>,
+        track_no: Option<u32>,
+        title: &str,
+    ) -> LibraryTrack {
+        LibraryTrack {
+            path: PathBuf::from(path),
+            root_path: PathBuf::from(root_path),
+            title: title.to_string(),
+            artist: String::new(),
+            album: album.to_string(),
+            cover_path: String::new(),
+            genre: String::new(),
+            year,
+            track_no,
+            duration_secs: None,
+        }
+    }
+
+    #[test]
+    fn collect_root_paths_tree_order_sorts_by_artist_then_album_year() {
+        // Root has two artists: "Beta" and "Alpha" (should sort alphabetically).
+        // Alpha has Album X (2020), Beta has Album Y (1990) and Album Z (2010).
+        // Year sort → Beta's albums: Y(1990), Z(2010); Alpha's album: X(2020).
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: vec![
+                track(
+                    "/music/Beta/Album Z/01.flac",
+                    "Album Z",
+                    Some(2010),
+                    Some(1),
+                    "Track 01",
+                ),
+                track(
+                    "/music/Beta/Album Y/01.flac",
+                    "Album Y",
+                    Some(1990),
+                    Some(1),
+                    "Track 01",
+                ),
+                track(
+                    "/music/Alpha/Album X/01.flac",
+                    "Album X",
+                    Some(2020),
+                    Some(1),
+                    "Track 01",
+                ),
+            ],
+            ..LibrarySnapshot::default()
+        };
+
+        let paths = collect_root_paths_tree_order(&library, "/music", LibrarySortMode::Year);
+        assert_eq!(
+            paths,
+            vec![
+                // Alpha first (alphabetical), then Beta
+                PathBuf::from("/music/Alpha/Album X/01.flac"),
+                // Beta: Album Y (1990) before Album Z (2010)
+                PathBuf::from("/music/Beta/Album Y/01.flac"),
+                PathBuf::from("/music/Beta/Album Z/01.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_root_paths_tree_order_sorts_by_artist_then_album_title() {
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: vec![
+                track(
+                    "/music/Artist/Zebra/01.flac",
+                    "Zebra",
+                    Some(1990),
+                    Some(1),
+                    "Track 01",
+                ),
+                track(
+                    "/music/Artist/Alpha/01.flac",
+                    "Alpha",
+                    Some(2020),
+                    Some(1),
+                    "Track 01",
+                ),
+            ],
+            ..LibrarySnapshot::default()
+        };
+
+        let paths = collect_root_paths_tree_order(&library, "/music", LibrarySortMode::Title);
+        assert_eq!(
+            paths,
+            vec![
+                // Title sort → Alpha before Zebra, regardless of year
+                PathBuf::from("/music/Artist/Alpha/01.flac"),
+                PathBuf::from("/music/Artist/Zebra/01.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_all_paths_tree_order_spans_multiple_roots() {
+        // Two roots: /a and /b, each with one artist and one album.
+        let library = LibrarySnapshot {
+            roots: vec![root("/a"), root("/b")],
+            tracks: vec![
+                track_in_root(
+                    "/b/Artist/Album/01.flac",
+                    "/b",
+                    "Album",
+                    Some(2000),
+                    Some(1),
+                    "T1",
+                ),
+                track_in_root(
+                    "/a/Artist/Album/01.flac",
+                    "/a",
+                    "Album",
+                    Some(2000),
+                    Some(1),
+                    "T1",
+                ),
+            ],
+            ..LibrarySnapshot::default()
+        };
+
+        let paths = collect_all_paths_tree_order(&library, LibrarySortMode::Year);
+        assert_eq!(
+            paths,
+            vec![
+                // Root /a first (BTreeMap order), then root /b
+                PathBuf::from("/a/Artist/Album/01.flac"),
+                PathBuf::from("/b/Artist/Album/01.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_all_paths_tree_order_sorts_albums_by_year_across_artists() {
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: vec![
+                track(
+                    "/music/Zeppelin/Houses (1973)/01.flac",
+                    "Houses (1973)",
+                    Some(1973),
+                    Some(1),
+                    "Track 01",
+                ),
+                track(
+                    "/music/Zeppelin/Presence (1976)/01.flac",
+                    "Presence (1976)",
+                    Some(1976),
+                    Some(1),
+                    "Track 01",
+                ),
+                track(
+                    "/music/Floyd/Wall (1979)/01.flac",
+                    "Wall (1979)",
+                    Some(1979),
+                    Some(1),
+                    "Track 01",
+                ),
+                track(
+                    "/music/Floyd/Meddle (1971)/01.flac",
+                    "Meddle (1971)",
+                    Some(1971),
+                    Some(1),
+                    "Track 01",
+                ),
+            ],
+            ..LibrarySnapshot::default()
+        };
+
+        let paths = collect_all_paths_tree_order(&library, LibrarySortMode::Year);
+        assert_eq!(
+            paths,
+            vec![
+                // Floyd first (alphabetical), albums by year
+                PathBuf::from("/music/Floyd/Meddle (1971)/01.flac"),
+                PathBuf::from("/music/Floyd/Wall (1979)/01.flac"),
+                // Zeppelin second, albums by year
+                PathBuf::from("/music/Zeppelin/Houses (1973)/01.flac"),
+                PathBuf::from("/music/Zeppelin/Presence (1976)/01.flac"),
             ]
         );
     }
