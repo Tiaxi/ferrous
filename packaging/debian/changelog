@@ -1,3 +1,8 @@
+ferrous (0.1.5-1) unstable; urgency=low
+
+  * Add right-click-to-seek on spectrogram in centered mode.
+  * Fix tree-order sorting when queuing root or all library tracks.
+
 ferrous (0.1.4-1) unstable; urgency=low
 
   * Fix spectrogram frequency axis for 44.1k-family sample rates.
