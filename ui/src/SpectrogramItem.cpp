@@ -2168,7 +2168,8 @@ void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
 }
 
 void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
-    if (event->button() != Qt::RightButton || !m_crosshairEnabled) {
+    if (event->button() != Qt::RightButton || !m_crosshairEnabled
+        || m_displayMode == 0) {
         event->ignore();
         return;
     }

@@ -166,7 +166,7 @@ ScrollView {
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
                     font.pixelSize: 12
-                    text: "When enabled, right-clicking the spectrogram seeks to that position in the track."
+                    text: "When enabled, right-clicking the spectrogram in centered mode seeks to that position in the track."
                 }
 
                 CheckBox {

@@ -419,7 +419,7 @@ private slots:
     void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
     void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
     void spectrogramLeftClickDoesNotSeek();
-    void spectrogramClickToSeekWorksInRollingMode();
+    void spectrogramClickToSeekDisabledInRollingMode();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2984,7 +2984,7 @@ void QmlSmokeTest::spectrogramLeftClickDoesNotSeek() {
     QCOMPARE(seekSpy.count(), 0);
 }
 
-void QmlSmokeTest::spectrogramClickToSeekWorksInRollingMode() {
+void QmlSmokeTest::spectrogramClickToSeekDisabledInRollingMode() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -3003,15 +3003,11 @@ void QmlSmokeTest::spectrogramClickToSeekWorksInRollingMode() {
         sampleRate, hopSize, false, true, 42);
 
     // Rolling mode (default displayMode=0), crosshair enabled.
+    // Seek is disabled in rolling mode because the write-order ring
+    // buffer history does not realign to the new position.
     item.setDisplayMode(0);
     item.setPositionSeconds(3.0);
     item.setCrosshairEnabled(true);
-
-    // Prime crosshair cache.
-    QHoverEvent hoverEnter(
-        QEvent::HoverEnter, QPointF(50.0, 90.0),
-        QPointF(50.0, 90.0), QPointF());
-    item.hoverEnterEvent(&hoverEnter);
 
     QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
 
@@ -3021,11 +3017,7 @@ void QmlSmokeTest::spectrogramClickToSeekWorksInRollingMode() {
         Qt::NoModifier);
     item.mousePressEvent(&pressEvent);
 
-    QCOMPARE(seekSpy.count(), 1);
-    const double seekSeconds = seekSpy.at(0).at(0).toDouble();
-    // The seek time is derived from the pixel position; it must be
-    // non-negative.
-    QVERIFY(seekSeconds >= 0.0);
+    QCOMPARE(seekSpy.count(), 0);
 }
 
 int main(int argc, char **argv) {
