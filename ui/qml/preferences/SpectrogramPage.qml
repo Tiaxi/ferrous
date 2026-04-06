@@ -160,6 +160,15 @@ ScrollView {
                     onToggled: root.uiBridge.setShowSpectrogramCrosshair(checked)
                 }
 
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 32
+                    wrapMode: Text.Wrap
+                    color: Kirigami.Theme.disabledTextColor
+                    font.pixelSize: 12
+                    text: "When enabled, right-clicking the spectrogram seeks to that position in the track."
+                }
+
                 CheckBox {
                     text: "Show Frequency/Time Scale"
                     focusPolicy: Qt.NoFocus
