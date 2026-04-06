@@ -10,6 +10,7 @@ Item {
 
     required property var uiBridge
     property double positionSeconds: 0
+    property var seekCommitted: null
 
     property var channelDescriptors: []
     property double _crosshairSharedX: -1.0
@@ -220,6 +221,11 @@ Item {
                     showTimeLabels: index === spectrogramRepeater.count - 1
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
+                    onSeekRequested: (seconds) => {
+                        if (root.seekCommitted) {
+                            root.seekCommitted(seconds)
+                        }
+                    }
                     // Pane-level hover detection for M/S button visibility.
                     // Attached to SpectrogramItem (not the parent Item) because
                     // SpectrogramItem accepts hover events for crosshair overlay,
@@ -288,8 +294,12 @@ Item {
 
                         MouseArea {
                             anchors.fill: parent
+                            acceptedButtons: Qt.AllButtons
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.uiBridge.toggleChannelMute(modelData.channelIndex)
+                            onClicked: function(mouse) {
+                                if (mouse.button === Qt.LeftButton)
+                                    root.uiBridge.toggleChannelMute(modelData.channelIndex)
+                            }
                         }
                     }
 
@@ -321,8 +331,12 @@ Item {
 
                         MouseArea {
                             anchors.fill: parent
+                            acceptedButtons: Qt.AllButtons
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.uiBridge.soloChannel(modelData.channelIndex)
+                            onClicked: function(mouse) {
+                                if (mouse.button === Qt.LeftButton)
+                                    root.uiBridge.soloChannel(modelData.channelIndex)
+                            }
                         }
                     }
                 }

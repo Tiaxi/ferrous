@@ -1033,6 +1033,7 @@ Kirigami.ApplicationWindow {
         anchors.fill: parent
         uiBridge: root.uiBridge
         positionSeconds: playbackController.spectrogramPositionSeconds
+        seekCommitted: playbackController.seekCommitted
     }
 
     Viewers.SpectrogramViewerShell {
