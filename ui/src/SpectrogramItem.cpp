@@ -7,6 +7,7 @@
 #include <QFontMetrics>
 #include <QDateTime>
 #include <QHoverEvent>
+#include <QMouseEvent>
 #include <QMutexLocker>
 #include <QPainter>
 #include <QQuickWindow>
@@ -318,6 +319,7 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
     setAcceptHoverEvents(true);
+    setAcceptedMouseButtons(Qt::RightButton);
     m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_forceFpsOverlay = m_forceFpsOverlay
@@ -2163,6 +2165,44 @@ void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
         emit crosshairHoverChanged(-1.0);
         update();
     }
+}
+
+void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
+    if (event->button() != Qt::RightButton || !m_crosshairEnabled) {
+        event->ignore();
+        return;
+    }
+
+    QMutexLocker lock(&m_stateMutex);
+
+    const double columnsPerSecond =
+        m_precomputedHopSize > 0
+            ? static_cast<double>(m_precomputedSampleRateHz)
+                  / static_cast<double>(m_precomputedHopSize)
+            : 0.0;
+    if (columnsPerSecond <= 0.0) {
+        lock.unlock();
+        event->ignore();
+        return;
+    }
+
+    const double seconds = pixelToTimeSeconds(
+        event->position().x(),
+        m_crosshairCachedDisplayLeft,
+        m_crosshairCachedRollingMode,
+        m_rollingEpoch,
+        columnsPerSecond,
+        m_crosshairCachedDrawX);
+
+    lock.unlock();
+
+    if (seconds < 0.0) {
+        event->ignore();
+        return;
+    }
+
+    event->accept();
+    emit seekRequested(seconds);
 }
 
 double SpectrogramItem::pixelToFrequencyHzLocked(int pixelY, int viewHeight) const {

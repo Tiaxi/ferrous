@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QHoverEvent>
 #include <QImage>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
 #include <QQmlComponent>
@@ -415,6 +416,10 @@ private slots:
     void spectrogramOverlayStalenessDetectsBinChange();
     void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
     void spectrogramOverlayStalenessDetectsDisplayRangeChange();
+    void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
+    void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
+    void spectrogramLeftClickDoesNotSeek();
+    void spectrogramClickToSeekWorksInRollingMode();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2874,6 +2879,153 @@ void QmlSmokeTest::testMutedChannelRendersGrayscale()
     QCOMPARE(spy.count(), 0);
     item.setChannelMuted(false);
     QCOMPARE(spy.count(), 1);
+}
+
+void QmlSmokeTest::spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int sampleRate = 48000;
+    constexpr int hopSize = 1024;
+    constexpr int totalEstimate = 512;
+
+    // Feed enough data so the ring buffer is populated.
+    QByteArray chunk(totalEstimate * binsPerColumn, '\0');
+    for (int i = 0; i < chunk.size(); ++i) {
+        chunk[i] = static_cast<char>(i & 0xFF);
+    }
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, totalEstimate, 0, totalEstimate,
+        sampleRate, hopSize, true, true, 42);
+
+    // Set centered mode, position at 5 seconds, crosshair enabled.
+    item.setDisplayMode(1);
+    item.setPositionSeconds(5.0);
+    item.setCrosshairEnabled(true);
+
+    // Prime the crosshair cache by simulating a hover so cached
+    // displayLeft/drawX/rollingMode are initialized.
+    QHoverEvent hoverEnter(
+        QEvent::HoverEnter, QPointF(100.0, 90.0),
+        QPointF(100.0, 90.0), QPointF());
+    item.hoverEnterEvent(&hoverEnter);
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+
+    // Right-click at pixel X=100.
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress, QPointF(100.0, 90.0),
+        QPointF(100.0, 90.0), Qt::RightButton, Qt::RightButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 1);
+    const double seekSeconds = seekSpy.at(0).at(0).toDouble();
+    // The exact value depends on display layout, but it must be
+    // non-negative (valid time).
+    QVERIFY(seekSeconds > 0.0);
+    QVERIFY(seekSeconds < 5.0);  // Left of center → earlier than playhead
+}
+
+void QmlSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 512;
+    QByteArray chunk(totalEstimate * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, totalEstimate, 0, totalEstimate,
+        48000, 1024, true, true, 42);
+
+    item.setDisplayMode(1);
+    item.setPositionSeconds(5.0);
+    item.setCrosshairEnabled(false);  // Crosshair OFF
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress, QPointF(100.0, 90.0),
+        QPointF(100.0, 90.0), Qt::RightButton, Qt::RightButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 0);
+}
+
+void QmlSmokeTest::spectrogramLeftClickDoesNotSeek() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 512;
+    QByteArray chunk(totalEstimate * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, totalEstimate, 0, totalEstimate,
+        48000, 1024, true, true, 42);
+
+    item.setDisplayMode(1);
+    item.setPositionSeconds(5.0);
+    item.setCrosshairEnabled(true);  // Crosshair ON
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+
+    // Left-click should NOT seek.
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress, QPointF(100.0, 90.0),
+        QPointF(100.0, 90.0), Qt::LeftButton, Qt::LeftButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 0);
+}
+
+void QmlSmokeTest::spectrogramClickToSeekWorksInRollingMode() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int sampleRate = 48000;
+    constexpr int hopSize = 1024;
+    constexpr int totalEstimate = 512;
+
+    QByteArray chunk(200 * binsPerColumn, '\0');
+    for (int i = 0; i < chunk.size(); ++i) {
+        chunk[i] = static_cast<char>(i & 0xFF);
+    }
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, 200, 0, totalEstimate,
+        sampleRate, hopSize, false, true, 42);
+
+    // Rolling mode (default displayMode=0), crosshair enabled.
+    item.setDisplayMode(0);
+    item.setPositionSeconds(3.0);
+    item.setCrosshairEnabled(true);
+
+    // Prime crosshair cache.
+    QHoverEvent hoverEnter(
+        QEvent::HoverEnter, QPointF(50.0, 90.0),
+        QPointF(50.0, 90.0), QPointF());
+    item.hoverEnterEvent(&hoverEnter);
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress, QPointF(50.0, 90.0),
+        QPointF(50.0, 90.0), Qt::RightButton, Qt::RightButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 1);
+    const double seekSeconds = seekSpy.at(0).at(0).toDouble();
+    // The seek time is derived from the pixel position; it must be
+    // non-negative.
+    QVERIFY(seekSeconds >= 0.0);
 }
 
 int main(int argc, char **argv) {
