@@ -1769,6 +1769,12 @@ struct SpectrogramSessionState {
     decode_rate_limit: f64,
     lookahead_columns: u64,
 
+    /// Whether a `GStreamer` duration re-query has already been attempted.
+    /// Raw DTS/AC3 files often lack duration at pipeline start; a re-query
+    /// after some data has been decoded may succeed.
+    #[cfg(feature = "gst")]
+    gst_duration_requeried: bool,
+
     /// Stored `ContinueWithFile` command to apply when the current file
     /// reaches EOF.  Set by command processing, consumed at EOF.
     /// Fields: `(path, track_token)`.
@@ -1916,6 +1922,8 @@ fn run_spectrogram_session(
         post_reset_unthrottled_columns: post_reset_unthrottled_columns(display_mode),
         decode_rate_limit,
         lookahead_columns,
+        #[cfg(feature = "gst")]
+        gst_duration_requeried: false,
         pending_continue: None,
     };
 
@@ -2202,6 +2210,13 @@ fn session_decode_loop(
 
         // 5. Drain STFT rows and emit chunks.
         session_drain_stft_rows(session, warmup_remaining, event_tx, columns_produced_out);
+
+        // 6. Update total_columns_estimate when the decoder produces more
+        //    columns than initially estimated.  This happens for raw DTS/AC3
+        //    files where GStreamer cannot query duration from the headerless
+        //    bitstream.  Without this, the UI ring buffer is undersized and
+        //    early columns get evicted, causing the spectrogram to go black.
+        maybe_update_columns_estimate(session, source);
 
         // Yield periodically to avoid starving UI.
         if session.packet_counter.is_multiple_of(64) {
@@ -2632,6 +2647,63 @@ fn session_drain_stft_rows(
     }
 }
 
+/// Update `total_columns_estimate` when the decoder is approaching or
+/// exceeding the current estimate.  This is critical for raw DTS/AC3 files
+/// where `GStreamer` cannot determine the stream duration from headerless
+/// bitstreams, causing the initial estimate to fall back to 300 seconds.
+///
+/// Two strategies:
+/// 1. Re-query `GStreamer` pipeline duration once some data has been decoded;
+///    `GStreamer` may determine the duration after processing the bitstream.
+/// 2. If the re-query fails and we're within 25% of the estimate, double it
+///    so the UI ring buffer grows before columns are evicted.
+fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: &AudioFrameSource) {
+    let estimate = u64::from(session.total_columns_estimate);
+    let produced = session.columns_produced;
+
+    // Attempt a GStreamer duration re-query early in the session.
+    #[cfg(feature = "gst")]
+    if !session.gst_duration_requeried && session.packet_counter >= 20 {
+        session.gst_duration_requeried = true;
+        if let Some(ns) = source.query_duration_ns() {
+            let rate =
+                u64::from(session.effective_rate) * u64::try_from(session.divisor).unwrap_or(1);
+            let total_frames = ns * rate / 1_000_000_000;
+            let divisor = waveform_sample_rate_divisor(rate);
+            let effective = total_frames / divisor;
+            let new_est =
+                u32::try_from(((effective / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
+                    .unwrap_or(u32::MAX);
+            if new_est > session.total_columns_estimate {
+                profile_eprintln!(
+                    "[spect-worker] duration re-query OK, est_cols {} → {}",
+                    session.total_columns_estimate,
+                    new_est,
+                );
+                session.total_columns_estimate = new_est;
+                return;
+            }
+        }
+    }
+
+    // Suppress the unused-variable warning when GStreamer is disabled.
+    let _ = source;
+
+    // Safety net: if we're within 25% of the estimate, double it.
+    // This ensures the UI ring buffer grows before columns get evicted.
+    let threshold = estimate.saturating_sub(estimate / 4);
+    if produced >= threshold && estimate < u64::from(u32::MAX / 2) {
+        let new_est = session.total_columns_estimate.saturating_mul(2);
+        profile_eprintln!(
+            "[spect-worker] columns approaching estimate, est_cols {} → {} (produced={})",
+            session.total_columns_estimate,
+            new_est,
+            produced,
+        );
+        session.total_columns_estimate = new_est;
+    }
+}
+
 fn session_flush_chunk(
     session: &mut SpectrogramSessionState,
     event_tx: &Sender<AnalysisEvent>,
@@ -2927,6 +2999,18 @@ impl AudioFrameSource {
                     })
                 }
             }
+        }
+    }
+
+    /// Query the pipeline duration in nanoseconds (`GStreamer` only).
+    /// Returns `None` for Symphonia sources or when the duration is unknown.
+    #[cfg(feature = "gst")]
+    fn query_duration_ns(&self) -> Option<u64> {
+        match self {
+            Self::Gst { pipeline, .. } => pipeline
+                .query_duration::<gst::ClockTime>()
+                .map(gst::ClockTime::nseconds),
+            Self::Symphonia { .. } => None,
         }
     }
 
@@ -4675,6 +4759,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -4760,6 +4846,8 @@ mod tests {
             ),
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -4802,6 +4890,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -4854,6 +4944,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -4898,6 +4990,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -5022,6 +5116,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -5071,6 +5167,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: Some((PathBuf::from("/tmp/old.flac"), 10)),
         };
 
@@ -5194,6 +5292,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -5238,6 +5338,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -5282,6 +5384,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: u64::MAX,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         };
 
@@ -5643,6 +5747,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            #[cfg(feature = "gst")]
+            gst_duration_requeried: false,
             pending_continue: None,
         }
     }
@@ -6295,5 +6401,114 @@ mod tests {
         assert!(!rewritten[1].clear_history);
         assert_eq!(rewritten[2].track_token, 42);
         assert!(!rewritten[2].buffer_reset);
+    }
+
+    /// Simulates a Symphonia source for tests that need `maybe_update_columns_estimate`.
+    #[cfg(not(feature = "gst"))]
+    fn make_dummy_source() -> AudioFrameSource {
+        let hint = Hint::new();
+        // We never call next_frames(), so a dummy Symphonia variant is fine.
+        // Build the minimum valid state — all fields will be unused.
+        AudioFrameSource::Symphonia {
+            format: {
+                // Create a minimal in-memory source that Symphonia can probe.
+                // Since we never actually decode, we just need a valid instance.
+                // Use a short WAV header for a silent 1-sample file.
+                let wav_header: &[u8] = &[
+                    0x52, 0x49, 0x46, 0x46, // "RIFF"
+                    0x2E, 0x00, 0x00, 0x00, // chunk size (46 bytes after this)
+                    0x57, 0x41, 0x56, 0x45, // "WAVE"
+                    0x66, 0x6D, 0x74, 0x20, // "fmt "
+                    0x10, 0x00, 0x00, 0x00, // subchunk1 size (16)
+                    0x01, 0x00, // PCM format
+                    0x01, 0x00, // 1 channel
+                    0x80, 0xBB, 0x00, 0x00, // 48000 Hz
+                    0x00, 0x77, 0x01, 0x00, // byte rate
+                    0x02, 0x00, // block align
+                    0x10, 0x00, // 16 bits/sample
+                    0x64, 0x61, 0x74, 0x61, // "data"
+                    0x02, 0x00, 0x00, 0x00, // data size (2 bytes = 1 sample)
+                    0x00, 0x00, // one silent sample
+                ];
+                let cursor = std::io::Cursor::new(wav_header.to_vec());
+                let mss =
+                    MediaSourceStream::new(Box::new(cursor), MediaSourceStreamOptions::default());
+                symphonia::default::get_probe()
+                    .format(
+                        &hint,
+                        mss,
+                        &FormatOptions::default(),
+                        &MetadataOptions::default(),
+                    )
+                    .unwrap()
+                    .format
+            },
+            decoder: {
+                let wav_header2: &[u8] = &[
+                    0x52, 0x49, 0x46, 0x46, 0x2E, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45, 0x66,
+                    0x6D, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x80, 0xBB,
+                    0x00, 0x00, 0x00, 0x77, 0x01, 0x00, 0x02, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74,
+                    0x61, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ];
+                let cursor2 = std::io::Cursor::new(wav_header2.to_vec());
+                let mss2 =
+                    MediaSourceStream::new(Box::new(cursor2), MediaSourceStreamOptions::default());
+                let probed = symphonia::default::get_probe()
+                    .format(
+                        &Hint::new(),
+                        mss2,
+                        &FormatOptions::default(),
+                        &MetadataOptions::default(),
+                    )
+                    .unwrap();
+                let track = probed.format.default_track().unwrap();
+                symphonia::default::get_codecs()
+                    .make(&track.codec_params, &DecoderOptions::default())
+                    .unwrap()
+            },
+            track_id: 0,
+            sample_buf: None,
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "gst"))]
+    fn columns_estimate_doubles_when_approaching_limit() {
+        let mut session = make_test_session();
+        session.total_columns_estimate = 1000;
+        session.columns_produced = 600; // below 75% threshold
+        let source = make_dummy_source();
+
+        maybe_update_columns_estimate(&mut session, &source);
+        assert_eq!(
+            session.total_columns_estimate, 1000,
+            "should not grow below 75%"
+        );
+
+        session.columns_produced = 750; // exactly at 75% threshold
+        maybe_update_columns_estimate(&mut session, &source);
+        assert_eq!(session.total_columns_estimate, 2000, "should double at 75%");
+
+        // After doubling, 750 is well below the new 75% threshold (1500).
+        maybe_update_columns_estimate(&mut session, &source);
+        assert_eq!(session.total_columns_estimate, 2000, "should stay stable");
+    }
+
+    #[test]
+    #[cfg(not(feature = "gst"))]
+    fn columns_estimate_doubles_again_when_still_producing() {
+        let mut session = make_test_session();
+        session.total_columns_estimate = 1000;
+        let source = make_dummy_source();
+
+        // Cross first threshold.
+        session.columns_produced = 800;
+        maybe_update_columns_estimate(&mut session, &source);
+        assert_eq!(session.total_columns_estimate, 2000);
+
+        // Cross second threshold (75% of 2000 = 1500).
+        session.columns_produced = 1600;
+        maybe_update_columns_estimate(&mut session, &source);
+        assert_eq!(session.total_columns_estimate, 4000);
     }
 }
