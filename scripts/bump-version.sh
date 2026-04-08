@@ -24,6 +24,9 @@ fi
 # Cargo.toml — single source of truth
 sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" "${REPO_ROOT}/Cargo.toml"
 
+# Regenerate Cargo.lock to match
+(cd "${REPO_ROOT}" && cargo update -p ferrous --quiet)
+
 # RPM spec fallback
 sed -i "s/%{!?ferrous_version:%global ferrous_version .*}/%{!?ferrous_version:%global ferrous_version ${NEW_VERSION}}/" \
     "${REPO_ROOT}/packaging/rpm/ferrous.spec"
@@ -44,10 +47,10 @@ mv "${DEBIAN_CHANGELOG}.tmp" "${DEBIAN_CHANGELOG}"
 
 echo "Bumped version to ${NEW_VERSION} in:"
 echo "  Cargo.toml"
+echo "  Cargo.lock"
 echo "  packaging/rpm/ferrous.spec"
 echo "  packaging/debian/changelog (edit release notes before committing)"
 echo ""
 echo "Next steps:"
-echo "  cargo check          # regenerates Cargo.lock"
 echo "  git add -p && git commit -m 'chore: bump version to ${NEW_VERSION}'"
 echo "  git tag v${NEW_VERSION}"
