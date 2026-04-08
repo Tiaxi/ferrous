@@ -1619,16 +1619,24 @@ mod tests {
         event_tx: &Sender<BridgeEvent>,
         event_rx: &Receiver<BridgeEvent>,
     ) {
-        let deadline = Instant::now() + Duration::from_millis(500);
-        loop {
+        let deadline = Instant::now() + Duration::from_millis(2000);
+        // Keep draining until two consecutive quiet cycles (no new events)
+        // to handle slow CI where background threads haven't sent their
+        // initial snapshot yet on the first attempt.
+        let mut consecutive_quiet = 0u32;
+        while Instant::now() < deadline {
             let _ = runtime.drain_pending_updates(event_tx);
             let had_events = event_rx.try_recv().is_ok();
-            // Drain any remaining events from this cycle.
             while event_rx.try_recv().is_ok() {}
-            if !had_events || Instant::now() >= deadline {
-                break;
+            if had_events {
+                consecutive_quiet = 0;
+            } else {
+                consecutive_quiet += 1;
+                if consecutive_quiet >= 2 {
+                    break;
+                }
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
         }
         runtime.flags.pending_snapshot = SnapshotUrgency::None;
         while event_rx.try_recv().is_ok() {}
