@@ -430,6 +430,10 @@ pub(super) fn process_lastfm_event(
             if state.settings.integrations.lastfm_username != runtime.username {
                 state.settings.integrations.lastfm_username = runtime.username;
                 *settings_dirty = true;
+                // Flush immediately — the username is the lookup key for the
+                // session in the keyring.  Losing it (e.g. Ctrl+C before the
+                // periodic 2 s save) makes the session irrecoverable.
+                super::config::save_settings(&state.settings);
                 urgency = SnapshotUrgency::Immediate;
             }
             urgency

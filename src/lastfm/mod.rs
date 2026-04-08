@@ -316,14 +316,22 @@ impl Service {
                 self.flush_queue();
             }
             Ok(None) => {
+                eprintln!(
+                    "Last.fm: no session key found in keyring for user \"{username}\" — \
+                     was the keyring cleared or is the keyring daemon unavailable?"
+                );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Disconnected;
                 self.state.status_text = "Reconnect Last.fm to resume scrobbling.".to_string();
             }
             Err(err) => {
+                let message = request_error_message(err);
+                eprintln!(
+                    "Last.fm: keyring error loading session for user \"{username}\": {message}"
+                );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Error;
-                self.state.status_text = request_error_message(err);
+                self.state.status_text = message;
             }
         }
     }
