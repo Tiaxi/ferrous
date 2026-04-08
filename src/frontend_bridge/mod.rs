@@ -5624,6 +5624,34 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Drain all initial background-thread events (playback engine startup
+    /// snapshots, etc.) so that subsequent `handle_wake` calls in the test
+    /// are not polluted by late-arriving initialisation events.
+    ///
+    /// A single `drain_pending_updates` is insufficient because background
+    /// threads may not have sent their initial snapshot yet (thread
+    /// scheduling).  We loop with short sleeps until a full drain cycle
+    /// produces no new events, or bail after a generous timeout.
+    fn drain_initial_events(
+        runtime: &mut BridgeLoopRuntime,
+        event_tx: &Sender<BridgeEvent>,
+        event_rx: &Receiver<BridgeEvent>,
+    ) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            let _ = runtime.drain_pending_updates(event_tx);
+            let had_events = event_rx.try_recv().is_ok();
+            // Drain any remaining events from this cycle.
+            while event_rx.try_recv().is_ok() {}
+            if !had_events || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        runtime.flags.pending_snapshot = SnapshotUrgency::None;
+        while event_rx.try_recv().is_ok() {}
+    }
+
     #[test]
     fn settings_roundtrip_text_format() {
         let settings = BridgeSettings {
@@ -6801,15 +6829,7 @@ mod tests {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        // The playback engine may emit its initial snapshot after a small
-        // delay (thread scheduling).  Drain twice with a brief gap so the
-        // initial playback snapshot does not arrive *during* handle_wake
-        // and overwrite the manually-set state below.
-        let _ = runtime.drain_pending_updates(&event_tx);
-        std::thread::sleep(Duration::from_millis(5));
-        let _ = runtime.drain_pending_updates(&event_tx);
-        runtime.flags.pending_snapshot = SnapshotUrgency::None;
-        while event_rx.try_recv().is_ok() {}
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let track = p("/tmp/ferrous_reactive_stopped_metadata.flac");
         runtime.state.playback.current = Some(track.clone());
         runtime.state.playback.state = PlaybackState::Stopped;
@@ -6861,9 +6881,7 @@ mod tests {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        let _ = runtime.drain_pending_updates(&event_tx);
-        runtime.flags.pending_snapshot = SnapshotUrgency::None;
-        while event_rx.try_recv().is_ok() {}
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
 
         let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
         runtime.analysis_rx = analysis_rx;
@@ -6934,9 +6952,7 @@ mod tests {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        let _ = runtime.drain_pending_updates(&event_tx);
-        runtime.flags.pending_snapshot = SnapshotUrgency::None;
-        while event_rx.try_recv().is_ok() {}
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
 
         let root = p("/music");
         let snapshot = LibrarySnapshot {
@@ -6974,9 +6990,7 @@ mod tests {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        let _ = runtime.drain_pending_updates(&event_tx);
-        runtime.flags.pending_snapshot = SnapshotUrgency::None;
-        while event_rx.try_recv().is_ok() {}
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let track = p("/tmp/ferrous_playing_heartbeat.flac");
         runtime.state.playback.current = Some(track.clone());
         runtime.state.playback.state = PlaybackState::Playing;
