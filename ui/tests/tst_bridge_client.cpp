@@ -13,6 +13,7 @@
 
 #define private public
 #include "../src/BridgeClient.h"
+#include "../src/CoverImageProvider.h"
 #include "../src/GlobalSearchResultsModel.h"
 #include "../src/MprisController.h"
 #undef private
@@ -77,6 +78,11 @@ private slots:
     void searchModelBatchedInsertionSmallSetSkipsBatching();
     void searchModelReplaceRowsCancelsBatchInProgress();
     void searchRetainAndReuseIntegration();
+    void coverImageProviderLoadsValidImage();
+    void coverImageProviderRespectsRequestedSize();
+    void coverImageProviderHandlesMissingFile();
+    void coverImageProviderCancelDoesNotCrash();
+    void coverImageProviderUrlForPathFormat();
 };
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -1160,6 +1166,109 @@ void BridgeClientTest::searchRetainAndReuseIntegration() {
     // Verify data is from the new set
     QCOMPARE(model.data(model.index(0), GlobalSearchResultsModel::LabelRole).toString(),
              QStringLiteral("Artist 0"));
+}
+
+void BridgeClientTest::coverImageProviderLoadsValidImage() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString imagePath = tempDir.filePath(QStringLiteral("cover.png"));
+    QImage source(200, 150, QImage::Format_ARGB32);
+    source.fill(Qt::blue);
+    QVERIFY(source.save(imagePath, "PNG"));
+
+    CoverImageProvider provider;
+    QQuickImageResponse *response = provider.requestImageResponse(imagePath, QSize());
+    QVERIFY(response != nullptr);
+
+    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
+    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+
+    QQuickTextureFactory *factory = response->textureFactory();
+    QVERIFY(factory != nullptr);
+    QImage result = factory->image();
+    QCOMPARE(result.width(), 200);
+    QCOMPARE(result.height(), 150);
+
+    delete factory;
+    delete response;
+}
+
+void BridgeClientTest::coverImageProviderRespectsRequestedSize() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString imagePath = tempDir.filePath(QStringLiteral("large.png"));
+    QImage source(800, 600, QImage::Format_ARGB32);
+    source.fill(Qt::red);
+    QVERIFY(source.save(imagePath, "PNG"));
+
+    CoverImageProvider provider;
+    QQuickImageResponse *response = provider.requestImageResponse(imagePath, QSize(100, 100));
+    QVERIFY(response != nullptr);
+
+    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
+    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+
+    QQuickTextureFactory *factory = response->textureFactory();
+    QVERIFY(factory != nullptr);
+    QImage result = factory->image();
+    // Scaled to fit within 100x100 preserving aspect ratio (800x600 → 100x75)
+    QVERIFY(result.width() <= 100);
+    QVERIFY(result.height() <= 100);
+    QVERIFY(!result.isNull());
+
+    delete factory;
+    delete response;
+}
+
+void BridgeClientTest::coverImageProviderHandlesMissingFile() {
+    CoverImageProvider provider;
+    QQuickImageResponse *response = provider.requestImageResponse(
+        QStringLiteral("/nonexistent/path/cover.jpg"), QSize());
+    QVERIFY(response != nullptr);
+
+    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
+    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+
+    QQuickTextureFactory *factory = response->textureFactory();
+    QVERIFY(factory == nullptr);
+    QVERIFY(!response->errorString().isEmpty());
+
+    delete response;
+}
+
+void BridgeClientTest::coverImageProviderCancelDoesNotCrash() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString imagePath = tempDir.filePath(QStringLiteral("cancel.png"));
+    QImage source(100, 100, QImage::Format_ARGB32);
+    source.fill(Qt::green);
+    QVERIFY(source.save(imagePath, "PNG"));
+
+    CoverImageProvider provider;
+    QQuickImageResponse *response = provider.requestImageResponse(imagePath, QSize());
+    QVERIFY(response != nullptr);
+
+    response->cancel();
+
+    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
+    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+
+    // After cancel, textureFactory may be null or valid — either is acceptable.
+    // The key invariant is no crash and finished() is emitted.
+    delete response->textureFactory();
+    delete response;
+}
+
+void BridgeClientTest::coverImageProviderUrlForPathFormat() {
+    QCOMPARE(CoverImageProvider::urlForPath(QString()), QString());
+    QCOMPARE(CoverImageProvider::urlForPath(QStringLiteral("")), QString());
+
+    const QString url = CoverImageProvider::urlForPath(
+        QStringLiteral("/mnt/nassikka/Music/cover.jpg"));
+    QCOMPARE(url, QStringLiteral("image://covers//mnt/nassikka/Music/cover.jpg"));
 }
 
 int main(int argc, char **argv) {
