@@ -11,15 +11,12 @@ use crate::analysis::{
     AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramDisplayMode,
     SpectrogramViewMode,
 };
-use crate::artwork::apply_artwork_to_track;
 use crate::lastfm::{
-    self, Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
-    RuntimeState as LastFmRuntimeState, ServiceOptions as LastFmServiceOptions,
+    Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
+    RuntimeState as LastFmRuntimeState,
 };
 use crate::library::{
-    load_external_track_cache, read_track_info, refresh_cover_paths_for_tracks,
-    refresh_cover_paths_for_tracks_with_override, store_external_track_cache, IndexedTrack,
-    LibraryEvent, LibraryService, LibrarySnapshot, TrackFileFingerprint,
+    IndexedTrack, LibraryEvent, LibraryService, LibrarySnapshot, TrackFileFingerprint,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -33,11 +30,12 @@ pub mod ffi;
 pub mod library_tree;
 mod queue;
 mod search;
+mod workers;
 
 use commands::{handle_bridge_command, sync_queue_details, BridgeCommandContext};
 use config::{
-    apply_session_restore, config_base_path, load_session_snapshot, load_settings_into,
-    save_session_snapshot, save_settings, session_snapshot_for_state, SessionSnapshot,
+    apply_session_restore, load_session_snapshot, load_settings_into, save_session_snapshot,
+    save_settings, session_snapshot_for_state, SessionSnapshot,
 };
 use events::{
     drain_analysis_events, drain_apply_album_art_events, drain_external_queue_detail_events,
@@ -47,7 +45,8 @@ use events::{
     process_metadata_event, process_playback_event, tick_lastfm_playback,
 };
 pub(crate) use search::is_main_album_disc_section;
-use search::{drain_search_results, process_search_results, run_search_worker, SearchWorkerQuery};
+use search::{drain_search_results, process_search_results, SearchWorkerQuery};
+use workers::{spawn_bridge_support_threads, spawn_lastfm_service};
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -474,28 +473,28 @@ struct PendingWaveformTrack {
 
 #[derive(Debug, Clone)]
 pub(super) struct ExternalQueueDetailsRequest {
-    path: PathBuf,
-    fingerprint: TrackFileFingerprint,
+    pub(super) path: PathBuf,
+    pub(super) fingerprint: TrackFileFingerprint,
 }
 
 #[derive(Debug, Clone)]
-struct ExternalQueueDetailsEvent {
-    path: PathBuf,
-    fingerprint: TrackFileFingerprint,
-    indexed: IndexedTrack,
+pub(super) struct ExternalQueueDetailsEvent {
+    pub(super) path: PathBuf,
+    pub(super) fingerprint: TrackFileFingerprint,
+    pub(super) indexed: IndexedTrack,
 }
 
 #[derive(Debug, Clone)]
-struct ApplyAlbumArtRequest {
-    track_path: PathBuf,
-    artwork_path: PathBuf,
+pub(super) struct ApplyAlbumArtRequest {
+    pub(super) track_path: PathBuf,
+    pub(super) artwork_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-struct ApplyAlbumArtEvent {
-    track_path: PathBuf,
-    indexed_by_path: HashMap<PathBuf, IndexedTrack>,
-    error: Option<String>,
+pub(super) struct ApplyAlbumArtEvent {
+    pub(super) track_path: PathBuf,
+    pub(super) indexed_by_path: HashMap<PathBuf, IndexedTrack>,
+    pub(super) error: Option<String>,
 }
 
 impl BridgeState {
@@ -1372,44 +1371,6 @@ impl BridgeLoopRuntime {
     }
 }
 
-fn spawn_bridge_support_threads(
-    search_query_rx: Receiver<SearchWorkerQuery>,
-    search_results_tx: Sender<BridgeSearchResultsFrame>,
-    external_queue_details_rx: Receiver<ExternalQueueDetailsRequest>,
-    external_queue_details_event_tx: Sender<ExternalQueueDetailsEvent>,
-    apply_album_art_rx: Receiver<ApplyAlbumArtRequest>,
-    apply_album_art_event_tx: Sender<ApplyAlbumArtEvent>,
-) {
-    let _ = std::thread::Builder::new()
-        .name("ferrous-bridge-search".to_string())
-        .spawn(move || run_search_worker(&search_query_rx, &search_results_tx));
-    let _ = std::thread::Builder::new()
-        .name("ferrous-queue-details".to_string())
-        .spawn(move || {
-            run_external_queue_detail_worker(
-                &external_queue_details_rx,
-                &external_queue_details_event_tx,
-            );
-        });
-    let _ = std::thread::Builder::new()
-        .name("ferrous-apply-artwork".to_string())
-        .spawn(move || run_apply_album_art_worker(&apply_album_art_rx, &apply_album_art_event_tx));
-}
-
-fn spawn_lastfm_service(settings: &BridgeSettings) -> (LastFmHandle, Receiver<LastFmEvent>) {
-    let lastfm_queue_path = config_base_path().map(|base| lastfm::queue_path(&base));
-    let (lastfm, lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
-        queue_path: lastfm_queue_path,
-        initial_enabled: settings.integrations.lastfm_scrobbling_enabled,
-    });
-    if !settings.integrations.lastfm_username.trim().is_empty() {
-        lastfm.command(LastFmCommand::LoadStoredSession {
-            username: settings.integrations.lastfm_username.clone(),
-        });
-    }
-    (lastfm, lastfm_rx)
-}
-
 fn restore_initial_bridge_state(
     state: &mut BridgeState,
     analysis: &AnalysisEngine,
@@ -1595,89 +1556,6 @@ where
         }
     }
     resolved
-}
-
-fn run_external_queue_detail_worker(
-    req_rx: &Receiver<ExternalQueueDetailsRequest>,
-    event_tx: &Sender<ExternalQueueDetailsEvent>,
-) {
-    while let Ok(request) = req_rx.recv() {
-        let indexed =
-            load_external_track_cache(&request.path, request.fingerprint).unwrap_or_else(|| {
-                let indexed = read_track_info(&request.path);
-                let _ = store_external_track_cache(&request.path, request.fingerprint, &indexed);
-                indexed
-            });
-        let _ = event_tx.send(ExternalQueueDetailsEvent {
-            path: request.path,
-            fingerprint: request.fingerprint,
-            indexed,
-        });
-    }
-}
-
-fn run_apply_album_art_worker(
-    req_rx: &Receiver<ApplyAlbumArtRequest>,
-    event_tx: &Sender<ApplyAlbumArtEvent>,
-) {
-    while let Ok(request) = req_rx.recv() {
-        let event = match apply_artwork_to_track(&request.track_path, &request.artwork_path) {
-            Ok(outcome) => {
-                let mut affected_paths = outcome.affected_track_paths;
-                affected_paths.sort();
-                affected_paths.dedup();
-
-                let (refresh_error, indexed_by_path) = if let Some(cover_path) =
-                    outcome.cover_path_override
-                {
-                    let refresh_error =
-                        refresh_cover_paths_for_tracks_with_override(&affected_paths, &cover_path)
-                            .err();
-                    let cover_path_string = cover_path.to_string_lossy().to_string();
-                    let indexed_by_path = affected_paths
-                        .into_iter()
-                        .map(|path| {
-                            let indexed = IndexedTrack {
-                                title: String::new(),
-                                artist: String::new(),
-                                album: String::new(),
-                                cover_path: cover_path_string.clone(),
-                                genre: String::new(),
-                                year: None,
-                                track_no: None,
-                                duration_secs: None,
-                            };
-                            (path, indexed)
-                        })
-                        .collect::<HashMap<_, _>>();
-                    (refresh_error, indexed_by_path)
-                } else {
-                    let refresh_error = refresh_cover_paths_for_tracks(&affected_paths).err();
-                    let indexed_by_path = affected_paths
-                        .into_iter()
-                        .map(|path| {
-                            let indexed = read_track_info(&path);
-                            (path, indexed)
-                        })
-                        .collect::<HashMap<_, _>>();
-                    (refresh_error, indexed_by_path)
-                };
-
-                ApplyAlbumArtEvent {
-                    track_path: request.track_path,
-                    indexed_by_path,
-                    error: refresh_error
-                        .map(|error| format!("failed to refresh cover paths: {error}")),
-                }
-            }
-            Err(error) => ApplyAlbumArtEvent {
-                track_path: request.track_path,
-                indexed_by_path: HashMap::new(),
-                error: Some(format!("failed to apply album art: {error}")),
-            },
-        };
-        let _ = event_tx.send(event);
-    }
 }
 
 #[cfg(test)]
