@@ -153,5 +153,5 @@ if [[ ${RUN_UI} -eq 1 ]]; then
     if [[ ${DO_BUILD} -eq 1 ]]; then
         cmake --build "${BUILD_DIR}"
     fi
-    ctest --test-dir "${BUILD_DIR}" --output-on-failure
+    ctest --test-dir "${BUILD_DIR}" --output-on-failure -V
 fi

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{after, bounded, select, unbounded, Receiver, Sender, TrySendError};
 use serde_json::json;
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use crate::analysis::{
@@ -3979,11 +3980,12 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
         let artist = track.artist.trim().to_string();
         let album = track.album.trim().to_string();
         let genre = track.genre.trim().to_string();
-        let title_l = title.to_lowercase();
-        let artist_l = artist.to_lowercase();
-        let album_l = album.to_lowercase();
-        let genre_l = genre.to_lowercase();
-        let haystack_l = format!("{title_l} {artist_l} {album_l} {genre_l} {path_lower}");
+        let title_l = normalize_for_search(&title);
+        let artist_l = normalize_for_search(&artist);
+        let album_l = normalize_for_search(&album);
+        let genre_l = normalize_for_search(&genre);
+        let path_n = normalize_for_search(&path_string);
+        let haystack_l = format!("{title_l} {artist_l} {album_l} {genre_l} {path_n}");
 
         if let Some(context) = roots_by_path
             .get(&track.root_path)
@@ -4179,10 +4181,20 @@ fn search_row_cmp(a: &BridgeSearchResultRow, b: &BridgeSearchResultRow) -> Order
         })
 }
 
+/// Lowercase and strip diacritical marks so that e.g. "jonsi" matches "Jónsi".
+/// Uses NFKD decomposition and then removes combining characters (Unicode
+/// category Mark, Nonspacing — `Mn`).
+fn normalize_for_search(text: &str) -> String {
+    text.nfkd()
+        .filter(|ch| !unicode_normalization::char::is_combining_mark(*ch))
+        .collect::<String>()
+        .to_lowercase()
+}
+
 fn split_search_terms(query: &str) -> Vec<String> {
     query
         .split_whitespace()
-        .map(|term| term.trim().to_lowercase())
+        .map(|term| normalize_for_search(term.trim()))
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>()
 }
@@ -4191,8 +4203,8 @@ fn query_terms_match_text(terms: &[String], text: &str) -> bool {
     if terms.is_empty() {
         return false;
     }
-    let text_l = text.to_lowercase();
-    terms.iter().all(|term| text_l.contains(term))
+    let text_n = normalize_for_search(text);
+    terms.iter().all(|term| text_n.contains(term))
 }
 
 fn choose_most_common_year(counts: &HashMap<i32, usize>) -> Option<i32> {
@@ -7509,5 +7521,31 @@ mod tests {
         assert!(!queue_path.exists());
 
         lastfm_handle.command(LastFmCommand::Shutdown);
+    }
+
+    #[test]
+    fn normalize_for_search_strips_diacritics() {
+        assert_eq!(super::normalize_for_search("Jónsi"), "jonsi");
+        assert_eq!(super::normalize_for_search("Björk"), "bjork");
+        assert_eq!(super::normalize_for_search("Sigur Rós"), "sigur ros");
+        assert_eq!(super::normalize_for_search("Ásgeir"), "asgeir");
+        assert_eq!(super::normalize_for_search("café"), "cafe");
+        assert_eq!(super::normalize_for_search("naïve"), "naive");
+        // Plain ASCII unchanged
+        assert_eq!(super::normalize_for_search("Pink Floyd"), "pink floyd");
+    }
+
+    #[test]
+    fn query_terms_match_text_accent_insensitive() {
+        let terms = super::split_search_terms("jonsi");
+        assert!(super::query_terms_match_text(&terms, "Jónsi"));
+        assert!(super::query_terms_match_text(&terms, "Jónsi & Alex"));
+
+        let terms2 = super::split_search_terms("jónsi");
+        assert!(super::query_terms_match_text(&terms2, "Jónsi"));
+        assert!(super::query_terms_match_text(&terms2, "Jonsi"));
+
+        let terms3 = super::split_search_terms("sigur ros");
+        assert!(super::query_terms_match_text(&terms3, "Sigur Rós"));
     }
 }
