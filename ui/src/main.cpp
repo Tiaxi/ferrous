@@ -276,6 +276,8 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &tagEditor);
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
+        QStringLiteral(FERROUS_APP_VERSION));
 
     QObject::connect(
         &engine,

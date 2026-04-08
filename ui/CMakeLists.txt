@@ -42,6 +42,11 @@ endfunction()
 
 set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
+
+# Read app version from Cargo.toml (single source of truth).
+file(STRINGS "${FERROUS_ROOT_DIR}/Cargo.toml" _cargo_version_line REGEX "^version *= *\"")
+string(REGEX REPLACE "^version *= *\"([^\"]+)\"" "\\1" FERROUS_APP_VERSION "${_cargo_version_line}")
+message(STATUS "Ferrous version: ${FERROUS_APP_VERSION}")
 set(FERROUS_RUST_FEATURES "gst")
 if(FERROUS_ENABLE_PROFILE_LOGS)
     set(FERROUS_RUST_FEATURES "gst,profiling-logs")
@@ -73,6 +78,7 @@ qt_add_executable(ferrous
 )
 
 target_include_directories(ferrous PRIVATE src)
+target_compile_definitions(ferrous PRIVATE FERROUS_APP_VERSION="${FERROUS_APP_VERSION}")
 add_dependencies(ferrous ferrous_rust_bridge)
 ferrous_enable_strict_warnings(ferrous)
 
