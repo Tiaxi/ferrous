@@ -277,11 +277,22 @@ pub(super) fn save_settings(settings: &BridgeSettings) {
     let Some(path) = settings_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = fs::create_dir_all(parent);
     let text = format_settings_text(settings);
-    let _ = fs::write(path, text);
+
+    // Atomic write: write to a temp file in the same directory, then rename.
+    // This prevents a crash during write from truncating/corrupting the settings file.
+    let tmp_path = path.with_extension("tmp");
+    if let Err(err) = fs::write(&tmp_path, &text) {
+        eprintln!("Failed to write settings temp file: {err}");
+        return;
+    }
+    if let Err(err) = fs::rename(&tmp_path, &path) {
+        eprintln!("Failed to rename settings temp file: {err}");
+    }
 }
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
