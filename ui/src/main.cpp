@@ -23,6 +23,7 @@
 
 #include "BridgeClient.h"
 #include "AppInstanceController.h"
+#include "CoverImageProvider.h"
 #include "DiagnosticsLog.h"
 #include "LibraryTreeModel.h"
 #include "MprisController.h"
@@ -269,6 +270,7 @@ int main(int argc, char *argv[]) {
     LibraryTreeModel libraryModel;
     TagEditorController tagEditor(&bridge);
     QQmlApplicationEngine engine;
+    engine.addImageProvider(QStringLiteral("covers"), new CoverImageProvider);
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);

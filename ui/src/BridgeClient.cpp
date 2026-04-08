@@ -2,6 +2,7 @@
 
 #include "BridgeClient.h"
 
+#include "CoverImageProvider.h"
 #include "DiagnosticsLog.h"
 #include "FerrousBridgeFfi.h"
 #include "SpectrogramSeekTrace.h"
@@ -182,15 +183,15 @@ QString searchCoverUrlFast(const QString &path) {
     if (path.startsWith(QStringLiteral("qrc:/")) || path.startsWith(QStringLiteral(":/"))) {
         return path;
     }
+    if (path.startsWith(QStringLiteral("image://"))) {
+        return path;
+    }
     if (path.startsWith(QStringLiteral("file://"))) {
         return path;
     }
-    // Pure path→URL conversion with no filesystem I/O.  The previous
-    // implementation did 3+ stat() syscalls per unique cover path which
-    // is extremely expensive on network mounts.  QML Image already
-    // handles missing files gracefully, and stale thumbnails in search
-    // results are harmless, so the existence/mtime checks are unnecessary.
-    return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded);
+    // Route through the async image provider so file I/O never blocks
+    // the main thread — critical for network-mounted libraries.
+    return CoverImageProvider::urlForPath(path);
 }
 
 QString cacheOnlyLocalFileUrl(const QString &path) {
@@ -569,7 +570,7 @@ QString findTrackCoverUrl(const QString &trackPath) {
     if (coverPath.isEmpty()) {
         return {};
     }
-    return QUrl::fromLocalFile(coverPath).toString();
+    return CoverImageProvider::urlForPath(coverPath);
 }
 
 QString trackDirectoryPath(const QString &trackPath) {
@@ -1173,7 +1174,7 @@ QString BridgeClient::coverUrlForPath(const QString &path) const {
 
     QUrl url(baseUrl);
     if (!url.isValid()) {
-        url = QUrl::fromLocalFile(canonicalPath);
+        url = QUrl(CoverImageProvider::urlForPath(canonicalPath));
     }
     QString fragment = url.fragment(QUrl::FullyDecoded);
     const int refreshPos = fragment.indexOf(QStringLiteral("&r="));

@@ -58,6 +58,7 @@ add_custom_target(ferrous_rust_bridge ALL
 qt_add_executable(ferrous
     src/AppInstanceController.cpp
     src/main.cpp
+    src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
@@ -185,6 +186,7 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
+        src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
@@ -250,6 +252,7 @@ if(BUILD_TESTING)
         tests/tst_bridge_client.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
+        src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
