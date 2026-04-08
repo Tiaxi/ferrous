@@ -1,3 +1,9 @@
+ferrous (0.1.6-1) unstable; urgency=low
+
+  * Make search accent-insensitive so e.g. "jonsi" finds "Jónsi".
+  * Fix cover art loading freezing UI on NAS.
+  * Fix spectrogram ring buffer for DTS/AC3 files with unknown duration.
+
 ferrous (0.1.5-1) unstable; urgency=low
 
   * Add right-click-to-seek on spectrogram in centered mode.

@@ -28,9 +28,24 @@ sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" "${REPO_ROOT}/Cargo.t
 sed -i "s/%{!?ferrous_version:%global ferrous_version .*}/%{!?ferrous_version:%global ferrous_version ${NEW_VERSION}}/" \
     "${REPO_ROOT}/packaging/rpm/ferrous.spec"
 
+# Debian changelog — prepend a new entry
+DEBIAN_CHANGELOG="${REPO_ROOT}/packaging/debian/changelog"
+DATE_RFC2822="$(date -R)"
+{
+    echo "ferrous (${NEW_VERSION}-1) unstable; urgency=low"
+    echo ""
+    echo "  * (fill in release notes)"
+    echo ""
+    echo " -- Ferrous contributors <ferrous@users.noreply.github.com>  ${DATE_RFC2822}"
+    echo ""
+    cat "${DEBIAN_CHANGELOG}"
+} > "${DEBIAN_CHANGELOG}.tmp"
+mv "${DEBIAN_CHANGELOG}.tmp" "${DEBIAN_CHANGELOG}"
+
 echo "Bumped version to ${NEW_VERSION} in:"
 echo "  Cargo.toml"
 echo "  packaging/rpm/ferrous.spec"
+echo "  packaging/debian/changelog (edit release notes before committing)"
 echo ""
 echo "Next steps:"
 echo "  cargo check          # regenerates Cargo.lock"
