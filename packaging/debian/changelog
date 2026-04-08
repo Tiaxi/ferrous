@@ -1,6 +1,7 @@
 ferrous (0.1.7-1) unstable; urgency=low
 
-  * (fill in release notes)
+  * Fix Last.fm auth loss when closing app before periodic settings save.
+  * Use atomic writes for settings file to prevent corruption on crash.
 
  -- Ferrous contributors <ferrous@users.noreply.github.com>  Thu, 09 Apr 2026 01:00:22 +0300
 
