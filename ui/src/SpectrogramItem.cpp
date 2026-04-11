@@ -1644,9 +1644,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const qint64 estimateCount = std::max(
                     static_cast<qint64>(m_precomputedTotalColumnsEstimate),
                     static_cast<qint64>(1));
+                // Use maxColumnIndex only when the decode has reached or
+                // passed the playhead.  During the initial fill after a
+                // seek, maxCol grows toward the playhead — switching to
+                // it prematurely causes the display range to shift each
+                // frame as maxCol advances, creating a "sliding" effect.
                 const bool decodedCoversPlayhead =
                     maxColCount > 0
-                    && static_cast<qint64>(nowCol) <= maxColCount + visibleWindowCols;
+                    && maxColCount >= static_cast<qint64>(nowCol);
                 const qint64 totalCols = decodedCoversPlayhead
                     ? maxColCount
                     : std::max(maxColCount, estimateCount);
@@ -1775,7 +1780,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         static_cast<qint64>(1));
                     const bool scrollDecodedCovers =
                         maxColScroll > 0
-                        && static_cast<qint64>(nowCol) <= maxColScroll + static_cast<qint64>(w);
+                        && maxColScroll >= static_cast<qint64>(nowCol);
                     const qint64 totalColsForScroll = scrollDecodedCovers
                         ? maxColScroll
                         : std::max(maxColScroll, estScroll);
