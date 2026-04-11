@@ -1705,18 +1705,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
                 playheadPixel = static_cast<int>(std::round(
                     static_cast<double>(nowCol - displayLeft) * effectiveZoom));
-
-                FERROUS_SPECTROGRAM_LOGF(stderr,
-                    "[Qt-display@%p] nowCol=%d dL=%lld dR=%lld phPx=%d maxCol=%lld est=%d cachedL=%lld cachedR=%lld\n",
-                    static_cast<const void *>(this),
-                    nowCol,
-                    static_cast<long long>(displayLeft),
-                    static_cast<long long>(displayRight),
-                    playheadPixel,
-                    static_cast<long long>(maxColCount),
-                    m_precomputedTotalColumnsEstimate,
-                    static_cast<long long>(m_precomputedCanvasDisplayLeft),
-                    static_cast<long long>(m_precomputedCanvasDisplayRight));
             } else {
                 rollingMode = true;
                 const int visibleWindowCols = static_cast<int>(
