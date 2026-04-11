@@ -1049,7 +1049,11 @@ impl AnalysisRuntimeState {
             let window_start = self.spectrogram_session_start;
             let window_end = window_start + window_seconds;
 
-            if position_seconds >= window_start && position_seconds <= window_end {
+            // The visible left edge can be up to `margin` seconds before
+            // the playhead (full screen width when playhead is at track end).
+            // Check that the entire visible range fits within the window.
+            let visible_left = (position_seconds - margin).max(0.0);
+            if visible_left >= window_start && position_seconds <= window_end {
                 // Seek within decoded window — cheap position update.
                 let adjusted = position_seconds + self.spectrogram_position_offset;
                 let _ = ctx.spectrogram_cmd_tx.send(
