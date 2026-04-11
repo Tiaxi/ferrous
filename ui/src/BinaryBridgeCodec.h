@@ -82,6 +82,7 @@ enum CommandId : quint16 {
     CmdSoloChannel = 54,
     CmdSetChannelButtonsVisibility = 55,
     CmdSetSpectrogramZoomEnabled = 56,
+    CmdSetSpectrogramZoomLevel = 57,
 };
 
 struct DecodedPlayback {

@@ -13,9 +13,9 @@ use std::time::Duration;
 use std::os::fd::RawFd;
 
 use super::{
-    BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
-    FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
+    BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
+    BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
+    BridgeSnapshot, FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
 use crate::analysis::{PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode};
 use crate::library::{IndexedTrack, LibraryTrack};
@@ -1091,6 +1091,8 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
         command
     } else if let Some(command) = parse_settings_command(cmd_id, &mut reader)? {
         command
+    } else if let Some(command) = parse_analysis_command(cmd_id, &mut reader)? {
+        command
     } else if let Some(command) = parse_system_command(cmd_id, &mut reader)? {
         command
     } else {
@@ -1286,6 +1288,24 @@ fn parse_settings_command(
     };
     reader.expect_done()?;
     Ok(Some(BridgeCommand::Settings(command)))
+}
+
+fn parse_analysis_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
+    let command = match cmd_id {
+        57 => {
+            let level = reader.read_f32()?;
+            if !level.is_finite() || level < 0.05 {
+                return Err("zoom level must be finite and >= 0.05".to_string());
+            }
+            BridgeAnalysisCommand::SetSpectrogramZoomLevel(level)
+        }
+        _ => return Ok(None),
+    };
+    reader.expect_done()?;
+    Ok(Some(BridgeCommand::Analysis(command)))
 }
 
 fn parse_system_command(

@@ -95,6 +95,12 @@ pub(super) fn handle_bridge_command(
                 context.analysis.command(AnalysisCommand::SetFftSize(fft));
                 true
             }
+            BridgeAnalysisCommand::SetSpectrogramZoomLevel(level) => {
+                context
+                    .analysis
+                    .command(AnalysisCommand::SetSpectrogramZoomLevel(level));
+                true
+            }
         },
         BridgeCommand::Settings(cmd) => {
             handle_settings_bridge_command(&cmd, state, context);

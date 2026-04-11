@@ -597,6 +597,7 @@ Item {
         function setShowSpectrogramCrosshair(value) {}
         function setShowSpectrogramScale(value) {}
         function setSpectrogramZoomEnabled(value) {}
+        function setSpectrogramZoomLevel(level) {}
         function setViewerFullscreenMode(mode) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

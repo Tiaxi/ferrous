@@ -187,6 +187,7 @@ pub enum BridgeLibraryCommand {
 #[derive(Debug, Clone)]
 pub enum BridgeAnalysisCommand {
     SetFftSize(usize),
+    SetSpectrogramZoomLevel(f32),
 }
 
 #[derive(Debug, Clone)]
