@@ -324,7 +324,8 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
     setAcceptHoverEvents(true);
-    setAcceptedMouseButtons(Qt::RightButton);
+    setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
+    setClip(true);
     m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_forceFpsOverlay = m_forceFpsOverlay
@@ -1535,10 +1536,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (m_displayMode == 1) {
                 rollingMode = false;
-                const int halfWindowCols = static_cast<int>(
-                    static_cast<double>(w) / m_zoomLevel / 2.0);
                 const int visibleWindowCols = static_cast<int>(
-                    static_cast<double>(w) / m_zoomLevel);
+                    std::ceil(static_cast<double>(w) / m_zoomLevel));
+                const int halfWindowCols = visibleWindowCols / 2;
                 const qint64 totalCols = m_precomputedMaxColumnIndex >= 0
                     ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
                     : std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
@@ -1567,7 +1567,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             } else {
                 rollingMode = true;
                 const int visibleWindowCols = static_cast<int>(
-                    static_cast<double>(w) / m_zoomLevel);
+                    std::ceil(static_cast<double>(w) / m_zoomLevel));
                 const qint64 displaySeq =
                     m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0));
                 writeHeadSeq = m_ringWriteSeq - 1;
@@ -3008,6 +3008,136 @@ void SpectrogramItem::drawPrecomputedColumnAtLocked(
     }
 }
 
+int SpectrogramItem::ringSlotForDisplayIndexLocked(
+    qint64 displayIndex, bool rollingMode) const {
+    if (m_ringCapacity <= 0 || m_ringSequenceId.empty() || m_ringColumnId.empty()) {
+        return -1;
+    }
+    if (rollingMode) {
+        const int slot = static_cast<int>(displayIndex % m_ringCapacity);
+        if (displayIndex >= m_ringOldestSeq
+            && displayIndex < m_ringWriteSeq
+            && slot >= 0 && slot < m_ringCapacity
+            && m_ringSequenceId[static_cast<size_t>(slot)] == displayIndex
+            && m_ringColumnId[static_cast<size_t>(slot)] >= 0) {
+            return slot;
+        }
+        return -1;
+    }
+    const auto tokenColumns =
+        m_trackColumnToSeqByToken.constFind(m_precomputedTrackToken);
+    const qint64 seq = tokenColumns != m_trackColumnToSeqByToken.cend()
+        ? tokenColumns->value(static_cast<qint32>(displayIndex), -1)
+        : -1;
+    if (seq < 0) {
+        return -1;
+    }
+    const int slot = static_cast<int>(seq % m_ringCapacity);
+    if (displayIndex >= 0
+        && seq >= m_ringOldestSeq && seq < m_ringWriteSeq
+        && slot >= 0 && slot < m_ringCapacity
+        && m_ringSequenceId[static_cast<size_t>(slot)] == seq
+        && m_ringColumnId[static_cast<size_t>(slot)]
+               == static_cast<qint32>(displayIndex)) {
+        return slot;
+    }
+    return -1;
+}
+
+void SpectrogramItem::drawInterpolatedColumnAtLocked(
+    int x,
+    qint64 displayIndexL,
+    qint64 displayIndexR,
+    double t,
+    bool rollingMode,
+    const std::array<quint8, 256> &dbRemap) {
+    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
+        || m_precomputedBinsPerColumn <= 0) {
+        return;
+    }
+
+    markTileDirtyLocked(x);
+
+    const int bins = m_precomputedBinsPerColumn;
+    const auto *ringData =
+        reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
+    const QRgb bgColor = kBackgroundColor.rgba();
+    const double gradScale =
+        static_cast<double>(kGradientTableSize) / 255.0;
+
+    const int slotL = ringSlotForDisplayIndexLocked(displayIndexL, rollingMode);
+    const int slotR = ringSlotForDisplayIndexLocked(displayIndexR, rollingMode);
+
+    if (slotL < 0 && slotR < 0) {
+        for (int y = 0; y < m_canvas.height(); ++y) {
+            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
+        }
+        return;
+    }
+    if (slotL < 0) {
+        drawPrecomputedColumnAtLocked(
+            x, displayIndexR, rollingMode, dbRemap);
+        return;
+    }
+    if (slotR < 0) {
+        drawPrecomputedColumnAtLocked(
+            x, displayIndexL, rollingMode, dbRemap);
+        return;
+    }
+
+    const int baseL = slotL * bins;
+    const int baseR = slotR * bins;
+    const double oneMinusT = 1.0 - t;
+    const int mapSize = static_cast<int>(m_iToBin.size());
+    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
+
+    for (int y = 0; y < m_canvas.height(); ++y) {
+        const int mi = m_canvas.height() - 1 - y;
+        int binLo = 0;
+        int binHi = 0;
+        if (mi >= 0 && mi < mapSize) {
+            const int bc = m_iToBin[static_cast<size_t>(mi)];
+            const int bp = (mi > 0)
+                ? m_iToBin[static_cast<size_t>(mi - 1)]
+                : bc;
+            const int bn = (mi + 1 < mapSize)
+                ? m_iToBin[static_cast<size_t>(mi + 1)]
+                : bc;
+            binLo = bp + (bc - bp) / 2;
+            binHi = bc + (bn - bc) / 2;
+            if (binLo == bp && bp != bc) {
+                binLo = bc;
+            }
+            if (binHi == bn && bn != bc) {
+                binHi = bc;
+            }
+            if (binLo > binHi) {
+                std::swap(binLo, binHi);
+            }
+            binLo = std::clamp(binLo, 0, bins - 1);
+            binHi = std::clamp(binHi, 0, bins - 1);
+        }
+
+        quint8 rawMaxL = 0;
+        quint8 rawMaxR = 0;
+        for (int b = binLo; b <= binHi; ++b) {
+            rawMaxL = std::max(rawMaxL, ringData[baseL + b]);
+            rawMaxR = std::max(rawMaxR, ringData[baseR + b]);
+        }
+
+        const auto rawBlended = static_cast<quint8>(std::lround(
+            static_cast<double>(rawMaxL) * oneMinusT
+            + static_cast<double>(rawMaxR) * t));
+        const quint8 intensity = dbRemap[static_cast<size_t>(rawBlended)];
+        int paletteIndex = kGradientTableSize
+            - static_cast<int>(
+                  std::lround(gradScale * static_cast<double>(intensity)));
+        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
+        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
+            palette[static_cast<size_t>(paletteIndex)];
+    }
+}
+
 void SpectrogramItem::rebuildPrecomputedCanvasLocked(
     int width,
     int height,
@@ -3036,12 +3166,26 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
     const double columnsPerPixel = 1.0 / m_zoomLevel;
     const auto dbRemap = buildPrecomputedDbRemapLocked();
 
+    const bool interpolate = m_zoomLevel > 1.001;
     for (int px = 0; px < drawPixels; ++px) {
-        const qint64 col = std::min(
-            displayLeft + static_cast<qint64>(
-                static_cast<double>(px) * columnsPerPixel),
+        const double srcColF =
+            static_cast<double>(px) * columnsPerPixel;
+        const qint64 colL = std::min(
+            displayLeft + static_cast<qint64>(std::floor(srcColF)),
             displayRight);
-        drawPrecomputedColumnAtLocked(px, col, rollingMode, dbRemap);
+
+        if (interpolate) {
+            const double t = srcColF - std::floor(srcColF);
+            if (t > 0.001) {
+                const qint64 colR = std::min(colL + 1, displayRight);
+                if (colR != colL) {
+                    drawInterpolatedColumnAtLocked(
+                        px, colL, colR, t, rollingMode, dbRemap);
+                    continue;
+                }
+            }
+        }
+        drawPrecomputedColumnAtLocked(px, colL, rollingMode, dbRemap);
     }
 
     m_canvasWriteX = width > 0 ? (drawPixels % width) : 0;

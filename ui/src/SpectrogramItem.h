@@ -172,6 +172,16 @@ private:
         qint64 displayIndex,
         bool rollingMode,
         const std::array<quint8, 256> &dbRemap);
+    void drawInterpolatedColumnAtLocked(
+        int x,
+        qint64 displayIndexL,
+        qint64 displayIndexR,
+        double t,
+        bool rollingMode,
+        const std::array<quint8, 256> &dbRemap);
+    int ringSlotForDisplayIndexLocked(
+        qint64 displayIndex,
+        bool rollingMode) const;
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
