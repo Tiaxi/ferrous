@@ -1048,16 +1048,34 @@ impl AnalysisRuntimeState {
                 );
             } else {
                 // Seek outside decoded window — restart session and clear
-                // the ring buffer.  Old data is from a different time region
-                // and would cause a visible "sweep" artifact as new columns
-                // overwrite stale content.
+                // the ring buffer.
                 //
+                // Emit an immediate reset chunk from the analysis thread so
+                // the frontend clears the ring BEFORE the next render frame.
+                // Without this, there's a 3-5 ms gap between the position
+                // property jumping and the worker's reset chunk arriving,
+                // during which old ring data can be briefly visible at the
+                // new playhead position.
+                let _ = ctx.event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                    PrecomputedSpectrogramChunk {
+                        track_token: self.active_track_token,
+                        columns_u8: Vec::new(),
+                        bins_per_column: 0,
+                        column_count: 0,
+                        channel_count: 1,
+                        start_column_index: 0,
+                        total_columns_estimate: 0,
+                        sample_rate_hz: 0,
+                        hop_size: 0,
+                        coverage_seconds: 0.0,
+                        complete: false,
+                        buffer_reset: true,
+                        clear_history: true,
+                    },
+                ));
                 // Suppress the next PositionUpdate to prevent a race: the
                 // playback snapshot may send a PositionUpdate at the new
-                // position before the worker processes our NewTrack.  Without
-                // suppression, the old session would see the far-forward
-                // position, seek there, and briefly produce content at the
-                // playhead before the new session replaces it.
+                // position before the worker processes our NewTrack.
                 self.suppress_next_spectrogram_position_update = true;
                 let margin = self.centered_margin_seconds();
                 let start = (position_seconds - margin).max(0.0);
