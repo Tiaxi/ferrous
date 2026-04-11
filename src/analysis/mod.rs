@@ -265,6 +265,13 @@ struct AnalysisRuntimeState {
     /// Used to determine whether a seek falls within the already-decoded
     /// window, avoiding unnecessary session restarts.
     spectrogram_session_start: f64,
+    /// Suppresses the next `PositionUpdate` forwarded to the spectrogram
+    /// worker after a centered-mode seek.  Without this, the position
+    /// update from the playback snapshot can reach the worker before the
+    /// `NewTrack` command, causing the old session to seek to the new
+    /// position and produce a brief flash of content at the playhead
+    /// before the new session replaces it.
+    suppress_next_spectrogram_position_update: bool,
     /// Compatibility params for the active spectrogram worker session.
     /// Updated on every session start and track change so the staging
     /// preflight can compare candidate files against the live session.
@@ -400,6 +407,7 @@ impl AnalysisRuntimeState {
             spectrogram_position_offset: 0.0,
             last_spectrogram_position: 0.0,
             spectrogram_session_start: 0.0,
+            suppress_next_spectrogram_position_update: false,
             active_session_effective_rate: 0,
             active_session_channel_count: 0,
             active_session_divisor: 1,
@@ -1001,6 +1009,10 @@ impl AnalysisRuntimeState {
 
     fn update_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         self.last_spectrogram_position = position_seconds;
+        if self.suppress_next_spectrogram_position_update {
+            self.suppress_next_spectrogram_position_update = false;
+            return;
+        }
         let adjusted = position_seconds + self.spectrogram_position_offset;
         let _ = ctx
             .spectrogram_cmd_tx
@@ -1039,6 +1051,14 @@ impl AnalysisRuntimeState {
                 // the ring buffer.  Old data is from a different time region
                 // and would cause a visible "sweep" artifact as new columns
                 // overwrite stale content.
+                //
+                // Suppress the next PositionUpdate to prevent a race: the
+                // playback snapshot may send a PositionUpdate at the new
+                // position before the worker processes our NewTrack.  Without
+                // suppression, the old session would see the far-forward
+                // position, seek there, and briefly produce content at the
+                // playhead before the new session replaces it.
+                self.suppress_next_spectrogram_position_update = true;
                 let margin = self.centered_margin_seconds();
                 let start = (position_seconds - margin).max(0.0);
                 self.start_spectrogram_session(start, true, true, ctx);
