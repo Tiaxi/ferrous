@@ -979,18 +979,25 @@ void SpectrogramItem::feedPrecomputedChunk(
         if (hopSize > 0) {
             m_precomputedHopSize = hopSize;
         }
-        // After a reset in rolling mode, snap the position anchor to the
-        // seek target derived from start_column_index.  In centered mode the
-        // session starts from a margin *before* the playhead, so the
-        // start_column_index does not represent the seek target — let the
-        // playback engine's position updates drive the anchor instead.
-        if (appliedReset && m_displayMode == 0
-            && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
+        if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
             const double seekPositionSeconds =
                 static_cast<double>(startIndex * m_precomputedHopSize)
                 / static_cast<double>(m_precomputedSampleRateHz);
-            m_positionJumpHoldActive = false;
-            setPositionAnchorLocked(seekPositionSeconds, Clock::now());
+            // In rolling mode, snap the position anchor to the seek
+            // target derived from start_column_index.
+            // In centered mode, the session starts from a margin
+            // *before* the playhead, so start_column_index doesn't
+            // represent the actual seek target — don't snap the anchor.
+            // But DO release the position jump hold on track changes
+            // (token changed) so the playhead isn't frozen for 2s.
+            const bool trackChanged = trackToken != m_precomputedTrackToken
+                || m_precomputedTrackToken == 0;
+            if (m_displayMode == 0) {
+                m_positionJumpHoldActive = false;
+                setPositionAnchorLocked(seekPositionSeconds, Clock::now());
+            } else if (trackChanged) {
+                m_positionJumpHoldActive = false;
+            }
         }
     }
 
