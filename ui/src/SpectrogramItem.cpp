@@ -848,7 +848,6 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
         m_precomputedCanvasDisplayLeft = 0;
         m_precomputedCanvasDisplayRight = -1;
-        m_prevMaxColCount = 0;
         m_awaitingWorkerReset = true;
         FERROUS_SPECTROGRAM_LOGF(stderr,
             "[Qt-synthetic-clear@%p] ring wiped, gate armed\n",
@@ -1633,34 +1632,43 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // playhead detaches from center at track end.  Fall back to
                 // totalColumnsEstimate only when the playhead is ahead of
                 // decoded data (during the initial fill after a far seek).
-                // Without the fallback, the display would clamp to the decoded
-                // range and cause a "race-in" artifact.
+                // Compute display range centered on the playhead, then
+                // clamp to actual content at the right edge.
+                //
+                // Use the estimate for the initial range so it stays
+                // stable during fill (no race-in, no sliding).  Then
+                // apply maxColumnIndex as a RIGHT-EDGE-ONLY clamp for
+                // EOF: this makes the playhead detach from center at
+                // track end without affecting the display during fill.
                 const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
                     ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
                     : static_cast<qint64>(0);
                 const qint64 estimateCount = std::max(
                     static_cast<qint64>(m_precomputedTotalColumnsEstimate),
                     static_cast<qint64>(1));
-                // Use maxColumnIndex for totalCols only when it's stable
-                // (decode caught up or reached EOF).  While maxCol is
-                // actively growing (fill in progress), use the estimate
-                // for a stable display range.  Without this, totalCols
-                // jumps when maxCol crosses nowCol and causes a visible
-                // twitch as the display range adjusts.
-                const bool maxColGrowing =
-                    maxColCount > m_prevMaxColCount && m_prevMaxColCount > 0;
-                m_prevMaxColCount = maxColCount;
-                const qint64 totalCols = (maxColCount > 0 && !maxColGrowing)
-                    ? maxColCount
-                    : std::max(maxColCount, estimateCount);
 
+                // Step 1: compute range using the estimate (always stable).
+                const qint64 estTotalCols = std::max(maxColCount, estimateCount);
                 displayLeft = std::max(static_cast<qint64>(0),
                     static_cast<qint64>(nowCol) - halfWindowCols);
                 displayRight = std::min(
-                    totalCols - 1,
+                    estTotalCols - 1,
                     displayLeft + static_cast<qint64>(visibleWindowCols) - 1);
                 displayLeft = std::max<qint64>(
                     0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
+
+                // Step 2: if we have actual decoded data and the playhead
+                // is past the last decoded column, clamp displayRight to
+                // the actual content.  This only fires near EOF where
+                // maxCol IS the true track end, making the playhead
+                // detach from center and move rightward.
+                if (maxColCount > 0
+                    && maxColCount < estTotalCols
+                    && static_cast<qint64>(nowCol) >= maxColCount) {
+                    displayRight = std::min(displayRight, maxColCount - 1);
+                    displayLeft = std::max<qint64>(
+                        0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
+                }
 
                 // Jitter prevention: only apply when zoom hasn't changed
                 const bool isSeekJump =
@@ -1771,18 +1779,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 if (rollingMode) {
                     drawX = static_cast<double>(w - drawCols) - columnPhase * effectiveZoom;
                 } else {
-                    const qint64 maxColScroll = m_precomputedMaxColumnIndex >= 0
-                        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                        : static_cast<qint64>(0);
-                    const qint64 estScroll = std::max(
-                        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                        static_cast<qint64>(1));
-                    const bool scrollMaxGrowing =
-                        maxColScroll > m_prevMaxColCount && m_prevMaxColCount > 0;
-                    const qint64 totalColsForScroll =
-                        (maxColScroll > 0 && !scrollMaxGrowing)
-                            ? maxColScroll
-                            : std::max(maxColScroll, estScroll);
+                    const qint64 totalColsForScroll = std::max(
+                        m_precomputedMaxColumnIndex >= 0
+                            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                            : static_cast<qint64>(0),
+                        std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                                 static_cast<qint64>(1)));
                     const bool centeredScrolling =
                         displayLeft > 0
                         && displayRight < totalColsForScroll - 1;
