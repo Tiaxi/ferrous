@@ -1675,7 +1675,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // clamping so the playhead detaches at the real content end.
                 // This does NOT fire during fill (maxCol is thousands of
                 // columns below the estimate), avoiding any sliding.
-                if (maxColCount > 0 && maxColCount < estTotalCols
+                if (maxColCount > 0
                     && maxColCount + 128 >= estimateCount) {
                     displayRight = std::min(displayRight, maxColCount - 1);
                     displayLeft = std::max<qint64>(
