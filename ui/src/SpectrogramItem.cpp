@@ -846,12 +846,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedMaxColumnIndex = -1;
         m_precomputedReady = false;
         m_precomputedCanvasDirty = true;
-        // Reset canvas display range so the jitter prevention doesn't
-        // clamp the new display range to stale values from the old
-        // position, which causes a visible "sliding" effect instead
-        // of an instant jump.
         m_precomputedCanvasDisplayLeft = 0;
         m_precomputedCanvasDisplayRight = -1;
+        m_prevMaxColCount = 0;
         m_awaitingWorkerReset = true;
         FERROUS_SPECTROGRAM_LOGF(stderr,
             "[Qt-synthetic-clear@%p] ring wiped, gate armed\n",
@@ -1644,28 +1641,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const qint64 estimateCount = std::max(
                     static_cast<qint64>(m_precomputedTotalColumnsEstimate),
                     static_cast<qint64>(1));
-                // Use maxColumnIndex only when the decode has reached or
-                // passed the playhead.  During the initial fill after a
-                // seek, maxCol grows toward the playhead — switching to
-                // it prematurely causes the display range to shift each
-                // frame as maxCol advances, creating a "sliding" effect.
-                const bool decodedCoversPlayhead =
-                    maxColCount > 0
-                    && maxColCount >= static_cast<qint64>(nowCol);
-                const qint64 totalCols = decodedCoversPlayhead
+                // Use maxColumnIndex for totalCols only when it's stable
+                // (decode caught up or reached EOF).  While maxCol is
+                // actively growing (fill in progress), use the estimate
+                // for a stable display range.  Without this, totalCols
+                // jumps when maxCol crosses nowCol and causes a visible
+                // twitch as the display range adjusts.
+                const bool maxColGrowing =
+                    maxColCount > m_prevMaxColCount && m_prevMaxColCount > 0;
+                m_prevMaxColCount = maxColCount;
+                const qint64 totalCols = (maxColCount > 0 && !maxColGrowing)
                     ? maxColCount
                     : std::max(maxColCount, estimateCount);
-
-                // When decodedCoversPlayhead just transitioned (totalCols
-                // source changed), reset the jitter prevention state so
-                // the display range jumps cleanly to the new basis without
-                // a correction twitch.
-                if (decodedCoversPlayhead != m_decodedCoveredPlayhead) {
-                    m_decodedCoveredPlayhead = decodedCoversPlayhead;
-                    m_precomputedCanvasDisplayLeft = 0;
-                    m_precomputedCanvasDisplayRight = -1;
-                    m_precomputedCanvasDirty = true;
-                }
 
                 displayLeft = std::max(static_cast<qint64>(0),
                     static_cast<qint64>(nowCol) - halfWindowCols);
@@ -1790,12 +1777,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const qint64 estScroll = std::max(
                         static_cast<qint64>(m_precomputedTotalColumnsEstimate),
                         static_cast<qint64>(1));
-                    const bool scrollDecodedCovers =
-                        maxColScroll > 0
-                        && maxColScroll >= static_cast<qint64>(nowCol);
-                    const qint64 totalColsForScroll = scrollDecodedCovers
-                        ? maxColScroll
-                        : std::max(maxColScroll, estScroll);
+                    const bool scrollMaxGrowing =
+                        maxColScroll > m_prevMaxColCount && m_prevMaxColCount > 0;
+                    const qint64 totalColsForScroll =
+                        (maxColScroll > 0 && !scrollMaxGrowing)
+                            ? maxColScroll
+                            : std::max(maxColScroll, estScroll);
                     const bool centeredScrolling =
                         displayLeft > 0
                         && displayRight < totalColsForScroll - 1;
