@@ -246,6 +246,10 @@ fn handle_settings_bridge_command(
             state.settings.display.channel_buttons_visibility = (*value).min(2);
             *context.settings_dirty = true;
         }
+        BridgeSettingsCommand::SetSpectrogramZoomEnabled(enabled) => {
+            state.settings.display.spectrogram_zoom_enabled = *enabled;
+            *context.settings_dirty = true;
+        }
         BridgeSettingsCommand::SetSystemMediaControlsEnabled(enabled) => {
             state.settings.integrations.system_media_controls_enabled = *enabled;
             *context.settings_dirty = true;
