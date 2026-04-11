@@ -276,6 +276,7 @@ Kirigami.ApplicationWindow {
         function setShowSpectrogramScale(value) {}
         function setSpectrogramZoomEnabled(value) {}
         function setSpectrogramZoomLevel(level) {}
+        function setSpectrogramWidgetWidth(width) {}
         function setSystemMediaControlsEnabled(value) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

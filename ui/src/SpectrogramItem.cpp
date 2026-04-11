@@ -2238,6 +2238,11 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
         m_timeGridDirty = true;
         m_crosshairDirty = true;
     }
+    const int newWidth = static_cast<int>(newGeometry.width());
+    const int oldWidth = static_cast<int>(oldGeometry.width());
+    if (newWidth != oldWidth && newWidth > 0) {
+        emit spectrogramWidthChanged(newWidth);
+    }
     update();
 }
 

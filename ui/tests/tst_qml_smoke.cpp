@@ -602,6 +602,7 @@ Item {
         function setShowSpectrogramScale(value) {}
         function setSpectrogramZoomEnabled(value) {}
         function setSpectrogramZoomLevel(level) {}
+        function setSpectrogramWidgetWidth(width) {}
         function setViewerFullscreenMode(mode) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

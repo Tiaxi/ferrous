@@ -2552,6 +2552,12 @@ void BridgeClient::setSpectrogramZoomLevel(float level) {
         BinaryBridgeCodec::CmdSetSpectrogramZoomLevel, level));
 }
 
+void BridgeClient::setSpectrogramWidgetWidth(int width) {
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
+        BinaryBridgeCodec::CmdSetSpectrogramWidgetWidth,
+        static_cast<quint32>(std::max(320, width))));
+}
+
 void BridgeClient::setSystemMediaControlsEnabled(bool value) {
     if (m_systemMediaControlsEnabled != value) {
         m_systemMediaControlsEnabled = value;

@@ -235,6 +235,12 @@ Item {
                     onBackendZoomRequested: (level) => {
                         root.uiBridge.setSpectrogramZoomLevel(level)
                     }
+                    // Only report width from the first pane (all share the same width).
+                    onSpectrogramWidthChanged: (w) => {
+                        if (index === 0) {
+                            root.uiBridge.setSpectrogramWidgetWidth(w)
+                        }
+                    }
                     onSeekRequested: (seconds) => {
                         if (root.seekCommitted) {
                             root.seekCommitted(seconds)

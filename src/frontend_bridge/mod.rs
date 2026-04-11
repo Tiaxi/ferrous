@@ -188,6 +188,7 @@ pub enum BridgeLibraryCommand {
 pub enum BridgeAnalysisCommand {
     SetFftSize(usize),
     SetSpectrogramZoomLevel(f32),
+    SetSpectrogramWidgetWidth(u32),
 }
 
 #[derive(Debug, Clone)]

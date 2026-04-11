@@ -280,6 +280,7 @@ public:
     Q_INVOKABLE void setShowSpectrogramScale(bool value);
     Q_INVOKABLE void setSpectrogramZoomEnabled(bool value);
     Q_INVOKABLE void setSpectrogramZoomLevel(float level);
+    Q_INVOKABLE void setSpectrogramWidgetWidth(int width);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void setLastFmScrobblingEnabled(bool value);
     Q_INVOKABLE void beginLastFmAuth();

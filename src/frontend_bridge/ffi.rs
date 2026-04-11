@@ -1302,6 +1302,7 @@ fn parse_analysis_command(
             }
             BridgeAnalysisCommand::SetSpectrogramZoomLevel(level)
         }
+        58 => BridgeAnalysisCommand::SetSpectrogramWidgetWidth(reader.read_u32()?),
         _ => return Ok(None),
     };
     reader.expect_done()?;

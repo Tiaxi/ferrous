@@ -133,6 +133,7 @@ pub(super) enum SpectrogramWorkerCommand {
         fft_size: usize,
         hop_size: usize,
         zoom_level: f32,
+        widget_width: u32,
         channel_count: usize,
         start_seconds: f64,
         emit_initial_reset: bool,
@@ -498,6 +499,7 @@ struct LastSessionParams {
     fft_size: usize,
     hop_size: usize,
     zoom_level: f32,
+    widget_width: u32,
     channel_count: usize,
     view_mode: SpectrogramViewMode,
     display_mode: SpectrogramDisplayMode,
@@ -526,6 +528,7 @@ fn spectrogram_worker_loop(
                 fft_size,
                 hop_size,
                 zoom_level,
+                widget_width,
                 channel_count,
                 view_mode,
                 display_mode,
@@ -535,6 +538,7 @@ fn spectrogram_worker_loop(
                     fft_size,
                     hop_size,
                     zoom_level,
+                    widget_width,
                     channel_count,
                     view_mode,
                     display_mode,
@@ -562,6 +566,7 @@ fn spectrogram_worker_loop(
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
                         zoom_level: params.zoom_level,
+                        widget_width: params.widget_width,
                         channel_count: params.channel_count,
                         start_seconds: 0.0,
                         emit_initial_reset: false,
@@ -573,6 +578,7 @@ fn spectrogram_worker_loop(
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
                         zoom_level: params.zoom_level,
+                        widget_width: params.widget_width,
                         channel_count: params.channel_count,
                         view_mode: params.view_mode,
                         display_mode: params.display_mode,
@@ -612,6 +618,7 @@ struct SpectrogramSessionState {
     hop_size: usize,
     effective_hop: usize,
     zoom_level: f32,
+    widget_width: u32,
     view_mode: SpectrogramViewMode,
     display_mode: SpectrogramDisplayMode,
     channel_count: usize,
@@ -702,6 +709,7 @@ fn run_spectrogram_session(
         fft_size,
         hop_size,
         zoom_level,
+        widget_width,
         channel_count: _channel_count,
         start_seconds,
         emit_initial_reset,
@@ -766,11 +774,13 @@ fn run_spectrogram_session(
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(10.0);
     let lookahead_columns = if display_mode == SpectrogramDisplayMode::Centered {
-        // Windowed centered: decode a window around the playhead.
-        // Unlimited decode speed fills this almost instantly, then the
-        // session follows the playhead.  Ring buffer overwrites old data.
-        let screen_cols = 1920_u64 * 3;
-        screen_cols + f64_to_u64_saturating(lookahead_seconds * cols_per_second)
+        // Windowed centered: decode enough to fill the visible window
+        // plus one screen width of buffer for small seeks and playback.
+        // visible_cols covers the display from left to right.
+        // The extra screen width means small forward seeks stay within
+        // the decoded window without a restart.
+        let visible_cols = u64::from(widget_width);
+        visible_cols * 2 + f64_to_u64_saturating(lookahead_seconds * cols_per_second)
     } else {
         // Rolling mode: existing logic
         f64_to_u64_saturating(lookahead_seconds * cols_per_second)
@@ -809,6 +819,7 @@ fn run_spectrogram_session(
         hop_size,
         effective_hop,
         zoom_level,
+        widget_width,
         view_mode,
         display_mode,
         channel_count: actual_channel_count,
@@ -928,6 +939,7 @@ fn run_spectrogram_session(
                     fft_size: session.fft_size,
                     hop_size: session.hop_size,
                     zoom_level: session.zoom_level,
+                    widget_width: session.widget_width,
                     channel_count: session.channel_count,
                     start_seconds: 0.0,
                     emit_initial_reset: false,
@@ -1469,10 +1481,10 @@ fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDi
             f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
     } else {
         session.decode_rate_limit = f64::INFINITY;
-        // Windowed centered: ~3 screen widths + lookahead
-        let screen_cols = 1920_u64 * 3;
+        // Windowed centered: visible window + one screen buffer + playback lookahead
+        let visible_cols = u64::from(session.widget_width);
         session.lookahead_columns =
-            screen_cols + f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
+            visible_cols * 2 + f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
     }
 }
 
@@ -1758,6 +1770,7 @@ mod tests {
             hop_size: 256,
             effective_hop: 1_024,
             zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1845,6 +1858,7 @@ mod tests {
             hop_size: 256,
             effective_hop: 1_024,
             zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1893,6 +1907,7 @@ mod tests {
             hop_size: 256,
             effective_hop: 1_024,
             zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1949,6 +1964,7 @@ mod tests {
             hop_size: 256,
             effective_hop: 1_024,
             zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1997,6 +2013,7 @@ mod tests {
             hop_size: 256,
             effective_hop: 1_024,
             zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
             channel_count: 1,
@@ -2053,6 +2070,7 @@ mod tests {
             hop_size: 256,
             effective_hop: 1_024,
             zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -2121,6 +2139,7 @@ mod tests {
             fft_size: 2_048,
             hop_size: 256,
             zoom_level: 1.0,
+            widget_width: 1920,
             channel_count: 1,
             start_seconds: 0.0,
             emit_initial_reset: true,

@@ -129,6 +129,7 @@ signals:
     void zoomRequested(double newZoomLevel);
     void zoomResetRequested();
     void backendZoomRequested(float zoomLevel);
+    void spectrogramWidthChanged(int width);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;

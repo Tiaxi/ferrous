@@ -76,6 +76,7 @@ pub enum AnalysisCommand {
     SetSampleRate(u32),
     SetFftSize(usize),
     SetSpectrogramZoomLevel(f32),
+    SetSpectrogramWidgetWidth(u32),
     SetSpectrogramViewMode(SpectrogramViewMode),
     SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     RestartCurrentTrack {
@@ -236,6 +237,10 @@ struct AnalysisRuntimeState {
     fft_size: usize,
     hop_size: usize,
     zoom_level: f32,
+    /// Actual pixel width of the spectrogram widget, used to compute
+    /// the decode margin and lookahead dynamically.  Updated from the
+    /// frontend on resize.
+    spectrogram_widget_width: u32,
     spectrogram_view_mode: SpectrogramViewMode,
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
@@ -383,6 +388,7 @@ impl AnalysisRuntimeState {
             fft_size: 8192,
             hop_size: 1024,
             zoom_level: 1.0,
+            spectrogram_widget_width: 1920,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
             active_track_token: 0,
             active_track_path: None,
@@ -468,6 +474,9 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 self.start_spectrogram_session(self.centered_start_seconds(), true, true, ctx);
+            }
+            AnalysisCommand::SetSpectrogramWidgetWidth(width) => {
+                self.spectrogram_widget_width = width.max(320);
             }
             AnalysisCommand::SetSpectrogramZoomLevel(level) => {
                 let level = level.clamp(0.05, 16.0);
@@ -951,6 +960,7 @@ impl AnalysisRuntimeState {
                 fft_size: self.fft_size,
                 hop_size: self.hop_size,
                 zoom_level: self.zoom_level,
+                widget_width: self.spectrogram_widget_width,
                 channel_count: self.active_session_channel_count.max(1),
                 start_seconds,
                 emit_initial_reset,
@@ -973,10 +983,8 @@ impl AnalysisRuntimeState {
     }
 
     /// Compute the pre-decode margin for centered mode: how many seconds
-    /// before the playhead to start decoding.  Based on the visible half-screen
-    /// at the current sample rate and zoom level, plus a small buffer.
-    /// This avoids the old hardcoded 30 s margin that wasted time decoding
-    /// content far from the playhead.
+    /// before the playhead to start decoding.  Based on the actual widget
+    /// width, sample rate, and zoom level, plus a small buffer.
     fn centered_margin_seconds(&self) -> f64 {
         let effective_hop = if self.zoom_level > 1.0 {
             self.hop_size
@@ -986,10 +994,9 @@ impl AnalysisRuntimeState {
         let rate = self.active_session_effective_rate;
         if rate > 0 && effective_hop > 0 {
             let cols_per_second = f64::from(rate) / effective_hop as f64;
-            // Use 2560 px as the assumed max spectrogram width (typical
-            // display minus side panel).  Half-screen in seconds plus
-            // 2 s margin for STFT warmup and decode latency.
-            let half_screen = 2560.0 / cols_per_second / 2.0;
+            let width = f64::from(self.spectrogram_widget_width);
+            // Half-screen in seconds plus 2 s for STFT warmup/latency.
+            let half_screen = width / cols_per_second / 2.0;
             half_screen + 2.0
         } else {
             // No rate info yet (first track load) — use generous fallback.
