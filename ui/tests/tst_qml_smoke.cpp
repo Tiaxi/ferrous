@@ -537,6 +537,7 @@ Item {
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
+        property bool spectrogramZoomEnabled: false
         property int soloedChannel: -1
         property int channelButtonsVisibility: 1
         property int viewerFullscreenMode: 0
@@ -593,6 +594,7 @@ Item {
         function setShowFps(value) {}
         function setShowSpectrogramCrosshair(value) {}
         function setShowSpectrogramScale(value) {}
+        function setSpectrogramZoomEnabled(value) {}
         function setViewerFullscreenMode(mode) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

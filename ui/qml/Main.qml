@@ -199,6 +199,7 @@ Kirigami.ApplicationWindow {
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
+        property bool spectrogramZoomEnabled: false
         property int soloedChannel: -1
         property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
@@ -273,6 +274,7 @@ Kirigami.ApplicationWindow {
         function setShowFps(value) {}
         function setShowSpectrogramCrosshair(value) {}
         function setShowSpectrogramScale(value) {}
+        function setSpectrogramZoomEnabled(value) {}
         function setSystemMediaControlsEnabled(value) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

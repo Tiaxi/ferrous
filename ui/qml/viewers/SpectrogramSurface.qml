@@ -14,6 +14,7 @@ Item {
 
     property var channelDescriptors: []
     property double _crosshairSharedX: -1.0
+    property double _sharedZoomLevel: 1.0
 
     // Standard channel labels for common layouts.
     readonly property var standardChannelLabels: [
@@ -221,6 +222,14 @@ Item {
                     showTimeLabels: index === spectrogramRepeater.count - 1
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
+                    zoomEnabled: root.uiBridge.spectrogramZoomEnabled
+                    zoomLevel: root._sharedZoomLevel
+                    onZoomRequested: (newZoomLevel) => {
+                        root._sharedZoomLevel = Math.max(0.05, Math.min(16.0, newZoomLevel))
+                    }
+                    onZoomResetRequested: {
+                        root._sharedZoomLevel = 1.0
+                    }
                     onSeekRequested: (seconds) => {
                         if (root.seekCommitted) {
                             root.seekCommitted(seconds)
