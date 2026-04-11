@@ -420,6 +420,8 @@ private slots:
     void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
     void spectrogramLeftClickDoesNotSeek();
     void spectrogramClickToSeekDisabledInRollingMode();
+    void spectrogramZoomProperty();
+    void spectrogramZoomLimitsWithTrackData();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -3023,6 +3025,63 @@ void QmlSmokeTest::spectrogramClickToSeekDisabledInRollingMode() {
     item.mousePressEvent(&pressEvent);
 
     QCOMPARE(seekSpy.count(), 0);
+}
+
+void QmlSmokeTest::spectrogramZoomProperty() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Default zoom is 1.0
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+    QCOMPARE(item.zoomEnabled(), false);
+
+    // Feed enough columns so that zoom < 16.0 is valid (minZoom = 1920/96000 = 0.02 → floor 0.05)
+    constexpr int binsPerColumn = 4;
+    constexpr int columns = 96000;
+    QByteArray chunk(binsPerColumn * columns, '\x20');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // Setting zoom level to 2.0 works when track is long enough
+    item.setZoomLevel(2.0);
+    QVERIFY(std::abs(item.zoomLevel() - 2.0) < 0.0001);
+
+    // Zoom clamps to maximum
+    item.setZoomLevel(100.0);
+    QVERIFY(std::abs(item.zoomLevel() - 16.0) < 0.0001);
+
+    // Zoom clamps to minimum floor (0.05 hard floor, minZoom = 1920/96000 = 0.02 → 0.05)
+    item.setZoomLevel(0.001);
+    QVERIFY(std::abs(item.zoomLevel() - 0.05) < 0.0001);
+
+    // Reset to 1.0
+    item.setZoomLevel(1.0);
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramZoomLimitsWithTrackData() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed some precomputed data to set up track columns
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 9600; // ~200 seconds at 48 cols/sec
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // Minimum zoom should allow seeing all columns
+    const double minZoom = item.minimumZoomLevel();
+    QVERIFY(minZoom > 0.0);
+    QVERIFY(minZoom <= 1.0);
+    // 1920 / 9600 = 0.2
+    QVERIFY(std::abs(minZoom - 0.2) < 0.01);
 }
 
 int main(int argc, char **argv) {
