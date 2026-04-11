@@ -1625,18 +1625,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const int visibleWindowCols = static_cast<int>(
                     std::ceil(static_cast<double>(w) / effectiveZoom));
                 const int halfWindowCols = visibleWindowCols / 2;
-                // Use the larger of the actual decoded column count and the
-                // metadata estimate.  With windowed decode the decoded range
-                // may start well past column 0, so maxColumnIndex can be much
-                // smaller than the full track.  Using only maxColumnIndex
-                // would clamp the display range and cause a "race-in" artifact
-                // as data fills in progressively.
-                const qint64 totalCols = std::max(
-                    m_precomputedMaxColumnIndex >= 0
-                        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                        : static_cast<qint64>(0),
-                    std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                             static_cast<qint64>(1)));
+                // Use maxColumnIndex (actual decoded extent) when it covers
+                // the playhead area — this gives accurate EOF clamping so the
+                // playhead detaches from center at track end.  Fall back to
+                // totalColumnsEstimate only when the playhead is ahead of
+                // decoded data (during the initial fill after a far seek).
+                // Without the fallback, the display would clamp to the decoded
+                // range and cause a "race-in" artifact.
+                const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
+                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                    : static_cast<qint64>(0);
+                const qint64 estimateCount = std::max(
+                    static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                    static_cast<qint64>(1));
+                const bool decodedCoversPlayhead =
+                    maxColCount > 0
+                    && static_cast<qint64>(nowCol) <= maxColCount + visibleWindowCols;
+                const qint64 totalCols = decodedCoversPlayhead
+                    ? maxColCount
+                    : std::max(maxColCount, estimateCount);
                 displayLeft = std::max(static_cast<qint64>(0),
                     static_cast<qint64>(nowCol) - halfWindowCols);
                 displayRight = std::min(
@@ -1754,12 +1761,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 if (rollingMode) {
                     drawX = static_cast<double>(w - drawCols) - columnPhase * effectiveZoom;
                 } else {
-                    const qint64 totalColsForScroll = std::max(
-                        m_precomputedMaxColumnIndex >= 0
-                            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                            : static_cast<qint64>(0),
-                        std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                                 static_cast<qint64>(1)));
+                    const qint64 maxColScroll = m_precomputedMaxColumnIndex >= 0
+                        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                        : static_cast<qint64>(0);
+                    const qint64 estScroll = std::max(
+                        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                        static_cast<qint64>(1));
+                    const bool scrollDecodedCovers =
+                        maxColScroll > 0
+                        && static_cast<qint64>(nowCol) <= maxColScroll + static_cast<qint64>(w);
+                    const qint64 totalColsForScroll = scrollDecodedCovers
+                        ? maxColScroll
+                        : std::max(maxColScroll, estScroll);
                     const bool centeredScrolling =
                         displayLeft > 0
                         && displayRight < totalColsForScroll - 1;
