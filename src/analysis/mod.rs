@@ -261,6 +261,10 @@ struct AnalysisRuntimeState {
     /// Last raw position forwarded to the spectrogram worker, used to
     /// compute the offset at gapless transitions.
     last_spectrogram_position: f64,
+    /// Start position (seconds) of the current spectrogram decode session.
+    /// Used to determine whether a seek falls within the already-decoded
+    /// window, avoiding unnecessary session restarts.
+    spectrogram_session_start: f64,
     /// Compatibility params for the active spectrogram worker session.
     /// Updated on every session start and track change so the staging
     /// preflight can compare candidate files against the live session.
@@ -395,6 +399,7 @@ impl AnalysisRuntimeState {
             prof_out_samples: 0,
             spectrogram_position_offset: 0.0,
             last_spectrogram_position: 0.0,
+            spectrogram_session_start: 0.0,
             active_session_effective_rate: 0,
             active_session_channel_count: 0,
             active_session_divisor: 1,
@@ -920,6 +925,7 @@ impl AnalysisRuntimeState {
             );
             return;
         };
+        self.spectrogram_session_start = start_seconds;
         // update_session_compat_params is already called by
         // handle_track_change before start_spectrogram_session; skip the
         // redundant probe here to avoid a second CIFS roundtrip.
@@ -982,14 +988,32 @@ impl AnalysisRuntimeState {
         self.last_spectrogram_position = position_seconds;
 
         if self.display_mode == SpectrogramDisplayMode::Centered {
-            // Windowed centered: restart session from before the seek target
-            // so both sides of the playhead fill immediately.
-            // Use clear_history=false so the ring retains overlapping data —
-            // for nearby seeks most columns are still valid, avoiding a blank
-            // flash. Stale columns get progressively overwritten as the new
-            // session fills in data.
-            let start = (position_seconds - 30.0).max(0.0);
-            self.start_spectrogram_session(start, true, false, ctx);
+            // Windowed centered: check if the seek target is within the
+            // already-decoded window before restarting the session.  The
+            // window starts at spectrogram_session_start and extends for
+            // ~(1920*3/cols_per_sec + lookahead_seconds).  Use a conservative
+            // 100 s estimate.  If the seek is inside, the data is already in
+            // the ring buffer — just send a PositionUpdate so the display
+            // shifts without a costly session restart.
+            let window_seconds = 100.0;
+            let window_start = self.spectrogram_session_start;
+            let window_end = window_start + window_seconds;
+
+            if position_seconds >= window_start && position_seconds <= window_end {
+                // Seek within decoded window — cheap position update.
+                let adjusted = position_seconds + self.spectrogram_position_offset;
+                let _ = ctx.spectrogram_cmd_tx.send(
+                    SpectrogramWorkerCommand::PositionUpdate {
+                        position_seconds: adjusted,
+                    },
+                );
+            } else {
+                // Seek outside decoded window — restart session.
+                // Use clear_history=false so the ring retains overlapping
+                // data, avoiding a blank flash for nearby seeks.
+                let start = (position_seconds - 30.0).max(0.0);
+                self.start_spectrogram_session(start, true, false, ctx);
+            }
         } else {
             // Rolling mode: an explicit seek breaks the continuous gapless
             // timeline.  Send a Seek command (existing behavior).
@@ -1881,12 +1905,13 @@ mod tests {
     }
 
     #[test]
-    fn centered_seek_restarts_session_with_new_track() {
-        // In windowed centered mode, seeks restart the decode session
-        // from before the seek target so both sides of the playhead fill.
+    fn centered_seek_within_window_sends_position_update() {
+        // Seeking within the decoded window should send a cheap
+        // PositionUpdate, not restart the session.
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.spectrogram_session_start = 0.0;
 
         let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
@@ -1901,14 +1926,46 @@ mod tests {
             spectrogram_decode_generation: &spectrogram_decode_generation,
         };
 
+        // Seek to 60s — within the window [0, 100].
         state.seek_spectrogram_position(60.0, &ctx);
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, .. } if (start_seconds - 30.0).abs() < 0.01),
-            "centered seek should restart session from 30s before target, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
+            "centered seek within window should send PositionUpdate, got {cmd:?}"
         );
-        // Offset should be reset on seek.
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
+    fn centered_seek_outside_window_restarts_session() {
+        // Seeking outside the decoded window should restart the session.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.spectrogram_session_start = 0.0;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+        };
+
+        // Seek to 200s — outside the window [0, 100].
+        state.seek_spectrogram_position(200.0, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, .. } if (start_seconds - 170.0).abs() < 0.01),
+            "centered seek outside window should restart session from 30s before target, got {cmd:?}"
+        );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
 
