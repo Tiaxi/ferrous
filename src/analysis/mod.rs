@@ -1056,13 +1056,16 @@ impl AnalysisRuntimeState {
                 // property jumping and the worker's reset chunk arriving,
                 // during which old ring data can be briefly visible at the
                 // new playhead position.
+                let synth_channel_count =
+                    u8::try_from(self.active_session_channel_count.max(1))
+                        .unwrap_or(u8::MAX);
                 let _ = ctx.event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
                     PrecomputedSpectrogramChunk {
                         track_token: self.active_track_token,
                         columns_u8: Vec::new(),
                         bins_per_column: 0,
                         column_count: 0,
-                        channel_count: 1,
+                        channel_count: synth_channel_count,
                         start_column_index: 0,
                         total_columns_estimate: 0,
                         sample_rate_hz: 0,
