@@ -104,6 +104,8 @@ public:
     Q_INVOKABLE void halt();
     Q_INVOKABLE void appendRows(const QVariantList &rows);
 
+    Q_INVOKABLE double minimumZoomLevel() const;
+
 signals:
     void dbRangeChanged();
     void logScaleChanged();
@@ -186,6 +188,7 @@ private:
         int width, int height, int padding,
         qint64 displayLeft,
         bool rollingMode, double columnsPerSecond, double drawX);
+    double minimumZoomLevelLocked() const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;

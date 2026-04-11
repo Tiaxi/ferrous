@@ -669,10 +669,32 @@ double SpectrogramItem::zoomLevel() const {
     return m_zoomLevel;
 }
 
-void SpectrogramItem::setZoomLevel(double value) {
-    // Clamp to valid range
-    value = std::clamp(value, 0.05, 16.0);
+double SpectrogramItem::minimumZoomLevelLocked() const {
+    const int w = static_cast<int>(width());
+    if (w <= 0) {
+        return 0.05;
+    }
+    const qint64 totalCols = m_precomputedMaxColumnIndex >= 0
+        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+        : std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                   static_cast<qint64>(1));
+    if (totalCols <= 0) {
+        return 0.05;
+    }
+    const double minZoom =
+        static_cast<double>(w) / static_cast<double>(totalCols);
+    return std::max(0.05, minZoom);
+}
+
+double SpectrogramItem::minimumZoomLevel() const {
     QMutexLocker lock(&m_stateMutex);
+    return minimumZoomLevelLocked();
+}
+
+void SpectrogramItem::setZoomLevel(double value) {
+    QMutexLocker lock(&m_stateMutex);
+    const double minZoom = minimumZoomLevelLocked();
+    value = std::clamp(value, minZoom, 16.0);
     if (std::abs(m_zoomLevel - value) < 0.0001) {
         return;
     }
@@ -2251,14 +2273,20 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
     }
     event->accept();
 
-    // angleDelta().y() is typically ±120 per notch
     const double steps = event->angleDelta().y() / 120.0;
     if (std::abs(steps) < 0.01) {
         return;
     }
 
     constexpr double kZoomStepFactor = 1.25;
-    const double newZoom = m_zoomLevel * std::pow(kZoomStepFactor, steps);
+    constexpr double kMaxZoom = 16.0;
+    QMutexLocker lock(&m_stateMutex);
+    const double minZoom = minimumZoomLevelLocked();
+    const double currentZoom = m_zoomLevel;
+    lock.unlock();
+    const double newZoom = std::clamp(
+        currentZoom * std::pow(kZoomStepFactor, steps),
+        minZoom, kMaxZoom);
     emit zoomRequested(newZoom);
 }
 

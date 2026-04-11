@@ -225,7 +225,9 @@ Item {
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
                     zoomLevel: root._sharedZoomLevel
                     onZoomRequested: (newZoomLevel) => {
-                        root._sharedZoomLevel = Math.max(0.05, Math.min(16.0, newZoomLevel))
+                        const minZoom = spectrogramPaneItem.minimumZoomLevel()
+                        root._sharedZoomLevel = Math.max(minZoom,
+                            Math.min(16.0, newZoomLevel))
                     }
                     onZoomResetRequested: {
                         root._sharedZoomLevel = 1.0
