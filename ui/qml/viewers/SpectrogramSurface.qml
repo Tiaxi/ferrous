@@ -232,6 +232,9 @@ Item {
                     onZoomResetRequested: {
                         root._sharedZoomLevel = 1.0
                     }
+                    onBackendZoomRequested: (level) => {
+                        root.uiBridge.setSpectrogramZoomLevel(level)
+                    }
                     onSeekRequested: (seconds) => {
                         if (root.seekCommitted) {
                             root.seekCommitted(seconds)

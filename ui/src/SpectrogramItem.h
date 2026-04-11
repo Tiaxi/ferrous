@@ -127,6 +127,7 @@ signals:
     void zoomEnabledChanged();
     void zoomRequested(double newZoomLevel);
     void zoomResetRequested();
+    void backendZoomRequested(float zoomLevel);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -198,6 +199,7 @@ private:
         int width, int height, int padding,
         qint64 displayLeft,
         bool rollingMode, double columnsPerSecond, double drawX);
+    double effectiveZoomLocked() const;
     double minimumZoomLevelLocked() const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
