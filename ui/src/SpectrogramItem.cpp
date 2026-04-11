@@ -964,6 +964,11 @@ void SpectrogramItem::feedPrecomputedChunk(
 #endif
     }
 
+    // Detect track change before updating the stored token.
+    const bool isTrackChange = appliedReset
+        && trackToken != 0
+        && (m_precomputedTrackToken == 0 || trackToken != m_precomputedTrackToken);
+
     if (trackToken != 0 && !(bufferReset && columns <= 0)) {
         m_precomputedTrackToken = trackToken;
     }
@@ -983,19 +988,10 @@ void SpectrogramItem::feedPrecomputedChunk(
             const double seekPositionSeconds =
                 static_cast<double>(startIndex * m_precomputedHopSize)
                 / static_cast<double>(m_precomputedSampleRateHz);
-            // In rolling mode, snap the position anchor to the seek
-            // target derived from start_column_index.
-            // In centered mode, the session starts from a margin
-            // *before* the playhead, so start_column_index doesn't
-            // represent the actual seek target — don't snap the anchor.
-            // But DO release the position jump hold on track changes
-            // (token changed) so the playhead isn't frozen for 2s.
-            const bool trackChanged = trackToken != m_precomputedTrackToken
-                || m_precomputedTrackToken == 0;
             if (m_displayMode == 0) {
                 m_positionJumpHoldActive = false;
                 setPositionAnchorLocked(seekPositionSeconds, Clock::now());
-            } else if (trackChanged) {
+            } else if (isTrackChange) {
                 // Release hold AND snap anchor to the new track's start
                 // position.  Without the anchor snap, clearing the gapless
                 // offset in applyPrecomputedResetLocked makes the next
