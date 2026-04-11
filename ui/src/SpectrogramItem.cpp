@@ -756,11 +756,12 @@ void SpectrogramItem::feedPrecomputedChunk(
     QMutexLocker lock(&m_stateMutex);
 
     FERROUS_SPECTROGRAM_LOGF(stderr,
-        "[Qt-feed] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d reset=%d clear=%d\n",
+        "[Qt-feed@%p] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d reset=%d clear=%d await=%d\n",
+        static_cast<const void *>(this),
         channelIndex, columns, startIndex, totalEstimate, bins,
         sampleRate, hopSize, static_cast<unsigned long long>(trackToken),
         m_precomputedReady ? 1 : 0, bufferReset ? 1 : 0,
-        clearHistoryOnReset ? 1 : 0);
+        clearHistoryOnReset ? 1 : 0, m_awaitingWorkerReset ? 1 : 0);
 
     // Allow buffer_reset chunks with no data (bins=0) through so the ring
     // can be cleared immediately. These are emitted by the analysis thread
