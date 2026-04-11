@@ -8,6 +8,7 @@
 #include <QMetaObject>
 #include <QMutex>
 #include <QQuickItem>
+#include <QTimer>
 #include <QVariantList>
 
 #include <array>
@@ -307,6 +308,8 @@ private:
     double m_zoomLevel{1.0};
     bool m_zoomEnabled{false};
     double m_precomputedCanvasZoomLevel{1.0};
+    QTimer *m_zoomDebounceTimer{nullptr};
+    float m_pendingBackendZoom{1.0f};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

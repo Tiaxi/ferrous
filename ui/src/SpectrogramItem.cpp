@@ -343,6 +343,12 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     rebuildPalette();
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
     bindWindowFpsTracking(window());
+    m_zoomDebounceTimer = new QTimer(this);
+    m_zoomDebounceTimer->setSingleShot(true);
+    m_zoomDebounceTimer->setInterval(150);
+    connect(m_zoomDebounceTimer, &QTimer::timeout, this, [this]() {
+        emit backendZoomRequested(m_pendingBackendZoom);
+    });
 }
 
 double SpectrogramItem::dbRange() const {
@@ -718,7 +724,8 @@ void SpectrogramItem::setZoomLevel(double value) {
     // Zoom-out (within the <=1.0 range) is handled entirely in the frontend
     // renderer via decimation — no backend session restart needed.
     if (m_zoomLevel > 1.001 || std::abs(oldZoom - 1.0) > 0.001) {
-        emit backendZoomRequested(static_cast<float>(m_zoomLevel));
+        m_pendingBackendZoom = static_cast<float>(m_zoomLevel);
+        m_zoomDebounceTimer->start(); // restarts the 150ms timer
     }
     update();
 }
