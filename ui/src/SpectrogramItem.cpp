@@ -1656,7 +1656,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 canvasSize = m_canvas.size();
                 drawCols = std::min(m_canvasFilledCols, canvasSize.width());
                 srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
-                scrollOffset = columnPhase;
+                scrollOffset = columnPhase * m_zoomLevel;
                 if (rollingMode) {
                     drawX = static_cast<double>(w - drawCols) - columnPhase * m_zoomLevel;
                 } else {

@@ -199,7 +199,7 @@ Kirigami.ApplicationWindow {
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
-        property bool spectrogramZoomEnabled: false
+        property bool spectrogramZoomEnabled: true
         property int soloedChannel: -1
         property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
