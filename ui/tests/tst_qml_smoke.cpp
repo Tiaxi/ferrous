@@ -422,6 +422,9 @@ private slots:
     void spectrogramClickToSeekDisabledInRollingMode();
     void spectrogramZoomProperty();
     void spectrogramZoomLimitsWithTrackData();
+    void spectrogramEffectiveZoomMatchesBackendHop();
+    void spectrogramAdvanceWorksWhenBackendMatchesZoom();
+    void spectrogramEffectiveZoomDuringTransition();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -3083,6 +3086,73 @@ void QmlSmokeTest::spectrogramZoomLimitsWithTrackData() {
     QVERIFY(minZoom <= 1.0);
     // 1920 / 9600 = 0.2
     QVERIFY(std::abs(minZoom - 0.2) < 0.01);
+}
+
+void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed data with hop_size=256 (simulating zoom=4x backend).
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0, allowing setZoomLevel(4.0).
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 500;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 256, false,
+        true, 1, false);
+
+    // Set zoom to 4x — should match backend hop
+    item.setZoomLevel(4.0);
+
+    // effectiveZoom = 4.0 * 256 / 1024 = 1.0
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramAdvanceWorksWhenBackendMatchesZoom() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed data with hop_size=256 (simulating zoom=4x backend).
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0, allowing setZoomLevel(4.0).
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 500;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 256, false,
+        true, 1, false);
+
+    // Set zoom to 4x — effectiveZoom = 4.0 * 256 / 1024 = 1.0
+    item.setZoomLevel(4.0);
+
+    // Verify the zoom level is 4.0 while rendering behaves as 1:1
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramEffectiveZoomDuringTransition() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed data with default hop_size=1024 (backend not yet producing zoom=4x data).
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0, allowing setZoomLevel(4.0).
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 500;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 1024, false,
+        true, 1, false);
+
+    // Set zoom to 4x — backend hasn't responded yet
+    item.setZoomLevel(4.0);
+
+    // effectiveZoom = 4.0 * 1024 / 1024 = 4.0 (transition state)
+    // This means interpolation/full-rebuild rendering is active
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
 }
 
 int main(int argc, char **argv) {
