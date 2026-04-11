@@ -1655,6 +1655,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const qint64 totalCols = decodedCoversPlayhead
                     ? maxColCount
                     : std::max(maxColCount, estimateCount);
+
+                // When decodedCoversPlayhead just transitioned (totalCols
+                // source changed), reset the jitter prevention state so
+                // the display range jumps cleanly to the new basis without
+                // a correction twitch.
+                if (decodedCoversPlayhead != m_decodedCoveredPlayhead) {
+                    m_decodedCoveredPlayhead = decodedCoversPlayhead;
+                    m_precomputedCanvasDisplayLeft = 0;
+                    m_precomputedCanvasDisplayRight = -1;
+                    m_precomputedCanvasDirty = true;
+                }
+
                 displayLeft = std::max(static_cast<qint64>(0),
                     static_cast<qint64>(nowCol) - halfWindowCols);
                 displayRight = std::min(

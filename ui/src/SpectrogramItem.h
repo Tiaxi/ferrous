@@ -306,6 +306,7 @@ private:
     qint64 m_precomputedCanvasDisplayRight{-1};
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
+    bool m_decodedCoveredPlayhead{false};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     double m_zoomLevel{1.0};
     bool m_zoomEnabled{false};
