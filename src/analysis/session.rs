@@ -132,6 +132,7 @@ pub(super) enum SpectrogramWorkerCommand {
         path: PathBuf,
         fft_size: usize,
         hop_size: usize,
+        zoom_level: f32,
         channel_count: usize,
         start_seconds: f64,
         emit_initial_reset: bool,
@@ -319,11 +320,12 @@ fn centered_staging_decode(
     path: &Path,
     fft_size: usize,
     hop_size: usize,
+    zoom_level: f32,
     view_mode: SpectrogramViewMode,
     stop: &AtomicBool,
     tx: &Sender<PrecomputedSpectrogramChunk>,
 ) {
-    let Some((mut source, native_sample_rate, native_channels, total_columns_estimate)) =
+    let Some((mut source, native_sample_rate, native_channels, total_columns)) =
         open_audio_file(path)
     else {
         profile_eprintln!("[staging] failed to open {}", path.display());
@@ -338,7 +340,11 @@ fn centered_staging_decode(
         SpectrogramViewMode::PerChannel => native_channels,
     };
     let bins_per_column = (fft_size / 2) + 1;
-    let decimation_factor = decimation_factor_for_hop(hop_size);
+    let decimation_factor = if zoom_level > 1.0 {
+        1
+    } else {
+        decimation_factor_for_hop(hop_size)
+    };
 
     let mut stfts: Vec<StftComputer> = (0..channel_count)
         .map(|_| StftComputer::new(fft_size, hop_size))
@@ -347,12 +353,26 @@ fn centered_staging_decode(
         .map(|_| SpectrogramDecimator::new(decimation_factor))
         .collect();
 
+    let effective_hop = hop_size * decimation_factor;
+    let total_columns_estimate = if effective_hop != REFERENCE_HOP && effective_hop > 0 {
+        // REFERENCE_HOP and effective_hop are small constants; precision loss is negligible.
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = REFERENCE_HOP as f64 / effective_hop as f64;
+        let scaled = (f64::from(total_columns) * ratio).ceil();
+        // Ceil result is non-negative and clamped via try_from fallback.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let val = scaled as u64;
+        u32::try_from(val).unwrap_or(u32::MAX)
+    } else {
+        total_columns
+    };
+
     let mut state = StagingChunkState {
         fft_size,
         bins_per_column,
         channel_count,
         effective_rate,
-        effective_hop: hop_size * decimation_factor,
+        effective_hop,
         total_columns_estimate,
         columns_produced: 0,
         total_covered_samples: 0,
@@ -426,12 +446,11 @@ fn centered_staging_decode(
 /// centered-mode gapless.  Produces `PrecomputedSpectrogramChunk`s
 /// with 0-based column indices and `track_token: 0` (placeholder).
 /// Returns the chunk receiver and the thread's join handle.
-// Callers are added in a subsequent task (handle_prepare_gapless_continuation).
-#[allow(dead_code)]
 pub(super) fn spawn_centered_staging_worker(
     path: PathBuf,
     fft_size: usize,
     hop_size: usize,
+    zoom_level: f32,
     view_mode: SpectrogramViewMode,
     stop: Arc<AtomicBool>,
 ) -> (
@@ -442,7 +461,7 @@ pub(super) fn spawn_centered_staging_worker(
     let handle = std::thread::Builder::new()
         .name("ferrous-spectrogram-staging".to_string())
         .spawn(move || {
-            centered_staging_decode(&path, fft_size, hop_size, view_mode, &stop, &tx);
+            centered_staging_decode(&path, fft_size, hop_size, zoom_level, view_mode, &stop, &tx);
         })
         .expect("failed to spawn staging thread");
     (rx, handle)
@@ -478,6 +497,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
 struct LastSessionParams {
     fft_size: usize,
     hop_size: usize,
+    zoom_level: f32,
     channel_count: usize,
     view_mode: SpectrogramViewMode,
     display_mode: SpectrogramDisplayMode,
@@ -505,6 +525,7 @@ fn spectrogram_worker_loop(
             SpectrogramWorkerCommand::NewTrack {
                 fft_size,
                 hop_size,
+                zoom_level,
                 channel_count,
                 view_mode,
                 display_mode,
@@ -513,6 +534,7 @@ fn spectrogram_worker_loop(
                 last_params = Some(LastSessionParams {
                     fft_size,
                     hop_size,
+                    zoom_level,
                     channel_count,
                     view_mode,
                     display_mode,
@@ -539,6 +561,7 @@ fn spectrogram_worker_loop(
                         path,
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
+                        zoom_level: params.zoom_level,
                         channel_count: params.channel_count,
                         start_seconds: 0.0,
                         emit_initial_reset: false,
@@ -549,6 +572,7 @@ fn spectrogram_worker_loop(
                     last_params = Some(LastSessionParams {
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
+                        zoom_level: params.zoom_level,
                         channel_count: params.channel_count,
                         view_mode: params.view_mode,
                         display_mode: params.display_mode,
@@ -587,6 +611,7 @@ struct SpectrogramSessionState {
     fft_size: usize,
     hop_size: usize,
     effective_hop: usize,
+    zoom_level: f32,
     view_mode: SpectrogramViewMode,
     display_mode: SpectrogramDisplayMode,
     channel_count: usize,
@@ -676,6 +701,7 @@ fn run_spectrogram_session(
         ref path,
         fft_size,
         hop_size,
+        zoom_level,
         channel_count: _channel_count,
         start_seconds,
         emit_initial_reset,
@@ -695,11 +721,10 @@ fn run_spectrogram_session(
     );
 
     let bins_per_column = (fft_size / 2) + 1;
-    let (mut source, native_sample_rate, native_channels, total_columns_estimate) =
-        open_audio_file(path)?;
+    let (mut source, native_sample_rate, native_channels, total_columns) = open_audio_file(path)?;
 
     profile_eprintln!(
-        "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns_estimate}",
+        "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns}",
         _start.elapsed().as_secs_f64() * 1000.0,
     );
 
@@ -710,9 +735,29 @@ fn run_spectrogram_session(
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
     };
-    let decimation_factor = decimation_factor_for_hop(hop_size);
+    let decimation_factor = if zoom_level > 1.0 {
+        1 // Bypass decimation -- keep all STFT rows for fine temporal resolution
+    } else {
+        decimation_factor_for_hop(hop_size)
+    };
     let effective_hop = hop_size * decimation_factor;
     let cols_per_second = f64::from(effective_rate) / usize_to_f64_approx(effective_hop);
+
+    // Adjust total_columns_estimate for zoom: when effective_hop differs
+    // from REFERENCE_HOP, the number of output columns changes proportionally.
+    let total_columns_estimate = if effective_hop != REFERENCE_HOP && effective_hop > 0 {
+        // REFERENCE_HOP and effective_hop are small constants; precision loss is negligible.
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = REFERENCE_HOP as f64 / effective_hop as f64;
+        // total_columns is u32, fits exactly in f64.
+        let scaled = (f64::from(total_columns) * ratio).ceil();
+        // Ceil result is non-negative and clamped via try_from fallback.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let val = scaled as u64;
+        u32::try_from(val).unwrap_or(u32::MAX)
+    } else {
+        total_columns
+    };
 
     // Lookahead configuration: rolling mode parks the decode ~10 s ahead
     // of the play head; centered mode decodes the entire track.
@@ -758,6 +803,7 @@ fn run_spectrogram_session(
         fft_size,
         hop_size,
         effective_hop,
+        zoom_level,
         view_mode,
         display_mode,
         channel_count: actual_channel_count,
@@ -876,6 +922,7 @@ fn run_spectrogram_session(
                     path,
                     fft_size: session.fft_size,
                     hop_size: session.hop_size,
+                    zoom_level: session.zoom_level,
                     channel_count: session.channel_count,
                     start_seconds: 0.0,
                     emit_initial_reset: false,
@@ -1318,7 +1365,11 @@ fn handle_session_seek(
     source.seek(actual_seek_seconds, native_rate);
 
     // Reset STFT state.
-    let decimation_factor = decimation_factor_for_hop(session.hop_size);
+    let decimation_factor = if session.zoom_level > 1.0 {
+        1
+    } else {
+        decimation_factor_for_hop(session.hop_size)
+    };
     session.stfts = (0..session.channel_count)
         .map(|_| StftComputer::new(session.fft_size, session.hop_size))
         .collect();
@@ -1698,6 +1749,7 @@ mod tests {
             fft_size: 2_048,
             hop_size: 256,
             effective_hop: 1_024,
+            zoom_level: 1.0,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1784,6 +1836,7 @@ mod tests {
             fft_size: 2_048,
             hop_size: 256,
             effective_hop: 1_024,
+            zoom_level: 1.0,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1831,6 +1884,7 @@ mod tests {
             fft_size: 2_048,
             hop_size: 256,
             effective_hop: 1_024,
+            zoom_level: 1.0,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1886,6 +1940,7 @@ mod tests {
             fft_size: 2_048,
             hop_size: 256,
             effective_hop: 1_024,
+            zoom_level: 1.0,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1933,6 +1988,7 @@ mod tests {
             fft_size: 2_048,
             hop_size: 256,
             effective_hop: 1_024,
+            zoom_level: 1.0,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
             channel_count: 1,
@@ -1988,6 +2044,7 @@ mod tests {
             fft_size: 2_048,
             hop_size: 256,
             effective_hop: 1_024,
+            zoom_level: 1.0,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -2055,6 +2112,7 @@ mod tests {
             path: PathBuf::from("/tmp/manual.flac"),
             fft_size: 2_048,
             hop_size: 256,
+            zoom_level: 1.0,
             channel_count: 1,
             start_seconds: 0.0,
             emit_initial_reset: true,

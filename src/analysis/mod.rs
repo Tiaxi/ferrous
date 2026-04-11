@@ -75,6 +75,7 @@ pub enum AnalysisCommand {
     ResetSpectrogram,
     SetSampleRate(u32),
     SetFftSize(usize),
+    SetSpectrogramZoomLevel(f32),
     SetSpectrogramViewMode(SpectrogramViewMode),
     SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     RestartCurrentTrack {
@@ -195,6 +196,32 @@ pub struct AnalysisEngine {
 
 const REFERENCE_HOP: usize = 1024;
 
+/// Compute the STFT hop size for a given zoom level.
+/// Zoom > 1.0: smaller hop (finer temporal resolution).
+/// Zoom <= 1.0: FFT-derived hop (normal resolution).
+///
+/// The zoom hop is derived from `REFERENCE_HOP` (not `fft_size/8`) because
+/// zoom is relative to the *output* column rate, which is always
+/// normalized to `REFERENCE_HOP` by the decimation system.  At zoom=2x
+/// we need `effective_hop = REFERENCE_HOP/2`, so with decimation bypassed
+/// the STFT hop must equal `REFERENCE_HOP/2`.  The STFT hop may be larger
+/// than the unzoomed `fft_size/8` hop -- this is correct because the
+/// unzoomed path decimates many overlapping STFT rows into one output
+/// column, while the zoomed path keeps every STFT row individually.
+fn zoom_hop_size(fft_size: usize, zoom_level: f32) -> usize {
+    if zoom_level > 1.0 {
+        // REFERENCE_HOP is 1024, well within f64 precision.
+        #[allow(clippy::cast_precision_loss)]
+        let hop_f64 = REFERENCE_HOP as f64;
+        // Result is clamped to [64, 1024] below, so truncation and sign loss are safe.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let raw = (hop_f64 / f64::from(zoom_level)).round() as usize;
+        raw.clamp(64, REFERENCE_HOP)
+    } else {
+        (fft_size / 8).max(64)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WaveformDecodeJob {
     track_token: u64,
@@ -208,6 +235,7 @@ struct AnalysisRuntimeState {
     last_emit: std::time::Instant,
     fft_size: usize,
     hop_size: usize,
+    zoom_level: f32,
     spectrogram_view_mode: SpectrogramViewMode,
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
@@ -343,6 +371,7 @@ impl AnalysisRuntimeState {
             last_emit: std::time::Instant::now(),
             fft_size: 8192,
             hop_size: 1024,
+            zoom_level: 1.0,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
             active_track_token: 0,
             active_track_path: None,
@@ -420,12 +449,29 @@ impl AnalysisRuntimeState {
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
                 let fft = size.clamp(512, 8192).next_power_of_two();
-                let hop = (fft / 8).max(64);
+                let hop = zoom_hop_size(fft, self.zoom_level);
                 self.fft_size = fft;
                 self.hop_size = hop;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 self.start_spectrogram_session(0.0, true, true, ctx);
+            }
+            AnalysisCommand::SetSpectrogramZoomLevel(level) => {
+                let level = level.clamp(0.05, 16.0);
+                self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
+                self.zoom_level = level;
+                self.hop_size = zoom_hop_size(self.fft_size, self.zoom_level);
+                self.reset_spectrogram_state();
+                self.emit_snapshot(ctx.event_tx, true);
+                // Centered mode: start from 0 (full-track decode, changed to windowed in Task 7).
+                // Rolling mode: start from current position.
+                let start = if self.display_mode == SpectrogramDisplayMode::Centered {
+                    0.0
+                } else {
+                    self.last_spectrogram_position
+                };
+                self.start_spectrogram_session(start, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
                 self.clear_early_continuation(ctx);
@@ -592,6 +638,7 @@ impl AnalysisRuntimeState {
                 path.clone(),
                 self.fft_size,
                 self.hop_size,
+                self.zoom_level,
                 self.spectrogram_view_mode,
                 Arc::clone(&stop),
             );
@@ -895,6 +942,7 @@ impl AnalysisRuntimeState {
                 path: path.clone(),
                 fft_size: self.fft_size,
                 hop_size: self.hop_size,
+                zoom_level: self.zoom_level,
                 channel_count: self.active_session_channel_count.max(1),
                 start_seconds,
                 emit_initial_reset,
@@ -2469,5 +2517,16 @@ mod tests {
         assert!(!rewritten[1].clear_history);
         assert_eq!(rewritten[2].track_token, 42);
         assert!(!rewritten[2].buffer_reset);
+    }
+
+    #[test]
+    fn zoom_hop_size_computation() {
+        assert_eq!(zoom_hop_size(8192, 1.0), 1024);
+        assert_eq!(zoom_hop_size(2048, 1.0), 256);
+        assert_eq!(zoom_hop_size(8192, 2.0), 512);
+        assert_eq!(zoom_hop_size(8192, 4.0), 256);
+        assert_eq!(zoom_hop_size(8192, 16.0), 64);
+        assert_eq!(zoom_hop_size(8192, 32.0), 64);
+        assert_eq!(zoom_hop_size(8192, 0.5), 1024);
     }
 }
