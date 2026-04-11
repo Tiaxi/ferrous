@@ -906,8 +906,10 @@ void SpectrogramItem::feedPrecomputedChunk(
                 screenWidth + screenWidth / 2
                     + static_cast<int>(extraSeconds * colsPerSecond));
         } else {
-            // Rolling: need screen width of history + lookahead.
-            neededCapacity = screenWidth
+            // Rolling: need screen width / zoomLevel of history + lookahead.
+            const int zoomAdjustedWidth = static_cast<int>(
+                static_cast<double>(screenWidth) / std::max(0.05, m_zoomLevel));
+            neededCapacity = zoomAdjustedWidth
                 + static_cast<int>(extraSeconds * colsPerSecond);
         }
         // Add some margin.
@@ -1506,54 +1508,46 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
 
             if (m_displayMode == 1) {
-                // Centered mode: playhead at center, data on both sides.
-                // Use the actual decoded column count when available.
-                // The metadata estimate can overshoot (STFT windowing at
-                // EOF) or undershoot (container padding), so the actual
-                // count from the ring is always more accurate.  During
-                // the initial decode burst (centered mode runs at full
-                // speed) the range grows rapidly and catches up within
-                // ~1 second; the estimate is only used before any data
-                // arrives.
                 rollingMode = false;
-                const int halfWidth = w / 2;
+                const int halfWindowCols = static_cast<int>(
+                    static_cast<double>(w) / m_zoomLevel / 2.0);
+                const int visibleWindowCols = static_cast<int>(
+                    static_cast<double>(w) / m_zoomLevel);
                 const qint64 totalCols = m_precomputedMaxColumnIndex >= 0
                     ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
                     : std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
                                static_cast<qint64>(1));
                 displayLeft = std::max(static_cast<qint64>(0),
-                    static_cast<qint64>(nowCol) - halfWidth);
+                    static_cast<qint64>(nowCol) - halfWindowCols);
                 displayRight = std::min(
                     totalCols - 1,
-                    displayLeft + static_cast<qint64>(w) - 1);
-                displayLeft = std::max<qint64>(0, displayRight - static_cast<qint64>(w) + 1);
+                    displayLeft + static_cast<qint64>(visibleWindowCols) - 1);
+                displayLeft = std::max<qint64>(
+                    0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
 
-                // Prevent backward jitter from the position servo: clamp
-                // displayLeft/displayRight to only advance.  This lets
-                // advancePrecomputedCanvasLocked handle every 1-column step
-                // smoothly instead of falling back to full rebuilds.
-                // Allow backward jumps larger than 2 columns (seeks).
+                // Jitter prevention: only apply when zoom hasn't changed
                 const bool isSeekJump =
                     m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
                     && displayLeft < m_precomputedCanvasDisplayLeft - 2;
                 if (!isSeekJump
-                    && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
+                    && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
+                    && std::abs(m_zoomLevel - m_precomputedCanvasZoomLevel) < 0.001) {
                     displayLeft = std::max(displayLeft, m_precomputedCanvasDisplayLeft);
                     displayRight = std::max(displayRight, m_precomputedCanvasDisplayRight);
                 }
 
-                playheadPixel = nowCol - static_cast<int>(displayLeft);
+                playheadPixel = static_cast<int>(std::round(
+                    static_cast<double>(nowCol - displayLeft) * m_zoomLevel));
             } else {
-                // Rolling mode preserves the visible history as a continuous
-                // write-order strip. Resets pin the new timeline to the
-                // current visual head and discard stale lookahead so the
-                // spectrogram keeps scrolling at playback speed.
                 rollingMode = true;
+                const int visibleWindowCols = static_cast<int>(
+                    static_cast<double>(w) / m_zoomLevel);
                 const qint64 displaySeq =
                     m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0));
                 writeHeadSeq = m_ringWriteSeq - 1;
                 displayRight = std::min(displaySeq, writeHeadSeq);
-                displayLeft = std::max(m_ringOldestSeq, displayRight - w + 1);
+                displayLeft = std::max(m_ringOldestSeq,
+                    displayRight - static_cast<qint64>(visibleWindowCols) + 1);
                 playheadPixel = -1;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 unclampedDisplaySeq = displaySeq;
@@ -1615,7 +1609,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || !hasCanvasRange
                     || displayLeft < m_precomputedCanvasDisplayLeft
                     || displayRight < m_precomputedCanvasDisplayRight
-                    || static_cast<qint64>(visibleCols) > m_canvas.width());
+                    || std::abs(m_zoomLevel - m_precomputedCanvasZoomLevel) > 0.001);
 
             if (visibleCols > 0) {
                 if (needsFullRebuild || m_precomputedCanvasDirty) {
@@ -1638,13 +1632,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
                 scrollOffset = columnPhase;
                 if (rollingMode) {
-                    drawX = static_cast<double>(w - drawCols) - columnPhase;
+                    drawX = static_cast<double>(w - drawCols) - columnPhase * m_zoomLevel;
                 } else {
-                    // Centered mode: use sub-pixel scrolling only in the
-                    // middle region where the spectrogram actually scrolls.
-                    // At the start (displayLeft == 0) and end (displayRight
-                    // == total-1) the image is static and the playhead moves
-                    // across it — sub-pixel offset would cause twitching.
                     const qint64 totalColsForScroll = m_precomputedMaxColumnIndex >= 0
                         ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
                         : std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
@@ -1652,7 +1641,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const bool centeredScrolling =
                         displayLeft > 0
                         && displayRight < totalColsForScroll - 1;
-                    drawX = centeredScrolling ? -columnPhase : 0.0;
+                    drawX = centeredScrolling ? -columnPhase * m_zoomLevel : 0.0;
                 }
                 latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
                 tileCount = static_cast<int>(m_dirtyTiles.size());
@@ -3006,24 +2995,31 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
     resizeDirtyTilesLocked();
     markAllTilesDirtyLocked();
 
-    const int visibleCols = std::min(
-        width,
-        static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
+    const qint64 sourceColumns = displayRight - displayLeft + 1;
+    const int drawPixels = std::min(width,
+        static_cast<int>(std::ceil(
+            static_cast<double>(sourceColumns) * m_zoomLevel)));
+    const double columnsPerPixel = 1.0 / m_zoomLevel;
     const auto dbRemap = buildPrecomputedDbRemapLocked();
-    for (int i = 0; i < visibleCols; ++i) {
-        drawPrecomputedColumnAtLocked(
-            i,
-            displayLeft + static_cast<qint64>(i),
-            rollingMode,
-            dbRemap);
+
+    for (int px = 0; px < drawPixels; ++px) {
+        const qint64 col = std::min(
+            displayLeft + static_cast<qint64>(
+                static_cast<double>(px) * columnsPerPixel),
+            displayRight);
+        drawPrecomputedColumnAtLocked(px, col, rollingMode, dbRemap);
     }
 
-    m_canvasWriteX = width > 0 ? (visibleCols % width) : 0;
-    m_canvasFilledCols = visibleCols;
+    m_canvasWriteX = width > 0 ? (drawPixels % width) : 0;
+    m_canvasFilledCols = drawPixels;
     m_precomputedCanvasDisplayLeft = displayLeft;
     m_precomputedCanvasDisplayRight =
-        visibleCols > 0 ? (displayLeft + static_cast<qint64>(visibleCols) - 1) : (displayLeft - 1);
+        drawPixels > 0
+            ? (displayLeft + static_cast<qint64>(
+                   static_cast<double>(drawPixels) * columnsPerPixel) - 1)
+            : (displayLeft - 1);
     m_precomputedCanvasRolling = rollingMode;
+    m_precomputedCanvasZoomLevel = m_zoomLevel;
     m_precomputedCanvasDirty = false;
 }
 
@@ -3031,6 +3027,12 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayLeft,
     qint64 displayRight,
     bool rollingMode) {
+    // Incremental advance only works at 1:1 column-to-pixel mapping.
+    // TODO: Implement incremental advance for non-1.0 zoom levels if
+    // full rebuild shows measurable frame drops on target hardware.
+    if (std::abs(m_zoomLevel - 1.0) > 0.001) {
+        return false;
+    }
     if (m_canvas.isNull()
         || m_canvas.width() <= 0
         || displayRight < displayLeft
