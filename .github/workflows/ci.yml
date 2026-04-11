@@ -79,4 +79,4 @@ jobs:
         run: cmake --build ui/build -j2
 
       - name: Run UI smoke tests
-        run: ctest --test-dir ui/build --output-on-failure
+        run: ctest --test-dir ui/build --output-on-failure -V

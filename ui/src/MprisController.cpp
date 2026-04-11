@@ -623,7 +623,18 @@ QVariantMap MprisController::buildMetadata() const {
     if (year.isValid() && !year.isNull()) {
         out.insert(QStringLiteral("xesam:contentCreated"), QString::number(year.toInt()));
     }
-    const QString artUrl = m_bridge->currentTrackCoverPath().trimmed();
+    // currentTrackCoverPath() may return an internal image://covers/ URL
+    // (from the async QML image provider). MPRIS consumers need file:// URLs.
+    QString artUrl = m_bridge->currentTrackCoverPath().trimmed();
+    if (artUrl.startsWith(QStringLiteral("image://covers/"))) {
+        QString localPath = artUrl.mid(QStringLiteral("image://covers/").size());
+        // Strip any fragment (nonce for QML cache busting)
+        const int hashPos = localPath.indexOf(QLatin1Char('#'));
+        if (hashPos >= 0) {
+            localPath.truncate(hashPos);
+        }
+        artUrl = QUrl::fromLocalFile(localPath).toString(QUrl::FullyEncoded);
+    }
     if (!artUrl.isEmpty()) {
         out.insert(QStringLiteral("mpris:artUrl"), artUrl);
     }
