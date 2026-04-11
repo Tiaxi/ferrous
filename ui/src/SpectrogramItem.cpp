@@ -762,7 +762,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedReady ? 1 : 0, bufferReset ? 1 : 0,
         clearHistoryOnReset ? 1 : 0);
 
-    if (totalEstimate <= 0 || bins <= 0) {
+    // Allow buffer_reset chunks with no data (bins=0) through so the ring
+    // can be cleared immediately. These are emitted by the analysis thread
+    // on far seeks to prevent stale-data flashes.
+    if ((totalEstimate <= 0 || bins <= 0) && !bufferReset) {
         return;
     }
 
@@ -804,7 +807,26 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     bool appliedReset = false;
-    if (bufferReset && columns <= 0) {
+    if (bufferReset && columns <= 0 && clearHistoryOnReset && bins <= 0) {
+        // Immediate ring clear from a synthetic reset chunk (emitted by
+        // the analysis thread on far seeks).  Don't defer — the whole
+        // point is to wipe stale data before the next render frame.
+        // Old queued chunks from the previous session that arrive after
+        // this will find no matching deferred reset (bins=0 won't match)
+        // and are written harmlessly to the empty ring; the worker's
+        // real reset (with proper bins) will clear them again shortly.
+        m_ringWriteSeq = 0;
+        m_ringOldestSeq = 0;
+        m_ringCapacity = 0;
+        m_ringBuffer.clear();
+        m_ringColumnId.clear();
+        m_ringSequenceId.clear();
+        m_ringTrackToken.clear();
+        m_trackColumnToSeqByToken.clear();
+        m_precomputedMaxColumnIndex = -1;
+        m_precomputedCanvasDirty = true;
+        invalidateCanvas();
+    } else if (bufferReset && columns <= 0) {
         // Delay the reset handoff until the first data-bearing post-seek
         // chunk arrives. Resetting on the metadata-only frame makes the
         // item repaint against an empty/new timeline before there is any
