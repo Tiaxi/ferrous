@@ -1008,11 +1008,12 @@ impl AnalysisRuntimeState {
                     },
                 );
             } else {
-                // Seek outside decoded window — restart session.
-                // Use clear_history=false so the ring retains overlapping
-                // data, avoiding a blank flash for nearby seeks.
+                // Seek outside decoded window — restart session and clear
+                // the ring buffer.  Old data is from a different time region
+                // and would cause a visible "sweep" artifact as new columns
+                // overwrite stale content.
                 let start = (position_seconds - 30.0).max(0.0);
-                self.start_spectrogram_session(start, true, false, ctx);
+                self.start_spectrogram_session(start, true, true, ctx);
             }
         } else {
             // Rolling mode: an explicit seek breaks the continuous gapless
@@ -1963,8 +1964,9 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, .. } if (start_seconds - 170.0).abs() < 0.01),
-            "centered seek outside window should restart session from 30s before target, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
+                if (start_seconds - 170.0).abs() < 0.01 && clear_history_on_reset),
+            "centered seek outside window should restart with clear_history=true, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
