@@ -976,7 +976,18 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     m_precomputedBinsPerColumn = bins;
-    m_precomputedTotalColumnsEstimate = totalEstimate;
+    // Only accept decreasing estimates.  The worker doubles the estimate
+    // as a safety measure for streaming sources ("columns approaching
+    // estimate"), but this inflated value makes the display think the
+    // track is 2x longer, preventing correct EOF playhead detachment.
+    // The initial estimate from the file metadata is accurate for
+    // file-based sources; ignore subsequent inflation.
+    if (totalEstimate > 0
+        && (m_precomputedTotalColumnsEstimate == 0
+            || totalEstimate <= m_precomputedTotalColumnsEstimate
+            || appliedReset)) {
+        m_precomputedTotalColumnsEstimate = totalEstimate;
+    }
 
     // Only update rate/hop from chunks that carry actual column data.
     if (columns > 0) {
@@ -1657,18 +1668,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 displayLeft = std::max<qint64>(
                     0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
 
-                // Step 2: if we have actual decoded data and the playhead
-                // is past the last decoded column, clamp displayRight to
-                // the actual content.  This only fires near EOF where
-                // maxCol IS the true track end, making the playhead
-                // detach from center and move rightward.
-                if (maxColCount > 0
-                    && maxColCount < estTotalCols
-                    && static_cast<qint64>(nowCol) >= maxColCount) {
-                    displayRight = std::min(displayRight, maxColCount - 1);
-                    displayLeft = std::max<qint64>(
-                        0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
-                }
+                // No separate EOF clamp needed: with the estimate not
+                // inflated (doubling filtered in feedPrecomputedChunk),
+                // estTotalCols IS the accurate track length and the
+                // standard displayRight = min(estTotalCols-1, ...) above
+                // handles playhead detachment at track end correctly.
 
                 // Jitter prevention: only apply when zoom hasn't changed
                 const bool isSeekJump =
