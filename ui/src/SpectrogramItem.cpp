@@ -846,6 +846,12 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedMaxColumnIndex = -1;
         m_precomputedReady = false;
         m_precomputedCanvasDirty = true;
+        // Reset canvas display range so the jitter prevention doesn't
+        // clamp the new display range to stale values from the old
+        // position, which causes a visible "sliding" effect instead
+        // of an instant jump.
+        m_precomputedCanvasDisplayLeft = 0;
+        m_precomputedCanvasDisplayRight = -1;
         m_awaitingWorkerReset = true;
         FERROUS_SPECTROGRAM_LOGF(stderr,
             "[Qt-synthetic-clear@%p] ring wiped, gate armed\n",
