@@ -996,7 +996,14 @@ void SpectrogramItem::feedPrecomputedChunk(
                 m_positionJumpHoldActive = false;
                 setPositionAnchorLocked(seekPositionSeconds, Clock::now());
             } else if (trackChanged) {
+                // Release hold AND snap anchor to the new track's start
+                // position.  Without the anchor snap, clearing the gapless
+                // offset in applyPrecomputedResetLocked makes the next
+                // setPositionSeconds see a 100+ second jump (old anchor
+                // vs new track's ~0), which immediately re-activates
+                // the hold.
                 m_positionJumpHoldActive = false;
+                setPositionAnchorLocked(seekPositionSeconds, Clock::now());
             }
         }
     }
