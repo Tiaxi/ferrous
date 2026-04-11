@@ -17,6 +17,7 @@
 
 class QQuickWindow;
 class QSGNode;
+class QWheelEvent;
 
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
@@ -35,6 +36,8 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
+    Q_PROPERTY(double zoomLevel READ zoomLevel WRITE setZoomLevel NOTIFY zoomLevelChanged)
+    Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -81,6 +84,12 @@ public:
     bool channelMuted() const;
     void setChannelMuted(bool muted);
 
+    double zoomLevel() const;
+    void setZoomLevel(double value);
+
+    bool zoomEnabled() const;
+    void setZoomEnabled(bool value);
+
     double pixelToFrequencyHz(int pixelY, int viewHeight) const;
 
     Q_INVOKABLE void feedPrecomputedChunk(
@@ -112,6 +121,10 @@ signals:
     void crosshairHoverChanged(double x);
     void channelMutedChanged();
     void seekRequested(double seconds);
+    void zoomLevelChanged();
+    void zoomEnabledChanged();
+    void zoomRequested(double newZoomLevel);
+    void zoomResetRequested();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -119,6 +132,7 @@ protected:
     void hoverEnterEvent(QHoverEvent *event) override;
     void hoverLeaveEvent(QHoverEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
     void releaseResources() override;
 
@@ -275,6 +289,9 @@ private:
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
+    double m_zoomLevel{1.0};
+    bool m_zoomEnabled{false};
+    double m_precomputedCanvasZoomLevel{1.0};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

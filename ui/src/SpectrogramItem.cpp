@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QHoverEvent>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QMutexLocker>
 #include <QPainter>
 #include <QQuickWindow>
@@ -658,6 +659,43 @@ void SpectrogramItem::setChannelMuted(bool muted) {
         m_precomputedCanvasDirty = true;
     }
     update();
+}
+
+double SpectrogramItem::zoomLevel() const {
+    return m_zoomLevel;
+}
+
+void SpectrogramItem::setZoomLevel(double value) {
+    // Clamp to valid range
+    value = std::clamp(value, 0.05, 16.0);
+    QMutexLocker lock(&m_stateMutex);
+    if (std::abs(m_zoomLevel - value) < 0.0001) {
+        return;
+    }
+    m_zoomLevel = value;
+    m_precomputedCanvasDirty = true;
+    m_crosshairDirty = true;
+    m_timeGridDirty = true;
+    lock.unlock();
+    emit zoomLevelChanged();
+    update();
+}
+
+bool SpectrogramItem::zoomEnabled() const {
+    return m_zoomEnabled;
+}
+
+void SpectrogramItem::setZoomEnabled(bool value) {
+    if (m_zoomEnabled == value) {
+        return;
+    }
+    m_zoomEnabled = value;
+    emit zoomEnabledChanged();
+    // Reset zoom to 1.0 when disabling so the user isn't stuck
+    // at a non-default zoom with no way to reset.
+    if (!value && std::abs(m_zoomLevel - 1.0) > 0.001) {
+        emit zoomResetRequested();
+    }
 }
 
 void SpectrogramItem::feedPrecomputedChunk(
@@ -2168,6 +2206,12 @@ void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
 }
 
 void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
+    if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
+        event->accept();
+        emit zoomResetRequested();
+        return;
+    }
+
     if (event->button() != Qt::RightButton || !m_crosshairEnabled
         || m_displayMode == 0) {
         event->ignore();
@@ -2204,6 +2248,24 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
 
     event->accept();
     emit seekRequested(seconds);
+}
+
+void SpectrogramItem::wheelEvent(QWheelEvent *event) {
+    if (!m_zoomEnabled) {
+        event->ignore();
+        return;
+    }
+    event->accept();
+
+    // angleDelta().y() is typically ±120 per notch
+    const double steps = event->angleDelta().y() / 120.0;
+    if (std::abs(steps) < 0.01) {
+        return;
+    }
+
+    constexpr double kZoomStepFactor = 1.25;
+    const double newZoom = m_zoomLevel * std::pow(kZoomStepFactor, steps);
+    emit zoomRequested(newZoom);
 }
 
 double SpectrogramItem::pixelToFrequencyHzLocked(int pixelY, int viewHeight) const {
