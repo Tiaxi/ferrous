@@ -995,9 +995,13 @@ impl AnalysisRuntimeState {
         if rate > 0 && effective_hop > 0 {
             let cols_per_second = f64::from(rate) / effective_hop as f64;
             let width = f64::from(self.spectrogram_widget_width);
-            // Half-screen in seconds plus 2 s for STFT warmup/latency.
-            let half_screen = width / cols_per_second / 2.0;
-            half_screen + 2.0
+            // Full screen width in seconds plus 2 s for STFT warmup.
+            // A full width (not half) is needed because near the end of
+            // a track the playhead detaches from center and moves right,
+            // making the visible left edge up to one full screen width
+            // behind the playhead position.
+            let full_screen = width / cols_per_second;
+            full_screen + 2.0
         } else {
             // No rate info yet (first track load) — use generous fallback.
             30.0
