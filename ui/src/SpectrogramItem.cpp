@@ -1214,7 +1214,10 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedMaxColumnIndex = -1;
     m_precomputedCommittedToken = 0;
     m_precomputedBinsPerColumn = 0;
-    m_precomputedTotalColumnsEstimate = 0;
+    // Don't zero m_precomputedTotalColumnsEstimate here — it represents
+    // the track length and should persist across resets. Zeroing it
+    // creates a window where the worker's doubled estimate bypasses
+    // the inflation filter in feedPrecomputedChunk.
     m_precomputedResetPending = false;
     m_precomputedPendingResetStartIndex = 0;
     m_precomputedPendingResetBins = 0;
