@@ -982,10 +982,17 @@ void SpectrogramItem::feedPrecomputedChunk(
     // track is 2x longer, preventing correct EOF playhead detachment.
     // The initial estimate from the file metadata is accurate for
     // file-based sources; ignore subsequent inflation.
+    // Only accept the estimate on track changes (new track has a
+    // different length) or when it decreases (more accurate info).
+    // Reject increases from the same track — those are the worker's
+    // safety doubling for streaming sources.  Using appliedReset here
+    // was wrong because same-track seeks also set appliedReset, and
+    // the worker may have already doubled the estimate by the time
+    // the first post-reset data chunk arrives.
     if (totalEstimate > 0
         && (m_precomputedTotalColumnsEstimate == 0
             || totalEstimate <= m_precomputedTotalColumnsEstimate
-            || appliedReset)) {
+            || isTrackChange)) {
         m_precomputedTotalColumnsEstimate = totalEstimate;
     }
 
