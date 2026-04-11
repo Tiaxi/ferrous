@@ -425,6 +425,7 @@ private slots:
     void spectrogramEffectiveZoomMatchesBackendHop();
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
+    void spectrogramCenteredModeUsesWindowedCapacity();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -3153,6 +3154,26 @@ void QmlSmokeTest::spectrogramEffectiveZoomDuringTransition() {
     // effectiveZoom = 4.0 * 1024 / 1024 = 4.0 (transition state)
     // This means interpolation/full-rebuild rendering is active
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1); // Centered
+
+    // Feed a large track estimate
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 100;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, 100000, 48000, 1024, false,
+        true, 1, false);
+
+    // Ring capacity should NOT be 100000 (full track).
+    // It should be bounded to ~3 screen widths + lookahead.
+    QVERIFY(item.m_ringCapacity < 20000);
 }
 
 int main(int argc, char **argv) {

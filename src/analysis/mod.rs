@@ -454,7 +454,7 @@ impl AnalysisRuntimeState {
                 self.hop_size = hop;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                self.start_spectrogram_session(0.0, true, true, ctx);
+                self.start_spectrogram_session(self.centered_start_seconds(), true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramZoomLevel(level) => {
                 let level = level.clamp(0.05, 16.0);
@@ -464,13 +464,7 @@ impl AnalysisRuntimeState {
                 self.hop_size = zoom_hop_size(self.fft_size, self.zoom_level);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                // Centered mode: start from 0 (full-track decode, changed to windowed in Task 7).
-                // Rolling mode: start from current position.
-                let start = if self.display_mode == SpectrogramDisplayMode::Centered {
-                    0.0
-                } else {
-                    self.last_spectrogram_position
-                };
+                let start = self.centered_start_seconds();
                 self.start_spectrogram_session(start, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
@@ -480,7 +474,7 @@ impl AnalysisRuntimeState {
                 self.spectrogram_view_mode = view_mode;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                self.start_spectrogram_session(0.0, true, true, ctx);
+                self.start_spectrogram_session(self.centered_start_seconds(), true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramDisplayMode(mode) => {
                 self.clear_early_continuation(ctx);
@@ -952,6 +946,17 @@ impl AnalysisRuntimeState {
             });
     }
 
+    /// Return the decode start position for the current display mode.
+    /// Centered mode starts 30 s before the playhead so the visible window
+    /// fills around the current position. Rolling mode starts at the playhead.
+    fn centered_start_seconds(&self) -> f64 {
+        if self.display_mode == SpectrogramDisplayMode::Centered {
+            (self.last_spectrogram_position - 30.0).max(0.0)
+        } else {
+            self.last_spectrogram_position
+        }
+    }
+
     /// Start a spectrogram session without emitting an initial reset.
     /// Used when staged chunks have already been emitted with reset flags.
     fn start_spectrogram_session_no_reset(
@@ -973,30 +978,25 @@ impl AnalysisRuntimeState {
     }
 
     fn seek_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
+        self.spectrogram_position_offset = 0.0;
         self.last_spectrogram_position = position_seconds;
 
-        // In centered mode the full track is (or will be) decoded into the
-        // ring buffer.  A seek just moves the display window — no need to
-        // restart the worker session or clear the ring.  Only forward the
-        // position update so the worker's target_position_seconds stays
-        // current (rate-limiter / headroom bookkeeping).
         if self.display_mode == SpectrogramDisplayMode::Centered {
-            let adjusted = position_seconds + self.spectrogram_position_offset;
+            // Windowed centered: restart session from before the seek target
+            // so both sides of the playhead fill immediately.
+            // Use clear_history=false so the ring retains overlapping data —
+            // for nearby seeks most columns are still valid, avoiding a blank
+            // flash. Stale columns get progressively overwritten as the new
+            // session fills in data.
+            let start = (position_seconds - 30.0).max(0.0);
+            self.start_spectrogram_session(start, true, false, ctx);
+        } else {
+            // Rolling mode: an explicit seek breaks the continuous gapless
+            // timeline.  Send a Seek command (existing behavior).
             let _ = ctx
                 .spectrogram_cmd_tx
-                .send(SpectrogramWorkerCommand::PositionUpdate {
-                    position_seconds: adjusted,
-                });
-            return;
+                .send(SpectrogramWorkerCommand::Seek { position_seconds });
         }
-
-        // Rolling mode: an explicit seek breaks the continuous gapless
-        // timeline.  Reset the offset so the worker seeks within the
-        // current file's coordinate space, not the accumulated one.
-        self.spectrogram_position_offset = 0.0;
-        let _ = ctx
-            .spectrogram_cmd_tx
-            .send(SpectrogramWorkerCommand::Seek { position_seconds });
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
@@ -1881,9 +1881,9 @@ mod tests {
     }
 
     #[test]
-    fn centered_seek_sends_position_update_not_seek() {
-        // In centered mode, seeks should not restart the worker session.
-        // The full track is already decoded; just update the position.
+    fn centered_seek_restarts_session_with_new_track() {
+        // In windowed centered mode, seeks restart the decode session
+        // from before the seek target so both sides of the playhead fill.
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
@@ -1905,9 +1905,11 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
-            "centered seek should send PositionUpdate, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, .. } if (start_seconds - 30.0).abs() < 0.01),
+            "centered seek should restart session from 30s before target, got {cmd:?}"
         );
+        // Offset should be reset on seek.
+        assert_eq!(state.spectrogram_position_offset, 0.0);
     }
 
     #[test]

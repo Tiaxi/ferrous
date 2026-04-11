@@ -948,12 +948,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         const int extraSeconds = 10;
         int neededCapacity;
         if (m_displayMode == 1) {
-            // Centered: size to fit the entire track so the full
-            // spectrogram is available for seeking and display.
-            neededCapacity = std::max(
-                static_cast<int>(m_precomputedTotalColumnsEstimate) + 256,
-                screenWidth + screenWidth / 2
-                    + static_cast<int>(extraSeconds * colsPerSecond));
+            // Centered: windowed — ~3 screen widths around playhead.
+            neededCapacity = screenWidth * 3
+                + static_cast<int>(extraSeconds * colsPerSecond);
         } else {
             // Rolling: need screen width / effectiveZoom of history + lookahead.
             const double ez = effectiveZoomLocked();
