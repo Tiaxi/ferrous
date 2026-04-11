@@ -797,6 +797,20 @@ void SpectrogramItem::feedPrecomputedChunk(
         return;
     }
 
+    // When m_awaitingWorkerReset is true, reject all data until the
+    // worker's proper reset arrives (bufferReset with valid bins).
+    // This blocks stale queued chunks from refilling the ring after
+    // a synthetic clear.  Must be checked BEFORE the implicit reset
+    // below, which would otherwise recreate the ring from stale data.
+    if (m_awaitingWorkerReset) {
+        if (bufferReset && bins > 0) {
+            m_awaitingWorkerReset = false;
+            // Fall through to normal reset handling below.
+        } else {
+            return;
+        }
+    }
+
     // If this widget has no ring and receives data (not a reset), it was
     // created/recycled after the reset went to a different widget instance.
     // Apply an implicit reset so the widget can accept the arriving data.
@@ -807,18 +821,6 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     bool appliedReset = false;
-    // When m_awaitingWorkerReset is true, reject all data until the
-    // worker's proper reset arrives (bufferReset with valid bins).
-    // This blocks stale queued chunks from refilling the ring after
-    // a synthetic clear.
-    if (m_awaitingWorkerReset) {
-        if (bufferReset && bins > 0) {
-            m_awaitingWorkerReset = false;
-            // Fall through to normal reset handling below.
-        } else {
-            return;
-        }
-    }
 
     if (bufferReset && columns <= 0 && clearHistoryOnReset && bins <= 0) {
         // Immediate ring clear from a synthetic reset chunk (emitted by
