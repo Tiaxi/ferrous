@@ -64,6 +64,7 @@ private slots:
     void mprisPublishesPlaybackStateOnPlaybackSignal();
     void mprisCanPauseOnlyWhilePlaying();
     void mprisControllerConstructionDoesNotCrash();
+    void mprisArtUrlConvertsImageProviderToFileUrl();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
@@ -703,6 +704,38 @@ void BridgeClientTest::mprisControllerConstructionDoesNotCrash() {
     }
 }
 
+
+void BridgeClientTest::mprisArtUrlConvertsImageProviderToFileUrl() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 1;
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    // Simulate the async image provider URL that coverUrlForPath() produces.
+    client.m_currentTrackCoverPath =
+        QStringLiteral("image://covers//music/cover.jpg#w=600&r=1");
+
+    MprisController controller(&client);
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+
+    emit client.trackMetadataChanged();
+
+    QVERIFY(controller.m_hasPublishedPlayerState);
+    const QVariantMap meta = controller.m_lastPlayerState.metadata;
+    const QString artUrl = meta.value(QStringLiteral("mpris:artUrl")).toString();
+    // Must be a file:// URL, not an image:// URL.
+    QVERIFY2(artUrl.startsWith(QStringLiteral("file://")),
+             qPrintable(QStringLiteral("Expected file:// URL, got: ") + artUrl));
+    QVERIFY2(!artUrl.contains(QStringLiteral("image://")),
+             qPrintable(QStringLiteral("image:// leaked into MPRIS artUrl: ") + artUrl));
+    // Fragment (nonce) must be stripped.
+    QVERIFY2(!artUrl.contains(QLatin1Char('#')),
+             qPrintable(QStringLiteral("Fragment not stripped: ") + artUrl));
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
 
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
     BridgeClient client;
