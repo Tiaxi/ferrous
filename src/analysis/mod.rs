@@ -953,13 +953,39 @@ impl AnalysisRuntimeState {
     }
 
     /// Return the decode start position for the current display mode.
-    /// Centered mode starts 30 s before the playhead so the visible window
-    /// fills around the current position. Rolling mode starts at the playhead.
+    /// Centered mode starts just before the visible left edge so data
+    /// around the playhead appears as quickly as possible.  Rolling mode
+    /// starts at the playhead.
     fn centered_start_seconds(&self) -> f64 {
         if self.display_mode == SpectrogramDisplayMode::Centered {
-            (self.last_spectrogram_position - 30.0).max(0.0)
+            (self.last_spectrogram_position - self.centered_margin_seconds()).max(0.0)
         } else {
             self.last_spectrogram_position
+        }
+    }
+
+    /// Compute the pre-decode margin for centered mode: how many seconds
+    /// before the playhead to start decoding.  Based on the visible half-screen
+    /// at the current sample rate and zoom level, plus a small buffer.
+    /// This avoids the old hardcoded 30 s margin that wasted time decoding
+    /// content far from the playhead.
+    fn centered_margin_seconds(&self) -> f64 {
+        let effective_hop = if self.zoom_level > 1.0 {
+            self.hop_size
+        } else {
+            REFERENCE_HOP
+        };
+        let rate = self.active_session_effective_rate;
+        if rate > 0 && effective_hop > 0 {
+            let cols_per_second = f64::from(rate) / effective_hop as f64;
+            // Use 2560 px as the assumed max spectrogram width (typical
+            // display minus side panel).  Half-screen in seconds plus
+            // 2 s margin for STFT warmup and decode latency.
+            let half_screen = 2560.0 / cols_per_second / 2.0;
+            half_screen + 2.0
+        } else {
+            // No rate info yet (first track load) — use generous fallback.
+            30.0
         }
     }
 
@@ -990,12 +1016,13 @@ impl AnalysisRuntimeState {
         if self.display_mode == SpectrogramDisplayMode::Centered {
             // Windowed centered: check if the seek target is within the
             // already-decoded window before restarting the session.  The
-            // window starts at spectrogram_session_start and extends for
-            // ~(1920*3/cols_per_sec + lookahead_seconds).  Use a conservative
-            // 100 s estimate.  If the seek is inside, the data is already in
-            // the ring buffer — just send a PositionUpdate so the display
-            // shifts without a costly session restart.
-            let window_seconds = 100.0;
+            // window extends from the session start for approximately
+            // 2× the visible screen width plus lookahead (~10 s).  If
+            // the seek is inside, the data is already in the ring buffer
+            // — just send a PositionUpdate so the display shifts without
+            // a costly session restart.
+            let margin = self.centered_margin_seconds();
+            let window_seconds = margin * 2.0 + 10.0;
             let window_start = self.spectrogram_session_start;
             let window_end = window_start + window_seconds;
 
@@ -1012,7 +1039,8 @@ impl AnalysisRuntimeState {
                 // the ring buffer.  Old data is from a different time region
                 // and would cause a visible "sweep" artifact as new columns
                 // overwrite stale content.
-                let start = (position_seconds - 30.0).max(0.0);
+                let margin = self.centered_margin_seconds();
+                let start = (position_seconds - margin).max(0.0);
                 self.start_spectrogram_session(start, true, true, ctx);
             }
         } else {
