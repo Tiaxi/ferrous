@@ -848,6 +848,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
         m_precomputedCanvasDisplayLeft = 0;
         m_precomputedCanvasDisplayRight = -1;
+        m_prevMaxColCount = 0;
         m_awaitingWorkerReset = true;
         FERROUS_SPECTROGRAM_LOGF(stderr,
             "[Qt-synthetic-clear@%p] ring wiped, gate armed\n",
@@ -1668,11 +1669,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 displayLeft = std::max<qint64>(
                     0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
 
-                // No separate EOF clamp needed: with the estimate not
-                // inflated (doubling filtered in feedPrecomputedChunk),
-                // estTotalCols IS the accurate track length and the
-                // standard displayRight = min(estTotalCols-1, ...) above
-                // handles playhead detachment at track end correctly.
+                // The estimate includes ~64 columns of padding from the
+                // decoder and may slightly overshoot the actual content.
+                // When maxCol has stopped growing (decode finished or
+                // reached EOF), use it to trim the right edge so the
+                // playhead detaches precisely at the real content end.
+                // With the estimate doubling filtered out, the gap
+                // between maxCol and estimate is tiny (~64 cols), so
+                // this adjustment doesn't cause visible sliding.
+                if (maxColCount > 0 && maxColCount < estTotalCols
+                    && maxColCount <= m_prevMaxColCount) {
+                    displayRight = std::min(displayRight, maxColCount - 1);
+                    displayLeft = std::max<qint64>(
+                        0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
+                }
+                m_prevMaxColCount = maxColCount;
 
                 // Jitter prevention: only apply when zoom hasn't changed
                 const bool isSeekJump =
