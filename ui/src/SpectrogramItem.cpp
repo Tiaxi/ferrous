@@ -272,11 +272,14 @@ double pixelToTimeSeconds(
     bool rollingMode,
     qint64 rollingEpoch,
     double columnsPerSecond,
-    double drawX) {
+    double drawX,
+    double zoomLevel = 1.0) {
     if (columnsPerSecond <= 0.0) {
         return -1.0;
     }
-    const double columnF = static_cast<double>(displayLeft) + (pixelX - drawX);
+    const double columnsPerPixel = 1.0 / zoomLevel;
+    const double columnF =
+        static_cast<double>(displayLeft) + (pixelX - drawX) * columnsPerPixel;
     double trackColumn = columnF;
     if (rollingMode) {
         trackColumn -= static_cast<double>(rollingEpoch);
@@ -291,12 +294,13 @@ double timeToPixelX(
     bool rollingMode,
     qint64 rollingEpoch,
     double columnsPerSecond,
-    double drawX) {
+    double drawX,
+    double zoomLevel = 1.0) {
     double column = timeSeconds * columnsPerSecond;
     if (rollingMode) {
         column += static_cast<double>(rollingEpoch);
     }
-    return drawX + (column - static_cast<double>(displayLeft));
+    return drawX + (column - static_cast<double>(displayLeft)) * zoomLevel;
 }
 
 // Select the smallest grid interval that keeps at least minPixelSpacing
@@ -2226,7 +2230,8 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         m_crosshairCachedRollingMode,
         m_rollingEpoch,
         columnsPerSecond,
-        m_crosshairCachedDrawX);
+        m_crosshairCachedDrawX,
+        m_zoomLevel);
 
     lock.unlock();
 
@@ -2373,7 +2378,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     if (m_showTimeLabels) {
         const double continuousTime = pixelToTimeSeconds(
             static_cast<double>(effectiveX), displayLeft, rollingMode,
-            m_rollingEpoch, columnsPerSecond, drawX);
+            m_rollingEpoch, columnsPerSecond, drawX, m_zoomLevel);
         const double trackTime = continuousTime - m_gaplessPositionOffset;
         if (trackTime >= 0.0) {
             QFont font;
@@ -2508,7 +2513,7 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     static constexpr double kTimeCandidates[] = {
         1, 2, 5, 10, 15, 30, 60, 120, 300, 600
     };
-    const double secondsPerPixel = 1.0 / columnsPerSecond;
+    const double secondsPerPixel = 1.0 / (columnsPerSecond * m_zoomLevel);
     const double timeInterval = selectGridInterval(
         kTimeCandidates,
         static_cast<int>(std::size(kTimeCandidates)),
@@ -2518,10 +2523,10 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     // Compute time range for the full padded width.
     // These are in continuous (cross-track) time.
     const double timeLeft = pixelToTimeSeconds(
-        0.0, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX);
+        0.0, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX, m_zoomLevel);
     const double timeRight = pixelToTimeSeconds(
         static_cast<double>(renderWidth - 1), displayLeft, rollingMode,
-        m_rollingEpoch, columnsPerSecond, drawX);
+        m_rollingEpoch, columnsPerSecond, drawX, m_zoomLevel);
 
     // Convert to per-track time for grid line snapping and labels.
     // m_gaplessPositionOffset is the continuous-time value where the
@@ -2552,7 +2557,8 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
         // Convert per-track time back to continuous time for pixel positioning.
         const double continuousT = trackT + m_gaplessPositionOffset;
         const double pxF = timeToPixelX(
-            continuousT, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX);
+            continuousT, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX,
+            m_zoomLevel);
         const int pixelX = static_cast<int>(std::round(pxF));
         if (pixelX < 0 || pixelX >= renderWidth) {
             continue;
