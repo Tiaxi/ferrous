@@ -804,9 +804,17 @@ void SpectrogramItem::feedPrecomputedChunk(
     // below, which would otherwise recreate the ring from stale data.
     if (m_awaitingWorkerReset) {
         if (bufferReset && bins > 0) {
+            FERROUS_SPECTROGRAM_LOGF(stderr,
+                "[Qt-gate-open@%p] worker reset arrived, bins=%d tok=%llu\n",
+                static_cast<const void *>(this), bins,
+                static_cast<unsigned long long>(trackToken));
             m_awaitingWorkerReset = false;
             // Fall through to normal reset handling below.
         } else {
+            FERROUS_SPECTROGRAM_LOGF(stderr,
+                "[Qt-gate-reject@%p] stale chunk rejected, cols=%d bins=%d reset=%d\n",
+                static_cast<const void *>(this), columns, bins,
+                bufferReset ? 1 : 0);
             return;
         }
     }
@@ -838,6 +846,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedReady = false;
         m_precomputedCanvasDirty = true;
         m_awaitingWorkerReset = true;
+        FERROUS_SPECTROGRAM_LOGF(stderr,
+            "[Qt-synthetic-clear@%p] ring wiped, gate armed\n",
+            static_cast<const void *>(this));
         invalidateCanvas();
         update();
         return;
