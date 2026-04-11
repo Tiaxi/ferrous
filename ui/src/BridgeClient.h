@@ -122,6 +122,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(bool showSpectrogramCrosshair READ showSpectrogramCrosshair NOTIFY snapshotChanged)
     Q_PROPERTY(bool showSpectrogramScale READ showSpectrogramScale NOTIFY snapshotChanged)
+    Q_PROPERTY(bool spectrogramZoomEnabled READ spectrogramZoomEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool systemMediaControlsEnabled READ systemMediaControlsEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool lastFmScrobblingEnabled READ lastFmScrobblingEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool lastFmBuildConfigured READ lastFmBuildConfigured NOTIFY snapshotChanged)
@@ -212,6 +213,7 @@ public:
     bool showFps() const;
     bool showSpectrogramCrosshair() const;
     bool showSpectrogramScale() const;
+    bool spectrogramZoomEnabled() const;
     bool systemMediaControlsEnabled() const;
     bool lastFmScrobblingEnabled() const;
     bool lastFmBuildConfigured() const;
@@ -276,6 +278,7 @@ public:
     Q_INVOKABLE void setShowFps(bool value);
     Q_INVOKABLE void setShowSpectrogramCrosshair(bool value);
     Q_INVOKABLE void setShowSpectrogramScale(bool value);
+    Q_INVOKABLE void setSpectrogramZoomEnabled(bool value);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void setLastFmScrobblingEnabled(bool value);
     Q_INVOKABLE void beginLastFmAuth();
@@ -545,6 +548,7 @@ private:
     bool m_showFps{false};
     bool m_showSpectrogramCrosshair{false};
     bool m_showSpectrogramScale{false};
+    bool m_spectrogramZoomEnabled{true};
     bool m_systemMediaControlsEnabled{true};
     bool m_lastFmScrobblingEnabled{false};
     bool m_lastFmBuildConfigured{false};

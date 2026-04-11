@@ -416,6 +416,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&channelButtonsVisibility)) {
         return false;
     }
+    quint8 spectrogramZoomEnabled = 1;
+    if (!reader.atEnd() && !reader.readU8(&spectrogramZoomEnabled)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -431,6 +435,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->showSpectrogramCrosshair = showSpectrogramCrosshair != 0;
     out->showSpectrogramScale = showSpectrogramScale != 0;
     out->channelButtonsVisibility = std::clamp(static_cast<int>(channelButtonsVisibility), 0, 2);
+    out->spectrogramZoomEnabled = spectrogramZoomEnabled != 0;
     return true;
 }
 

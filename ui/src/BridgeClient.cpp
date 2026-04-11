@@ -2111,6 +2111,10 @@ bool BridgeClient::showSpectrogramScale() const {
     return m_showSpectrogramScale;
 }
 
+bool BridgeClient::spectrogramZoomEnabled() const {
+    return m_spectrogramZoomEnabled;
+}
+
 bool BridgeClient::systemMediaControlsEnabled() const {
     return m_systemMediaControlsEnabled;
 }
@@ -2530,6 +2534,16 @@ void BridgeClient::setShowSpectrogramScale(bool value) {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramScale,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setSpectrogramZoomEnabled(bool value) {
+    if (m_spectrogramZoomEnabled != value) {
+        m_spectrogramZoomEnabled = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramZoomEnabled,
         static_cast<quint8>(value ? 1 : 0)));
 }
 
@@ -4972,6 +4986,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         0, 2);
     if (m_channelButtonsVisibility != channelButtonsVisibility) {
         m_channelButtonsVisibility = channelButtonsVisibility;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const bool spectrogramZoomEnabled = snapshot.settings.present
+        ? snapshot.settings.spectrogramZoomEnabled
+        : m_spectrogramZoomEnabled;
+    if (m_spectrogramZoomEnabled != spectrogramZoomEnabled) {
+        m_spectrogramZoomEnabled = spectrogramZoomEnabled;
         changed = true;
         snapshotSignalChanged = true;
     }
