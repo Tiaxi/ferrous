@@ -1560,10 +1560,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const int visibleWindowCols = static_cast<int>(
                     std::ceil(static_cast<double>(w) / effectiveZoom));
                 const int halfWindowCols = visibleWindowCols / 2;
-                const qint64 totalCols = m_precomputedMaxColumnIndex >= 0
-                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                    : std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                               static_cast<qint64>(1));
+                // Use the larger of the actual decoded column count and the
+                // metadata estimate.  With windowed decode the decoded range
+                // may start well past column 0, so maxColumnIndex can be much
+                // smaller than the full track.  Using only maxColumnIndex
+                // would clamp the display range and cause a "race-in" artifact
+                // as data fills in progressively.
+                const qint64 totalCols = std::max(
+                    m_precomputedMaxColumnIndex >= 0
+                        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                        : static_cast<qint64>(0),
+                    std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                             static_cast<qint64>(1)));
                 displayLeft = std::max(static_cast<qint64>(0),
                     static_cast<qint64>(nowCol) - halfWindowCols);
                 displayRight = std::min(
@@ -1681,10 +1689,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 if (rollingMode) {
                     drawX = static_cast<double>(w - drawCols) - columnPhase * effectiveZoom;
                 } else {
-                    const qint64 totalColsForScroll = m_precomputedMaxColumnIndex >= 0
-                        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                        : std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                                   static_cast<qint64>(1));
+                    const qint64 totalColsForScroll = std::max(
+                        m_precomputedMaxColumnIndex >= 0
+                            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                            : static_cast<qint64>(0),
+                        std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                                 static_cast<qint64>(1)));
                     const bool centeredScrolling =
                         displayLeft > 0
                         && displayRight < totalColsForScroll - 1;
