@@ -316,6 +316,11 @@ private:
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};
     bool m_zoomEnabled{false};
+    // Canvas freeze during zoom transition.  Independent of
+    // m_awaitingZoomData (which controls the zoom snap).  Set when a
+    // session restart changes the hop; cleared when the ring covers
+    // the display.  updatePaintNode skips canvas updates while active.
+    bool m_zoomFillActive{false};
     double m_precomputedCanvasZoomLevel{1.0};
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};

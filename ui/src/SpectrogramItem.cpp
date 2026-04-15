@@ -1022,6 +1022,16 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedSampleRateHz = sampleRate;
         }
         if (hopSize > 0) {
+            // Activate canvas freeze when the hop changes (zoom
+            // transition).  The old canvas stays visible while the
+            // ring fills with new-hop data.  Cleared below when the
+            // ring covers the display.  Independent of
+            // m_awaitingZoomData (which controls the zoom snap).
+            if (hopSize != m_precomputedHopSize
+                && m_displayMode == 1
+                && !m_canvas.isNull()) {
+                m_zoomFillActive = true;
+            }
             m_precomputedHopSize = hopSize;
         }
         // Apply deferred visual zoom when backend recalculation data arrives.
@@ -1273,6 +1283,19 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
     }
 
+    // Canvas freeze readiness: clear m_zoomFillActive when the ring
+    // has enough data to cover the visible display.
+    if (m_zoomFillActive) {
+        const int screenWidth = std::max(static_cast<int>(width()), 1);
+        const int fillTarget = m_precomputedTotalColumnsEstimate > 0
+            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
+            : screenWidth;
+        if (m_precomputedMaxColumnIndex + 1 >= fillTarget - 16) {
+            m_zoomFillActive = false;
+            m_precomputedCanvasDirty = true;
+        }
+    }
+
     // Reset zoom to 1.0 on any track change (gapless or user-initiated).
     // Check m_renderZoomLevel (not m_zoomLevel) because in multi-channel
     // layouts the first pane's signal may have already set m_zoomLevel=1.0
@@ -1285,6 +1308,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_zoomLevel = 1.0;
         m_renderZoomLevel = 1.0;
         m_awaitingZoomData = false;
+        m_zoomFillActive = false;
         // Clear the estimate so the fresh zoom=1.0 data can set it.
         // Without this, the stale estimate from the previous zoom's
         // decimation persists and the increase filter rejects the
@@ -1347,6 +1371,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedLastDisplaySeq = -1;
     m_precomputedTrackToken = 0;
     m_awaitingZoomData = false;
+    m_zoomFillActive = false;
     m_renderZoomLevel = m_zoomLevel;
     m_gaplessPositionOffset = 0.0;
     m_positionJumpHoldActive = false;
@@ -1909,7 +1934,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || displayRight < m_precomputedCanvasDisplayRight
                     || std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) > 0.001);
 
-            if (visibleCols > 0) {
+            // During a zoom fill, keep the old canvas visible.
+            // m_zoomFillActive is independent of m_awaitingZoomData.
+            const bool canvasFreeze =
+                m_zoomFillActive && !m_canvas.isNull()
+                && m_precomputedCanvasDisplayRight
+                    >= m_precomputedCanvasDisplayLeft;
+
+            if (visibleCols > 0 && !canvasFreeze) {
                 if (needsFullRebuild || m_precomputedCanvasDirty) {
                     rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
                 } else if (rangeChanged) {
