@@ -175,6 +175,12 @@ private:
         qint64 displayIndex,
         bool rollingMode,
         const std::array<quint8, 256> &dbRemap);
+    void drawPeakHoldColumnRangeLocked(
+        int x,
+        qint64 colFirst,
+        qint64 colLast,
+        bool rollingMode,
+        const std::array<quint8, 256> &dbRemap);
     void drawInterpolatedColumnAtLocked(
         int x,
         qint64 displayIndexL,

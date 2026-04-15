@@ -3298,6 +3298,104 @@ void SpectrogramItem::drawPrecomputedColumnAtLocked(
     }
 }
 
+void SpectrogramItem::drawPeakHoldColumnRangeLocked(
+    int x,
+    qint64 colFirst,
+    qint64 colLast,
+    bool rollingMode,
+    const std::array<quint8, 256> &dbRemap) {
+    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
+        || m_precomputedBinsPerColumn <= 0 || colFirst > colLast) {
+        return;
+    }
+
+    // Single column: delegate to the fast path.
+    if (colFirst == colLast) {
+        drawPrecomputedColumnAtLocked(x, colFirst, rollingMode, dbRemap);
+        return;
+    }
+
+    markTileDirtyLocked(x);
+
+    const int bins = m_precomputedBinsPerColumn;
+    const auto *ringData =
+        reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
+    const QRgb bgColor = kBackgroundColor.rgba();
+    const double gradScale =
+        static_cast<double>(kGradientTableSize) / 255.0;
+    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
+
+    // Resolve ring slots for each column in the range.
+    // Cap to a reasonable max to avoid pathological cases.
+    const int rangeCols = static_cast<int>(
+        std::min(colLast - colFirst + 1, static_cast<qint64>(64)));
+
+    // Collect valid slot base offsets.
+    std::array<int, 64> slotBases{};
+    int validCount = 0;
+    for (int i = 0; i < rangeCols; ++i) {
+        const int slot = ringSlotForDisplayIndexLocked(
+            colFirst + i, rollingMode);
+        if (slot >= 0) {
+            slotBases[static_cast<size_t>(validCount)] = slot * bins;
+            ++validCount;
+        }
+    }
+
+    if (validCount == 0) {
+        for (int y = 0; y < m_canvas.height(); ++y) {
+            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
+        }
+        return;
+    }
+
+    const int mapSize = static_cast<int>(m_iToBin.size());
+    for (int y = 0; y < m_canvas.height(); ++y) {
+        const int mi = m_canvas.height() - 1 - y;
+        int binLo = 0;
+        int binHi = 0;
+        if (mi >= 0 && mi < mapSize) {
+            const int bc = m_iToBin[static_cast<size_t>(mi)];
+            const int bp = (mi > 0)
+                ? m_iToBin[static_cast<size_t>(mi - 1)]
+                : bc;
+            const int bn = (mi + 1 < mapSize)
+                ? m_iToBin[static_cast<size_t>(mi + 1)]
+                : bc;
+            binLo = bp + (bc - bp) / 2;
+            binHi = bc + (bn - bc) / 2;
+            if (binLo == bp && bp != bc) {
+                binLo = bc;
+            }
+            if (binHi == bn && bn != bc) {
+                binHi = bc;
+            }
+            if (binLo > binHi) {
+                std::swap(binLo, binHi);
+            }
+            binLo = std::clamp(binLo, 0, bins - 1);
+            binHi = std::clamp(binHi, 0, bins - 1);
+        }
+
+        // Peak-hold across all valid columns in the range.
+        quint8 rawMax = 0;
+        for (int c = 0; c < validCount; ++c) {
+            const int base = slotBases[static_cast<size_t>(c)];
+            for (int b = binLo; b <= binHi; ++b) {
+                rawMax = std::max(rawMax, ringData[base + b]);
+            }
+        }
+
+        const quint8 intensity = dbRemap[static_cast<size_t>(rawMax)];
+        int paletteIndex = kGradientTableSize
+            - static_cast<int>(
+                  std::lround(gradScale * static_cast<double>(intensity)));
+        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
+        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
+            palette[static_cast<size_t>(paletteIndex)];
+    }
+}
+
 int SpectrogramItem::ringSlotForDisplayIndexLocked(
     qint64 displayIndex, bool rollingMode) const {
     if (m_ringCapacity <= 0 || m_ringSequenceId.empty() || m_ringColumnId.empty()) {
