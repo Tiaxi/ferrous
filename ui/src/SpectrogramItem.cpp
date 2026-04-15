@@ -1321,13 +1321,10 @@ void SpectrogramItem::feedPrecomputedChunk(
 
         if (ringHasEnoughColumns && ringCoversDisplayRight) {
             m_zoomFillActive = false;
-            // Force a clean rebuild: invalidate the old canvas so
-            // needsFullRebuild fires (canvas.isNull()).  This ensures
-            // no stale pixels from the frozen canvas leak into the
-            // new display range.
-            invalidateCanvas();
-            m_precomputedCanvasDisplayLeft = 0;
-            m_precomputedCanvasDisplayRight = -1;
+            // Don't invalidateCanvas() here — the canvas must stay
+            // non-null so the NEXT zoom transition can activate its
+            // freeze.  Just mark dirty; the rebuild replaces all
+            // canvas content.
             m_precomputedCanvasDirty = true;
         }
     }
