@@ -1032,20 +1032,26 @@ void SpectrogramItem::feedPrecomputedChunk(
         // When enough columns have arrived, the render zoom is applied and
         // the canvas is rebuilt with complete data — no left-to-right fill.
         if (m_awaitingZoomData && (appliedReset || appliedImplicitReset)) {
-            // Snap renderZoomLevel IMMEDIATELY so effectiveZoom is always
-            // correct (1.0).  Do NOT clear m_awaitingZoomData here — the
-            // readiness check (below, after data feed) clears it when
-            // the ring covers the display.  Clearing it here would
-            // disable the canvas freeze in updatePaintNode, causing a
-            // rebuild from the nearly-empty ring.
-            if (m_precomputedHopSize > 0
-                && m_precomputedHopSize
-                    != static_cast<int>(kReferenceHopSamples)) {
-                m_renderZoomLevel = kReferenceHopSamples
-                    / static_cast<double>(m_precomputedHopSize);
-            } else {
-                m_renderZoomLevel = m_zoomLevel;
+            // Don't consume the awaiting flag if the zoom debounce timer is
+            // still running — a zoom change command hasn't been sent to the
+            // backend yet.  This reset is from a different trigger (e.g.
+            // widget width change) and carries data at the OLD zoom level.
+            // Consuming the flag here would prevent the zoom snap from
+            // firing when the actual zoom-change data arrives, leaving
+            // renderZoomLevel stale and forcing full canvas rebuilds.
+            if (!m_zoomDebounceTimer->isActive()) {
+                m_awaitingZoomData = false;
             }
+            // Use the actual zoom level as the render zoom.  With
+            // zoom-adapted decimation, effectiveZoom = zoomLevel * hop / ref
+            // is ≈1.0 for most zoom levels, but at the extremes (max
+            // zoom-out) integer truncation in the decimation factor means
+            // effectiveZoom can be slightly below 1.0.  Using zoomLevel
+            // directly (instead of snapping to refHop/hop which forces
+            // exactly 1.0) ensures ALL downstream consumers — canvas
+            // rebuild, advance path, EOF clamping, crosshair overlay,
+            // time grid — see the true effective zoom.
+            m_renderZoomLevel = m_zoomLevel;
             m_crosshairDirty = true;
         }
         if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
@@ -1224,18 +1230,14 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     m_precomputedLastRightCol = -1;
 
-    const double inPlaceEz = (m_precomputedBinsPerColumn > 0)
-        ? effectiveZoomLocked() : 1.0;
     if (m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
         && !m_canvas.isNull()
-        && m_precomputedBinsPerColumn > 0
-        && inPlaceEz <= 1.001) {
-        // Centered mode with existing canvas at ~1:1 or sub-1.0 zoom:
-        // draw new columns in-place using the rebuild's mapping.
-        // At zoom > 1.0, each column spans multiple pixels and the
-        // in-place draw can't fill the interpolated pixels between
-        // them, so we fall through to the dirty path below.
+        && m_precomputedBinsPerColumn > 0) {
+        // Centered mode with existing canvas: draw new columns in-place
+        // using the same column-to-pixel mapping as the rebuild path.
+        // This avoids costly full rebuilds (20-50 ms at 3440x719) while
+        // the growing edge fills in during initial decode.
         const qint32 chunkEnd =
             static_cast<qint32>(startIndex) + columns - 1;
         const qint32 dispL =
@@ -1261,58 +1263,14 @@ void SpectrogramItem::feedPrecomputedChunk(
                 }
             }
         }
-    } else if (m_displayMode == 1
-        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
-        && inPlaceEz > 1.001) {
-        // Centered mode at zoom > 1.0: mark dirty for a full rebuild
-        // with proper interpolation.  The in-place draw can't fill
-        // the interpolated pixels between columns at zoom > 1.0.
-        const qint32 chunkEnd =
-            static_cast<qint32>(startIndex) + columns - 1;
-        const bool overlapsVisible =
-            static_cast<qint32>(startIndex)
-                <= static_cast<qint32>(m_precomputedCanvasDisplayRight)
-            && chunkEnd
-                >= static_cast<qint32>(m_precomputedCanvasDisplayLeft);
-        if (overlapsVisible) {
-            m_precomputedCanvasDirty = true;
-        }
     } else if (m_displayMode == 0
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         // Rolling mode with existing canvas: the advance path handles
-        // new data incrementally.
+        // new data incrementally.  Avoid forcing a full rebuild on every
+        // chunk, which is the primary cause of FPS drops during playback.
     } else {
         // No canvas range yet (first data after reset) — force build.
         m_precomputedCanvasDirty = true;
-    }
-
-    // Canvas readiness: while m_awaitingZoomData is true (zoom snap
-    // already fired above, but the flag stays until timer is inactive),
-    // updatePaintNode skips canvas updates so the old frame stays
-    // visible.  When the ring covers the display, mark dirty so the
-    // next paint does a clean rebuild.
-    if (m_awaitingZoomData && !m_zoomDebounceTimer->isActive()) {
-        // The snap already fired (above).  Check if the ring now
-        // covers the visible display and clear the flag.
-        // At max zoom-out, the total columns for the track can be
-        // LESS than the widget width (e.g., 1183 columns on a 3440px
-        // display).  Cap the target at the total estimate so the
-        // check passes when the full track is decoded.  The -16
-        // margin accounts for STFT edge effects (the last few columns
-        // can't be computed because the analysis window extends past
-        // the end of the file).
-        const int screenWidth = std::max(static_cast<int>(width()), 1);
-        const int fillTarget = m_precomputedTotalColumnsEstimate > 0
-            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
-            : screenWidth;
-        const bool hasEnoughData =
-            m_precomputedMaxColumnIndex + 1 >= fillTarget - 16;
-        if (hasEnoughData) {
-            m_awaitingZoomData = false;
-            m_precomputedCanvasDirty = true;
-            m_crosshairDirty = true;
-            m_timeGridDirty = true;
-        }
     }
 
     // Reset zoom to 1.0 on any track change (gapless or user-initiated).
@@ -1346,13 +1304,6 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (needsZoomReset) {
         emit zoomLevelChanged();
         emit zoomResetRequested();
-        // Tell the backend to restart at zoom=1.0.  The QML handler
-        // for zoomResetRequested sets the zoom property to 1.0, but
-        // setZoomLevel(1.0) is a no-op because the reset above already
-        // set m_zoomLevel=1.0.  Without this explicit signal the
-        // backend continues at the old zoom level, producing data at
-        // the wrong hop size.
-        emit backendZoomRequested(1.0f);
     }
     if (readyChanged) {
         emit precomputedReadyChanged();
@@ -1417,10 +1368,8 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_gaplessPositionOffset = 0.0;
     m_centeredGaplessTransitionAt = {};
     m_precomputedMaxColumnIndex = -1;
-    if (!m_awaitingZoomData) {
-        m_precomputedCanvasDisplayLeft = 0;
-        m_precomputedCanvasDisplayRight = -1;
-    }
+    m_precomputedCanvasDisplayLeft = 0;
+    m_precomputedCanvasDisplayRight = -1;
     const bool preserveRollingHistory =
         !clearHistoryOnReset &&
         m_displayMode == 0
@@ -1451,16 +1400,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
     m_timeGridDirty = true;
-    // During a zoom transition (m_awaitingZoomData), preserve the old
-    // canvas and display range so the previous frame stays visible while
-    // the new data fills the ring.  The snap in feedPrecomputedChunk
-    // defers the visual switch until the ring covers the display.
-    if (m_awaitingZoomData && !m_canvas.isNull()) {
-        // Keep old canvas — updatePaintNode will skip updates while
-        // m_awaitingZoomData is true.
-    } else {
-        invalidateCanvas();
-    }
+    invalidateCanvas();
 }
 
 qint64 SpectrogramItem::currentRollingDisplayRightLocked(
@@ -1963,15 +1903,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || displayRight < m_precomputedCanvasDisplayRight
                     || std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) > 0.001);
 
-            // During a zoom transition (m_awaitingZoomData), the ring is
-            // being refilled with data at the new hop.  Skip canvas
-            // updates so the old frame stays visible until the ring
-            // covers the display.  feedPrecomputedChunk clears
-            // m_awaitingZoomData and sets dirty when data is ready.
-            const bool zoomFillActive =
-                m_awaitingZoomData && hasCanvasRange && !m_canvas.isNull();
-
-            if (visibleCols > 0 && !zoomFillActive) {
+            if (visibleCols > 0) {
                 if (needsFullRebuild || m_precomputedCanvasDirty) {
                     rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
                 } else if (rangeChanged) {
@@ -3621,18 +3553,9 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
 
     const qint64 sourceColumns = displayRight - displayLeft + 1;
     const double rebuildEffectiveZoom = effectiveZoomLocked();
-    int drawPixels = std::min(width,
+    const int drawPixels = std::min(width,
         static_cast<int>(std::ceil(
             static_cast<double>(sourceColumns) * rebuildEffectiveZoom)));
-    // At max zoom-out, hop rounding can produce 1–2 fewer columns than
-    // the canvas width.  Pad to width when the display covers nearly
-    // all the content — the colFirst clamping in the loop repeats the
-    // last column for the extra pixels.
-    if (drawPixels < width
-        && displayLeft == 0
-        && sourceColumns + 5 >= static_cast<qint64>(width)) {
-        drawPixels = width;
-    }
     const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
     const auto dbRemap = buildPrecomputedDbRemapLocked();
 
@@ -3691,8 +3614,8 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayRight,
     bool rollingMode) {
     // Incremental advance only works at 1:1 column-to-pixel mapping.
-    // The render-zoom snap in feedPrecomputedChunk ensures effectiveZoom
-    // is exactly 1.0 at all zoom levels, so this threshold is always met.
+    // TODO: Implement incremental advance for non-1.0 zoom levels if
+    // full rebuild shows measurable frame drops on target hardware.
     if (std::abs(effectiveZoomLocked() - 1.0) > 0.001) {
         return false;
     }
