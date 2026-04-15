@@ -112,12 +112,15 @@ impl StftComputer {
     }
 }
 
+// Superseded by PeakHoldResampler; kept until Task 3 removes it.
+#[allow(dead_code)]
 pub(super) struct SpectrogramDecimator {
     factor: usize,
     accum: Vec<f32>,
     count: usize,
 }
 
+#[allow(dead_code)]
 impl SpectrogramDecimator {
     pub(super) fn new(factor: usize) -> Self {
         Self {
@@ -163,9 +166,6 @@ pub(super) struct PeakHoldResampler {
     peak: Vec<f32>,
 }
 
-// Call sites migrate from SpectrogramDecimator in a subsequent commit;
-// suppress dead-code warnings while this impl is transitionally unused.
-#[allow(dead_code)]
 impl PeakHoldResampler {
     pub(super) fn new(output_interval: f64) -> Self {
         Self {

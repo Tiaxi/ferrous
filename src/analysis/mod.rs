@@ -1006,14 +1006,21 @@ impl AnalysisRuntimeState {
             // already-decoded region to trigger unnecessary session restarts.
             let base_hop = (self.fft_size / 8).max(64);
             let zoom = f64::from(self.zoom_level.max(0.001));
+            // Continuous fractional interval matching output_interval_for_hop.
+            // REFERENCE_HOP and base_hop are small compile-time/session constants;
+            // precision loss from usize→f64 is negligible.
+            #[allow(clippy::cast_precision_loss)]
+            let target_effective = REFERENCE_HOP as f64 / zoom;
+            #[allow(clippy::cast_precision_loss)]
+            let interval = (target_effective / base_hop as f64).max(1.0);
+            // interval >= 1.0 and base_hop is small, so the product fits in usize.
             #[allow(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 clippy::cast_precision_loss
             )]
-            let target = (REFERENCE_HOP as f64 / zoom).round() as usize;
-            let factor = (target / base_hop).max(1);
-            base_hop * factor
+            let hop = (base_hop as f64 * interval).round() as usize;
+            hop
         };
         let rate = self.active_session_effective_rate;
         if rate > 0 && effective_hop > 0 {

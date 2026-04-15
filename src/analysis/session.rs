@@ -12,7 +12,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use super::decoders::{
     deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource,
 };
-use super::fft::{waveform_sample_rate_divisor, SpectrogramDecimator, StftComputer};
+use super::fft::{waveform_sample_rate_divisor, PeakHoldResampler, StftComputer};
 use super::{
     f64_to_u64_saturating, AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode,
     SpectrogramViewMode, REFERENCE_HOP,
@@ -69,6 +69,8 @@ fn usize_to_f64_approx(v: usize) -> f64 {
     r
 }
 
+// Superseded by output_interval_for_hop; kept until Task 3 removes it.
+#[allow(dead_code)]
 fn decimation_factor_for_hop(hop: usize, zoom_level: f32) -> usize {
     if hop == 0 {
         return 1;
@@ -88,6 +90,54 @@ fn decimation_factor_for_hop(hop: usize, zoom_level: f32) -> usize {
     )]
     let target_effective_hop = (REFERENCE_HOP as f64 / zoom).round() as usize;
     (target_effective_hop / hop).max(1)
+}
+
+fn output_interval_for_hop(hop: usize, zoom_level: f32) -> f64 {
+    if hop == 0 {
+        return 1.0;
+    }
+    // Continuous fractional interval: target_effective_hop / hop.
+    // Unlike the old integer factor, this is NOT truncated, so every
+    // zoom level produces a distinct output rate.  At zoom=0.8 with
+    // hop=1024, this gives 1.25 (not 1).
+    let zoom = f64::from(zoom_level.clamp(0.001, 1.0));
+    // REFERENCE_HOP and hop are small compile-time/session constants;
+    // precision loss from usize→f64 is negligible.
+    #[allow(clippy::cast_precision_loss)]
+    let target_effective_hop = REFERENCE_HOP as f64 / zoom;
+    #[allow(clippy::cast_precision_loss)]
+    let interval = target_effective_hop / hop as f64;
+    interval.max(1.0)
+}
+
+/// Compute the effective hop size from a fractional output interval.
+/// `hop_size` is a small positive usize; precision loss is negligible.
+fn effective_hop_from_interval(hop_size: usize, output_interval: f64) -> usize {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let hop = (hop_size as f64 * output_interval).round() as usize;
+    hop
+}
+
+/// Rescale a base `total_columns` estimate for a given `effective_hop`.
+/// When the effective hop differs from `REFERENCE_HOP`, the output
+/// column count changes proportionally.
+fn scale_columns_estimate(total_columns: u32, effective_hop: usize) -> u32 {
+    if effective_hop != REFERENCE_HOP && effective_hop > 0 {
+        // REFERENCE_HOP and effective_hop are small constants; precision loss is negligible.
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = REFERENCE_HOP as f64 / effective_hop as f64;
+        let scaled = (f64::from(total_columns) * ratio).ceil();
+        // Ceil result is non-negative and clamped via try_from fallback.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let val = scaled as u64;
+        u32::try_from(val).unwrap_or(u32::MAX)
+    } else {
+        total_columns
+    }
 }
 
 fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
@@ -251,7 +301,7 @@ impl StagingChunkState {
 /// Returns `true` to continue decoding, `false` if the receiver dropped.
 fn staging_drain_stft_rows(
     stfts: &mut [StftComputer],
-    decimators: &mut [SpectrogramDecimator],
+    resamplers: &mut [PeakHoldResampler],
     state: &mut StagingChunkState,
     tx: &Sender<PrecomputedSpectrogramChunk>,
 ) -> bool {
@@ -271,11 +321,11 @@ fn staging_drain_stft_rows(
         }
 
         let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(state.channel_count);
-        for (ch, row) in rows.into_iter().enumerate() {
-            if let Some(dec) = decimators.get_mut(ch) {
-                decimated_rows.push(dec.push(row));
+        for (ch, row) in rows.iter().enumerate() {
+            if let Some(resampler) = resamplers.get_mut(ch) {
+                decimated_rows.push(resampler.push(row));
             } else {
-                decimated_rows.push(Some(row));
+                decimated_rows.push(Some(row.clone()));
             }
         }
 
@@ -355,32 +405,21 @@ fn centered_staging_decode(
         SpectrogramViewMode::PerChannel => native_channels,
     };
     let bins_per_column = (fft_size / 2) + 1;
-    let decimation_factor = if zoom_level > 1.0 {
-        1
+    let output_interval = if zoom_level > 1.0 {
+        1.0
     } else {
-        decimation_factor_for_hop(hop_size, zoom_level)
+        output_interval_for_hop(hop_size, zoom_level)
     };
 
     let mut stfts: Vec<StftComputer> = (0..channel_count)
         .map(|_| StftComputer::new(fft_size, hop_size))
         .collect();
-    let mut decimators: Vec<SpectrogramDecimator> = (0..channel_count)
-        .map(|_| SpectrogramDecimator::new(decimation_factor))
+    let mut resamplers: Vec<PeakHoldResampler> = (0..channel_count)
+        .map(|_| PeakHoldResampler::new(output_interval))
         .collect();
 
-    let effective_hop = hop_size * decimation_factor;
-    let total_columns_estimate = if effective_hop != REFERENCE_HOP && effective_hop > 0 {
-        // REFERENCE_HOP and effective_hop are small constants; precision loss is negligible.
-        #[allow(clippy::cast_precision_loss)]
-        let ratio = REFERENCE_HOP as f64 / effective_hop as f64;
-        let scaled = (f64::from(total_columns) * ratio).ceil();
-        // Ceil result is non-negative and clamped via try_from fallback.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let val = scaled as u64;
-        u32::try_from(val).unwrap_or(u32::MAX)
-    } else {
-        total_columns
-    };
+    let effective_hop = effective_hop_from_interval(hop_size, output_interval);
+    let total_columns_estimate = scale_columns_estimate(total_columns, effective_hop);
 
     let mut state = StagingChunkState {
         fft_size,
@@ -440,7 +479,7 @@ fn centered_staging_decode(
             }
         }
 
-        if !staging_drain_stft_rows(&mut stfts, &mut decimators, &mut state, tx) {
+        if !staging_drain_stft_rows(&mut stfts, &mut resamplers, &mut state, tx) {
             return; // receiver dropped
         }
     }
@@ -657,7 +696,7 @@ struct SpectrogramSessionState {
 
     // Chunking / STFT state
     stfts: Vec<StftComputer>,
-    decimators: Vec<SpectrogramDecimator>,
+    resamplers: Vec<PeakHoldResampler>,
     packet_counter: usize,
     chunk_buf: Vec<u8>,
     chunk_columns: u16,
@@ -757,29 +796,14 @@ fn run_spectrogram_session(
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
     };
-    let decimation_factor = if zoom_level > 1.0 {
-        1 // Bypass decimation -- keep all STFT rows for fine temporal resolution
+    let output_interval = if zoom_level > 1.0 {
+        1.0 // Bypass decimation -- keep all STFT rows for fine temporal resolution
     } else {
-        decimation_factor_for_hop(hop_size, zoom_level)
+        output_interval_for_hop(hop_size, zoom_level)
     };
-    let effective_hop = hop_size * decimation_factor;
+    let effective_hop = effective_hop_from_interval(hop_size, output_interval);
     let cols_per_second = f64::from(effective_rate) / usize_to_f64_approx(effective_hop);
-
-    // Adjust total_columns_estimate for zoom: when effective_hop differs
-    // from REFERENCE_HOP, the number of output columns changes proportionally.
-    let total_columns_estimate = if effective_hop != REFERENCE_HOP && effective_hop > 0 {
-        // REFERENCE_HOP and effective_hop are small constants; precision loss is negligible.
-        #[allow(clippy::cast_precision_loss)]
-        let ratio = REFERENCE_HOP as f64 / effective_hop as f64;
-        // total_columns is u32, fits exactly in f64.
-        let scaled = (f64::from(total_columns) * ratio).ceil();
-        // Ceil result is non-negative and clamped via try_from fallback.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let val = scaled as u64;
-        u32::try_from(val).unwrap_or(u32::MAX)
-    } else {
-        total_columns
-    };
+    let total_columns_estimate = scale_columns_estimate(total_columns, effective_hop);
 
     // Lookahead configuration: how far ahead of the play head the decode
     // worker runs before parking.
@@ -849,8 +873,8 @@ fn run_spectrogram_session(
         stfts: (0..actual_channel_count)
             .map(|_| StftComputer::new(fft_size, hop_size))
             .collect(),
-        decimators: (0..actual_channel_count)
-            .map(|_| SpectrogramDecimator::new(decimation_factor))
+        resamplers: (0..actual_channel_count)
+            .map(|_| PeakHoldResampler::new(output_interval))
             .collect(),
         packet_counter: 0,
         chunk_buf: Vec::new(),
@@ -1396,16 +1420,16 @@ fn handle_session_seek(
     source.seek(actual_seek_seconds, native_rate);
 
     // Reset STFT state.
-    let decimation_factor = if session.zoom_level > 1.0 {
-        1
+    let output_interval = if session.zoom_level > 1.0 {
+        1.0
     } else {
-        decimation_factor_for_hop(session.hop_size, session.zoom_level)
+        output_interval_for_hop(session.hop_size, session.zoom_level)
     };
     session.stfts = (0..session.channel_count)
         .map(|_| StftComputer::new(session.fft_size, session.hop_size))
         .collect();
-    session.decimators = (0..session.channel_count)
-        .map(|_| SpectrogramDecimator::new(decimation_factor))
+    session.resamplers = (0..session.channel_count)
+        .map(|_| PeakHoldResampler::new(output_interval))
         .collect();
 
     let new_column = f64_to_u64_saturating((position_seconds * session.cols_per_second).floor());
@@ -1544,13 +1568,13 @@ fn session_drain_stft_rows(
             break;
         }
 
-        // Push through decimators.
+        // Push through resamplers.
         let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(session.channel_count);
-        for (ch, row) in rows.into_iter().enumerate() {
-            if let Some(dec) = session.decimators.get_mut(ch) {
-                decimated_rows.push(dec.push(row));
+        for (ch, row) in rows.iter().enumerate() {
+            if let Some(resampler) = session.resamplers.get_mut(ch) {
+                decimated_rows.push(resampler.push(row));
             } else {
-                decimated_rows.push(Some(row));
+                decimated_rows.push(Some(row.clone()));
             }
         }
 
@@ -1678,6 +1702,34 @@ fn session_flush_chunk(
     event_tx: &Sender<AnalysisEvent>,
     columns_produced_out: &AtomicU64,
 ) {
+    // Drain any partial resampler window at track end.
+    // All channels must flush together — if any channel has no
+    // partial data, skip the flush (same synchronization as the
+    // drain loop).
+    let flushed: Vec<Option<Vec<f32>>> = session
+        .resamplers
+        .iter_mut()
+        .map(PeakHoldResampler::flush)
+        .collect();
+    if !flushed.is_empty() && flushed.iter().all(Option::is_some) {
+        for maybe_row in &flushed {
+            let row = maybe_row.as_ref().unwrap();
+            for &v in row.iter().take(session.bins_per_column) {
+                session
+                    .chunk_buf
+                    .push(precomputed_to_u8_spectrum(v, session.fft_size));
+            }
+            if row.len() < session.bins_per_column {
+                session.chunk_buf.extend(std::iter::repeat_n(
+                    0u8,
+                    session.bins_per_column - row.len(),
+                ));
+            }
+        }
+        session.chunk_columns += 1;
+        session.columns_produced += 1;
+    }
+
     if session.chunk_columns > 0 {
         let coverage = seconds_from_frames(
             session.total_covered_samples,
@@ -1798,7 +1850,7 @@ mod tests {
             columns_produced: 256,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -1886,7 +1938,7 @@ mod tests {
             columns_produced: 400,
             session_start_column: 400,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -1935,7 +1987,7 @@ mod tests {
             columns_produced: 320,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -1992,7 +2044,7 @@ mod tests {
             columns_produced: 320,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -2041,7 +2093,7 @@ mod tests {
             columns_produced: 320,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -2098,7 +2150,7 @@ mod tests {
             columns_produced: 256,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -2341,16 +2393,16 @@ mod tests {
 
     #[test]
     fn centered_staging_chunk_indices_are_zero_based_and_monotonic() {
-        // Exercises the same STFT -> decimator -> chunk indexing logic used
+        // Exercises the same STFT -> resampler -> chunk indexing logic used
         // by centered_staging_decode, verifying 0-based start indices and
         // placeholder token 0.
         let fft_size = 512;
         let hop_size = 128;
         let bins_per_column = (fft_size / 2) + 1;
-        let decimation_factor = decimation_factor_for_hop(hop_size, 1.0);
+        let output_interval = output_interval_for_hop(hop_size, 1.0);
 
         let mut stft = StftComputer::new(fft_size, hop_size);
-        let mut decimator = SpectrogramDecimator::new(decimation_factor);
+        let mut resampler = PeakHoldResampler::new(output_interval);
 
         // Feed a 440 Hz sine wave, enough for several output columns.
         let sample_rate = 48_000u32;
@@ -2358,6 +2410,10 @@ mod tests {
             .map(|i| (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / sample_rate as f32)).sin())
             .collect();
         stft.enqueue_samples(&samples, sample_rate);
+
+        // output_interval >= 1.0 and hop_size is small, so the product fits.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let effective_hop = (hop_size as f64 * output_interval).round() as usize;
 
         let mut columns_produced: u64 = 0;
         let mut chunk_start_index: u64 = 0;
@@ -2371,7 +2427,7 @@ mod tests {
                 break;
             }
             let row = row.into_iter().next().unwrap();
-            let maybe_dec = decimator.push(row);
+            let maybe_dec = resampler.push(&row);
             if maybe_dec.is_none() {
                 continue;
             }
@@ -2389,7 +2445,7 @@ mod tests {
                     start_column_index: u64_to_u32_saturating(chunk_start_index),
                     total_columns_estimate: 1000,
                     sample_rate_hz: sample_rate,
-                    hop_size: clamp_to_u16(hop_size * decimation_factor),
+                    hop_size: clamp_to_u16(effective_hop),
                     coverage_seconds: 0.0,
                     complete: false,
                     buffer_reset: false,
@@ -2522,5 +2578,24 @@ mod tests {
         session.columns_produced = 1600;
         maybe_update_columns_estimate(&mut session, &source);
         assert_eq!(session.total_columns_estimate, 4000);
+    }
+
+    #[test]
+    fn output_interval_is_continuous() {
+        let i1 = output_interval_for_hop(1024, 1.0);
+        assert!((i1 - 1.0).abs() < 0.001);
+
+        let i2 = output_interval_for_hop(1024, 0.8);
+        assert!((i2 - 1.25).abs() < 0.001);
+        assert!(
+            i2 > i1,
+            "zoom=0.8 must produce a different interval than zoom=1.0"
+        );
+
+        let i3 = output_interval_for_hop(1024, 0.5);
+        assert!((i3 - 2.0).abs() < 0.001);
+
+        let i4 = output_interval_for_hop(128, 0.7);
+        assert!((i4 - 11.43).abs() < 0.1);
     }
 }
