@@ -1288,23 +1288,35 @@ void SpectrogramItem::feedPrecomputedChunk(
     // has enough data to cover the visible display.
     if (m_zoomFillActive) {
         const int screenWidth = std::max(static_cast<int>(width()), 1);
-        // The ring fills from the session's start position (often 0).
-        // The display is centered on the playhead, which may be far
-        // ahead.  The fill target must cover playheadCol + screenWidth/2
-        // so the right edge of the display is in the ring.
+        // Two conditions must be met:
+        // 1. The ring has at least screenWidth columns (enough data
+        //    to fill the canvas).
+        // 2. The newest column in the ring covers the display's
+        //    right edge (playheadCol + screenWidth/2), so the
+        //    display won't have a black region on the right.
+        // Both are capped at totalEstimate for max zoom-out.
+        const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
+        const int fillWidth = m_precomputedTotalColumnsEstimate > 0
+            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
+            : screenWidth;
+        const bool ringHasEnoughColumns =
+            ringFill >= static_cast<qint64>(fillWidth) - 16;
+
         const double cps = m_precomputedHopSize > 0
             ? static_cast<double>(m_precomputedSampleRateHz)
                 / static_cast<double>(m_precomputedHopSize)
             : 1.0;
-        const int playheadCol =
-            static_cast<int>(std::max(0.0, m_positionSeconds) * cps);
-        const int displayRight = playheadCol + screenWidth / 2;
-        const int fillTarget = m_precomputedTotalColumnsEstimate > 0
-            ? std::min(displayRight + 1,
-                       m_precomputedTotalColumnsEstimate)
-            : std::min(displayRight + 1, screenWidth);
-        const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
-        if (ringFill >= static_cast<qint64>(fillTarget) - 16) {
+        const qint64 displayRightCol = static_cast<qint64>(
+            std::max(0.0, m_positionSeconds) * cps) + screenWidth / 2;
+        const qint64 displayRightCapped =
+            m_precomputedTotalColumnsEstimate > 0
+                ? std::min(displayRightCol,
+                    static_cast<qint64>(m_precomputedTotalColumnsEstimate))
+                : displayRightCol;
+        const bool ringCoversDisplayRight =
+            m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
+
+        if (ringHasEnoughColumns && ringCoversDisplayRight) {
             m_zoomFillActive = false;
             m_precomputedCanvasDirty = true;
         }
