@@ -251,6 +251,11 @@ Item {
                         } else {
                             root._widgetZoomLevel = clamped
                         }
+                        // Cancel any pending width-settle restart — the
+                        // zoom debounce timer's restart will use the
+                        // latest widget width, making a separate
+                        // width-triggered restart redundant.
+                        widthSettleTimer.stop()
                     }
                     onZoomResetRequested: {
                         root._widgetZoomLevel = 1.0

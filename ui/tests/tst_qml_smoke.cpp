@@ -3296,6 +3296,10 @@ void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
     // This is distinct from 1024.
     // With the OLD integer decimation: factor=1, effective_hop=1024 (same!).
     item.setZoomLevel(0.8);
+    // Stop the debounce timer to simulate it having fired (no Qt event
+    // loop in unit tests to drain it naturally).  The deferred zoom snap
+    // checks !isActive() before consuming m_awaitingZoomData.
+    item.m_zoomDebounceTimer->stop();
     QByteArray chunk2(bins * cols, '\x40');
     item.feedPrecomputedChunk(
         chunk2, bins, 0, cols,

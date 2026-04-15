@@ -1031,33 +1031,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         // the backend streams enough data to cover the visible window.
         // When enough columns have arrived, the render zoom is applied and
         // the canvas is rebuilt with complete data — no left-to-right fill.
-        if (m_awaitingZoomData && (appliedReset || appliedImplicitReset)) {
-            // Don't consume the awaiting flag if the zoom debounce timer is
-            // still running — a zoom change command hasn't been sent to the
-            // backend yet.  This reset is from a different trigger (e.g.
-            // widget width change) and carries data at the OLD zoom level.
-            // Consuming the flag here would prevent the zoom snap from
-            // firing when the actual zoom-change data arrives, leaving
-            // renderZoomLevel stale and forcing full canvas rebuilds.
-            if (!m_zoomDebounceTimer->isActive()) {
-                m_awaitingZoomData = false;
-            }
-            // Snap renderZoomLevel so effectiveZoom = renderZoom × hop / ref
-            // equals 1.0.  With zoom-adapted decimation the backend adjusts
-            // the output column rate to match the zoom, so the 1.0 snap is
-            // correct at all zoom levels.  Keeping effectiveZoom at 1.0 lets
-            // the fast incremental advance path work at all zoom levels and
-            // avoids rebuild/advance mismatches that cause edge gaps and
-            // visual blurring.
-            if (m_precomputedHopSize > 0
-                && m_precomputedHopSize != static_cast<int>(kReferenceHopSamples)) {
-                m_renderZoomLevel = kReferenceHopSamples
-                    / static_cast<double>(m_precomputedHopSize);
-            } else {
-                m_renderZoomLevel = m_zoomLevel;
-            }
-            m_crosshairDirty = true;
-        }
+        // The deferred zoom snap is handled below (after data is fed
+        // into the ring so m_precomputedMaxColumnIndex is up to date).
         if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
             const double seekPositionSeconds =
                 static_cast<double>(startIndex * m_precomputedHopSize)
@@ -1296,6 +1271,34 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
     }
 
+    // Deferred zoom snap: apply the render zoom only when the ring has
+    // enough data to fill the visible display.  This keeps the OLD canvas
+    // visible during the fill, then swaps to the new data in a single
+    // clean rebuild — avoiding the black region from rendering a
+    // partially-filled ring.
+    if (m_awaitingZoomData && !m_zoomDebounceTimer->isActive()) {
+        const int screenWidth = std::max(static_cast<int>(width()), 1);
+        const bool hasEnoughData =
+            m_precomputedMaxColumnIndex + 1 >= screenWidth
+            || (m_precomputedTotalColumnsEstimate > 0
+                && m_precomputedMaxColumnIndex + 1
+                    >= m_precomputedTotalColumnsEstimate);
+        if (hasEnoughData) {
+            m_awaitingZoomData = false;
+            if (m_precomputedHopSize > 0
+                && m_precomputedHopSize
+                    != static_cast<int>(kReferenceHopSamples)) {
+                m_renderZoomLevel = kReferenceHopSamples
+                    / static_cast<double>(m_precomputedHopSize);
+            } else {
+                m_renderZoomLevel = m_zoomLevel;
+            }
+            m_precomputedCanvasDirty = true;
+            m_crosshairDirty = true;
+            m_timeGridDirty = true;
+        }
+    }
+
     // Reset zoom to 1.0 on any track change (gapless or user-initiated).
     // Check m_renderZoomLevel (not m_zoomLevel) because in multi-channel
     // layouts the first pane's signal may have already set m_zoomLevel=1.0
@@ -1398,8 +1401,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_gaplessPositionOffset = 0.0;
     m_centeredGaplessTransitionAt = {};
     m_precomputedMaxColumnIndex = -1;
-    m_precomputedCanvasDisplayLeft = 0;
-    m_precomputedCanvasDisplayRight = -1;
+    if (!m_awaitingZoomData) {
+        m_precomputedCanvasDisplayLeft = 0;
+        m_precomputedCanvasDisplayRight = -1;
+    }
     const bool preserveRollingHistory =
         !clearHistoryOnReset &&
         m_displayMode == 0
@@ -1430,7 +1435,16 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
     m_timeGridDirty = true;
-    invalidateCanvas();
+    // During a zoom transition (m_awaitingZoomData), preserve the old
+    // canvas and display range so the previous frame stays visible while
+    // the new data fills the ring.  The snap in feedPrecomputedChunk
+    // defers the visual switch until the ring covers the display.
+    if (m_awaitingZoomData && !m_canvas.isNull()) {
+        // Keep old canvas — updatePaintNode will skip updates while
+        // m_awaitingZoomData is true.
+    } else {
+        invalidateCanvas();
+    }
 }
 
 qint64 SpectrogramItem::currentRollingDisplayRightLocked(
