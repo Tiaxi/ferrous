@@ -827,6 +827,17 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
     }
 
+    // Early hop change detection: activate canvas freeze BEFORE any
+    // reset processing that might call invalidateCanvas().  The freeze
+    // must be active when applyPrecomputedResetLocked runs so it can
+    // preserve the old canvas for updatePaintNode's canvasFreeze check.
+    if (hopSize > 0
+        && hopSize != m_precomputedHopSize
+        && m_displayMode == 1
+        && !m_canvas.isNull()) {
+        m_zoomFillActive = true;
+    }
+
     // If this widget has no ring and receives data (not a reset), it was
     // created/recycled after the reset went to a different widget instance.
     // Apply an implicit reset so the widget can accept the arriving data.
@@ -1022,16 +1033,6 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedSampleRateHz = sampleRate;
         }
         if (hopSize > 0) {
-            // Activate canvas freeze when the hop changes (zoom
-            // transition).  The old canvas stays visible while the
-            // ring fills with new-hop data.  Cleared below when the
-            // ring covers the display.  Independent of
-            // m_awaitingZoomData (which controls the zoom snap).
-            if (hopSize != m_precomputedHopSize
-                && m_displayMode == 1
-                && !m_canvas.isNull()) {
-                m_zoomFillActive = true;
-            }
             m_precomputedHopSize = hopSize;
         }
         // Apply deferred visual zoom when backend recalculation data arrives.
