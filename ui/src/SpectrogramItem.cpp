@@ -1032,17 +1032,12 @@ void SpectrogramItem::feedPrecomputedChunk(
         // When enough columns have arrived, the render zoom is applied and
         // the canvas is rebuilt with complete data — no left-to-right fill.
         if (m_awaitingZoomData && (appliedReset || appliedImplicitReset)) {
-            // Don't consume the awaiting flag if the zoom debounce timer
-            // is still running — a zoom change command hasn't been sent
-            // to the backend yet.
-            if (!m_zoomDebounceTimer->isActive()) {
-                m_awaitingZoomData = false;
-            }
             // Snap renderZoomLevel IMMEDIATELY so effectiveZoom is always
-            // correct (1.0).  The visual canvas update is deferred by
-            // checking m_awaitingZoomData in updatePaintNode — the old
-            // canvas stays visible until the ring fills, then a single
-            // dirty rebuild shows the complete new spectrogram.
+            // correct (1.0).  Do NOT clear m_awaitingZoomData here — the
+            // readiness check (below, after data feed) clears it when
+            // the ring covers the display.  Clearing it here would
+            // disable the canvas freeze in updatePaintNode, causing a
+            // rebuild from the nearly-empty ring.
             if (m_precomputedHopSize > 0
                 && m_precomputedHopSize
                     != static_cast<int>(kReferenceHopSamples)) {
