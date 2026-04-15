@@ -1230,14 +1230,18 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     m_precomputedLastRightCol = -1;
 
+    const double inPlaceEz = (m_precomputedBinsPerColumn > 0)
+        ? effectiveZoomLocked() : 1.0;
     if (m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
         && !m_canvas.isNull()
-        && m_precomputedBinsPerColumn > 0) {
-        // Centered mode with existing canvas: draw new columns in-place
-        // using the same column-to-pixel mapping as the rebuild path.
-        // This avoids costly full rebuilds (20-50 ms at 3440x719) while
-        // the growing edge fills in during initial decode.
+        && m_precomputedBinsPerColumn > 0
+        && inPlaceEz <= 1.001) {
+        // Centered mode with existing canvas at ~1:1 or sub-1.0 zoom:
+        // draw new columns in-place using the rebuild's mapping.
+        // At zoom > 1.0, each column spans multiple pixels and the
+        // in-place draw can't fill the interpolated pixels between
+        // them, so we fall through to the dirty path below.
         const qint32 chunkEnd =
             static_cast<qint32>(startIndex) + columns - 1;
         const qint32 dispL =
@@ -1263,11 +1267,26 @@ void SpectrogramItem::feedPrecomputedChunk(
                 }
             }
         }
+    } else if (m_displayMode == 1
+        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
+        && inPlaceEz > 1.001) {
+        // Centered mode at zoom > 1.0: mark dirty for a full rebuild
+        // with proper interpolation.  The in-place draw can't fill
+        // the interpolated pixels between columns at zoom > 1.0.
+        const qint32 chunkEnd =
+            static_cast<qint32>(startIndex) + columns - 1;
+        const bool overlapsVisible =
+            static_cast<qint32>(startIndex)
+                <= static_cast<qint32>(m_precomputedCanvasDisplayRight)
+            && chunkEnd
+                >= static_cast<qint32>(m_precomputedCanvasDisplayLeft);
+        if (overlapsVisible) {
+            m_precomputedCanvasDirty = true;
+        }
     } else if (m_displayMode == 0
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         // Rolling mode with existing canvas: the advance path handles
-        // new data incrementally.  Avoid forcing a full rebuild on every
-        // chunk, which is the primary cause of FPS drops during playback.
+        // new data incrementally.
     } else {
         // No canvas range yet (first data after reset) — force build.
         m_precomputedCanvasDirty = true;
@@ -1304,6 +1323,13 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (needsZoomReset) {
         emit zoomLevelChanged();
         emit zoomResetRequested();
+        // Tell the backend to restart at zoom=1.0.  The QML handler
+        // for zoomResetRequested sets the zoom property to 1.0, but
+        // setZoomLevel(1.0) is a no-op because the reset above already
+        // set m_zoomLevel=1.0.  Without this explicit signal the
+        // backend continues at the old zoom level, producing data at
+        // the wrong hop size.
+        emit backendZoomRequested(1.0f);
     }
     if (readyChanged) {
         emit precomputedReadyChanged();
@@ -3613,10 +3639,12 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayLeft,
     qint64 displayRight,
     bool rollingMode) {
-    // Incremental advance only works at 1:1 column-to-pixel mapping.
-    // TODO: Implement incremental advance for non-1.0 zoom levels if
-    // full rebuild shows measurable frame drops on target hardware.
-    if (std::abs(effectiveZoomLocked() - 1.0) > 0.001) {
+    // Incremental advance works at near-1:1 column-to-pixel mapping.
+    // The 0.01 tolerance accommodates hop rounding at non-power-of-2
+    // zoom levels (e.g., zoom=7.45 gives effectiveZoom=0.997).  The
+    // small deviation (<1%) causes at most a few pixels of drift at
+    // the canvas edge, corrected on the next full rebuild.
+    if (std::abs(effectiveZoomLocked() - 1.0) > 0.01) {
         return false;
     }
     if (m_canvas.isNull()
