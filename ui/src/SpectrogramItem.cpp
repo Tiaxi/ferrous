@@ -1304,6 +1304,12 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (needsZoomReset) {
         emit zoomLevelChanged();
         emit zoomResetRequested();
+        // Tell the backend to restart at zoom=1.0.  The QML handler
+        // for zoomResetRequested sets the zoom property to 1.0, but
+        // setZoomLevel(1.0) is a no-op because the reset above already
+        // set m_zoomLevel=1.0.  Without this explicit signal the
+        // backend continues at the old zoom level.
+        emit backendZoomRequested(1.0f);
     }
     if (readyChanged) {
         emit precomputedReadyChanged();
@@ -3553,9 +3559,18 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
 
     const qint64 sourceColumns = displayRight - displayLeft + 1;
     const double rebuildEffectiveZoom = effectiveZoomLocked();
-    const int drawPixels = std::min(width,
+    int drawPixels = std::min(width,
         static_cast<int>(std::ceil(
             static_cast<double>(sourceColumns) * rebuildEffectiveZoom)));
+    // At max zoom-out, hop rounding can produce a few fewer columns
+    // than the canvas width.  Pad to width when the display covers
+    // nearly all the content — the colFirst clamping in the loop
+    // repeats the last column for the extra pixels.
+    if (drawPixels < width
+        && displayLeft == 0
+        && sourceColumns + 5 >= static_cast<qint64>(width)) {
+        drawPixels = width;
+    }
     const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
     const auto dbRemap = buildPrecomputedDbRemapLocked();
 
