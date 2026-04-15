@@ -1235,24 +1235,28 @@ void SpectrogramItem::feedPrecomputedChunk(
         && !m_canvas.isNull()
         && m_precomputedBinsPerColumn > 0) {
         // Centered mode with existing canvas: draw new columns in-place
-        // instead of marking the entire canvas dirty.  A full rebuild at
-        // large canvas sizes (e.g. 3440×719) takes 20-50 ms and causes
-        // severe FPS drops when chunks arrive continuously.
-        const qint32 chunkEnd = static_cast<qint32>(startIndex) + columns - 1;
-        const qint32 dispL = static_cast<qint32>(m_precomputedCanvasDisplayLeft);
-        const qint32 dispR = static_cast<qint32>(m_precomputedCanvasDisplayRight);
+        // using the same column-to-pixel mapping as the rebuild path.
+        // This avoids costly full rebuilds (20-50 ms at 3440x719) while
+        // the growing edge fills in during initial decode.
+        const qint32 chunkEnd =
+            static_cast<qint32>(startIndex) + columns - 1;
+        const qint32 dispL =
+            static_cast<qint32>(m_precomputedCanvasDisplayLeft);
+        const qint32 dispR =
+            static_cast<qint32>(m_precomputedCanvasDisplayRight);
         const bool overlapsVisible =
-            static_cast<qint32>(startIndex) <= dispR && chunkEnd >= dispL;
+            static_cast<qint32>(startIndex) <= dispR
+            && chunkEnd >= dispL;
         if (overlapsVisible) {
             const auto dbRemap = buildPrecomputedDbRemapLocked();
-            const qint64 dispSpan = m_precomputedCanvasDisplayRight
-                - m_precomputedCanvasDisplayLeft + 1;
+            const double ez = effectiveZoomLocked();
             for (qint32 col = std::max(static_cast<qint32>(startIndex), dispL);
                  col <= std::min(chunkEnd, dispR); ++col) {
-                // Map column to canvas pixel(s).
-                const double frac =
-                    static_cast<double>(col - dispL) / std::max<double>(dispSpan, 1);
-                const int px = static_cast<int>(frac * m_canvas.width());
+                // Use the rebuild's mapping (inverted): px = (col - dispL) * ez.
+                // This matches rebuildPrecomputedCanvasLocked's
+                // colFirst = displayLeft + floor(px / ez), ensuring no gaps.
+                const int px = static_cast<int>(
+                    static_cast<double>(col - dispL) * ez);
                 if (px >= 0 && px < m_canvas.width()) {
                     drawPrecomputedColumnAtLocked(
                         px, static_cast<qint64>(col), false, dbRemap);
