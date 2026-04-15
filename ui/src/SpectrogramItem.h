@@ -308,10 +308,12 @@ private:
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     double m_zoomLevel{1.0};
+    double m_renderZoomLevel{1.0};
     bool m_zoomEnabled{false};
     double m_precomputedCanvasZoomLevel{1.0};
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};
+    bool m_awaitingZoomData{false};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

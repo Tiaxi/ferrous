@@ -422,9 +422,12 @@ private slots:
     void spectrogramClickToSeekDisabledInRollingMode();
     void spectrogramZoomProperty();
     void spectrogramZoomLimitsWithTrackData();
+    void spectrogramZoomOutBlockedWhenSongFits();
     void spectrogramEffectiveZoomMatchesBackendHop();
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
+    void spectrogramDeferredZoomAppliesOnBackendData();
+    void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
 };
 
@@ -3059,9 +3062,9 @@ void QmlSmokeTest::spectrogramZoomProperty() {
     item.setZoomLevel(100.0);
     QVERIFY(std::abs(item.zoomLevel() - 16.0) < 0.0001);
 
-    // Zoom clamps to minimum floor (0.05 hard floor, minZoom = 1920/96000 = 0.02 → 0.05)
+    // Zoom clamps to minimum (full-song level: 1920/96000 = 0.02)
     item.setZoomLevel(0.001);
-    QVERIFY(std::abs(item.zoomLevel() - 0.05) < 0.0001);
+    QVERIFY(std::abs(item.zoomLevel() - 0.02) < 0.001);
 
     // Reset to 1.0
     item.setZoomLevel(1.0);
@@ -3090,25 +3093,58 @@ void QmlSmokeTest::spectrogramZoomLimitsWithTrackData() {
     QVERIFY(std::abs(minZoom - 0.2) < 0.01);
 }
 
+void QmlSmokeTest::spectrogramZoomOutBlockedWhenSongFits() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed a short track that fits entirely at zoom=1.0 (1000 < 1920).
+    constexpr int binsPerColumn = 4;
+    constexpr int columns = 1000;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // Minimum zoom should be 1.0 — no zoom-out possible.
+    QVERIFY(std::abs(item.minimumZoomLevel() - 1.0) < 0.0001);
+
+    // Attempting to zoom out is clamped to 1.0.
+    item.setZoomLevel(0.5);
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+
+    // Zoom-in still works.
+    item.setZoomLevel(2.0);
+    QVERIFY(std::abs(item.zoomLevel() - 2.0) < 0.0001);
+}
+
 void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
 
-    // Feed data with hop_size=256 (simulating zoom=4x backend).
-    // Need >= 480 columns so minZoom (1920/cols) <= 4.0, allowing setZoomLevel(4.0).
+    // Feed initial data at default hop, then request zoom=4x.
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0.
     constexpr int binsPerColumn = 64;
     constexpr int columns = 500;
     QByteArray chunk(binsPerColumn * columns, '\x40');
     item.feedPrecomputedChunk(
         chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 1024, false,
+        true, 1, false);
+
+    item.setZoomLevel(4.0);
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Simulate backend restart with hop_size=256 (zoom=4x data).
+    // After this buffer_reset, effectiveZoom = 4.0 * 256 / 1024 = 1.0.
+    QByteArray zoomChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, columns,
         0, columns * 2, 48000, 256, false,
         true, 1, false);
 
-    // Set zoom to 4x — should match backend hop
-    item.setZoomLevel(4.0);
-
-    // effectiveZoom = 4.0 * 256 / 1024 = 1.0
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
 }
 
@@ -3117,20 +3153,26 @@ void QmlSmokeTest::spectrogramAdvanceWorksWhenBackendMatchesZoom() {
     item.setWidth(1920);
     item.setHeight(400);
 
-    // Feed data with hop_size=256 (simulating zoom=4x backend).
-    // Need >= 480 columns so minZoom (1920/cols) <= 4.0, allowing setZoomLevel(4.0).
+    // Feed initial data at default hop, then request zoom=4x.
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0.
     constexpr int binsPerColumn = 64;
     constexpr int columns = 500;
     QByteArray chunk(binsPerColumn * columns, '\x40');
     item.feedPrecomputedChunk(
         chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 1024, false,
+        true, 1, false);
+
+    item.setZoomLevel(4.0);
+
+    // Simulate backend restart with hop_size=256 (zoom=4x data).
+    // After this, effectiveZoom = 4.0 * 256 / 1024 = 1.0 (1:1 rendering).
+    QByteArray zoomChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, columns,
         0, columns * 2, 48000, 256, false,
         true, 1, false);
 
-    // Set zoom to 4x — effectiveZoom = 4.0 * 256 / 1024 = 1.0
-    item.setZoomLevel(4.0);
-
-    // Verify the zoom level is 4.0 while rendering behaves as 1:1
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
 }
 
@@ -3149,12 +3191,122 @@ void QmlSmokeTest::spectrogramEffectiveZoomDuringTransition() {
         0, columns * 2, 48000, 1024, false,
         true, 1, false);
 
-    // Set zoom to 4x — backend hasn't responded yet
+    // Set zoom to 4x — backend hasn't responded yet.
+    // The visual zoom (renderZoomLevel) is deferred; the display
+    // keeps showing the existing data at the old zoom until the
+    // backend session restarts with the finer hop size.
     item.setZoomLevel(4.0);
 
-    // effectiveZoom = 4.0 * 1024 / 1024 = 4.0 (transition state)
-    // This means interpolation/full-rebuild rendering is active
+    // The property reflects the requested zoom immediately.
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Simulate backend restart: feed a buffer_reset chunk with finer hop.
+    // This triggers the deferred render zoom to take effect.
+    QByteArray zoomChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 256, false,
+        true, 1, false);
+
+    // After backend data arrives, zoom is fully applied.
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Use small bins so large column counts don't allocate too much memory.
+    constexpr int binsPerColumn = 4;
+    constexpr int columns = 96000;
+
+    // Feed initial data at default hop (backend at zoom=1x).
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+
+    // Request zoom to 4x — property updates immediately.
+    item.setZoomLevel(4.0);
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Feed continuation data at OLD hop (still in pipeline from before the
+    // backend received the zoom command).  This is NOT a buffer_reset, so
+    // the deferred zoom must NOT apply yet.
+    constexpr int staleCols = 50;
+    QByteArray staleChunk(binsPerColumn * staleCols, '\x40');
+    item.feedPrecomputedChunk(
+        staleChunk, binsPerColumn, 0, staleCols,
+        columns, columns, 48000, 1024, false,
+        false, 1, false);
+
+    // Property still shows requested zoom.
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Simulate backend restart: buffer_reset with finer hop.
+    // This triggers the deferred render zoom to take effect.
+    // At zoom=4x with hop=256, the backend produces 4x more columns.
+    constexpr int zoomColumns = columns * 4;
+    QByteArray zoomChunk(binsPerColumn * zoomColumns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, zoomColumns,
+        0, zoomColumns, 48000, 256, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Verify zoom back to 1.0 also defers correctly.
+    item.setZoomLevel(1.0);
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+
+    // Backend restarts at default hop.
+    QByteArray resetChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        resetChunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {
+    // Simulates the widget→fullscreen transition: when width increases,
+    // minimumZoomLevel should increase (allow less zoom-out), and a zoom
+    // level valid at the old width should be clamped to the new minimum.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(400);
+
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 9600;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // At width=1200, minZoom = 1200/9600 = 0.125
+    const double narrowMinZoom = item.minimumZoomLevel();
+    QVERIFY(std::abs(narrowMinZoom - 0.125) < 0.01);
+
+    // Zoom all the way out on the narrow widget.
+    item.setZoomLevel(narrowMinZoom);
+    QVERIFY(std::abs(item.zoomLevel() - narrowMinZoom) < 0.01);
+
+    // Simulate entering fullscreen: width triples.
+    item.setWidth(3600);
+
+    // New minZoom = 3600/9600 = 0.375 — much higher.
+    const double wideMinZoom = item.minimumZoomLevel();
+    QVERIFY(std::abs(wideMinZoom - 0.375) < 0.01);
+
+    // Re-applying the old narrow zoom should clamp to the new minimum.
+    item.setZoomLevel(narrowMinZoom);
+    QVERIFY(std::abs(item.zoomLevel() - wideMinZoom) < 0.01);
 }
 
 void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {

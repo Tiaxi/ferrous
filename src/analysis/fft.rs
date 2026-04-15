@@ -112,54 +112,6 @@ impl StftComputer {
     }
 }
 
-// Superseded by PeakHoldResampler; kept until Task 3 removes it.
-#[allow(dead_code)]
-pub(super) struct SpectrogramDecimator {
-    factor: usize,
-    accum: Vec<f32>,
-    count: usize,
-}
-
-#[allow(dead_code)]
-impl SpectrogramDecimator {
-    pub(super) fn new(factor: usize) -> Self {
-        Self {
-            factor: factor.max(1),
-            accum: Vec::new(),
-            count: 0,
-        }
-    }
-
-    pub(super) fn push(&mut self, row: Vec<f32>) -> Option<Vec<f32>> {
-        if self.accum.is_empty() {
-            self.accum = vec![0.0; row.len()];
-        }
-        if row.len() != self.accum.len() {
-            self.accum = vec![0.0; row.len()];
-            self.count = 0;
-        }
-
-        for (a, v) in self.accum.iter_mut().zip(row) {
-            *a += v;
-        }
-        self.count += 1;
-
-        if self.count < self.factor {
-            return None;
-        }
-
-        let inv = 1.0 / small_usize_to_f32(self.count);
-        let mut out = Vec::with_capacity(self.accum.len());
-        for v in &self.accum {
-            out.push(v * inv);
-        }
-
-        self.accum.fill(0.0);
-        self.count = 0;
-        Some(out)
-    }
-}
-
 pub(super) struct PeakHoldResampler {
     output_interval: f64,
     accumulator: f64,
@@ -376,15 +328,6 @@ pub(super) fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn spectrogram_decimator_averages_rows() {
-        let mut decimator = SpectrogramDecimator::new(2);
-        let first = decimator.push(vec![2.0, 4.0]);
-        assert!(first.is_none());
-        let second = decimator.push(vec![4.0, 6.0]).expect("averaged row");
-        assert_eq!(second, vec![3.0, 5.0]);
-    }
 
     #[test]
     fn stft_computer_produces_rows_from_samples() {

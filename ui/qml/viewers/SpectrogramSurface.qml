@@ -12,9 +12,27 @@ Item {
     property double positionSeconds: 0
     property var seekCommitted: null
 
+    property bool viewerMode: false
     property var channelDescriptors: []
     property double _crosshairSharedX: -1.0
-    property double _sharedZoomLevel: 1.0
+    property double _widgetZoomLevel: 1.0
+    property double _viewerZoomLevel: 1.0
+
+    // Debounced backend restart after significant width changes
+    // (entering/exiting fullscreen).  The timer lets the geometry
+    // settle before sending — fullscreen transitions can produce
+    // multiple intermediate sizes.
+    property int _widthRestartRef: 0
+    Timer {
+        id: widthSettleTimer
+        interval: 100
+        repeat: false
+        onTriggered: {
+            const zoom = root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
+            root.uiBridge.setSpectrogramZoomLevel(zoom)
+        }
+    }
+
 
     // Standard channel labels for common layouts.
     readonly property var standardChannelLabels: [
@@ -223,22 +241,40 @@ Item {
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
-                    zoomLevel: root._sharedZoomLevel
+                    zoomLevel: root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
                     onZoomRequested: (newZoomLevel) => {
                         const minZoom = spectrogramPaneItem.minimumZoomLevel()
-                        root._sharedZoomLevel = Math.max(minZoom,
+                        const clamped = Math.max(minZoom,
                             Math.min(16.0, newZoomLevel))
+                        if (root.viewerMode) {
+                            root._viewerZoomLevel = clamped
+                        } else {
+                            root._widgetZoomLevel = clamped
+                        }
                     }
                     onZoomResetRequested: {
-                        root._sharedZoomLevel = 1.0
+                        root._widgetZoomLevel = 1.0
+                        root._viewerZoomLevel = 1.0
                     }
                     onBackendZoomRequested: (level) => {
-                        root.uiBridge.setSpectrogramZoomLevel(level)
+                        if (index === 0) {
+                            root.uiBridge.setSpectrogramZoomLevel(level)
+                        }
                     }
                     // Only report width from the first pane (all share the same width).
                     onSpectrogramWidthChanged: (w) => {
                         if (index === 0) {
                             root.uiBridge.setSpectrogramWidgetWidth(w)
+                            // On significant width changes (>20%), debounce
+                            // a backend restart so the decode window matches.
+                            const ref = root._widthRestartRef
+                            if (ref > 0) {
+                                const ratio = w / ref
+                                if (ratio > 1.2 || ratio < 0.8) {
+                                    widthSettleTimer.restart()
+                                }
+                            }
+                            root._widthRestartRef = w
                         }
                     }
                     onSeekRequested: (seconds) => {

@@ -762,7 +762,6 @@ pub(super) fn pump_external_queue_detail_events(
 mod tests {
     use super::*;
     use crate::lastfm::{self, Command as LastFmCommand, ServiceOptions as LastFmServiceOptions};
-    use crate::library::LibraryTrack;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};

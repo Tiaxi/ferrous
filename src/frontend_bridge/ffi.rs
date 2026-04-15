@@ -1297,8 +1297,8 @@ fn parse_analysis_command(
     let command = match cmd_id {
         57 => {
             let level = reader.read_f32()?;
-            if !level.is_finite() || level < 0.05 {
-                return Err("zoom level must be finite and >= 0.05".to_string());
+            if !level.is_finite() || level <= 0.0 {
+                return Err("zoom level must be finite and positive".to_string());
             }
             BridgeAnalysisCommand::SetSpectrogramZoomLevel(level)
         }

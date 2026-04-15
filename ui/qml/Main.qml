@@ -1035,6 +1035,7 @@ Kirigami.ApplicationWindow {
             : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
+        viewerMode: viewerController.spectrogramViewerOpen
         uiBridge: root.uiBridge
         positionSeconds: playbackController.spectrogramPositionSeconds
         seekCommitted: playbackController.seekCommitted

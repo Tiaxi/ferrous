@@ -69,29 +69,6 @@ fn usize_to_f64_approx(v: usize) -> f64 {
     r
 }
 
-// Superseded by output_interval_for_hop; kept until Task 3 removes it.
-#[allow(dead_code)]
-fn decimation_factor_for_hop(hop: usize, zoom_level: f32) -> usize {
-    if hop == 0 {
-        return 1;
-    }
-    // Target effective_hop = round(REFERENCE_HOP / zoom), so the output
-    // column rate adapts to the visible time span.  At zoom=0.5 the
-    // effective hop doubles (half as many columns per second), matching
-    // the 2× wider view.  This keeps effectiveZoom ≈ 1.0 on the frontend.
-    let zoom = f64::from(zoom_level.clamp(0.001, 1.0));
-    // Intentional: REFERENCE_HOP is a small compile-time constant, zoom is
-    // clamped to (0.001, 1.0] so the quotient is finite and positive, and
-    // rounding to usize cannot be negative.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    let target_effective_hop = (REFERENCE_HOP as f64 / zoom).round() as usize;
-    (target_effective_hop / hop).max(1)
-}
-
 fn output_interval_for_hop(hop: usize, zoom_level: f32) -> f64 {
     if hop == 0 {
         return 1.0;
