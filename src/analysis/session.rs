@@ -69,11 +69,25 @@ fn usize_to_f64_approx(v: usize) -> f64 {
     r
 }
 
-fn decimation_factor_for_hop(hop: usize) -> usize {
+fn decimation_factor_for_hop(hop: usize, zoom_level: f32) -> usize {
     if hop == 0 {
         return 1;
     }
-    (REFERENCE_HOP / hop).max(1)
+    // Target effective_hop = round(REFERENCE_HOP / zoom), so the output
+    // column rate adapts to the visible time span.  At zoom=0.5 the
+    // effective hop doubles (half as many columns per second), matching
+    // the 2× wider view.  This keeps effectiveZoom ≈ 1.0 on the frontend.
+    let zoom = f64::from(zoom_level.clamp(0.001, 1.0));
+    // Intentional: REFERENCE_HOP is a small compile-time constant, zoom is
+    // clamped to (0.001, 1.0] so the quotient is finite and positive, and
+    // rounding to usize cannot be negative.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let target_effective_hop = (REFERENCE_HOP as f64 / zoom).round() as usize;
+    (target_effective_hop / hop).max(1)
 }
 
 fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
@@ -344,7 +358,7 @@ fn centered_staging_decode(
     let decimation_factor = if zoom_level > 1.0 {
         1
     } else {
-        decimation_factor_for_hop(hop_size)
+        decimation_factor_for_hop(hop_size, zoom_level)
     };
 
     let mut stfts: Vec<StftComputer> = (0..channel_count)
@@ -746,7 +760,7 @@ fn run_spectrogram_session(
     let decimation_factor = if zoom_level > 1.0 {
         1 // Bypass decimation -- keep all STFT rows for fine temporal resolution
     } else {
-        decimation_factor_for_hop(hop_size)
+        decimation_factor_for_hop(hop_size, zoom_level)
     };
     let effective_hop = hop_size * decimation_factor;
     let cols_per_second = f64::from(effective_rate) / usize_to_f64_approx(effective_hop);
@@ -1385,7 +1399,7 @@ fn handle_session_seek(
     let decimation_factor = if session.zoom_level > 1.0 {
         1
     } else {
-        decimation_factor_for_hop(session.hop_size)
+        decimation_factor_for_hop(session.hop_size, session.zoom_level)
     };
     session.stfts = (0..session.channel_count)
         .map(|_| StftComputer::new(session.fft_size, session.hop_size))
@@ -2333,7 +2347,7 @@ mod tests {
         let fft_size = 512;
         let hop_size = 128;
         let bins_per_column = (fft_size / 2) + 1;
-        let decimation_factor = decimation_factor_for_hop(hop_size);
+        let decimation_factor = decimation_factor_for_hop(hop_size, 1.0);
 
         let mut stft = StftComputer::new(fft_size, hop_size);
         let mut decimator = SpectrogramDecimator::new(decimation_factor);

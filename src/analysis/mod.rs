@@ -229,6 +229,9 @@ struct WaveformDecodeJob {
     path: PathBuf,
 }
 
+// The bools in this struct are independent flags with distinct semantics;
+// collapsing them into enums or a bitset would reduce clarity without benefit.
+#[allow(clippy::struct_excessive_bools)]
 struct AnalysisRuntimeState {
     snapshot: AnalysisSnapshot,
     pending_channels: Vec<AnalysisSpectrogramChannel>,
@@ -270,6 +273,11 @@ struct AnalysisRuntimeState {
     /// Used to determine whether a seek falls within the already-decoded
     /// window, avoiding unnecessary session restarts.
     spectrogram_session_start: f64,
+    /// The margin (in seconds) that was used when the current session
+    /// started.  Used in the seek-within-window check so that widget
+    /// width changes (e.g. entering/exiting fullscreen) don't shrink
+    /// the effective window below the actual decode extent.
+    spectrogram_session_margin: f64,
     /// Suppresses the next `PositionUpdate` forwarded to the spectrogram
     /// worker after a centered-mode seek.  Without this, the position
     /// update from the playback snapshot can reach the worker before the
@@ -413,6 +421,7 @@ impl AnalysisRuntimeState {
             spectrogram_position_offset: 0.0,
             last_spectrogram_position: 0.0,
             spectrogram_session_start: 0.0,
+            spectrogram_session_margin: 30.0,
             suppress_next_spectrogram_position_update: false,
             active_session_effective_rate: 0,
             active_session_channel_count: 0,
@@ -943,6 +952,7 @@ impl AnalysisRuntimeState {
             return;
         };
         self.spectrogram_session_start = start_seconds;
+        self.spectrogram_session_margin = self.centered_margin_seconds();
         // update_session_compat_params is already called by
         // handle_track_change before start_spectrogram_session; skip the
         // redundant probe here to avoid a second CIFS roundtrip.
@@ -984,23 +994,44 @@ impl AnalysisRuntimeState {
 
     /// Compute the pre-decode margin for centered mode: how many seconds
     /// before the playhead to start decoding.  Based on the actual widget
-    /// width, sample rate, and zoom level, plus a small buffer.
+    /// width, sample rate, zoom level, plus a small buffer.
     fn centered_margin_seconds(&self) -> f64 {
         let effective_hop = if self.zoom_level > 1.0 {
             self.hop_size
         } else {
-            REFERENCE_HOP
+            // Match the zoom-adapted decimation: at sub-1.0 zoom, columns
+            // are coarser, so effective_hop = base_hop * decimation_factor.
+            // Using REFERENCE_HOP here would underestimate the visible time
+            // span by the decimation factor, causing seeks within the
+            // already-decoded region to trigger unnecessary session restarts.
+            let base_hop = (self.fft_size / 8).max(64);
+            let zoom = f64::from(self.zoom_level.max(0.001));
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let target = (REFERENCE_HOP as f64 / zoom).round() as usize;
+            let factor = (target / base_hop).max(1);
+            base_hop * factor
         };
         let rate = self.active_session_effective_rate;
         if rate > 0 && effective_hop > 0 {
+            // effective_hop and REFERENCE_HOP are hop sizes (small usize);
+            // precision loss from usize→f64 is negligible for these values.
+            #[allow(clippy::cast_precision_loss)]
             let cols_per_second = f64::from(rate) / effective_hop as f64;
             let width = f64::from(self.spectrogram_widget_width);
+            #[allow(clippy::cast_precision_loss)]
+            let effective_zoom =
+                f64::from(self.zoom_level) * effective_hop as f64 / REFERENCE_HOP as f64;
+            let visible_cols = width / effective_zoom.max(0.01);
             // Full screen width in seconds plus 2 s for STFT warmup.
             // A full width (not half) is needed because near the end of
             // a track the playhead detaches from center and moves right,
             // making the visible left edge up to one full screen width
             // behind the playhead position.
-            let full_screen = width / cols_per_second;
+            let full_screen = visible_cols / cols_per_second;
             full_screen + 2.0
         } else {
             // No rate info yet (first track load) — use generous fallback.
@@ -1044,7 +1075,15 @@ impl AnalysisRuntimeState {
             // the seek is inside, the data is already in the ring buffer
             // — just send a PositionUpdate so the display shifts without
             // a costly session restart.
-            let margin = self.centered_margin_seconds();
+            // Use the larger of the current margin and the session's
+            // original margin.  The widget width can change between
+            // session start and seek (e.g. fullscreen toggle), which
+            // changes centered_margin_seconds().  Using only the current
+            // margin would flag seeks within the decoded extent as
+            // "outside window" after width shrinks, causing unnecessary
+            // session restarts and data loss.
+            let current_margin = self.centered_margin_seconds();
+            let margin = current_margin.max(self.spectrogram_session_margin);
             let window_seconds = margin * 2.0 + 10.0;
             let window_start = self.spectrogram_session_start;
             let window_end = window_start + window_seconds;
@@ -1056,11 +1095,11 @@ impl AnalysisRuntimeState {
             if visible_left >= window_start && position_seconds <= window_end {
                 // Seek within decoded window — cheap position update.
                 let adjusted = position_seconds + self.spectrogram_position_offset;
-                let _ = ctx.spectrogram_cmd_tx.send(
-                    SpectrogramWorkerCommand::PositionUpdate {
+                let _ = ctx
+                    .spectrogram_cmd_tx
+                    .send(SpectrogramWorkerCommand::PositionUpdate {
                         position_seconds: adjusted,
-                    },
-                );
+                    });
             } else {
                 // Seek outside decoded window — restart session and clear
                 // the ring buffer.
@@ -1072,25 +1111,26 @@ impl AnalysisRuntimeState {
                 // during which old ring data can be briefly visible at the
                 // new playhead position.
                 let synth_channel_count =
-                    u8::try_from(self.active_session_channel_count.max(1))
-                        .unwrap_or(u8::MAX);
-                let _ = ctx.event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
-                    PrecomputedSpectrogramChunk {
-                        track_token: self.active_track_token,
-                        columns_u8: Vec::new(),
-                        bins_per_column: 0,
-                        column_count: 0,
-                        channel_count: synth_channel_count,
-                        start_column_index: 0,
-                        total_columns_estimate: 0,
-                        sample_rate_hz: 0,
-                        hop_size: 0,
-                        coverage_seconds: 0.0,
-                        complete: false,
-                        buffer_reset: true,
-                        clear_history: true,
-                    },
-                ));
+                    u8::try_from(self.active_session_channel_count.max(1)).unwrap_or(u8::MAX);
+                let _ = ctx
+                    .event_tx
+                    .send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                        PrecomputedSpectrogramChunk {
+                            track_token: self.active_track_token,
+                            columns_u8: Vec::new(),
+                            bins_per_column: 0,
+                            column_count: 0,
+                            channel_count: synth_channel_count,
+                            start_column_index: 0,
+                            total_columns_estimate: 0,
+                            sample_rate_hz: 0,
+                            hop_size: 0,
+                            coverage_seconds: 0.0,
+                            complete: false,
+                            buffer_reset: true,
+                            clear_history: true,
+                        },
+                    ));
                 // Suppress the next PositionUpdate to prevent a race: the
                 // playback snapshot may send a PositionUpdate at the new
                 // position before the worker processes our NewTrack.
