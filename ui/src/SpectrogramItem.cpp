@@ -1287,10 +1287,15 @@ void SpectrogramItem::feedPrecomputedChunk(
     // has enough data to cover the visible display.
     if (m_zoomFillActive) {
         const int screenWidth = std::max(static_cast<int>(width()), 1);
+        // Use the ring fill count (valid columns in the ring), NOT
+        // m_precomputedMaxColumnIndex (absolute column index from
+        // track start).  The session may start mid-track, giving
+        // maxColumnIndex=5907 immediately while the ring has 1 column.
+        const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
         const int fillTarget = m_precomputedTotalColumnsEstimate > 0
             ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
             : screenWidth;
-        if (m_precomputedMaxColumnIndex + 1 >= fillTarget - 16) {
+        if (ringFill >= fillTarget - 16) {
             m_zoomFillActive = false;
             m_precomputedCanvasDirty = true;
         }
