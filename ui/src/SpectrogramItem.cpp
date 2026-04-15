@@ -1042,16 +1042,20 @@ void SpectrogramItem::feedPrecomputedChunk(
             if (!m_zoomDebounceTimer->isActive()) {
                 m_awaitingZoomData = false;
             }
-            // Use the actual zoom level as the render zoom.  With
-            // zoom-adapted decimation, effectiveZoom = zoomLevel * hop / ref
-            // is ≈1.0 for most zoom levels, but at the extremes (max
-            // zoom-out) integer truncation in the decimation factor means
-            // effectiveZoom can be slightly below 1.0.  Using zoomLevel
-            // directly (instead of snapping to refHop/hop which forces
-            // exactly 1.0) ensures ALL downstream consumers — canvas
-            // rebuild, advance path, EOF clamping, crosshair overlay,
-            // time grid — see the true effective zoom.
-            m_renderZoomLevel = m_zoomLevel;
+            // Snap renderZoomLevel so effectiveZoom = renderZoom × hop / ref
+            // equals 1.0.  With zoom-adapted decimation the backend adjusts
+            // the output column rate to match the zoom, so the 1.0 snap is
+            // correct at all zoom levels.  Keeping effectiveZoom at 1.0 lets
+            // the fast incremental advance path work at all zoom levels and
+            // avoids rebuild/advance mismatches that cause edge gaps and
+            // visual blurring.
+            if (m_precomputedHopSize > 0
+                && m_precomputedHopSize != static_cast<int>(kReferenceHopSamples)) {
+                m_renderZoomLevel = kReferenceHopSamples
+                    / static_cast<double>(m_precomputedHopSize);
+            } else {
+                m_renderZoomLevel = m_zoomLevel;
+            }
             m_crosshairDirty = true;
         }
         if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
@@ -3639,12 +3643,10 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayLeft,
     qint64 displayRight,
     bool rollingMode) {
-    // Incremental advance works at near-1:1 column-to-pixel mapping.
-    // The 0.01 tolerance accommodates hop rounding at non-power-of-2
-    // zoom levels (e.g., zoom=7.45 gives effectiveZoom=0.997).  The
-    // small deviation (<1%) causes at most a few pixels of drift at
-    // the canvas edge, corrected on the next full rebuild.
-    if (std::abs(effectiveZoomLocked() - 1.0) > 0.01) {
+    // Incremental advance only works at 1:1 column-to-pixel mapping.
+    // The render-zoom snap in feedPrecomputedChunk ensures effectiveZoom
+    // is exactly 1.0 at all zoom levels, so this threshold is always met.
+    if (std::abs(effectiveZoomLocked() - 1.0) > 0.001) {
         return false;
     }
     if (m_canvas.isNull()
