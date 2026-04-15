@@ -1404,8 +1404,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_gaplessPositionOffset = 0.0;
     m_centeredGaplessTransitionAt = {};
     m_precomputedMaxColumnIndex = -1;
-    m_precomputedCanvasDisplayLeft = 0;
-    m_precomputedCanvasDisplayRight = -1;
+    if (!m_zoomFillActive) {
+        m_precomputedCanvasDisplayLeft = 0;
+        m_precomputedCanvasDisplayRight = -1;
+    }
     const bool preserveRollingHistory =
         !clearHistoryOnReset &&
         m_displayMode == 0
@@ -1436,7 +1438,14 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
     m_timeGridDirty = true;
-    invalidateCanvas();
+    // During a zoom fill, preserve the old canvas so updatePaintNode
+    // can keep showing it while the ring refills at the new hop.
+    if (m_zoomFillActive && !m_canvas.isNull()) {
+        // Keep old canvas — canvasFreeze in updatePaintNode will
+        // prevent rebuild/advance until the ring covers the display.
+    } else {
+        invalidateCanvas();
+    }
 }
 
 qint64 SpectrogramItem::currentRollingDisplayRightLocked(
