@@ -1053,16 +1053,19 @@ void SpectrogramItem::feedPrecomputedChunk(
             if (!m_zoomDebounceTimer->isActive()) {
                 m_awaitingZoomData = false;
             }
-            // Use the actual zoom level as the render zoom.  With
-            // zoom-adapted decimation, effectiveZoom = zoomLevel * hop / ref
-            // is ≈1.0 for most zoom levels, but at the extremes (max
-            // zoom-out) integer truncation in the decimation factor means
-            // effectiveZoom can be slightly below 1.0.  Using zoomLevel
-            // directly (instead of snapping to refHop/hop which forces
-            // exactly 1.0) ensures ALL downstream consumers — canvas
-            // rebuild, advance path, EOF clamping, crosshair overlay,
-            // time grid — see the true effective zoom.
-            m_renderZoomLevel = m_zoomLevel;
+            // Snap renderZoomLevel so effectiveZoom = renderZoom × hop / ref
+            // equals exactly 1.0.  Without this snap, hop rounding at
+            // non-power-of-2 zoom levels (e.g. zoom=3.815 → hop=268 →
+            // effectiveZoom=0.998) causes the advance path to fail,
+            // forcing 42ms full rebuilds every frame.
+            if (m_precomputedHopSize > 0
+                && m_precomputedHopSize
+                    != static_cast<int>(kReferenceHopSamples)) {
+                m_renderZoomLevel = kReferenceHopSamples
+                    / static_cast<double>(m_precomputedHopSize);
+            } else {
+                m_renderZoomLevel = m_zoomLevel;
+            }
             m_crosshairDirty = true;
         }
         if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
@@ -1318,6 +1321,13 @@ void SpectrogramItem::feedPrecomputedChunk(
 
         if (ringHasEnoughColumns && ringCoversDisplayRight) {
             m_zoomFillActive = false;
+            // Force a clean rebuild: invalidate the old canvas so
+            // needsFullRebuild fires (canvas.isNull()).  This ensures
+            // no stale pixels from the frozen canvas leak into the
+            // new display range.
+            invalidateCanvas();
+            m_precomputedCanvasDisplayLeft = 0;
+            m_precomputedCanvasDisplayRight = -1;
             m_precomputedCanvasDirty = true;
         }
     }
