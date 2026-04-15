@@ -1031,8 +1031,28 @@ void SpectrogramItem::feedPrecomputedChunk(
         // the backend streams enough data to cover the visible window.
         // When enough columns have arrived, the render zoom is applied and
         // the canvas is rebuilt with complete data — no left-to-right fill.
-        // The deferred zoom snap is handled below (after data is fed
-        // into the ring so m_precomputedMaxColumnIndex is up to date).
+        if (m_awaitingZoomData && (appliedReset || appliedImplicitReset)) {
+            // Don't consume the awaiting flag if the zoom debounce timer
+            // is still running — a zoom change command hasn't been sent
+            // to the backend yet.
+            if (!m_zoomDebounceTimer->isActive()) {
+                m_awaitingZoomData = false;
+            }
+            // Snap renderZoomLevel IMMEDIATELY so effectiveZoom is always
+            // correct (1.0).  The visual canvas update is deferred by
+            // checking m_awaitingZoomData in updatePaintNode — the old
+            // canvas stays visible until the ring fills, then a single
+            // dirty rebuild shows the complete new spectrogram.
+            if (m_precomputedHopSize > 0
+                && m_precomputedHopSize
+                    != static_cast<int>(kReferenceHopSamples)) {
+                m_renderZoomLevel = kReferenceHopSamples
+                    / static_cast<double>(m_precomputedHopSize);
+            } else {
+                m_renderZoomLevel = m_zoomLevel;
+            }
+            m_crosshairDirty = true;
+        }
         if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
             const double seekPositionSeconds =
                 static_cast<double>(startIndex * m_precomputedHopSize)
@@ -1271,12 +1291,14 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
     }
 
-    // Deferred zoom snap: apply the render zoom only when the ring has
-    // enough data to fill the visible display.  This keeps the OLD canvas
-    // visible during the fill, then swaps to the new data in a single
-    // clean rebuild — avoiding the black region from rendering a
-    // partially-filled ring.
+    // Canvas readiness: while m_awaitingZoomData is true (zoom snap
+    // already fired above, but the flag stays until timer is inactive),
+    // updatePaintNode skips canvas updates so the old frame stays
+    // visible.  When the ring covers the display, mark dirty so the
+    // next paint does a clean rebuild.
     if (m_awaitingZoomData && !m_zoomDebounceTimer->isActive()) {
+        // The snap already fired (above).  Check if the ring now
+        // covers the visible display and clear the flag.
         const int screenWidth = std::max(static_cast<int>(width()), 1);
         const bool hasEnoughData =
             m_precomputedMaxColumnIndex + 1 >= screenWidth
@@ -1285,14 +1307,6 @@ void SpectrogramItem::feedPrecomputedChunk(
                     >= m_precomputedTotalColumnsEstimate);
         if (hasEnoughData) {
             m_awaitingZoomData = false;
-            if (m_precomputedHopSize > 0
-                && m_precomputedHopSize
-                    != static_cast<int>(kReferenceHopSamples)) {
-                m_renderZoomLevel = kReferenceHopSamples
-                    / static_cast<double>(m_precomputedHopSize);
-            } else {
-                m_renderZoomLevel = m_zoomLevel;
-            }
             m_precomputedCanvasDirty = true;
             m_crosshairDirty = true;
             m_timeGridDirty = true;
@@ -1947,7 +1961,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || displayRight < m_precomputedCanvasDisplayRight
                     || std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) > 0.001);
 
-            if (visibleCols > 0) {
+            // During a zoom transition (m_awaitingZoomData), the ring is
+            // being refilled with data at the new hop.  Skip canvas
+            // updates so the old frame stays visible until the ring
+            // covers the display.  feedPrecomputedChunk clears
+            // m_awaitingZoomData and sets dirty when data is ready.
+            const bool zoomFillActive =
+                m_awaitingZoomData && hasCanvasRange && !m_canvas.isNull();
+
+            if (visibleCols > 0 && !zoomFillActive) {
                 if (needsFullRebuild || m_precomputedCanvasDirty) {
                     rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
                 } else if (rangeChanged) {
@@ -3597,9 +3619,18 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
 
     const qint64 sourceColumns = displayRight - displayLeft + 1;
     const double rebuildEffectiveZoom = effectiveZoomLocked();
-    const int drawPixels = std::min(width,
+    int drawPixels = std::min(width,
         static_cast<int>(std::ceil(
             static_cast<double>(sourceColumns) * rebuildEffectiveZoom)));
+    // At max zoom-out, hop rounding can produce 1–2 fewer columns than
+    // the canvas width.  Pad to width when the display covers nearly
+    // all the content — the colFirst clamping in the loop repeats the
+    // last column for the extra pixels.
+    if (drawPixels < width
+        && displayLeft == 0
+        && sourceColumns + 5 >= static_cast<qint64>(width)) {
+        drawPixels = width;
+    }
     const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
     const auto dbRemap = buildPrecomputedDbRemapLocked();
 
