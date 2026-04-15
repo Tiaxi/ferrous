@@ -429,6 +429,7 @@ private slots:
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
+    void spectrogramPeakHoldRebuildUsesMaxNotNearest();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -3327,6 +3328,57 @@ void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
     // Ring capacity should NOT be 100000 (full track).
     // It should be bounded to ~3 screen widths + lookahead.
     QVERIFY(item.m_ringCapacity < 20000);
+}
+
+void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(10);
+    item.setDisplayMode(1); // Centered
+
+    // Feed 150 columns into a 100px widget at effectiveZoom=0.8.
+    // zoom=0.8, hop=1024 -> effectiveZoom = 0.8 * 1024/1024 = 0.8.
+    // columnsPerPixel = 1/0.8 = 1.25.  Since 1.25 > 1.0, the rebuild
+    // enters the peak-hold path (colFirst < colLast && !interpolate).
+    // drawPixels = min(100, ceil(150 * 0.8)) = 100.
+    constexpr int bins = 4;
+    constexpr int cols = 150;
+    QByteArray chunk(bins * cols, '\x10'); // dark baseline (0x10)
+
+    // Make column 50 bright: set all bins to 0xF0.
+    for (int b = 0; b < bins; ++b) {
+        chunk[50 * bins + b] = static_cast<char>(static_cast<unsigned char>(0xF0));
+    }
+
+    item.setZoomLevel(0.8);
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, cols,
+        0, cols, 48000, 1024, true,
+        true, 1, false);
+
+    QVERIFY(item.precomputedReady());
+
+    // Trigger a rebuild directly so we can inspect canvas pixels.
+    // The debounce timer is still active in the test (no event loop),
+    // so m_awaitingZoomData was not consumed by feedPrecomputedChunk.
+    // Force m_renderZoomLevel to match m_zoomLevel so effectiveZoom=0.8.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 0.8;
+        item.ensureMapping(10);
+        item.rebuildPrecomputedCanvasLocked(100, 10, 0, cols - 1, false);
+    }
+
+    // Column 50 at columnsPerPixel=1.25:
+    //   pixel 40 -> rangeStart=50.0, rangeEnd=51.25
+    //   colFirst=50, colLast=51 -> peak-hold across cols 50-51.
+    // The bright column 50 (0xF0) is in this range, so pixel 40
+    // should be significantly brighter than pixel 0 (dark baseline).
+    QVERIFY(!item.m_canvas.isNull());
+    const QRgb brightPixel = item.m_canvas.pixel(40, 5);
+    const QRgb darkPixel = item.m_canvas.pixel(0, 5);
+    QVERIFY(qRed(brightPixel) + qGreen(brightPixel) + qBlue(brightPixel)
+            > qRed(darkPixel) + qGreen(darkPixel) + qBlue(darkPixel));
 }
 
 int main(int argc, char **argv) {

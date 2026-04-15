@@ -3557,24 +3557,39 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
 
     const bool interpolate = rebuildEffectiveZoom > 1.001;
     for (int px = 0; px < drawPixels; ++px) {
-        const double srcColF =
+        const double rangeStart =
             static_cast<double>(px) * columnsPerPixel;
-        const qint64 colL = std::min(
-            displayLeft + static_cast<qint64>(std::floor(srcColF)),
+        const double rangeEnd =
+            static_cast<double>(px + 1) * columnsPerPixel;
+        const qint64 colFirst = std::min(
+            displayLeft + static_cast<qint64>(std::floor(rangeStart)),
+            displayRight);
+        const qint64 colLast = std::min(
+            displayLeft
+                + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
             displayRight);
 
-        if (interpolate) {
+        if (colFirst < colLast && !interpolate) {
+            // Multiple source columns map to this pixel: peak-hold.
+            drawPeakHoldColumnRangeLocked(
+                px, colFirst, colLast, rollingMode, dbRemap);
+        } else if (interpolate) {
+            const double srcColF = rangeStart;
             const double t = srcColF - std::floor(srcColF);
             if (t > 0.001) {
-                const qint64 colR = std::min(colL + 1, displayRight);
-                if (colR != colL) {
+                const qint64 colR = std::min(colFirst + 1, displayRight);
+                if (colR != colFirst) {
                     drawInterpolatedColumnAtLocked(
-                        px, colL, colR, t, rollingMode, dbRemap);
+                        px, colFirst, colR, t, rollingMode, dbRemap);
                     continue;
                 }
             }
+            drawPrecomputedColumnAtLocked(
+                px, colFirst, rollingMode, dbRemap);
+        } else {
+            drawPrecomputedColumnAtLocked(
+                px, colFirst, rollingMode, dbRemap);
         }
-        drawPrecomputedColumnAtLocked(px, colL, rollingMode, dbRemap);
     }
 
     m_canvasWriteX = width > 0 ? (drawPixels % width) : 0;
