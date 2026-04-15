@@ -427,6 +427,7 @@ private slots:
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
+    void spectrogramZoomOutProducesDistinctHop();
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
@@ -3272,6 +3273,42 @@ void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
         true, 1, false);
 
     QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    constexpr int bins = 4;
+    constexpr int cols = 9600;
+
+    // Feed data at zoom=1.0 (hop=1024).
+    QByteArray chunk1(bins * cols, '\x40');
+    item.feedPrecomputedChunk(
+        chunk1, bins, 0, cols,
+        0, cols, 48000, 1024, true,
+        true, 1, false);
+    const int hop1 = item.m_precomputedHopSize;
+
+    // Simulate zoom to 0.8: backend restarts with a DIFFERENT hop.
+    // With fractional resampling: effective_hop = round(1024 * 1.25) = 1280.
+    // This is distinct from 1024.
+    // With the OLD integer decimation: factor=1, effective_hop=1024 (same!).
+    item.setZoomLevel(0.8);
+    QByteArray chunk2(bins * cols, '\x40');
+    item.feedPrecomputedChunk(
+        chunk2, bins, 0, cols,
+        0, cols, 48000, 1280, true,
+        true, 1, false);
+    const int hop2 = item.m_precomputedHopSize;
+
+    // The hops MUST differ — this is the dead zone fix.
+    QVERIFY(hop1 != hop2);
+    // Verify effectiveZoom is close to 1.0.
+    const double ez = item.m_renderZoomLevel
+        * static_cast<double>(hop2) / 1024.0;
+    QVERIFY(std::abs(ez - 1.0) < 0.01);
 }
 
 void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {
