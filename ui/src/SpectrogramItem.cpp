@@ -1294,12 +1294,19 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (m_awaitingZoomData && !m_zoomDebounceTimer->isActive()) {
         // The snap already fired (above).  Check if the ring now
         // covers the visible display and clear the flag.
+        // At max zoom-out, the total columns for the track can be
+        // LESS than the widget width (e.g., 1183 columns on a 3440px
+        // display).  Cap the target at the total estimate so the
+        // check passes when the full track is decoded.  The -16
+        // margin accounts for STFT edge effects (the last few columns
+        // can't be computed because the analysis window extends past
+        // the end of the file).
         const int screenWidth = std::max(static_cast<int>(width()), 1);
+        const int fillTarget = m_precomputedTotalColumnsEstimate > 0
+            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
+            : screenWidth;
         const bool hasEnoughData =
-            m_precomputedMaxColumnIndex + 1 >= screenWidth
-            || (m_precomputedTotalColumnsEstimate > 0
-                && m_precomputedMaxColumnIndex + 1
-                    >= m_precomputedTotalColumnsEstimate);
+            m_precomputedMaxColumnIndex + 1 >= fillTarget - 16;
         if (hasEnoughData) {
             m_awaitingZoomData = false;
             m_precomputedCanvasDirty = true;
