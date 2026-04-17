@@ -280,6 +280,14 @@ private:
     std::vector<quint64> m_ringTrackToken; // per slot: track token stored there, or 0
     QHash<quint64, QHash<qint32, qint64>> m_trackColumnToSeqByToken;
     int m_ringCapacity{0};            // number of column slots
+    // Max widget width ever observed.  The ring capacity calculation
+    // uses it as a floor so the ring stays large enough to hold the
+    // Rust decoder's lookahead (which is sized against the Rust-side
+    // max-widget-width tracker).  Otherwise a fullscreen→windowed
+    // transition resets the ring to the current small width while the
+    // decoder continues producing at the fullscreen lookahead, evicting
+    // the left-margin columns and painting black around the playhead.
+    int m_maxWidgetWidthSeen{0};
     qint64 m_ringWriteSeq{0};         // next write-order sequence number
     qint64 m_ringOldestSeq{0};        // oldest write-order sequence still retained
     qint64 m_trackEpochSeq{0};        // legacy reset bookkeeping

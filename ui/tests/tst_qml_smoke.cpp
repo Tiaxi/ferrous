@@ -399,6 +399,7 @@ private slots:
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
+    void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -2165,6 +2166,67 @@ void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
     // visibleWindowCols (1200) cols.
     QCOMPARE(item.m_precomputedCanvasDisplayLeft,
              static_cast<qint64>(maxColIndex) - 1199);
+}
+
+void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
+    // Regression: the centered ring resets on every session restart
+    // (e.g. zoom change on fullscreen toggle) and recomputes its cap
+    // from the CURRENT widget width.  The Rust decoder's lookahead is
+    // sized against the MAX widget width ever seen, so after a
+    // fullscreen->windowed transition the decoder produces farther
+    // ahead than the shrunken ring can hold and evicts the left-margin
+    // cols around the playhead, painting black.  The ring cap must
+    // also track the max widget width so both sides stay in sync.
+    SpectrogramItem item;
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // max zoom
+    constexpr quint64 token = 1;
+
+    // Simulate fullscreen: widget at a wide width.  First data chunk
+    // triggers the ring-cap sizing path.
+    item.setWidth(3840);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, token);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, token);
+    const int fullscreenCap = item.m_ringCapacity;
+    QVERIFY2(fullscreenCap >= 3840,
+             qPrintable(QString("fullscreen ring cap too small: %1")
+                            .arg(fullscreenCap)));
+    QCOMPARE(item.m_maxWidgetWidthSeen, 3840);
+
+    // Simulate the session reset that the backend emits on a zoom
+    // change: bins=0 + bufferReset + clearHistory triggers the
+    // synthetic-clear path that zeroes the ring capacity.
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0, 0, 0,
+        0, 0, false, true, token, true);
+    QCOMPARE(item.m_ringCapacity, 0);
+
+    // Now shrink to windowed width.  The next data chunks (a proper
+    // worker reset followed by data) must still allocate a ring cap
+    // at least as large as the fullscreen run so the decoder's
+    // max-width-sized lookahead fits without evicting left-margin
+    // cols around the playhead.
+    item.setWidth(1213);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, token);
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, token);
+    QVERIFY2(item.m_ringCapacity >= fullscreenCap,
+             qPrintable(QString("post-shrink ring cap %1 < fullscreen cap %2")
+                            .arg(item.m_ringCapacity)
+                            .arg(fullscreenCap)));
+    QCOMPARE(item.m_maxWidgetWidthSeen, 3840);
 }
 
 void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {

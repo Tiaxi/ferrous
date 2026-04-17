@@ -1141,7 +1141,17 @@ void SpectrogramItem::feedPrecomputedChunk(
         const double colsPerSecond =
             static_cast<double>(m_precomputedSampleRateHz)
             / static_cast<double>(m_precomputedHopSize);
-        const int screenWidth = std::max(static_cast<int>(width()), 1920);
+        // Track the max widget width so the ring can hold enough cols
+        // to cover the Rust decoder's lookahead even after a session
+        // reset that shrinks the current widget.  Without this, going
+        // fullscreen→windowed at high zoom leaves the decoder producing
+        // at the fullscreen lookahead while the ring is sized for the
+        // smaller current window, evicting the left-margin cols around
+        // the playhead.
+        const int currentWidth = static_cast<int>(width());
+        m_maxWidgetWidthSeen = std::max(m_maxWidgetWidthSeen, currentWidth);
+        const int screenWidth = std::max(
+            {currentWidth, 1920, m_maxWidgetWidthSeen});
         const int extraSeconds = 10;
         int neededCapacity;
         if (m_displayMode == 1) {
