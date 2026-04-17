@@ -214,6 +214,7 @@ pub(super) enum SpectrogramWorkerCommand {
 pub(super) struct SpectrogramWorkerHandles {
     pub(super) cmd_tx: Sender<SpectrogramWorkerCommand>,
     pub(super) decode_generation: Arc<AtomicU64>,
+    pub(super) columns_produced: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -973,7 +974,12 @@ fn run_spectrogram_session(
                 return Some(cmd);
             }
             None => {
-                // Natural EOF with no pending continuation.
+                // Natural EOF with no pending continuation.  Emit a
+                // finalize chunk so Qt learns the true decoded extent
+                // and can detach the centered-mode playhead from center
+                // as playback approaches the actual end (the file
+                // metadata estimate often overshoots by seconds).
+                session_emit_finalize_chunk(&session, event_tx);
                 profile_eprintln!(
                     "[spect-worker] SESSION END (EOF) elapsed={:.1}ms cols_produced={}",
                     _start.elapsed().as_secs_f64() * 1000.0,
@@ -1779,6 +1785,35 @@ fn flush_chunk_before_lookahead_park(
         return;
     }
     session_flush_chunk(session, event_tx, columns_produced_out);
+}
+
+/// Emit a finalize chunk carrying the actual decoded column count as
+/// `total_columns_estimate`.  Qt uses this to shrink its
+/// `m_precomputedTotalColumnsEstimate` so the centered-mode EOF clamp
+/// fires at the true end of decoded audio instead of the file-metadata
+/// estimate (which may overshoot by seconds at high zoom).
+fn session_emit_finalize_chunk(
+    session: &SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+) {
+    let final_cols = u64_to_u32_saturating(session.columns_produced);
+    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+        PrecomputedSpectrogramChunk {
+            track_token: session.track_token,
+            columns_u8: Vec::new(),
+            bins_per_column: clamp_to_u16(session.bins_per_column),
+            column_count: 0,
+            channel_count: clamp_to_u8(session.channel_count),
+            start_column_index: final_cols,
+            total_columns_estimate: final_cols,
+            sample_rate_hz: session.effective_rate,
+            hop_size: clamp_to_u16(session.effective_hop),
+            coverage_seconds: 0.0,
+            complete: true,
+            buffer_reset: false,
+            clear_history: false,
+        },
+    ));
 }
 
 // ---------------------------------------------------------------------------

@@ -757,18 +757,40 @@ void SpectrogramItem::setZoomEnabled(bool value) {
 void SpectrogramItem::feedPrecomputedChunk(
     const QByteArray &data, int bins, int channelIndex,
     int columns, int startIndex, int totalEstimate,
-    int sampleRate, int hopSize, bool /*complete*/,
+    int sampleRate, int hopSize, bool complete,
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset) {
     using Clock = std::chrono::steady_clock;
     QMutexLocker lock(&m_stateMutex);
 
     FERROUS_SPECTROGRAM_LOGF(stderr,
-        "[Qt-feed@%p] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d reset=%d clear=%d await=%d\n",
+        "[Qt-feed@%p] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d reset=%d clear=%d await=%d complete=%d\n",
         static_cast<const void *>(this),
         channelIndex, columns, startIndex, totalEstimate, bins,
         sampleRate, hopSize, static_cast<unsigned long long>(trackToken),
         m_precomputedReady ? 1 : 0, bufferReset ? 1 : 0,
-        clearHistoryOnReset ? 1 : 0, m_awaitingWorkerReset ? 1 : 0);
+        clearHistoryOnReset ? 1 : 0, m_awaitingWorkerReset ? 1 : 0,
+        complete ? 1 : 0);
+
+    // Finalize chunk: carries the true decoded-column count for the
+    // matching track so the centered-mode EOF clamp fires at the real
+    // audio end instead of the file-metadata estimate (which may
+    // overshoot by seconds, especially at high zoom).  Apply only when
+    // the token matches the current track — a stale finalize for a
+    // superseded track would otherwise corrupt the new-track estimate.
+    // Skip all other reset / ring / canvas logic; only the estimate
+    // needs to change.
+    if (complete && columns == 0 && !bufferReset && !clearHistoryOnReset) {
+        if (totalEstimate > 0
+            && (m_precomputedCommittedToken == 0
+                || trackToken == m_precomputedCommittedToken)
+            && m_precomputedTotalColumnsEstimate > 0
+            && static_cast<int>(totalEstimate) < m_precomputedTotalColumnsEstimate) {
+            m_precomputedTotalColumnsEstimate = totalEstimate;
+            m_precomputedCanvasDirty = true;
+            update();
+        }
+        return;
+    }
 
     // Allow buffer_reset chunks with no data (bins=0) through so the ring
     // can be cleared immediately. These are emitted by the analysis thread
@@ -853,6 +875,23 @@ void SpectrogramItem::feedPrecomputedChunk(
         // Immediate ring clear from a synthetic reset chunk (emitted by
         // the analysis thread on far seeks).  Clear the ring and block
         // all subsequent data until the worker's proper reset arrives.
+        //
+        // Preserve the old canvas across the seek in centered mode when
+        // there's a valid image to show.  Without this, the display
+        // goes fully black for ~100 ms while the decoder catches up
+        // from (pos - margin) to the new playhead — very visible at
+        // max zoom-in where the visible window is only a couple of
+        // seconds wide.  The existing canvasFreeze machinery handles
+        // the brief interval; readiness clears once the new session
+        // has produced enough columns to cover the new display range.
+        const bool preserveCanvasForSeek =
+            !m_canvas.isNull()
+            && m_displayMode == 1
+            && m_precomputedCanvasDisplayRight
+                >= m_precomputedCanvasDisplayLeft
+            && m_precomputedTotalColumnsEstimate > 0
+            && m_precomputedBinsPerColumn > 0;
+
         m_ringWriteSeq = 0;
         m_ringOldestSeq = 0;
         m_ringCapacity = 0;
@@ -862,15 +901,24 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
         m_precomputedMaxColumnIndex = -1;
-        m_precomputedReady = false;
         m_precomputedCanvasDirty = true;
-        m_precomputedCanvasDisplayLeft = 0;
-        m_precomputedCanvasDisplayRight = -1;
         m_awaitingWorkerReset = true;
+
+        if (preserveCanvasForSeek) {
+            // Canvas, m_precomputedReady, and the stored display range
+            // all stay as-is so the paint keeps rendering the old
+            // image through canvasFreeze.
+            m_zoomFillActive = true;
+        } else {
+            m_precomputedReady = false;
+            m_precomputedCanvasDisplayLeft = 0;
+            m_precomputedCanvasDisplayRight = -1;
+            invalidateCanvas();
+        }
         FERROUS_SPECTROGRAM_LOGF(stderr,
-            "[Qt-synthetic-clear@%p] ring wiped, gate armed\n",
-            static_cast<const void *>(this));
-        invalidateCanvas();
+            "[Qt-synthetic-clear@%p] ring wiped, gate armed, preserved=%d\n",
+            static_cast<const void *>(this),
+            preserveCanvasForSeek ? 1 : 0);
         update();
         return;
     } else if (bufferReset && columns <= 0) {
@@ -1319,7 +1367,24 @@ void SpectrogramItem::feedPrecomputedChunk(
         const bool ringCoversDisplayRight =
             m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
 
-        if (ringHasEnoughColumns && ringCoversDisplayRight) {
+        // Decode tail-end: the STFT window truncates the last few
+        // columns so maxCol+1 stops short of the estimate by ~20–30
+        // columns.  At max zoom-out in wide fullscreen views,
+        // fillWidth ≈ totalEstimate and ringHasEnoughColumns would
+        // require ringFill to exceed that short-by-tail value —
+        // which it never does.  Without this bypass, the freeze
+        // persists forever and the old canvas leaves a slice of
+        // stale content at the right edge.  Once maxCol is within
+        // a reasonable slack of the estimate, no more data is
+        // coming; clear the freeze so the rebuild can run.
+        const bool decodeReachedEnd =
+            m_precomputedTotalColumnsEstimate > 0
+            && m_precomputedMaxColumnIndex >= 0
+            && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
+                >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
+
+        if ((ringHasEnoughColumns && ringCoversDisplayRight)
+            || decodeReachedEnd) {
             m_zoomFillActive = false;
             // Don't invalidateCanvas() here — the canvas must stay
             // non-null so the NEXT zoom transition can activate its
@@ -1875,15 +1940,26 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);
                 }
 
-                // The estimate includes ~64 columns of padding and may
-                // slightly overshoot the actual content.  When the decode
-                // has reached near the end of the track (maxCol within
-                // 128 of the estimate), use maxCol for precise right-edge
-                // clamping so the playhead detaches at the real content end.
-                // This does NOT fire during fill (maxCol is thousands of
-                // columns below the estimate), avoiding any sliding.
+                // The file-metadata estimate can overshoot the actual
+                // audible/decoded extent by seconds (e.g. trailing
+                // silence counted by container duration but trimmed
+                // during playback).  A fixed 128-column tolerance fails
+                // at high zoom where 128 cols is ~0.2 s and the gap is
+                // typically ~1 s.  Instead, whenever the decoder can't
+                // fill the right half of the centered window — i.e.
+                // maxCol is within one half-window of the playhead —
+                // use maxCol as the hard right edge.  During steady
+                // mid-track playback the decoder parks thousands of
+                // columns ahead of the playhead, so this clause is
+                // inert.  It activates at EOF (decoder stopped growing)
+                // and naturally drives playhead detachment from center
+                // toward the right edge, while keeping the displayed
+                // time axis bounded by real content so the crosshair
+                // never shows positions past the audible end.
                 if (maxColCount > 0
-                    && maxColCount + 128 >= estimateCount) {
+                    && static_cast<qint64>(maxColCount) - 1
+                        < static_cast<qint64>(nowCol)
+                            + static_cast<qint64>(halfWindowCols)) {
                     displayRight = std::min(displayRight, maxColCount - 1);
                     displayLeft = std::max<qint64>(
                         0, displayRight - static_cast<qint64>(visibleWindowCols) + 1);

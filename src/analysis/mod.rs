@@ -354,6 +354,7 @@ impl AnalysisEngine {
             SpectrogramWorkerHandles {
                 cmd_tx: spectrogram_cmd_tx,
                 decode_generation: spectrogram_decode_generation,
+                columns_produced: worker_columns_produced,
             },
         );
 
@@ -381,6 +382,11 @@ struct AnalysisContext<'a> {
     waveform_decode_active_token: &'a AtomicU64,
     spectrogram_cmd_tx: &'a Sender<SpectrogramWorkerCommand>,
     spectrogram_decode_generation: &'a AtomicU64,
+    /// Absolute column count the spectrogram decode worker has produced
+    /// for its current session.  Read by the analysis thread when a
+    /// gapless transition commits so it can emit a finalize chunk for
+    /// the outgoing track with the true decoded extent.
+    spectrogram_decode_columns_produced: &'a AtomicU64,
 }
 
 impl AnalysisRuntimeState {
@@ -489,6 +495,18 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::SetSpectrogramZoomLevel(level) => {
                 let level = level.clamp(0.05, 16.0);
+                // The Qt side fires this on width changes too (via the
+                // widthSettleTimer after a fullscreen toggle) with the
+                // unchanged zoom.  Restarting the session in that case
+                // wipes the ring and flashes black for ~100 ms while
+                // the decoder catches up — but the existing session's
+                // data is still valid at the same hop, and the Qt-side
+                // ring realloc + canvas rebuild handle the width change
+                // on their own.  Skip the restart when the zoom level
+                // hasn't actually changed.
+                if (self.zoom_level - level).abs() < 0.001 {
+                    return;
+                }
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
                 self.zoom_level = level;
@@ -696,6 +714,46 @@ impl AnalysisRuntimeState {
     /// Chunks are emitted individually (no consolidation) so the first
     /// chunk (carrying the buffer reset) reaches the bridge immediately
     /// without waiting for a costly memcpy pass over the full dataset.
+    /// Emit a 0-column finalize chunk for the outgoing track so Qt can
+    /// shrink its `total_columns_estimate` to the actual decoded extent
+    /// reported by the worker.  This is the signal the centered-mode
+    /// paint code uses to detach the playhead from center as playback
+    /// approaches the real end of the track.
+    fn emit_outgoing_track_finalize(&self, outgoing_track_token: u64, ctx: &AnalysisContext<'_>) {
+        if outgoing_track_token == 0 {
+            return;
+        }
+        let cols_produced = ctx
+            .spectrogram_decode_columns_produced
+            .load(Ordering::Relaxed);
+        if cols_produced == 0 {
+            return;
+        }
+        let final_cols = u32::try_from(cols_produced).unwrap_or(u32::MAX);
+        let bins_per_column = u16::try_from((self.fft_size / 2) + 1).unwrap_or(u16::MAX);
+        let channel_count =
+            u8::try_from(self.active_session_channel_count.max(1).min(255)).unwrap_or(u8::MAX);
+        let _ = ctx
+            .event_tx
+            .send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                PrecomputedSpectrogramChunk {
+                    track_token: outgoing_track_token,
+                    columns_u8: Vec::new(),
+                    bins_per_column,
+                    column_count: 0,
+                    channel_count,
+                    start_column_index: final_cols,
+                    total_columns_estimate: final_cols,
+                    sample_rate_hz: self.active_session_effective_rate,
+                    hop_size: 0,
+                    coverage_seconds: 0.0,
+                    complete: true,
+                    buffer_reset: false,
+                    clear_history: false,
+                },
+            ));
+    }
+
     fn drain_staged_centered_chunks(&mut self, track_token: u64, ctx: &AnalysisContext<'_>) -> u32 {
         // Signal staging thread to stop (non-blocking).
         if let Some(stop) = self.staged_centered_stop.take() {
@@ -800,6 +858,11 @@ impl AnalysisRuntimeState {
         #[cfg(feature = "profiling-logs")]
         let _track_change_start = std::time::Instant::now();
 
+        // Snapshot the outgoing track's identity before any updates so
+        // the centered-gapless path can emit a finalize chunk for it
+        // before the new track's staged chunks flood the event stream.
+        let outgoing_track_token = self.active_track_token;
+
         // Save previous compat params so the rolling gapless path can
         // detect incompatible transitions (e.g. 48 kHz/6ch → 44.1 kHz/2ch)
         // that would cause ContinueWithFile to fall back inside the worker.
@@ -843,6 +906,16 @@ impl AnalysisRuntimeState {
             // Centered mode gapless: check for pre-staged data.
             self.clear_early_continuation(ctx);
             self.spectrogram_position_offset = 0.0;
+
+            // Emit a finalize chunk for the outgoing track BEFORE the
+            // staged chunks so Qt can shrink the old-track estimate to
+            // the actual decoded extent in the short window before the
+            // new track's buffer_reset lands.  Without this, the
+            // centered-mode playhead stays pinned at center through
+            // the transition because the file-metadata estimate
+            // overshoots the true playback end by up to several
+            // seconds (especially visible at max zoom).
+            self.emit_outgoing_track_finalize(outgoing_track_token, ctx);
 
             let chunk_count = if self.staged_centered_path.as_ref() == Some(&path) {
                 self.drain_staged_centered_chunks(track_token, ctx)
@@ -1448,6 +1521,8 @@ fn spawn_analysis_worker(
                             waveform_decode_active_token: waveform_decode_active_token.as_ref(),
                             spectrogram_cmd_tx: &spectrogram.cmd_tx,
                             spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
+                            spectrogram_decode_columns_produced:
+                                spectrogram.columns_produced.as_ref(),
                         };
                         state.handle_command(cmd, &ctx);
                     }
@@ -1872,12 +1947,14 @@ mod tests {
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         // Gapless track change now sends ContinueWithFile, not NewTrack.
@@ -1907,12 +1984,14 @@ mod tests {
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         // Non-gapless (gapless=false) must send NewTrack.
@@ -1946,12 +2025,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.clear_early_continuation(&ctx);
@@ -1973,17 +2054,126 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.clear_early_continuation(&ctx);
         // No command should be sent.
         assert!(spectrogram_cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn centered_gapless_emits_outgoing_finalize_before_staged_chunks() {
+        // Regression for zoom-dependent playhead detachment at track end:
+        // at high zoom the file-metadata total_columns_estimate can
+        // overshoot the actual playable extent by ~1 second worth of
+        // columns, which at hop=64 is ~700 columns — far more than the
+        // Qt-side EOF-clamp tolerance.  The analysis thread emits a
+        // finalize chunk for the outgoing token carrying the worker's
+        // cols_produced so Qt can shrink its estimate and detach the
+        // centered-mode playhead before the new track's staged chunks
+        // commit the transition.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track_a.flac"));
+        state.active_track_token = 7;
+        state.active_session_effective_rate = 44_100;
+        state.active_session_channel_count = 2;
+
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, _spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        // Simulate the worker having produced 159_980 cols for the
+        // outgoing track before the transition committed (matches the
+        // max-zoom scenario in diagnostics).
+        let spectrogram_decode_columns_produced = AtomicU64::new(159_980);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.handle_track_change(
+            PathBuf::from("/tmp/track_b.flac"),
+            false, // reset_spectrogram
+            true,  // gapless
+            8,     // new track_token
+            &ctx,
+        );
+
+        // Scan emitted events for a finalize chunk tagged with the
+        // outgoing token and the expected cols count.
+        let mut finalize_seen = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = ev {
+                if chunk.complete && chunk.column_count == 0 && chunk.track_token == 7 {
+                    assert_eq!(
+                        chunk.total_columns_estimate, 159_980,
+                        "finalize estimate must equal the worker's cols_produced"
+                    );
+                    assert!(!chunk.buffer_reset);
+                    assert!(!chunk.clear_history);
+                    finalize_seen = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            finalize_seen,
+            "analysis thread must emit a finalize chunk for the outgoing track on centered gapless transition"
+        );
+    }
+
+    #[test]
+    fn centered_gapless_skips_finalize_when_no_columns_produced() {
+        // When the worker has not produced any columns yet (fresh start,
+        // immediate track-change), there is nothing to finalize and the
+        // chunk must not be emitted.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track_a.flac"));
+        state.active_track_token = 11;
+        state.active_session_effective_rate = 44_100;
+        state.active_session_channel_count = 2;
+
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, _spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.handle_track_change(PathBuf::from("/tmp/track_b.flac"), false, true, 12, &ctx);
+
+        // No event should be a finalize chunk.
+        while let Ok(ev) = event_rx.try_recv() {
+            if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = ev {
+                assert!(
+                    !(chunk.complete && chunk.column_count == 0),
+                    "no finalize chunk should be emitted when cols_produced is 0"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2001,12 +2191,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_track_change(
@@ -2050,12 +2242,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         // Seek to 60s — within the window [0, 100].
@@ -2082,12 +2276,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         // Seek to 200s — outside the window [0, 100].
@@ -2114,12 +2310,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.seek_spectrogram_position(60.0, &ctx);
@@ -2146,12 +2344,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_track_change(
@@ -2182,12 +2382,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_command(
@@ -2220,12 +2422,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.start_spectrogram_session(0.0, true, true, &ctx);
@@ -2262,12 +2466,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_track_change(
@@ -2305,12 +2511,14 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_track_change(
@@ -2348,12 +2556,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_prepare_gapless_continuation(PathBuf::from("/tmp/next.flac"), &ctx);
@@ -2379,12 +2589,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_track_change(
@@ -2421,12 +2633,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         let gen_before = spectrogram_decode_generation.load(Ordering::Relaxed);
@@ -2458,12 +2672,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         let gen_before = spectrogram_decode_generation.load(Ordering::Relaxed);
@@ -2494,12 +2710,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_command(AnalysisCommand::CancelStagedContinuation, &ctx);
@@ -2524,12 +2742,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_prepare_gapless_continuation(PathBuf::from("/tmp/next.dts"), &ctx);
@@ -2566,12 +2786,14 @@ mod tests {
         let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
             waveform_decode_active_token: &waveform_decode_active_token,
             spectrogram_cmd_tx: &spectrogram_cmd_tx,
             spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
         state.handle_prepare_gapless_continuation(PathBuf::from("/tmp/next.dts"), &ctx);
@@ -2720,5 +2942,83 @@ mod tests {
         assert_eq!(zoom_hop_size(8192, 16.0), 64);
         assert_eq!(zoom_hop_size(8192, 32.0), 64);
         assert_eq!(zoom_hop_size(8192, 0.5), 1024);
+    }
+
+    #[test]
+    fn set_zoom_level_with_unchanged_value_skips_session_restart() {
+        // Regression: fullscreen toggle fires widthSettleTimer which
+        // calls SetSpectrogramZoomLevel(currentZoom) with an unchanged
+        // zoom.  Restarting the session in that case wipes the ring
+        // and flashes the canvas black for ~100 ms while the decoder
+        // catches up.  The existing session's data is still valid at
+        // the same hop — the restart must be skipped.
+        let mut state = AnalysisRuntimeState::new();
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_track_token = 1;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        // Default zoom is 1.0 — set the same again.
+        state.handle_command(AnalysisCommand::SetSpectrogramZoomLevel(1.0), &ctx);
+
+        // No session restart command should have been sent.
+        assert!(
+            spectrogram_cmd_rx.try_recv().is_err(),
+            "unchanged zoom must not restart the spectrogram session"
+        );
+        assert_eq!(spectrogram_decode_generation.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn set_zoom_level_with_changed_value_restarts_session() {
+        // Counterpart to the skip test: verify a real zoom change
+        // still triggers the session restart.
+        let mut state = AnalysisRuntimeState::new();
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_track_token = 1;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.handle_command(AnalysisCommand::SetSpectrogramZoomLevel(2.0), &ctx);
+
+        // A real zoom change must send a NewTrack to restart decoding
+        // at the new hop.
+        let cmd = spectrogram_cmd_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("zoom change must send a spectrogram command");
+        match cmd {
+            SpectrogramWorkerCommand::NewTrack { .. } => {}
+            other => panic!("expected NewTrack for real zoom change, got {other:?}"),
+        }
+        assert!(
+            (state.zoom_level - 2.0).abs() < 0.001,
+            "zoom_level should have been updated to the new value"
+        );
     }
 }

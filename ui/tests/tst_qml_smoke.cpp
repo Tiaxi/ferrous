@@ -396,6 +396,9 @@ private slots:
     void spectrogramCenteredModeSeekPreservesRing();
     void spectrogramCenteredGaplessPreStagedFill();
     void spectrogramCenteredGaplessSnapsAnchorToZero();
+    void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
+    void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
+    void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -431,6 +434,9 @@ private slots:
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
+    void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramSyntheticClearPreservesCanvasDuringSeek();
+    void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2006,6 +2012,161 @@ void QmlSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
     QVERIFY(item.m_ringCapacity > 0);
 }
 
+void QmlSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate() {
+    // Regression for zoom-dependent playhead detachment at track end.
+    // The backend emits a finalize chunk (columns=0, complete=true)
+    // carrying the actual decoded-column count; the widget must shrink
+    // its m_precomputedTotalColumnsEstimate so the centered-mode EOF
+    // clamp fires at the real audio end.  The initial file-metadata
+    // estimate can overshoot by ~1 s worth of columns at max zoom,
+    // which at hop=64 is ~700 cols — far more than the former 128-col
+    // tolerance could absorb.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 1025;
+    constexpr int fileMetadataEstimate = 161024; // cols at hop=64 for ~233.6 s
+    constexpr int actualDecodedCols = 159980;    // true end ~232.1 s
+    constexpr quint64 token = 7;
+
+    // Initial reset carries the file-metadata estimate.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, fileMetadataEstimate,
+        44100, 64, false, true, token);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, fileMetadataEstimate);
+
+    // A small amount of data so the widget is "live".
+    QByteArray data(200 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 200, 0, fileMetadataEstimate,
+        44100, 64, false, false, token);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, fileMetadataEstimate);
+
+    // Finalize chunk arrives with the true decoded extent.  complete=true,
+    // columns=0, no bufferReset, no clearHistory.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, actualDecodedCols, actualDecodedCols,
+        44100, 64, /*complete=*/true, /*bufferReset=*/false, token,
+        /*clearHistoryOnReset=*/false);
+
+    // Estimate must have shrunk to the true extent.  The max column
+    // index and ring write state must not have been disturbed.
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, actualDecodedCols);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 199);
+    QVERIFY(item.m_ringWriteSeq > 0);
+}
+
+void QmlSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {
+    // A finalize chunk for a track that has already been superseded by
+    // a buffer_reset for a newer token must not clobber the new track's
+    // total_columns_estimate.  Otherwise a late-arriving finalize from
+    // the outgoing track would corrupt the new track's display.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 1025;
+    constexpr int oldEstimate = 161024;
+    constexpr int newEstimate = 167936;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    // Old-track reset + data.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, oldEstimate,
+        44100, 64, false, true, oldToken);
+    QByteArray oldData(100 * bins, '\x10');
+    item.feedPrecomputedChunk(
+        oldData, bins, 0, 100, 0, oldEstimate,
+        44100, 64, false, false, oldToken);
+
+    // New-track buffer_reset + data bumps the committed token and
+    // commits the new estimate (track-change path accepts increases).
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, newEstimate,
+        44100, 64, false, true, newToken);
+    QByteArray newData(50 * bins, '\x20');
+    item.feedPrecomputedChunk(
+        newData, bins, 0, 50, 0, newEstimate,
+        44100, 64, false, false, newToken);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, newEstimate);
+
+    // Late-arriving finalize for the OLD token should be ignored.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 159980, 159980,
+        44100, 64, /*complete=*/true, /*bufferReset=*/false, oldToken,
+        /*clearHistoryOnReset=*/false);
+
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, newEstimate);
+}
+
+void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
+    // Regression: at high zoom the file-metadata total_columns_estimate
+    // overshoots the actual decoded extent by ~1 s worth of cols.  When
+    // the decoder has produced all it's going to and playback is within
+    // one half-window of maxCol, the centered display must clamp its
+    // right edge to maxCol-1 so (a) the playhead detaches from center
+    // toward the right edge, (b) no blank tail is shown past real
+    // content, and (c) the crosshair at the right edge reads a time
+    // <= the true audible end.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // max zoom
+    constexpr int maxColIndex = 8000;
+    constexpr int decodedCols = maxColIndex + 1; // 8001 cols decoded
+    // Estimate overshoots by ~1 second (689 cols at hop=64) — the
+    // same magnitude seen in diagnostics at max zoom.
+    constexpr int inflatedEstimate = decodedCols + 700;
+
+    // Bufferreset + data so the ring is initialized and maxCol is set.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, inflatedEstimate,
+        44100, hop, false, true, 1);
+    QByteArray data(decodedCols * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, decodedCols, 0, inflatedEstimate,
+        44100, hop, false, false, 1);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, maxColIndex);
+
+    // Snap renderZoomLevel so effectiveZoom == 1 (1 px per col).
+    // updatePaintNode normally does this on zoom-matched resets; force
+    // it here so visibleWindowCols = 1200 deterministically.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel =
+            1024.0 / static_cast<double>(hop); // = 16.0
+    }
+
+    // Position the playhead within halfWindow (600 cols) of maxCol so
+    // the EOF clamp must fire.  At 689 cols/s (hop=64, sr=44100),
+    // pos=11.25 s -> col ~ 7750, which is maxCol - 250 (inside the
+    // 600-col half-window trigger).
+    item.setPositionSeconds(11.25);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    // Display right must equal maxCol (decoder's last column), not the
+    // inflated estimate.  The crosshair / grid at the right edge is
+    // driven by this value, so clamping it here keeps the time axis
+    // bounded by real content.
+    QCOMPARE(item.m_precomputedCanvasDisplayRight,
+             static_cast<qint64>(maxColIndex));
+    // DisplayLeft slid right so the window still covers
+    // visibleWindowCols (1200) cols.
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft,
+             static_cast<qint64>(maxColIndex) - 1199);
+}
+
 void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {
     // In centered mode, a gapless token change must immediately reset the
     // position anchor to 0 so the display snaps to the beginning of the
@@ -3416,6 +3577,150 @@ void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
     const QRgb darkPixel = item.m_canvas.pixel(0, 5);
     QVERIFY(qRed(brightPixel) + qGreen(brightPixel) + qBlue(brightPixel)
             > qRed(darkPixel) + qGreen(darkPixel) + qBlue(darkPixel));
+}
+
+void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
+    // Regression: at max zoom-out in a wide fullscreen canvas the
+    // STFT windowing leaves the decoder a few columns short of the
+    // scaled totalEstimate.  The old readiness check required
+    // ringFill >= fillWidth - 16 (with fillWidth ≈ totalEstimate),
+    // so ringFill could never reach the threshold and
+    // m_zoomFillActive stayed true forever.  The old canvas then
+    // leaked a slice of stale content at the right edge.
+    SpectrogramItem item;
+    item.setWidth(3440);
+    item.setHeight(720);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+
+    // Baseline zoom=1.0 chunk — populates the ring.
+    QByteArray baseline(3440 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 3440,
+        0, 10064, 44100, 1024, false,
+        true, 1, true);
+    QVERIFY(item.m_precomputedReady);
+
+    // Trigger a rebuild so the canvas exists — the real flow does
+    // this on the next paint, but QtTest has no event loop.  The
+    // hop-change detector only arms m_zoomFillActive when a canvas
+    // is already present.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1.0;
+        item.ensureMapping(720);
+        item.rebuildPrecomputedCanvasLocked(3440, 720, 0, 3439, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_zoomFillActive, false);
+
+    // Zoom-out restart: the backend decimates to hop=2996 and the
+    // scaled estimate shrinks to ≈ widget width.  Decoder produces
+    // 3418 columns (22 short of the 3440 estimate) due to the
+    // STFT tail.
+    constexpr int decodedCols = 3418;
+    QByteArray decimated(decodedCols * bins, '\x50');
+    item.feedPrecomputedChunk(
+        decimated, bins, 0, decodedCols,
+        0, 3440, 44100, 2996, false,
+        true, 1, false);
+
+    QCOMPARE(item.m_precomputedMaxColumnIndex, decodedCols - 1);
+    // Must clear: decoder will produce no more columns, so freezing
+    // indefinitely would strand stale pixels at the right edge.
+    QCOMPARE(item.m_zoomFillActive, false);
+    // Dirty flag set so the next paint rebuilds the canvas cleanly.
+    QVERIFY(item.m_precomputedCanvasDirty);
+}
+
+void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
+    // Regression: a seek outside the decoded window emits a synthetic
+    // clear chunk (cols=0, bins=0, clear_history=true) that wipes the
+    // ring and invalidates the canvas.  Without canvas preservation,
+    // the display flashes fully black for ~100 ms while the backend
+    // restarts at (pos − margin) and decodes up to the new playhead.
+    // The freeze should arm instead so the old canvas stays visible
+    // through the brief transition.
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+
+    // Populate the ring with centered-mode data.
+    QByteArray chunk(1920 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, 1920,
+        0, 10064, 44100, 1024, false,
+        true, 7, true);
+    QVERIFY(item.m_precomputedReady);
+
+    // Build a canvas directly with a valid display range — the real
+    // flow does this via updatePaintNode but QtTest has no event loop.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1.0;
+        item.ensureMapping(400);
+        item.rebuildPrecomputedCanvasLocked(1920, 400, 0, 1919, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(1919));
+
+    // Synthetic clear: cols=0, bins=0, buffer_reset=true,
+    // clear_history=true — the signature emitted by
+    // seek_spectrogram_position for far seeks.
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0,
+        0, 0, 0, 0, false,
+        true, 7, true);
+
+    // Ring is wiped.
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(0));
+    QCOMPARE(item.m_ringCapacity, 0);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, -1);
+    QVERIFY(item.m_awaitingWorkerReset);
+
+    // Canvas and its display range are preserved, freeze is armed.
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(1919));
+    QVERIFY(item.m_precomputedReady);
+    QCOMPARE(item.m_zoomFillActive, true);
+}
+
+void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() {
+    // When there's no canvas to preserve (first track load, rolling
+    // mode, or the display range was already invalid), the synthetic
+    // clear must still wipe everything and invalidate — the freeze
+    // would latch onto garbage state otherwise.
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1);
+
+    // No rebuild → canvas stays null.  Still send some data so
+    // m_precomputedReady could be true, which would be misleading
+    // after the clear.
+    QByteArray chunk(100 * 4, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, 4, 0, 100,
+        0, 10064, 44100, 1024, false,
+        true, 7, true);
+    QVERIFY(item.m_canvas.isNull());
+
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0,
+        0, 0, 0, 0, false,
+        true, 7, true);
+
+    QVERIFY(item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedReady, false);
+    QCOMPARE(item.m_zoomFillActive, false);
+    QCOMPARE(item.m_precomputedCanvasDisplayRight,
+             item.m_precomputedCanvasDisplayLeft - 1);
 }
 
 int main(int argc, char **argv) {
