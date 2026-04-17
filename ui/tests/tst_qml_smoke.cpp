@@ -381,6 +381,7 @@ private slots:
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
+    void spectrogramRollingZoomResetAnchorsEpochToResetStart();
     void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
     void diagnosticsLogUsesLowercaseAppDir();
     void playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate();
@@ -402,6 +403,9 @@ private slots:
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
+    void spectrogramRollingGaplessTrackChangePreservesZoom();
+    void spectrogramCenteredGaplessTrackChangeResetsZoom();
+    void spectrogramRollingResetTrackChangeResetsZoom();
     void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
     void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
     void spectrogramTrackChangeCancelsPendingZoomDebounce();
@@ -1613,6 +1617,75 @@ void QmlSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {
     QCOMPARE(item.m_ringTrackToken[1], 12ULL);
 }
 
+void QmlSmokeTest::spectrogramRollingZoomResetAnchorsEpochToResetStart() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int binsPerColumn = 8;
+    constexpr int sampleRate = 44'100;
+    constexpr int oldHop = 655;
+    constexpr int newHop = 524;
+    constexpr int resetStart = 1416;
+    constexpr int totalEstimate = 19'668;
+    constexpr quint64 trackToken = 3;
+
+    QByteArray initialChunk(64 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        64,
+        0,
+        totalEstimate,
+        sampleRate,
+        oldHop,
+        false,
+        true,
+        trackToken,
+        true);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        newHop,
+        false,
+        true,
+        trackToken,
+        true);
+
+    QByteArray zoomChunk(127 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        zoomChunk,
+        binsPerColumn,
+        0,
+        127,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        newHop,
+        false,
+        false,
+        trackToken,
+        true);
+
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(127));
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(-resetStart));
+
+    const double colsPerSecond =
+        static_cast<double>(sampleRate) / static_cast<double>(newHop);
+    const qint64 anchoredCol = static_cast<qint64>(std::floor(
+        item.m_positionAnchorSeconds * colsPerSecond));
+    QCOMPARE(anchoredCol, static_cast<qint64>(resetStart));
+    QCOMPARE(item.m_rollingEpoch + anchoredCol, static_cast<qint64>(0));
+}
+
 void QmlSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
     SpectrogramItem item;
     item.setWidth(320);
@@ -2320,6 +2393,131 @@ void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
     QVERIFY2(fresh.m_ringCapacity >= 3840,
              qPrintable(QString("fresh-instance ring cap %1 < 3840")
                             .arg(fresh.m_ringCapacity)));
+}
+
+void QmlSmokeTest::spectrogramRollingGaplessTrackChangePreservesZoom() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(0); // Rolling
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, oldToken);
+    QByteArray initial(32 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 32, 0, total,
+        44100, 1024, false, false, oldToken);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 4.0;
+        item.m_renderZoomLevel = 4.0;
+    }
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    QByteArray gapless(32 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        gapless, bins, 0, 32, 32, total,
+        44100, 1024, false, false, newToken);
+
+    QCOMPARE(zoomResetSpy.count(), 0);
+    QCOMPARE(backendZoomSpy.count(), 0);
+    QCOMPARE(item.zoomLevel(), 4.0);
+    QCOMPARE(item.m_renderZoomLevel, 4.0);
+}
+
+void QmlSmokeTest::spectrogramCenteredGaplessTrackChangeResetsZoom() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, oldToken);
+    QByteArray initial(32 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 32, 0, total,
+        44100, 1024, false, false, oldToken);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 4.0;
+        item.m_renderZoomLevel = 4.0;
+    }
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    QByteArray gapless(32 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        gapless, bins, 0, 32, 32, total,
+        44100, 1024, false, false, newToken);
+
+    QCOMPARE(zoomResetSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramRollingResetTrackChangeResetsZoom() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(0); // Rolling
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, oldToken);
+    QByteArray initial(32 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 32, 0, total,
+        44100, 1024, false, false, oldToken);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 4.0;
+        item.m_renderZoomLevel = 4.0;
+    }
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, newToken);
+    QByteArray nextTrack(32 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        nextTrack, bins, 0, 32, 0, total,
+        44100, 1024, false, false, newToken);
+
+    QCOMPARE(zoomResetSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(item.m_renderZoomLevel, 1.0);
 }
 
 void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {

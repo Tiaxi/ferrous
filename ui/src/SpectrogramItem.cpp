@@ -1433,8 +1433,12 @@ void SpectrogramItem::feedPrecomputedChunk(
         std::abs(m_renderZoomLevel - 1.0) > 0.001;
     const bool backendNotAtReferenceHop =
         hopSize > 0 && hopSize != static_cast<int>(kReferenceHopSamples);
+    const bool preserveRollingGaplessZoom =
+        m_displayMode == 0 && isGaplessTrackChange;
+    const bool resetForTrackTransition =
+        isTrackChange || (isGaplessTrackChange && !preserveRollingGaplessZoom);
     const bool needsZoomReset =
-        (isTrackChange || isGaplessTrackChange)
+        resetForTrackTransition
         && (qtRenderNotAtDefault || backendNotAtReferenceHop);
     if (needsZoomReset) {
         m_zoomLevel = 1.0;
@@ -1563,7 +1567,16 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_ringOldestSeq = 0;
         m_ringWriteSeq = 0;
         m_trackEpochSeq = 0;
-        m_rollingEpoch = 0;
+        // Even when a rolling reset clears history (manual track
+        // change or same-track zoom restart), the new ring's sequence
+        // space starts at startIndex.  Re-anchor the epoch so the
+        // current playback column maps to sequence 0 instead of its
+        // absolute track column; otherwise updatePaintNode clamps the
+        // display against a huge imaginary headroom gap and scrolling
+        // appears frozen until the worker decodes thousands of cols.
+        m_rollingEpoch = m_displayMode == 0
+            ? -static_cast<qint64>(startIndex)
+            : 0;
         m_ringBuffer.clear();
         m_ringColumnId.clear();
         m_ringSequenceId.clear();
