@@ -19,7 +19,7 @@ gstreamer-audio = { version = "0.25", optional = true }
 gstreamer-pbutils = { version = "0.25", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native-sync-persistent", "windows-native", "vendored"] }
-lofty = "0.23"
+lofty = "0.24"
 md5 = "0.7"
 parking_lot = "0.12"
 realfft = "3"

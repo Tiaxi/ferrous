@@ -754,7 +754,7 @@ impl AnalysisRuntimeState {
         let final_cols = u32::try_from(cols_produced).unwrap_or(u32::MAX);
         let bins_per_column = u16::try_from((self.fft_size / 2) + 1).unwrap_or(u16::MAX);
         let channel_count =
-            u8::try_from(self.active_session_channel_count.max(1).min(255)).unwrap_or(u8::MAX);
+            u8::try_from(self.active_session_channel_count.clamp(1, 255)).unwrap_or(u8::MAX);
         let _ = ctx
             .event_tx
             .send(AnalysisEvent::PrecomputedSpectrogramChunk(

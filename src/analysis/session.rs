@@ -1696,6 +1696,7 @@ fn session_drain_stft_rows(
 ///    `GStreamer` may determine the duration after processing the bitstream.
 /// 2. If the re-query fails and we're within 25% of the estimate, double it
 ///    so the UI ring buffer grows before columns are evicted.
+///
 /// Convert an audio-frame count from a duration re-query into a
 /// total-columns estimate in the session's `effective_hop` units.
 ///
