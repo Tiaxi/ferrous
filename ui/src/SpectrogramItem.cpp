@@ -1055,7 +1055,15 @@ void SpectrogramItem::feedPrecomputedChunk(
         && m_precomputedTrackToken != 0
         && trackToken != m_precomputedTrackToken
         && !bufferReset && !appliedReset && !appliedImplicitReset;
+    // Centered same-track seeks outside the current window restart the
+    // worker with the SAME track token but a non-zero start column.
+    // Fresh SpectrogramItem instances can miss the prior synthetic clear,
+    // so m_precomputedTrackToken may still be 0 when that first data-bearing
+    // reset chunk lands. Treat only 0-based resets as real track changes;
+    // otherwise a same-track seek at max zoom-out gets misclassified as a
+    // fresh-track backend/hop desync and forces zoom back to 1.0.
     const bool isTrackChange = appliedReset
+        && startIndex == 0
         && trackToken != 0
         && (m_precomputedTrackToken == 0 || trackToken != m_precomputedTrackToken);
 
@@ -1064,30 +1072,17 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     m_precomputedBinsPerColumn = bins;
-    // Only accept decreasing estimates.  The worker doubles the estimate
-    // as a safety measure for streaming sources ("columns approaching
-    // estimate"), but this inflated value makes the display think the
-    // track is 2x longer, preventing correct EOF playhead detachment.
-    // The initial estimate from the file metadata is accurate for
-    // file-based sources; ignore subsequent inflation.
-    // Only accept the estimate on track changes (new track has a
-    // different length) or when it decreases (more accurate info).
-    // Reject increases from the same track — those are the worker's
-    // safety doubling for streaming sources.  Using appliedReset here
-    // was wrong because same-track seeks also set appliedReset, and
-    // the worker may have already doubled the estimate by the time
-    // the first post-reset data chunk arrives.
+    // Accept the latest estimate for the active session.  Same-hop
+    // increases are legitimate for raw-surround files: the worker can
+    // start with a fallback/header estimate, then raise it once a
+    // duration re-query succeeds or once decoding proves the fallback
+    // too small.  Rejecting those updates leaves Qt stuck on the stale
+    // shorter length, which tightens minimumZoomLevel and clamps
+    // centered-mode displayRight/seek math before the actual EOF.
     //
-    // Also accept when the hop size changed: the estimate scales
-    // inversely with the effective hop, so a zoom change produces a
-    // legitimately different estimate that must be accepted.
-    const bool hopChanged = hopSize > 0
-        && hopSize != m_precomputedHopSize;
-    if (totalEstimate > 0
-        && (m_precomputedTotalColumnsEstimate == 0
-            || totalEstimate <= m_precomputedTotalColumnsEstimate
-            || isTrackChange
-            || hopChanged)) {
+    // Stale-session chunks are filtered above by token/reset gating, and
+    // finalize chunks still take the dedicated shrink-only path.
+    if (totalEstimate > 0) {
         m_precomputedTotalColumnsEstimate = totalEstimate;
     }
 

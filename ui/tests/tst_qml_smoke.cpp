@@ -398,10 +398,12 @@ private slots:
     void spectrogramCenteredGaplessSnapsAnchorToZero();
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
+    void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
+    void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
     void spectrogramTrackChangeCancelsPendingZoomDebounce();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
@@ -2107,6 +2109,39 @@ void QmlSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, newEstimate);
 }
 
+void QmlSmokeTest::spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit() {
+    // Regression for 6ch AC3 max-zoom-out: the worker can start with a
+    // fallback/header estimate, then raise it on the same hop once a
+    // duration re-query succeeds.  Qt must accept that larger estimate
+    // or minimumZoomLevel stays clamped to the stale shorter length and
+    // centered-mode EOF/seek math stops before the real end.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 1025;
+    constexpr int initialEstimate = 14126;
+    constexpr int requeriedEstimate = 16273;
+    constexpr quint64 token = 3;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, initialEstimate,
+        48000, 1024, false, true, token);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, initialEstimate);
+
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 15, requeriedEstimate,
+        48000, 1024, false, false, token);
+
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, requeriedEstimate);
+
+    const double expectedMinZoom =
+        static_cast<double>(item.width()) / static_cast<double>(requeriedEstimate);
+    QVERIFY(std::abs(item.minimumZoomLevel() - expectedMinZoom) < 0.0001);
+}
+
 void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
     // Regression: at high zoom the file-metadata total_columns_estimate
     // overshoots the actual decoded extent by ~1 s worth of cols.  When
@@ -2351,6 +2386,46 @@ void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
     // path must not fire.
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, 161024);
     QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramFreshInstanceSeekRestartDoesNotResetZoom() {
+    // Regression: centered same-track seeks outside the current
+    // window restart decoding with the same track token but a non-zero
+    // startIndex. Fresh SpectrogramItem instances can see that restart
+    // before they've learned the current token, so a broad
+    // "appliedReset + non-default hop" heuristic wrongly treated the
+    // seek as a track change and emitted backendZoomRequested(1.0),
+    // resetting max zoom-out back to normal.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(48000);
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    constexpr int bins = 4;
+    constexpr int hop = 14088; // Non-default max-zoom-out-style hop
+    constexpr int startIndex = 714;
+    constexpr int total = 1027;
+    constexpr quint64 trackToken = 7;
+
+    // Simulate a fresh pane instance seeing only the post-seek worker
+    // restart. The token is the current track's token, not a track
+    // change, but the item has no prior token state yet.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, startIndex, total,
+        48000, hop, false, true, trackToken, true);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, startIndex, total,
+        48000, hop, false, false, trackToken, false);
+
+    QCOMPARE(zoomResetSpy.count(), 0);
+    QCOMPARE(backendZoomSpy.count(), 0);
+    QCOMPARE(item.m_precomputedHopSize, hop);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, total);
 }
 
 void QmlSmokeTest::spectrogramTrackChangeCancelsPendingZoomDebounce() {
