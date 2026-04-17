@@ -400,6 +400,7 @@ private slots:
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
+    void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -2200,7 +2201,7 @@ void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
     QVERIFY2(fullscreenCap >= 3840,
              qPrintable(QString("fullscreen ring cap too small: %1")
                             .arg(fullscreenCap)));
-    QCOMPARE(item.m_maxWidgetWidthSeen, 3840);
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
 
     // Simulate the session reset that the backend emits on a zoom
     // change: bins=0 + bufferReset + clearHistory triggers the
@@ -2226,7 +2227,62 @@ void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
              qPrintable(QString("post-shrink ring cap %1 < fullscreen cap %2")
                             .arg(item.m_ringCapacity)
                             .arg(fullscreenCap)));
-    QCOMPARE(item.m_maxWidgetWidthSeen, 3840);
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+}
+
+void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
+    // Regression: when the channel count changes (e.g. 6ch PerChannel
+    // → 2ch PerChannel), the old SpectrogramItems are destroyed and
+    // fresh ones are created.  The Rust-side lookahead tracker is a
+    // singleton in AnalysisRuntimeState so it remembers the prior
+    // fullscreen width and keeps producing at that lookahead.  The
+    // Qt tracker must therefore also be singleton-equivalent
+    // (static), otherwise the new widget starts at maxSeen=0, sizes
+    // its ring against the current (smaller) width, the decoder laps
+    // the ring, and left-margin cols around the playhead are evicted
+    // — the user sees a narrow growing-edge of data with the previous
+    // canvas smearing through the rest of the view.
+    SpectrogramItem::s_maxWidgetWidthSeen = 0;
+    constexpr int bins = 4;
+    constexpr int hop = 64;
+    constexpr quint64 firstToken = 100;
+    constexpr quint64 secondToken = 101;
+
+    {
+        SpectrogramItem big;
+        big.setHeight(200);
+        big.setDisplayMode(1);
+        big.setWidth(3840);
+        big.setSampleRateHz(44100);
+        big.feedPrecomputedChunk(
+            QByteArray(), bins, 0, 0, 0, 161024,
+            44100, hop, false, true, firstToken);
+        QByteArray data(16 * bins, '\x40');
+        big.feedPrecomputedChunk(
+            data, bins, 0, 16, 0, 161024,
+            44100, hop, false, false, firstToken);
+        QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+    }
+    // The wide-view instance is now gone; the static must retain the
+    // max so the next instance sizes its ring against it.
+
+    SpectrogramItem fresh;
+    fresh.setHeight(200);
+    fresh.setDisplayMode(1);
+    fresh.setWidth(1213); // windowed
+    fresh.setSampleRateHz(44100);
+    fresh.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, secondToken);
+    QByteArray data(16 * bins, '\x40');
+    fresh.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, secondToken);
+
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+    QVERIFY2(fresh.m_ringCapacity >= 3840,
+             qPrintable(QString("fresh-instance ring cap %1 < 3840")
+                            .arg(fresh.m_ringCapacity)));
 }
 
 void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {

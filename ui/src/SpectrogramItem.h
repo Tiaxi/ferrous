@@ -280,14 +280,17 @@ private:
     std::vector<quint64> m_ringTrackToken; // per slot: track token stored there, or 0
     QHash<quint64, QHash<qint32, qint64>> m_trackColumnToSeqByToken;
     int m_ringCapacity{0};            // number of column slots
-    // Max widget width ever observed.  The ring capacity calculation
-    // uses it as a floor so the ring stays large enough to hold the
-    // Rust decoder's lookahead (which is sized against the Rust-side
-    // max-widget-width tracker).  Otherwise a fullscreen→windowed
-    // transition resets the ring to the current small width while the
-    // decoder continues producing at the fullscreen lookahead, evicting
-    // the left-margin columns and painting black around the playhead.
-    int m_maxWidgetWidthSeen{0};
+    // Max widget width ever observed ACROSS ALL SpectrogramItem
+    // instances (static).  The Rust-side max-widget-width tracker that
+    // sizes the decoder lookahead is a singleton in AnalysisRuntimeState
+    // and persists across instance tear-downs (e.g. when the channel
+    // count changes — 6ch PerChannel → 2ch PerChannel destroys the
+    // prior widgets and creates fresh ones).  A per-instance tracker
+    // would reset to 0 on each new widget, under-sizing the ring
+    // relative to the still-large Rust lookahead and letting the
+    // decoder lap the ring, evicting left-margin cols and smearing the
+    // previous canvas through the blanked region.
+    static int s_maxWidgetWidthSeen;
     qint64 m_ringWriteSeq{0};         // next write-order sequence number
     qint64 m_ringOldestSeq{0};        // oldest write-order sequence still retained
     qint64 m_trackEpochSeq{0};        // legacy reset bookkeeping

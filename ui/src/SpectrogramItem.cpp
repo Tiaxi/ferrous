@@ -320,6 +320,12 @@ double selectGridInterval(
 
 } // namespace
 
+// Shared across all SpectrogramItem instances so the ring-cap floor
+// survives instance tear-downs (channel-count changes destroy and
+// recreate the widgets).  Matches the singleton tracker on the Rust
+// side in AnalysisRuntimeState.
+int SpectrogramItem::s_maxWidgetWidthSeen = 0;
+
 SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
@@ -1143,15 +1149,14 @@ void SpectrogramItem::feedPrecomputedChunk(
             / static_cast<double>(m_precomputedHopSize);
         // Track the max widget width so the ring can hold enough cols
         // to cover the Rust decoder's lookahead even after a session
-        // reset that shrinks the current widget.  Without this, going
-        // fullscreen→windowed at high zoom leaves the decoder producing
-        // at the fullscreen lookahead while the ring is sized for the
-        // smaller current window, evicting the left-margin cols around
-        // the playhead.
+        // reset that shrinks the current widget.  Static so the floor
+        // survives instance tear-downs (channel-count changes destroy
+        // and recreate the widgets) — matches the singleton tracker on
+        // the Rust side in AnalysisRuntimeState.
         const int currentWidth = static_cast<int>(width());
-        m_maxWidgetWidthSeen = std::max(m_maxWidgetWidthSeen, currentWidth);
+        s_maxWidgetWidthSeen = std::max(s_maxWidgetWidthSeen, currentWidth);
         const int screenWidth = std::max(
-            {currentWidth, 1920, m_maxWidgetWidthSeen});
+            {currentWidth, 1920, s_maxWidgetWidthSeen});
         const int extraSeconds = 10;
         int neededCapacity;
         if (m_displayMode == 1) {
