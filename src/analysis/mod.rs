@@ -1119,13 +1119,29 @@ impl AnalysisRuntimeState {
             let hop = (base_hop as f64 * interval).round() as usize;
             hop
         };
-        let rate = self.active_session_effective_rate;
+        let rate = if self.active_session_effective_rate > 0 {
+            self.active_session_effective_rate
+        } else if self.snapshot.sample_rate_hz > 0 {
+            let sample_rate = self.snapshot.sample_rate_hz;
+            let divisor = waveform_sample_rate_divisor(u64::from(sample_rate)).max(1);
+            u32::try_from(u64::from(sample_rate) / divisor).unwrap_or(sample_rate)
+        } else {
+            0
+        };
         if rate > 0 && effective_hop > 0 {
             // effective_hop and REFERENCE_HOP are hop sizes (small usize);
             // precision loss from usize→f64 is negligible for these values.
             #[allow(clippy::cast_precision_loss)]
             let cols_per_second = f64::from(rate) / effective_hop as f64;
-            let width = f64::from(self.spectrogram_widget_width);
+            // Keep the seek-window math aligned with the live worker session:
+            // both the worker lookahead and the Qt ring are sized from the
+            // largest width seen so far, so using only the current width here
+            // can misclassify in-window seeks as restart-worthy after a
+            // narrow-pane layout change.
+            let width = f64::from(
+                self.spectrogram_widget_width
+                    .max(self.spectrogram_max_widget_width),
+            );
             #[allow(clippy::cast_precision_loss)]
             let effective_zoom =
                 f64::from(self.zoom_level) * effective_hop as f64 / REFERENCE_HOP as f64;
@@ -2288,6 +2304,91 @@ mod tests {
     }
 
     #[test]
+    fn centered_seek_uses_max_widget_width_for_zoomed_out_window() {
+        // Regression for 6ch AC3 max-zoom-out seeks: the worker session
+        // and Qt ring are sized from the largest seen width, but the
+        // seek-window check used only the current pane width. On a narrow
+        // pane this misclassified an in-window seek as "outside" and
+        // restarted decoding from the tail, smearing the display.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.ac3"));
+        state.active_session_effective_rate = 48_000;
+        state.zoom_level = 1024.0 / 14_088.0;
+        state.spectrogram_widget_width = 120;
+        state.spectrogram_max_widget_width = 1_920;
+        state.spectrogram_session_start = 0.0;
+        state.spectrogram_session_margin = state.centered_margin_seconds();
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.seek_spectrogram_position(266.791, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
+            "seek should stay within the already-decoded max-width window, got {cmd:?}"
+        );
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
+    fn centered_seek_uses_playback_rate_when_raw_surround_probe_skips() {
+        // Regression for raw surround (AC3/DTS): update_session_compat_params
+        // skips the Symphonia probe, so active_session_effective_rate can stay
+        // zero even while playback and worker chunks already know the real
+        // 48 kHz rate. Falling back to the hard-coded 30 s margin makes
+        // whole-track max-zoom-out seeks restart from the tail.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.ac3"));
+        state.snapshot.sample_rate_hz = 48_000;
+        state.zoom_level = 1024.0 / 14_088.0;
+        state.hop_size = 14_088;
+        state.spectrogram_widget_width = 1_200;
+        state.spectrogram_max_widget_width = 1_920;
+        state.spectrogram_session_start = 0.0;
+        state.spectrogram_session_margin = state.centered_margin_seconds();
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.seek_spectrogram_position(217.777, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
+            "seek should stay within the already-decoded raw-surround window, got {cmd:?}"
+        );
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
     fn centered_seek_outside_window_restarts_session() {
         // Seeking outside the decoded window should restart the session.
         let mut state = AnalysisRuntimeState::new();
@@ -2310,13 +2411,15 @@ mod tests {
             spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
         };
 
-        // Seek to 200s — outside the window [0, 100].
+        // Seek to 200s — outside the decoded window, so the session
+        // should restart from one centered margin before the target.
+        let expected_start = (200.0 - state.centered_margin_seconds()).max(0.0);
         state.seek_spectrogram_position(200.0, &ctx);
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
             matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
-                if (start_seconds - 170.0).abs() < 0.01 && clear_history_on_reset),
+                if (start_seconds - expected_start).abs() < 0.01 && clear_history_on_reset),
             "centered seek outside window should restart with clear_history=true, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
