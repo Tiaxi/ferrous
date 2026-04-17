@@ -719,7 +719,17 @@ double SpectrogramItem::minimumZoomLevelLocked() const {
     if (referenceCols <= static_cast<qint64>(w)) {
         return 1.0;
     }
-    return static_cast<double>(w) / static_cast<double>(referenceCols);
+    // Mirror the Rust-side clamp in AnalysisCommand::SetSpectrogramZoomLevel
+    // (`.clamp(0.05, 16.0)`).  If Qt lets the user request a zoom below
+    // Rust's floor, setSpectrogramZoomLevel(0.04) gets clamped to 0.05
+    // on the backend, the session restarts at a slightly different
+    // effective hop than Qt expected, and the next widthSettle-driven
+    // re-send gets clamped the same way — the user sees their zoom-out
+    // attempts "restart the same zoom level over and over".
+    constexpr double kBackendMinZoom = 0.05;
+    const double trackFit =
+        static_cast<double>(w) / static_cast<double>(referenceCols);
+    return std::max(trackFit, kBackendMinZoom);
 }
 
 double SpectrogramItem::minimumZoomLevel() const {

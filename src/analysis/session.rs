@@ -1745,13 +1745,27 @@ fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: 
     // Suppress the unused-variable warning when GStreamer is disabled.
     let _ = source;
 
-    // Safety net: if we're within 25% of the estimate, double it.
-    // This ensures the UI ring buffer grows before columns get evicted.
-    let threshold = estimate.saturating_sub(estimate / 4);
-    if produced >= threshold && estimate < u64::from(u32::MAX / 2) {
+    // Safety net for sources without a trustworthy duration (the
+    // 300-second fallback in decoders.rs): if the decoder has actually
+    // produced MORE cols than the estimate, the estimate was wrong and
+    // we need to double it so the UI ring/range don't clamp behind the
+    // growing column count.
+    //
+    // Fire strictly when produced exceeds the estimate rather than on
+    // a 75% threshold.  For bounded (file) sources with a real
+    // duration, the estimate already includes +64 cols of STFT tail
+    // padding, so produced tops out AT or slightly BELOW the estimate
+    // and the doubling never fires.  An early-threshold doubling here
+    // inflated zoom-out estimates by 2× (effective_hop > REFERENCE_HOP
+    // means cols_produced climbs fast relative to the already-small
+    // estimate) and left Qt with an estimate that didn't match the
+    // actual decoded extent — post-seek displays showed mostly blank
+    // because displayRight clamped to the inflated estimate but data
+    // only covered the actual decoded cols.
+    if produced > estimate && estimate < u64::from(u32::MAX / 2) {
         let new_est = session.total_columns_estimate.saturating_mul(2);
         profile_eprintln!(
-            "[spect-worker] columns approaching estimate, est_cols {} → {} (produced={})",
+            "[spect-worker] columns overshot estimate, est_cols {} → {} (produced={})",
             session.total_columns_estimate,
             new_est,
             produced,
@@ -2795,41 +2809,62 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "gst"))]
-    fn columns_estimate_doubles_when_approaching_limit() {
+    fn columns_estimate_holds_when_approaching_without_overshoot() {
+        // Regression for zoom-out blank-post-seek: the doubling used
+        // to fire at the 75% threshold, which inflated a correctly-
+        // scaled zoom-out estimate as the decoder finished the file
+        // (produced climbs naturally toward the real total).  For
+        // bounded sources the estimate already includes STFT tail
+        // padding, so doubling while still within the estimate is
+        // always spurious.
         let mut session = make_test_session();
         session.total_columns_estimate = 1000;
-        session.columns_produced = 600; // below 75% threshold
+        session.columns_produced = 600;
         let source = make_dummy_source();
 
         maybe_update_columns_estimate(&mut session, &source);
         assert_eq!(
             session.total_columns_estimate, 1000,
-            "should not grow below 75%"
+            "should not grow below estimate"
         );
 
-        session.columns_produced = 750; // exactly at 75% threshold
+        session.columns_produced = 750;
         maybe_update_columns_estimate(&mut session, &source);
-        assert_eq!(session.total_columns_estimate, 2000, "should double at 75%");
+        assert_eq!(
+            session.total_columns_estimate, 1000,
+            "75% threshold no longer triggers doubling"
+        );
 
-        // After doubling, 750 is well below the new 75% threshold (1500).
+        session.columns_produced = 1000;
         maybe_update_columns_estimate(&mut session, &source);
-        assert_eq!(session.total_columns_estimate, 2000, "should stay stable");
+        assert_eq!(
+            session.total_columns_estimate, 1000,
+            "AT the estimate must not trigger doubling — bounded \
+             sources legitimately stop here"
+        );
     }
 
     #[test]
     #[cfg(not(feature = "gst"))]
-    fn columns_estimate_doubles_again_when_still_producing() {
+    fn columns_estimate_doubles_when_overshooting() {
+        // Unbounded sources (the decoders.rs 300-second fallback for
+        // missing-duration metadata) legitimately produce more cols
+        // than the estimate.  The safety net must still fire when
+        // produced strictly exceeds the estimate.
         let mut session = make_test_session();
         session.total_columns_estimate = 1000;
         let source = make_dummy_source();
 
-        // Cross first threshold.
-        session.columns_produced = 800;
+        session.columns_produced = 1001;
         maybe_update_columns_estimate(&mut session, &source);
-        assert_eq!(session.total_columns_estimate, 2000);
+        assert_eq!(
+            session.total_columns_estimate, 2000,
+            "overshoot by 1 col must double"
+        );
 
-        // Cross second threshold (75% of 2000 = 1500).
-        session.columns_produced = 1600;
+        // Cross the next estimate too — safety net keeps firing until
+        // it catches up with the real length.
+        session.columns_produced = 2500;
         maybe_update_columns_estimate(&mut session, &source);
         assert_eq!(session.total_columns_estimate, 4000);
     }

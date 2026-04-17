@@ -3472,9 +3472,14 @@ void QmlSmokeTest::spectrogramZoomProperty() {
     item.setZoomLevel(100.0);
     QVERIFY(std::abs(item.zoomLevel() - 16.0) < 0.0001);
 
-    // Zoom clamps to minimum (full-song level: 1920/96000 = 0.02)
+    // Zoom clamps to the Rust-side minimum (0.05).  The track-fit
+    // floor (1920/96000 = 0.02) would technically allow a smaller
+    // zoom, but the backend clamps any sub-0.05 value to 0.05, so
+    // Qt must also floor at 0.05 or else successive widthSettle
+    // re-sends oscillate between what Qt requested and what Rust
+    // clamped back.
     item.setZoomLevel(0.001);
-    QVERIFY(std::abs(item.zoomLevel() - 0.02) < 0.001);
+    QVERIFY(std::abs(item.zoomLevel() - 0.05) < 0.001);
 
     // Reset to 1.0
     item.setZoomLevel(1.0);
