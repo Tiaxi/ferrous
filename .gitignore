@@ -3,4 +3,5 @@
 /build.env
 /dist
 .worktrees/
+.codex
 CMakeFiles/
