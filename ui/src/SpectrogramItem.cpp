@@ -1414,19 +1414,37 @@ void SpectrogramItem::feedPrecomputedChunk(
     // layouts the first pane's signal may have already set m_zoomLevel=1.0
     // on this pane via QML, but m_renderZoomLevel is still at the old
     // value and m_awaitingZoomData still needs clearing.
+    //
+    // Also reset when the arriving chunk's hop size is not the default
+    // reference hop: this catches the case where the SpectrogramItem
+    // instance is fresh (channel-count change tore down the previous
+    // widgets) so m_renderZoomLevel defaults to 1.0 even though the
+    // backend persisted a non-default zoom from the previous track.
+    // Without this, Qt renders at effectiveZoom = 1.0 × hop / refHop
+    // (= 0.0625 at hop=64), the visible window inflates to thousands of
+    // cols, and the right side of the widget stays un-backed while the
+    // previous canvas smears through the gap.
+    const bool qtRenderNotAtDefault =
+        std::abs(m_renderZoomLevel - 1.0) > 0.001;
+    const bool backendNotAtReferenceHop =
+        hopSize > 0 && hopSize != static_cast<int>(kReferenceHopSamples);
     const bool needsZoomReset =
         (isTrackChange || isGaplessTrackChange)
-        && std::abs(m_renderZoomLevel - 1.0) > 0.001;
+        && (qtRenderNotAtDefault || backendNotAtReferenceHop);
     if (needsZoomReset) {
         m_zoomLevel = 1.0;
         m_renderZoomLevel = 1.0;
         m_awaitingZoomData = false;
         m_zoomFillActive = false;
-        // Clear the estimate so the fresh zoom=1.0 data can set it.
-        // Without this, the stale estimate from the previous zoom's
-        // decimation persists and the increase filter rejects the
-        // correct (larger) estimate at the default hop.
-        m_precomputedTotalColumnsEstimate = 0;
+        // Clear the estimate only when Qt's render zoom was actually
+        // changing.  The pre-reset estimate came from a different zoom's
+        // decimation and would otherwise be stale.  If we're only
+        // syncing the backend (Qt already at default zoom on a fresh
+        // instance), the estimate that just arrived is the correct one
+        // for the new track — don't discard it.
+        if (qtRenderNotAtDefault) {
+            m_precomputedTotalColumnsEstimate = 0;
+        }
         m_precomputedCanvasDirty = true;
         m_crosshairDirty = true;
         m_timeGridDirty = true;

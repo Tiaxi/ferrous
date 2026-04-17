@@ -401,6 +401,7 @@ private slots:
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
+    void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -2283,6 +2284,72 @@ void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
     QVERIFY2(fresh.m_ringCapacity >= 3840,
              qPrintable(QString("fresh-instance ring cap %1 < 3840")
                             .arg(fresh.m_ringCapacity)));
+}
+
+void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
+    // Regression: the Rust-side zoom_level persists across tracks
+    // (track changes don't reset it).  When a channel-count change
+    // destroys the SpectrogramItem instances and creates fresh ones,
+    // the new instance has m_renderZoomLevel = 1.0 (default) while
+    // the backend may still be at zoom=16 from the previous track,
+    // sending data at hop=64.  Without a zoom resync, Qt renders at
+    // effectiveZoom = renderZoom × hop / refHop = 0.0625, inflating
+    // the centered visible window to thousands of cols.  The decoder
+    // hasn't produced that many yet, so the right side of the widget
+    // has no data and the old canvas smears through.
+    //
+    // On track change with a non-default backend hop, the widget
+    // must emit backendZoomRequested(1.0) even when it's already at
+    // render zoom 1.0 (i.e. fresh instance).  The estimate that just
+    // arrived is the correct one for the new track and must be
+    // preserved (the clear is only for the actual zoom-change case).
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // backend at max zoom from prior track
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 7;
+
+    // Seed the widget as if it had just been seeing the prior track
+    // at backend zoom 1.0 (the fresh-instance default).  First chunk
+    // establishes the committed token so the track-change detection
+    // fires on the next non-matching buffer_reset.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 10064,
+        44100, 1024, false, true, oldToken);
+    QByteArray warm(4 * bins, '\x10');
+    item.feedPrecomputedChunk(
+        warm, bins, 0, 4, 0, 10064,
+        44100, 1024, false, false, oldToken);
+    QCOMPARE(backendZoomSpy.count(), 0);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, 10064);
+
+    // Track change with backend at hop=64 (still at max zoom from the
+    // previous track — the backend's zoom_level persisted across the
+    // track change even though Qt's fresh-instance default is 1.0).
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, newToken);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, newToken);
+
+    // Qt must have asked the backend to go back to zoom=1.0 so a
+    // subsequent session restart produces data at the reference hop.
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    // The estimate for the new track must be preserved; a fresh
+    // instance is not a real zoom transition, so the estimate-clear
+    // path must not fire.
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, 161024);
+    QCOMPARE(item.m_renderZoomLevel, 1.0);
 }
 
 void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {
