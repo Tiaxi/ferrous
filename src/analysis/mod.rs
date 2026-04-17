@@ -1046,6 +1046,11 @@ impl AnalysisRuntimeState {
             );
             return;
         };
+        // NewTrack starts a fresh worker timeline. Any rolling-mode gapless
+        // offset must be cleared first, otherwise the next PositionUpdate is
+        // re-adjusted into the old continuous coordinate space and the worker
+        // seeks far forward immediately after the restart.
+        self.spectrogram_position_offset = 0.0;
         self.spectrogram_session_start = start_seconds;
         self.spectrogram_session_margin = self.centered_margin_seconds();
         // update_session_compat_params is already called by
@@ -3207,6 +3212,55 @@ mod tests {
         assert!(
             (state.zoom_level - 2.0).abs() < 0.001,
             "zoom_level should have been updated to the new value"
+        );
+    }
+
+    #[test]
+    fn rolling_zoom_restart_clears_gapless_position_offset() {
+        // Regression: after a rolling-mode gapless handoff, a later zoom
+        // restart must start from the real playback position. Keeping the
+        // old gapless offset causes the first post-restart PositionUpdate to
+        // look like a huge forward seek, sending the worker near EOF where
+        // it stops feeding after a few seconds.
+        let mut state = AnalysisRuntimeState::new();
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_track_token = 4;
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.last_spectrogram_position = 7.6;
+        state.spectrogram_position_offset = 232.2;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.handle_command(AnalysisCommand::SetSpectrogramZoomLevel(2.0), &ctx);
+
+        let cmd = spectrogram_cmd_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("zoom change must send a spectrogram command");
+        match cmd {
+            SpectrogramWorkerCommand::NewTrack { start_seconds, .. } => {
+                assert!(
+                    (start_seconds - 7.6).abs() < 0.001,
+                    "rolling zoom restart should use the live playback position"
+                );
+            }
+            other => panic!("expected NewTrack for zoom restart, got {other:?}"),
+        }
+        assert_eq!(
+            state.spectrogram_position_offset, 0.0,
+            "zoom restart should clear stale rolling gapless offset"
         );
     }
 }
