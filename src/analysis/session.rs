@@ -1696,6 +1696,24 @@ fn session_drain_stft_rows(
 ///    `GStreamer` may determine the duration after processing the bitstream.
 /// 2. If the re-query fails and we're within 25% of the estimate, double it
 ///    so the UI ring buffer grows before columns are evicted.
+/// Convert an audio-frame count from a duration re-query into a
+/// total-columns estimate in the session's `effective_hop` units.
+///
+/// The raw math (`frames / REFERENCE_HOP`) gives a reference-hop
+/// count — but `session.total_columns_estimate` is always stored in
+/// the current session's `effective_hop` cols, so we must scale.
+/// Without this scaling, zoom-out sessions
+/// (`effective_hop > REFERENCE_HOP`) see a ref-hop figure that is
+/// always larger than the correctly-scaled in-session estimate and
+/// the estimate gets inflated by `effective_hop / REFERENCE_HOP`,
+/// breaking the zoom-out minZoom computation on the Qt side.
+fn duration_requery_estimate_for_session(effective_frames: u64, effective_hop: usize) -> u32 {
+    let new_est_ref =
+        u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
+            .unwrap_or(u32::MAX);
+    scale_columns_estimate(new_est_ref, effective_hop)
+}
+
 fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: &AudioFrameSource) {
     let estimate = u64::from(session.total_columns_estimate);
     let produced = session.columns_produced;
@@ -1710,14 +1728,13 @@ fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: 
             let total_frames = ns * rate / 1_000_000_000;
             let divisor = waveform_sample_rate_divisor(rate);
             let effective = total_frames / divisor;
-            let new_est =
-                u32::try_from(((effective / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
-                    .unwrap_or(u32::MAX);
+            let new_est = duration_requery_estimate_for_session(effective, session.effective_hop);
             if new_est > session.total_columns_estimate {
                 profile_eprintln!(
-                    "[spect-worker] duration re-query OK, est_cols {} → {}",
+                    "[spect-worker] duration re-query OK, est_cols {} → {} (effective_hop={})",
                     session.total_columns_estimate,
                     new_est,
+                    session.effective_hop,
                 );
                 session.total_columns_estimate = new_est;
                 return;
@@ -2410,6 +2427,49 @@ mod tests {
         assert!(matches!(action, SessionAction::Continue));
         assert_eq!(session.widget_width, 1000);
         assert_eq!(session.lookahead_columns, 430);
+    }
+
+    #[test]
+    fn duration_requery_estimate_scales_to_effective_hop() {
+        // Regression: the GStreamer duration re-query computed new_est
+        // as effective_frames/REFERENCE_HOP + 64 and compared it to
+        // session.total_columns_estimate (stored in effective_hop
+        // cols).  For zoom-out sessions (effective_hop > REFERENCE_HOP)
+        // the ref-hop figure was always larger than the correctly-
+        // scaled in-session estimate, so the estimate got inflated by
+        // effective_hop/REFERENCE_HOP — AC3 at zoom ≈ 0.17 (effective
+        // hop ≈ 6104) turned a correct ~2370-col estimate into a bogus
+        // 16273, which then broke Qt's minimumZoomLevel calc and
+        // trapped the user at a fixed zoom across repeated zoom-out
+        // attempts.  Pipe new_est through scale_columns_estimate.
+        //
+        // Numbers mirror the diagnostics: a ~5-minute AC3 track at
+        // 48 kHz stereo-after-downmix (divisor 1) has
+        // effective_frames = 5 * 60 * 48_000 = 14_400_000.
+        let effective_frames: u64 = 14_400_000;
+        let reference_est = duration_requery_estimate_for_session(effective_frames, REFERENCE_HOP);
+        // Reference-hop gives the raw ~14125 figure + 64 padding.
+        assert!(
+            reference_est >= 14_000 && reference_est <= 14_200,
+            "reference-hop est out of expected range: {}",
+            reference_est,
+        );
+
+        // Zoom-out: effective_hop ≈ 6104 → est in effective-hop cols
+        // must be strictly smaller than the reference-hop count, in the
+        // same ratio scale_columns_estimate uses for a fresh session.
+        let zoom_out_est = duration_requery_estimate_for_session(effective_frames, 6_104);
+        assert!(
+            zoom_out_est < reference_est,
+            "zoom-out est ({}) should scale below reference-hop est ({})",
+            zoom_out_est,
+            reference_est,
+        );
+        // Compare against what scale_columns_estimate(initial_open_file_cols, 6104)
+        // would produce for the same input.  Without the fix the
+        // zoom-out est would be ≈ reference_est (i.e. inflated).
+        let expected_scaled = scale_columns_estimate(reference_est, 6_104);
+        assert_eq!(zoom_out_est, expected_scaled);
     }
 
     #[test]
