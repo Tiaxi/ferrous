@@ -701,6 +701,12 @@ struct SpectrogramSessionState {
     /// `UpdateWidgetWidth` can recompute `lookahead_columns` without
     /// re-reading the env var.
     lookahead_seconds: f64,
+    /// True once `source.next_frames()` has returned `None` — the
+    /// decoder has consumed the entire audio file.  Used by
+    /// `run_spectrogram_session` to emit a finalize chunk only in the
+    /// real-EOF case, not on a stale-generation termination (where the
+    /// decoder is superseded by a new session before reaching EOF).
+    source_reached_eof: bool,
 
     /// Whether a `GStreamer` duration re-query has already been attempted.
     /// Raw DTS/AC3 files often lack duration at pipeline start; a re-query
@@ -877,6 +883,7 @@ fn run_spectrogram_session(
         decode_rate_limit,
         lookahead_columns,
         lookahead_seconds,
+        source_reached_eof: false,
         #[cfg(feature = "gst")]
         gst_duration_requeried: false,
         pending_continue: None,
@@ -987,14 +994,30 @@ fn run_spectrogram_session(
                 return Some(cmd);
             }
             None => {
-                // Natural EOF with no pending continuation.  Emit a
-                // finalize chunk so Qt learns the true decoded extent
-                // and can detach the centered-mode playhead from center
-                // as playback approaches the actual end (the file
-                // metadata estimate often overshoots by seconds).
-                session_emit_finalize_chunk(&session, event_tx);
+                // session_decode_loop returns None for two reasons:
+                //   1. Real source EOF (decoder consumed the whole
+                //      file) — post-EOF park then exited via stale-gen
+                //      or cmd_rx close.  cols_produced is the true
+                //      decoded extent and should be sent as a finalize
+                //      chunk so Qt can shrink the estimate.
+                //   2. Stale-generation detection in the main decode
+                //      loop BEFORE reaching source EOF — a new session
+                //      is about to start and cols_produced is just the
+                //      current in-flight count, NOT the track length.
+                //      Emitting a finalize here would clobber the next
+                //      session's estimate with a bogus small value.
+                // Gate the finalize on `source_reached_eof` to tell
+                // them apart.
+                if session.source_reached_eof {
+                    session_emit_finalize_chunk(&session, event_tx);
+                }
                 profile_eprintln!(
-                    "[spect-worker] SESSION END (EOF) elapsed={:.1}ms cols_produced={}",
+                    "[spect-worker] SESSION END ({}) elapsed={:.1}ms cols_produced={}",
+                    if session.source_reached_eof {
+                        "EOF"
+                    } else {
+                        "superseded"
+                    },
                     _start.elapsed().as_secs_f64() * 1000.0,
                     session.columns_produced.saturating_sub(start_column),
                 );
@@ -1146,7 +1169,13 @@ fn session_decode_loop(
         let audio = match source.next_frames() {
             Some(af) if af.frames == 0 => continue, // GStreamer timeout, no data yet
             Some(af) => af,
-            None => break, // EOF
+            None => {
+                // Real source EOF.  Mark so the outer wrapper emits a
+                // finalize chunk for this session (distinguishing EOF
+                // from the stale-generation None return below).
+                session.source_reached_eof = true;
+                break;
+            }
         };
         session.packet_counter += 1;
 
@@ -1908,6 +1937,7 @@ mod tests {
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -1999,6 +2029,7 @@ mod tests {
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2047,6 +2078,7 @@ mod tests {
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2105,6 +2137,7 @@ mod tests {
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2155,6 +2188,7 @@ mod tests {
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2213,6 +2247,7 @@ mod tests {
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2375,6 +2410,47 @@ mod tests {
         assert!(matches!(action, SessionAction::Continue));
         assert_eq!(session.widget_width, 1000);
         assert_eq!(session.lookahead_columns, 430);
+    }
+
+    #[test]
+    fn session_emit_finalize_chunk_carries_cols_produced_and_complete_flag() {
+        // Regression: the finalize chunk must carry the session's
+        // columns_produced as total_columns_estimate and complete=true
+        // so the Qt-side handler recognises it and shrinks its estimate
+        // only for a session that actually consumed the source.
+        let mut session = make_test_session();
+        session.track_token = 42;
+        session.columns_produced = 7_777;
+        session.bins_per_column = 1_025;
+        session.channel_count = 2;
+        session.effective_rate = 44_100;
+        session.effective_hop = 64;
+
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        session_emit_finalize_chunk(&session, &event_tx);
+        let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) =
+            event_rx.try_recv().expect("finalize event")
+        else {
+            panic!("expected a PrecomputedSpectrogramChunk event")
+        };
+        assert!(chunk.complete);
+        assert_eq!(chunk.column_count, 0);
+        assert_eq!(chunk.track_token, 42);
+        assert_eq!(chunk.total_columns_estimate, 7_777);
+        assert_eq!(chunk.start_column_index, 7_777);
+        assert!(!chunk.buffer_reset);
+        assert!(!chunk.clear_history);
+    }
+
+    #[test]
+    fn source_reached_eof_defaults_to_false() {
+        // Regression guard: a freshly-built session must not claim to
+        // have reached source EOF, otherwise a stale-generation
+        // termination (None return before decoding finishes the file)
+        // would be treated as real EOF and emit a spurious finalize
+        // chunk clobbering the next session's total_columns_estimate.
+        let session = make_test_session();
+        assert!(!session.source_reached_eof);
     }
 
     #[test]
