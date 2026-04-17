@@ -206,6 +206,14 @@ pub(super) enum SpectrogramWorkerCommand {
     /// Clear any pending continuation that has not yet been consumed at
     /// EOF.  Sent when the gapless prediction is cancelled.
     CancelPendingContinue,
+    /// Grow the running session's widget-width basis so the centered-mode
+    /// lookahead park threshold covers a newly-enlarged display (e.g.
+    /// fullscreen toggle without session restart).  The worker updates
+    /// `session.widget_width` and recomputes `session.lookahead_columns`
+    /// so the decoder produces enough cols to fill the bigger window.
+    UpdateWidgetWidth {
+        widget_width: u32,
+    },
     #[allow(dead_code)]
     SetDisplayMode(SpectrogramDisplayMode),
     Stop,
@@ -689,6 +697,10 @@ struct SpectrogramSessionState {
     post_reset_unthrottled_columns: u32,
     decode_rate_limit: f64,
     lookahead_columns: u64,
+    /// Seconds-of-audio component of the lookahead park cap.  Stored so
+    /// `UpdateWidgetWidth` can recompute `lookahead_columns` without
+    /// re-reading the env var.
+    lookahead_seconds: f64,
 
     /// Whether a `GStreamer` duration re-query has already been attempted.
     /// Raw DTS/AC3 files often lack duration at pipeline start; a re-query
@@ -864,6 +876,7 @@ fn run_spectrogram_session(
         post_reset_unthrottled_columns: post_reset_unthrottled_columns(display_mode),
         decode_rate_limit,
         lookahead_columns,
+        lookahead_seconds,
         #[cfg(feature = "gst")]
         gst_duration_requeried: false,
         pending_continue: None,
@@ -1266,6 +1279,17 @@ fn process_session_commands(
             SpectrogramWorkerCommand::CancelPendingContinue => {
                 session.pending_continue = None;
             }
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
+                if session.display_mode == SpectrogramDisplayMode::Centered
+                    && widget_width > session.widget_width
+                {
+                    session.widget_width = widget_width;
+                    session.lookahead_columns = u64::from(widget_width) * 2
+                        + f64_to_u64_saturating(
+                            session.lookahead_seconds * session.cols_per_second,
+                        );
+                }
+            }
             SpectrogramWorkerCommand::Stop => {
                 return Some(SessionAction::Stop);
             }
@@ -1361,6 +1385,16 @@ fn handle_single_command(
         }
         SpectrogramWorkerCommand::CancelPendingContinue => {
             session.pending_continue = None;
+            SessionAction::Continue
+        }
+        SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
+            if session.display_mode == SpectrogramDisplayMode::Centered
+                && widget_width > session.widget_width
+            {
+                session.widget_width = widget_width;
+                session.lookahead_columns = u64::from(widget_width) * 2
+                    + f64_to_u64_saturating(session.lookahead_seconds * session.cols_per_second);
+            }
             SessionAction::Continue
         }
         SpectrogramWorkerCommand::Stop => SessionAction::Stop,
@@ -1873,6 +1907,7 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -1963,6 +1998,7 @@ mod tests {
             ),
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2010,6 +2046,7 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2067,6 +2104,7 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2116,6 +2154,7 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2173,6 +2212,7 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2269,6 +2309,72 @@ mod tests {
             "expected FlushToken when pending_continue is None"
         );
         assert_eq!(session.track_token, 20);
+    }
+
+    #[test]
+    fn update_widget_width_grows_centered_lookahead() {
+        // Growing the widget width (e.g. fullscreen) must lift the
+        // centered-mode lookahead so the decoder doesn't stay parked at
+        // the old window's threshold and leave the right edge black.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Centered;
+        session.widget_width = 1000;
+        session.cols_per_second = 43.07;
+        session.lookahead_seconds = 10.0;
+        session.lookahead_columns = 2000 + 431; // 1000*2 + 10*43.07
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: 3840 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(session.widget_width, 3840);
+        // new lookahead = 3840*2 + 10*43.07 ≈ 8111.
+        assert!(
+            session.lookahead_columns > 8_000 && session.lookahead_columns < 8_200,
+            "lookahead did not grow to cover the new width: {}",
+            session.lookahead_columns
+        );
+    }
+
+    #[test]
+    fn update_widget_width_ignored_when_shrinking() {
+        // Shrinking the widget must not shrink the running lookahead —
+        // the existing buffer is fine and we don't want to discard
+        // already-decoded cols.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Centered;
+        session.widget_width = 3840;
+        session.lookahead_columns = 8_111;
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: 1200 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(session.widget_width, 3840);
+        assert_eq!(session.lookahead_columns, 8_111);
+    }
+
+    #[test]
+    fn update_widget_width_ignored_in_rolling_mode() {
+        // Rolling mode uses a different lookahead formula that doesn't
+        // depend on widget width; UpdateWidgetWidth must be a no-op.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Rolling;
+        session.widget_width = 1000;
+        session.lookahead_columns = 430;
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: 3840 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(session.widget_width, 1000);
+        assert_eq!(session.lookahead_columns, 430);
     }
 
     #[test]

@@ -244,6 +244,13 @@ struct AnalysisRuntimeState {
     /// the decode margin and lookahead dynamically.  Updated from the
     /// frontend on resize.
     spectrogram_widget_width: u32,
+    /// Maximum widget width observed so far.  The lookahead park
+    /// threshold is sized against this rather than the current width so
+    /// a fullscreen toggle that skips the session restart (because the
+    /// zoom level hasn't changed) still has enough decoded columns to
+    /// fill the larger display.  Cheap memory trade: at max zoom a 4K
+    /// lookahead costs ~12 MB extra vs a 1080p lookahead.
+    spectrogram_max_widget_width: u32,
     spectrogram_view_mode: SpectrogramViewMode,
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
@@ -403,6 +410,7 @@ impl AnalysisRuntimeState {
             hop_size: 1024,
             zoom_level: 1.0,
             spectrogram_widget_width: 1920,
+            spectrogram_max_widget_width: 1920,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
             active_track_token: 0,
             active_track_path: None,
@@ -491,7 +499,21 @@ impl AnalysisRuntimeState {
                 self.start_spectrogram_session(self.centered_start_seconds(), true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramWidgetWidth(width) => {
-                self.spectrogram_widget_width = width.max(320);
+                let w = width.max(320);
+                self.spectrogram_widget_width = w;
+                if w > self.spectrogram_max_widget_width {
+                    self.spectrogram_max_widget_width = w;
+                    // Propagate to the running session so its
+                    // centered-mode lookahead park threshold grows to
+                    // fill the enlarged display.  Without this, a
+                    // fullscreen toggle that skips the session restart
+                    // (zoom unchanged) leaves the decoder parked at the
+                    // old lookahead and the right portion of the new
+                    // window stays black until playback catches up.
+                    let _ = ctx
+                        .spectrogram_cmd_tx
+                        .send(SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: w });
+                }
             }
             AnalysisCommand::SetSpectrogramZoomLevel(level) => {
                 let level = level.clamp(0.05, 16.0);
@@ -1043,7 +1065,9 @@ impl AnalysisRuntimeState {
                 fft_size: self.fft_size,
                 hop_size: self.hop_size,
                 zoom_level: self.zoom_level,
-                widget_width: self.spectrogram_widget_width,
+                widget_width: self
+                    .spectrogram_widget_width
+                    .max(self.spectrogram_max_widget_width),
                 channel_count: self.active_session_channel_count.max(1),
                 start_seconds,
                 emit_initial_reset,
@@ -2942,6 +2966,67 @@ mod tests {
         assert_eq!(zoom_hop_size(8192, 16.0), 64);
         assert_eq!(zoom_hop_size(8192, 32.0), 64);
         assert_eq!(zoom_hop_size(8192, 0.5), 1024);
+    }
+
+    #[test]
+    fn set_widget_width_growth_notifies_worker_to_extend_lookahead() {
+        // Regression for the fullscreen-regression-after-unchanged-zoom
+        // skip: a widget-width increase (e.g. fullscreen toggle) must
+        // propagate to the running decoder so its centered-mode
+        // lookahead park threshold grows to fill the larger display.
+        // Without this, the decoder stays parked at the old window's
+        // lookahead and the right side of the new fullscreen view
+        // shows only the slowly-advancing decode edge.
+        let mut state = AnalysisRuntimeState::new();
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_track_token = 1;
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        // Default starts at 1920; first shrink to 1000 simulates the
+        // windowed layout.  No UpdateWidgetWidth should flow because the
+        // max has not grown.
+        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1000), &ctx);
+        assert_eq!(state.spectrogram_widget_width, 1000);
+        assert_eq!(state.spectrogram_max_widget_width, 1920);
+        assert!(
+            spectrogram_cmd_rx.try_recv().is_err(),
+            "shrinking the widget must not refresh the worker's lookahead"
+        );
+
+        // Growing past the previous max (fullscreen on a wider display)
+        // must dispatch an UpdateWidgetWidth carrying the new value.
+        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(3840), &ctx);
+        assert_eq!(state.spectrogram_widget_width, 3840);
+        assert_eq!(state.spectrogram_max_widget_width, 3840);
+        let cmd = spectrogram_cmd_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("widget-width growth must send a worker command");
+        match cmd {
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
+                assert_eq!(widget_width, 3840);
+            }
+            other => panic!("expected UpdateWidgetWidth, got {other:?}"),
+        }
+
+        // Shrinking back does not refresh again (would just waste work).
+        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1200), &ctx);
+        assert_eq!(state.spectrogram_widget_width, 1200);
+        assert_eq!(state.spectrogram_max_widget_width, 3840);
+        assert!(spectrogram_cmd_rx.try_recv().is_err());
     }
 
     #[test]
