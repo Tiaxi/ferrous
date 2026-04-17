@@ -1436,6 +1436,20 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_renderZoomLevel = 1.0;
         m_awaitingZoomData = false;
         m_zoomFillActive = false;
+        // Cancel any pending debounced setZoomLevel that would
+        // otherwise overwrite this reset 150 ms later.  Scenario: the
+        // QML zoomLevel binding pushes the SpectrogramSurface's
+        // _widgetZoomLevel into freshly-instantiated SpectrogramItems
+        // (channel-count change recreated the Repeater children).  If
+        // _widgetZoomLevel was still at the prior track's max value
+        // (e.g. 16), setZoomLevel(16) on the new instance arms the
+        // debounce timer with m_pendingBackendZoom = 16 — which we
+        // must null out here so the timer doesn't fire after our
+        // reset and restart the backend at the old zoom.
+        m_pendingBackendZoom = 1.0f;
+        if (m_zoomDebounceTimer) {
+            m_zoomDebounceTimer->stop();
+        }
         // Clear the estimate only when Qt's render zoom was actually
         // changing.  The pre-reset estimate came from a different zoom's
         // decimation and would otherwise be stale.  If we're only

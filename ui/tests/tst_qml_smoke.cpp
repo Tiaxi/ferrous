@@ -402,6 +402,7 @@ private slots:
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
+    void spectrogramTrackChangeCancelsPendingZoomDebounce();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -2350,6 +2351,67 @@ void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
     // path must not fire.
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, 161024);
     QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramTrackChangeCancelsPendingZoomDebounce() {
+    // Regression: a SpectrogramItem is instantiated with
+    // m_zoomLevel defaulting to 1.0, then the QML zoomLevel
+    // property binding pushes the SpectrogramSurface's existing
+    // _widgetZoomLevel (e.g. 16 from the previous track's max zoom
+    // on the prior instance set) into the new instance.
+    // setZoomLevel(16) arms the 150 ms debounce timer with
+    // m_pendingBackendZoom = 16.  A track change arrives in that
+    // window — our needsZoomReset path emits
+    // backendZoomRequested(1.0) directly, bypassing the timer —
+    // but if we don't ALSO cancel the pending debounce, the timer
+    // fires 150 ms later with the stale 16 and restarts the
+    // backend at max zoom.  The widget then renders at
+    // effectiveZoom = 0.0625 with a smeared right edge because
+    // the ring hasn't filled far enough for the inflated visible
+    // window.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1);
+    item.setSampleRateHz(44100);
+
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    // Simulate the QML binding pushing the prior track's max zoom
+    // into the freshly-created instance: arms the debounce with 16.
+    item.setZoomLevel(16.0);
+    QVERIFY(item.m_zoomDebounceTimer != nullptr);
+    QVERIFY(item.m_zoomDebounceTimer->isActive());
+    QCOMPARE(item.m_pendingBackendZoom, 16.0f);
+
+    // Track change (non-gapless): the initial reset + data chunk
+    // carries the backend's leftover non-default hop (64 at max
+    // zoom), so needsZoomReset fires.
+    constexpr int bins = 4;
+    constexpr int hop = 64;
+    constexpr quint64 newToken = 42;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, newToken);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, newToken);
+
+    // The reset must have fired backendZoomRequested(1.0) and
+    // disarmed the debounce so the stale 16 can't fire after.
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    QVERIFY2(!item.m_zoomDebounceTimer->isActive(),
+             "pending debounce still armed after track-change zoom reset");
+    QCOMPARE(item.m_pendingBackendZoom, 1.0f);
+    QCOMPARE(item.m_zoomLevel, 1.0);
+
+    // Even if we wait past the original debounce interval, no
+    // further backendZoomRequested should fire — the timer was
+    // cancelled.
+    QTest::qWait(200);
+    QCOMPARE(backendZoomSpy.count(), 0);
 }
 
 void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {
