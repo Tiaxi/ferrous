@@ -224,7 +224,9 @@ private:
     QVariantMap debugSeekProfileStateLocked() const;
     void resetSmoothnessProfileLocked();
     void maybeStartSmoothnessProfileLocked(qint64 nowMs);
+    void noteSmoothnessServoLocked(double errorSeconds, bool regressedDuringPlayback);
     void noteSmoothnessProfileFrameLocked(qint64 nowMs, double elapsedSeconds, bool pending, bool advanced);
+    void noteSmoothnessAdvanceFallbackLocked(double effectiveZoom);
     void noteSmoothnessPaintLocked(double paintMs);
     void finalizeSmoothnessProfileLocked(qint64 nowMs, const char *reason);
     QVariantMap debugSmoothnessProfileStateLocked() const;
@@ -267,6 +269,8 @@ private:
     std::chrono::steady_clock::time_point m_profileLastFrameGapSpike{};
     std::chrono::steady_clock::time_point m_profileLastPaintSpike{};
     std::chrono::steady_clock::time_point m_profileLastWriteHeadClampSpike{};
+    std::chrono::steady_clock::time_point m_profileLastServoSpike{};
+    std::chrono::steady_clock::time_point m_profileLastAdvanceFallbackSpike{};
     quint64 m_profilePaints{0};
     double m_profilePaintMs{0.0};
     quint64 m_sceneGraphGeneration{0};
@@ -400,9 +404,16 @@ private:
         int pendingGapFrames{0};
         double maxGapMs{0.0};
         int regressionCount{0};
+        int servoFrames{0};
+        int servoRegressionDrops{0};
+        double servoErrorMsTotal{0.0};
+        double maxServoErrorMs{0.0};
         int drainPasses{0};
         int drainedColumns{0};
         int maxPendingRows{0};
+        int advanceFallbackFrames{0};
+        int nonUnityAdvanceFallbackFrames{0};
+        double maxAdvanceFallbackZoomDelta{0.0};
         int paintSpikeCount{0};
         double maxPaintMs{0.0};
         double paintMsTotal{0.0};

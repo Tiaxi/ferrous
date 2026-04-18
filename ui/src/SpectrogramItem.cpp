@@ -517,6 +517,14 @@ void SpectrogramItem::setPositionSeconds(double value) {
         constexpr double kServoAlpha = 0.25;
         constexpr double kServoMaxErrorSeconds = 0.15;
         const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (m_profileEnabled
+            && m_smoothnessProfile.active
+            && (regressedDuringPlayback
+                || (smallCorrection && std::abs(error) >= 0.001))) {
+            noteSmoothnessServoLocked(error, regressedDuringPlayback);
+        }
+#endif
         const double effectivePosition = regressedDuringPlayback
             ? currentPosition
             : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
@@ -3846,7 +3854,13 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     // Incremental advance only works at 1:1 column-to-pixel mapping.
     // TODO: Implement incremental advance for non-1.0 zoom levels if
     // full rebuild shows measurable frame drops on target hardware.
-    if (std::abs(effectiveZoomLocked() - 1.0) > 0.001) {
+    const double effectiveZoom = effectiveZoomLocked();
+    if (std::abs(effectiveZoom - 1.0) > 0.001) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (m_profileEnabled) {
+            noteSmoothnessAdvanceFallbackLocked(effectiveZoom);
+        }
+#endif
         return false;
     }
     if (m_canvas.isNull()
@@ -4109,6 +4123,35 @@ void SpectrogramItem::maybeStartSmoothnessProfileLocked(qint64 nowMs) {
     }
 }
 
+void SpectrogramItem::noteSmoothnessServoLocked(
+    double errorSeconds,
+    bool regressedDuringPlayback) {
+    if (!m_smoothnessProfile.active) {
+        return;
+    }
+
+    const double errorMs = std::abs(errorSeconds) * 1000.0;
+    m_smoothnessProfile.servoFrames += 1;
+    m_smoothnessProfile.servoErrorMsTotal += errorMs;
+    m_smoothnessProfile.maxServoErrorMs =
+        std::max(m_smoothnessProfile.maxServoErrorMs, errorMs);
+    if (regressedDuringPlayback) {
+        m_smoothnessProfile.servoRegressionDrops += 1;
+    }
+
+    if (m_profileEnabled
+        && errorMs >= 12.0
+        && shouldLogProfileSpike(&m_profileLastServoSpike, std::chrono::steady_clock::now(), 0.10)) {
+        FERROUS_SPECTROGRAM_LOGF(
+            stderr,
+            "[ui-spectrogram] position_servo error_ms=%.3f regressed=%d frames=%d drops=%d\n",
+            errorMs,
+            regressedDuringPlayback ? 1 : 0,
+            m_smoothnessProfile.servoFrames,
+            m_smoothnessProfile.servoRegressionDrops);
+    }
+}
+
 void SpectrogramItem::noteSmoothnessProfileFrameLocked(
     qint64 nowMs,
     double elapsedSeconds,
@@ -4179,7 +4222,7 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
         m_smoothnessProfile.incidentReported = true;
         FERROUS_SPECTROGRAM_LOGF(
             stderr,
-            "[ui-spectrogram] smoothness_hitch_detected sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d paint_spikes=%d max_gap_ms=%.3f advanced=%d\n",
+            "[ui-spectrogram] smoothness_hitch_detected sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d servo_frames=%d servo_drop_frames=%d servo_max_error_ms=%.3f pending_max=%d drain_passes=%d drained=%d advance_fallback_frames=%d advance_fallback_non_unity=%d advance_fallback_max_zoom_delta=%.6f paint_spikes=%d max_gap_ms=%.3f advanced=%d\n",
             m_sampleRateHz,
             rowsPerSecond,
             m_smoothnessProfile.framesObserved,
@@ -4189,12 +4232,47 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
             m_smoothnessProfile.pendingGapFrames,
             m_smoothnessProfile.stallClusters,
             m_smoothnessProfile.regressionCount,
+            m_smoothnessProfile.servoFrames,
+            m_smoothnessProfile.servoRegressionDrops,
+            m_smoothnessProfile.maxServoErrorMs,
             m_smoothnessProfile.maxPendingRows,
             m_smoothnessProfile.drainPasses,
             m_smoothnessProfile.drainedColumns,
+            m_smoothnessProfile.advanceFallbackFrames,
+            m_smoothnessProfile.nonUnityAdvanceFallbackFrames,
+            m_smoothnessProfile.maxAdvanceFallbackZoomDelta,
             m_smoothnessProfile.paintSpikeCount,
             m_smoothnessProfile.maxGapMs,
             advanced ? 1 : 0);
+    }
+}
+
+void SpectrogramItem::noteSmoothnessAdvanceFallbackLocked(double effectiveZoom) {
+    if (!m_smoothnessProfile.active) {
+        return;
+    }
+
+    m_smoothnessProfile.advanceFallbackFrames += 1;
+    const double zoomDelta = std::abs(effectiveZoom - 1.0);
+    if (zoomDelta > 0.001) {
+        m_smoothnessProfile.nonUnityAdvanceFallbackFrames += 1;
+        m_smoothnessProfile.maxAdvanceFallbackZoomDelta =
+            std::max(m_smoothnessProfile.maxAdvanceFallbackZoomDelta, zoomDelta);
+    }
+
+    if (m_profileEnabled
+        && zoomDelta > 0.001
+        && shouldLogProfileSpike(
+            &m_profileLastAdvanceFallbackSpike,
+            std::chrono::steady_clock::now(),
+            0.10)) {
+        FERROUS_SPECTROGRAM_LOGF(
+            stderr,
+            "[ui-spectrogram] advance_fallback effective_zoom=%.6f delta=%.6f frames=%d non_unity=%d\n",
+            effectiveZoom,
+            zoomDelta,
+            m_smoothnessProfile.advanceFallbackFrames,
+            m_smoothnessProfile.nonUnityAdvanceFallbackFrames);
     }
 }
 
@@ -4240,9 +4318,24 @@ void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *
     summary.insert(QStringLiteral("pendingGapFrames"), m_smoothnessProfile.pendingGapFrames);
     summary.insert(QStringLiteral("maxGapMs"), m_smoothnessProfile.maxGapMs);
     summary.insert(QStringLiteral("regressionCount"), m_smoothnessProfile.regressionCount);
+    summary.insert(QStringLiteral("servoFrames"), m_smoothnessProfile.servoFrames);
+    summary.insert(
+        QStringLiteral("servoRegressionDrops"),
+        m_smoothnessProfile.servoRegressionDrops);
+    summary.insert(QStringLiteral("servoErrorMsTotal"), m_smoothnessProfile.servoErrorMsTotal);
+    summary.insert(QStringLiteral("maxServoErrorMs"), m_smoothnessProfile.maxServoErrorMs);
     summary.insert(QStringLiteral("drainPasses"), m_smoothnessProfile.drainPasses);
     summary.insert(QStringLiteral("drainedColumns"), m_smoothnessProfile.drainedColumns);
     summary.insert(QStringLiteral("maxPendingRows"), m_smoothnessProfile.maxPendingRows);
+    summary.insert(
+        QStringLiteral("advanceFallbackFrames"),
+        m_smoothnessProfile.advanceFallbackFrames);
+    summary.insert(
+        QStringLiteral("nonUnityAdvanceFallbackFrames"),
+        m_smoothnessProfile.nonUnityAdvanceFallbackFrames);
+    summary.insert(
+        QStringLiteral("maxAdvanceFallbackZoomDelta"),
+        m_smoothnessProfile.maxAdvanceFallbackZoomDelta);
     summary.insert(QStringLiteral("paintSpikeCount"), m_smoothnessProfile.paintSpikeCount);
     summary.insert(QStringLiteral("maxPaintMs"), m_smoothnessProfile.maxPaintMs);
     summary.insert(
@@ -4255,7 +4348,7 @@ void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *
 
     FERROUS_SPECTROGRAM_LOGF(
         stderr,
-        "[ui-spectrogram] smoothness_window reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d paint_spikes=%d max_gap_ms=%.3f max_paint_ms=%.3f avg_paint_ms=%.3f incident=%d\n",
+        "[ui-spectrogram] smoothness_window reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d servo_frames=%d servo_drop_frames=%d servo_total_error_ms=%.3f servo_max_error_ms=%.3f drain_passes=%d drained=%d pending_max=%d advance_fallback_frames=%d advance_fallback_non_unity=%d advance_fallback_max_zoom_delta=%.6f paint_spikes=%d max_gap_ms=%.3f max_paint_ms=%.3f avg_paint_ms=%.3f incident=%d\n",
         reason,
         m_sampleRateHz,
         rowsPerSecond,
@@ -4266,9 +4359,16 @@ void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *
         m_smoothnessProfile.pendingGapFrames,
         m_smoothnessProfile.stallClusters,
         m_smoothnessProfile.regressionCount,
+        m_smoothnessProfile.servoFrames,
+        m_smoothnessProfile.servoRegressionDrops,
+        m_smoothnessProfile.servoErrorMsTotal,
+        m_smoothnessProfile.maxServoErrorMs,
         m_smoothnessProfile.drainPasses,
         m_smoothnessProfile.drainedColumns,
         m_smoothnessProfile.maxPendingRows,
+        m_smoothnessProfile.advanceFallbackFrames,
+        m_smoothnessProfile.nonUnityAdvanceFallbackFrames,
+        m_smoothnessProfile.maxAdvanceFallbackZoomDelta,
         m_smoothnessProfile.paintSpikeCount,
         m_smoothnessProfile.maxGapMs,
         m_smoothnessProfile.maxPaintMs,
@@ -4298,9 +4398,24 @@ QVariantMap SpectrogramItem::debugSmoothnessProfileStateLocked() const {
         state.insert(QStringLiteral("pendingGapFrames"), m_smoothnessProfile.pendingGapFrames);
         state.insert(QStringLiteral("maxGapMs"), m_smoothnessProfile.maxGapMs);
         state.insert(QStringLiteral("regressionCount"), m_smoothnessProfile.regressionCount);
+        state.insert(QStringLiteral("servoFrames"), m_smoothnessProfile.servoFrames);
+        state.insert(
+            QStringLiteral("servoRegressionDrops"),
+            m_smoothnessProfile.servoRegressionDrops);
+        state.insert(QStringLiteral("servoErrorMsTotal"), m_smoothnessProfile.servoErrorMsTotal);
+        state.insert(QStringLiteral("maxServoErrorMs"), m_smoothnessProfile.maxServoErrorMs);
         state.insert(QStringLiteral("drainPasses"), m_smoothnessProfile.drainPasses);
         state.insert(QStringLiteral("drainedColumns"), m_smoothnessProfile.drainedColumns);
         state.insert(QStringLiteral("maxPendingRows"), m_smoothnessProfile.maxPendingRows);
+        state.insert(
+            QStringLiteral("advanceFallbackFrames"),
+            m_smoothnessProfile.advanceFallbackFrames);
+        state.insert(
+            QStringLiteral("nonUnityAdvanceFallbackFrames"),
+            m_smoothnessProfile.nonUnityAdvanceFallbackFrames);
+        state.insert(
+            QStringLiteral("maxAdvanceFallbackZoomDelta"),
+            m_smoothnessProfile.maxAdvanceFallbackZoomDelta);
         state.insert(QStringLiteral("paintSpikeCount"), m_smoothnessProfile.paintSpikeCount);
         state.insert(QStringLiteral("maxPaintMs"), m_smoothnessProfile.maxPaintMs);
         state.insert(
