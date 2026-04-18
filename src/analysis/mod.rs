@@ -1094,50 +1094,68 @@ impl AnalysisRuntimeState {
         }
     }
 
-    /// Compute the pre-decode margin for centered mode: how many seconds
-    /// before the playhead to start decoding.  Based on the actual widget
-    /// width, sample rate, zoom level, plus a small buffer.
-    fn centered_margin_seconds(&self) -> f64 {
-        let effective_hop = if self.zoom_level > 1.0 {
-            self.hop_size
-        } else {
-            // Match the zoom-adapted decimation: at sub-1.0 zoom, columns
-            // are coarser, so effective_hop = base_hop * decimation_factor.
-            // Using REFERENCE_HOP here would underestimate the visible time
-            // span by the decimation factor, causing seeks within the
-            // already-decoded region to trigger unnecessary session restarts.
-            let base_hop = (self.fft_size / 8).max(64);
-            let zoom = f64::from(self.zoom_level.max(0.001));
-            // Continuous fractional interval matching output_interval_for_hop.
-            // REFERENCE_HOP and base_hop are small compile-time/session constants;
-            // precision loss from usize→f64 is negligible.
-            #[allow(clippy::cast_precision_loss)]
-            let target_effective = REFERENCE_HOP as f64 / zoom;
-            #[allow(clippy::cast_precision_loss)]
-            let interval = (target_effective / base_hop as f64).max(1.0);
-            // interval >= 1.0 and base_hop is small, so the product fits in usize.
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss
-            )]
-            let hop = (base_hop as f64 * interval).round() as usize;
-            hop
-        };
+    fn effective_hop_for_current_zoom(&self) -> Option<usize> {
+        if self.hop_size == 0 {
+            return None;
+        }
+        if self.zoom_level > 1.0 {
+            return Some(self.hop_size);
+        }
+        let base_hop = (self.fft_size / 8).max(64);
+        let zoom = f64::from(self.zoom_level.max(0.001));
+        #[allow(clippy::cast_precision_loss)]
+        let target_effective = REFERENCE_HOP as f64 / zoom;
+        #[allow(clippy::cast_precision_loss)]
+        let interval = (target_effective / base_hop as f64).max(1.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let hop = (base_hop as f64 * interval).round() as usize;
+        Some(hop)
+    }
+
+    fn current_centered_cols_per_second(&self) -> Option<f64> {
+        let effective_hop = self.effective_hop_for_current_zoom()?;
         let rate = if self.active_session_effective_rate > 0 {
             self.active_session_effective_rate
         } else if self.snapshot.sample_rate_hz > 0 {
             let sample_rate = self.snapshot.sample_rate_hz;
             let divisor = waveform_sample_rate_divisor(u64::from(sample_rate)).max(1);
-            u32::try_from(u64::from(sample_rate) / divisor).unwrap_or(sample_rate)
+            u32::try_from(u64::from(sample_rate) / divisor).ok()?
         } else {
             0
         };
-        if rate > 0 && effective_hop > 0 {
+        if rate == 0 || effective_hop == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let cols_per_second = f64::from(rate) / effective_hop as f64;
+        Some(cols_per_second)
+    }
+
+    fn centered_ring_capacity_columns(&self) -> Option<u64> {
+        let cols_per_second = self.current_centered_cols_per_second()?;
+        let current_width = self
+            .spectrogram_widget_width
+            .max(self.spectrogram_max_widget_width);
+        let screen_width = current_width.max(1920);
+        let extra_seconds = 10.0;
+        let capacity = f64::from(screen_width) * 3.0 + extra_seconds * cols_per_second;
+        Some(f64_to_u64_saturating(capacity.ceil()))
+    }
+
+    /// Compute the pre-decode margin for centered mode: how many seconds
+    /// before the playhead to start decoding.  Based on the actual widget
+    /// width, sample rate, zoom level, plus a small buffer.
+    fn centered_margin_seconds(&self) -> f64 {
+        if let (Some(effective_hop), Some(cols_per_second)) = (
+            self.effective_hop_for_current_zoom(),
+            self.current_centered_cols_per_second(),
+        ) {
             // effective_hop and REFERENCE_HOP are hop sizes (small usize);
             // precision loss from usize→f64 is negligible for these values.
-            #[allow(clippy::cast_precision_loss)]
-            let cols_per_second = f64::from(rate) / effective_hop as f64;
             // Keep the seek-window math aligned with the live worker session:
             // both the worker lookahead and the Qt ring are sized from the
             // largest width seen so far, so using only the current width here
@@ -1217,7 +1235,23 @@ impl AnalysisRuntimeState {
             // the playhead (full screen width when playhead is at track end).
             // Check that the entire visible range fits within the window.
             let visible_left = (position_seconds - margin).max(0.0);
-            if visible_left >= window_start && position_seconds <= window_end {
+            let retained_window_start = if let (Some(cols_per_second), Some(ring_capacity)) = (
+                self.current_centered_cols_per_second(),
+                self.centered_ring_capacity_columns(),
+            ) {
+                let produced = ctx
+                    .spectrogram_decode_columns_produced
+                    .load(Ordering::Relaxed);
+                let oldest_retained_col = produced.saturating_sub(ring_capacity);
+                // Column-to-seconds conversion only needs approximate
+                // floating-point precision for seek-window comparisons.
+                #[allow(clippy::cast_precision_loss)]
+                let oldest_retained_seconds = oldest_retained_col as f64 / cols_per_second;
+                oldest_retained_seconds.max(window_start)
+            } else {
+                window_start
+            };
+            if visible_left >= retained_window_start && position_seconds <= window_end {
                 // Seek within decoded window — cheap position update.
                 let adjusted = position_seconds + self.spectrogram_position_offset;
                 let _ = ctx
@@ -2304,6 +2338,51 @@ mod tests {
         assert!(
             matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
             "centered seek within window should send PositionUpdate, got {cmd:?}"
+        );
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
+    fn centered_seek_restarts_when_visible_left_falls_before_retained_ring() {
+        // Regression: at max zoom the centered UI ring only retains the
+        // latest ~3 screens + lookahead. After enough forward decode,
+        // small backward seeks can still fit the original session window
+        // while their visible left edge has already been evicted.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_session_effective_rate = 44_100;
+        state.hop_size = 64;
+        state.zoom_level = 16.0;
+        state.spectrogram_widget_width = 1_183;
+        state.spectrogram_max_widget_width = 1_183;
+        state.spectrogram_session_start = 0.0;
+        state.spectrogram_session_margin = state.centered_margin_seconds();
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(13_000);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        let seek_target = 3.554;
+        let expected_start = (seek_target - state.centered_margin_seconds()).max(0.0);
+        state.seek_spectrogram_position(seek_target, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
+                if (start_seconds - expected_start).abs() < 0.01 && clear_history_on_reset),
+            "seek whose visible left edge was evicted from the centered ring should restart, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }

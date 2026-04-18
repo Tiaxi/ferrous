@@ -408,6 +408,7 @@ private slots:
     void spectrogramCenteredModeSeekPreservesRing();
     void spectrogramCenteredGaplessPreStagedFill();
     void spectrogramCenteredGaplessSnapsAnchorToZero();
+    void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
     void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
@@ -2834,6 +2835,67 @@ void QmlSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
     // Ring populated, not growing from zero.
     QVERIFY(item.m_ringWriteSeq >= 800);
     QVERIFY(item.m_ringCapacity > 0);
+}
+
+void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
+    // Regression: repeated small backward seeks at max zoom can force a
+    // same-track centered restart once the earlier left-margin columns
+    // have been evicted from the ring. After the synthetic clear and the
+    // same-token reset, the widget must rebuild the earlier window
+    // instead of stranding a blank left region.
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // max zoom
+    constexpr int total = 20'000;
+    constexpr quint64 token = 9;
+
+    // Fill enough later-track data to force eviction of the earliest
+    // columns from the centered ring.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, hop, false, true, token);
+    QByteArray laterData(13'000 * bins, '\x30');
+    item.feedPrecomputedChunk(
+        laterData, bins, 0, 13'000, 0, total,
+        44100, hop, false, false, token);
+    QVERIFY(item.m_ringOldestSeq > 0);
+
+    // Same-track centered seek restart: synthetic clear first, then the
+    // worker's proper reset and earlier data at the new start index.
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0, 0, 0,
+        0, 0, false, true, token, true);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, hop, false, true, token, true);
+    QByteArray earlierData(4'000 * bins, '\x50');
+    item.feedPrecomputedChunk(
+        earlierData, bins, 0, 4'000, 0, total,
+        44100, hop, false, false, token);
+
+    QCOMPARE(item.m_ringOldestSeq, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedTrackToken, token);
+    QVERIFY(item.m_ringWriteSeq >= 4'000);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel =
+            1024.0 / static_cast<double>(hop); // effectiveZoom == 1.0
+    }
+
+    item.setPositionSeconds(3.554);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const auto tokenMap = item.m_trackColumnToSeqByToken.value(token);
+    QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayLeft)));
+    QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayRight)));
 }
 
 void QmlSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate() {
