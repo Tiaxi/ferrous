@@ -1,3 +1,10 @@
+ferrous (0.1.8-1) unstable; urgency=low
+
+  * Add spectrogram zoom.
+  * Fix MPRIS cover art metadata URLs.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Sat, 18 Apr 2026 19:14:08 +0300
+
 ferrous (0.1.7-1) unstable; urgency=low
 
   * Fix Last.fm auth loss when closing app before periodic settings save.
