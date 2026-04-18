@@ -176,6 +176,22 @@ ScrollView {
                     onToggled: root.uiBridge.setShowSpectrogramScale(checked)
                 }
 
+                CheckBox {
+                    text: "Allow Spectrogram Zoom"
+                    focusPolicy: Qt.NoFocus
+                    checked: root.uiBridge.spectrogramZoomEnabled
+                    onToggled: root.uiBridge.setSpectrogramZoomEnabled(checked)
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 32
+                    wrapMode: Text.Wrap
+                    color: Kirigami.Theme.disabledTextColor
+                    font.pixelSize: 12
+                    text: "Scroll to zoom in/out. Middle-click to reset."
+                }
+
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12

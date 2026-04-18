@@ -157,6 +157,30 @@ pub(super) fn playback_snapshot_urgency(
     SnapshotUrgency::None
 }
 
+#[cfg(any(test, feature = "profiling-logs"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlaybackPositionTrace {
+    previous: i128,
+    current: i128,
+    delta: i128,
+}
+
+#[cfg(any(test, feature = "profiling-logs"))]
+fn duration_ms_i128(value: Duration) -> i128 {
+    i128::try_from(value.as_millis()).unwrap_or(i128::MAX)
+}
+
+#[cfg(any(test, feature = "profiling-logs"))]
+fn playback_position_trace(previous: Duration, current: Duration) -> PlaybackPositionTrace {
+    let previous_ms = duration_ms_i128(previous);
+    let current_ms = duration_ms_i128(current);
+    PlaybackPositionTrace {
+        previous: previous_ms,
+        current: current_ms,
+        delta: current_ms - previous_ms,
+    }
+}
+
 pub(super) fn process_playback_event(
     event: PlaybackEvent,
     analysis: &AnalysisEngine,
@@ -286,6 +310,21 @@ fn process_playback_snapshot_event(
         && !replayed_same_track_from_stop
     {
         let pos_seconds = state.playback.position.as_secs_f64();
+        #[cfg(feature = "profiling-logs")]
+        let position_trace =
+            playback_position_trace(previous_playback.position, state.playback.position);
+        profile_eprintln!(
+            "[bridge-pos] prev_ms={} next_ms={} delta_ms={} urgency={urgency:?} token={} current={}",
+            position_trace.previous,
+            position_trace.current,
+            position_trace.delta,
+            state.analysis_track_token,
+            state
+                .playback
+                .current
+                .as_ref()
+                .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
+        );
         analysis.command(AnalysisCommand::PositionUpdate(pos_seconds));
     }
     urgency
@@ -762,7 +801,6 @@ pub(super) fn pump_external_queue_detail_events(
 mod tests {
     use super::*;
     use crate::lastfm::{self, Command as LastFmCommand, ServiceOptions as LastFmServiceOptions};
-    use crate::library::LibraryTrack;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -828,6 +866,22 @@ mod tests {
             clear_history: false,
         };
         note_precomputed_spectrogram_chunk(&mut state, &chunk);
+    }
+
+    #[test]
+    fn playback_position_trace_computes_signed_delta_ms() {
+        let trace =
+            playback_position_trace(Duration::from_millis(6_880), Duration::from_millis(7_050));
+        assert_eq!(trace.previous, 6_880);
+        assert_eq!(trace.current, 7_050);
+        assert_eq!(trace.delta, 170);
+    }
+
+    #[test]
+    fn playback_position_trace_preserves_backward_jumps() {
+        let trace =
+            playback_position_trace(Duration::from_millis(8_000), Duration::from_millis(7_100));
+        assert_eq!(trace.delta, -900);
     }
 
     #[test]

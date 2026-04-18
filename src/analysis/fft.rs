@@ -112,48 +112,61 @@ impl StftComputer {
     }
 }
 
-pub(super) struct SpectrogramDecimator {
-    factor: usize,
-    accum: Vec<f32>,
-    count: usize,
+pub(super) struct PeakHoldResampler {
+    output_interval: f64,
+    accumulator: f64,
+    peak: Vec<f32>,
 }
 
-impl SpectrogramDecimator {
-    pub(super) fn new(factor: usize) -> Self {
+impl PeakHoldResampler {
+    pub(super) fn new(output_interval: f64) -> Self {
         Self {
-            factor: factor.max(1),
-            accum: Vec::new(),
-            count: 0,
+            output_interval: output_interval.max(1.0),
+            accumulator: 0.0,
+            peak: Vec::new(),
         }
     }
 
-    pub(super) fn push(&mut self, row: Vec<f32>) -> Option<Vec<f32>> {
-        if self.accum.is_empty() {
-            self.accum = vec![0.0; row.len()];
-        }
-        if row.len() != self.accum.len() {
-            self.accum = vec![0.0; row.len()];
-            self.count = 0;
+    pub(super) fn push(&mut self, row: &[f32]) -> Option<Vec<f32>> {
+        if self.peak.len() != row.len() {
+            self.peak = vec![f32::NEG_INFINITY; row.len()];
+            self.accumulator = 0.0;
         }
 
-        for (a, v) in self.accum.iter_mut().zip(row) {
-            *a += v;
+        // Peak-hold: element-wise max.
+        for (p, &v) in self.peak.iter_mut().zip(row.iter()) {
+            *p = p.max(v);
         }
-        self.count += 1;
+        self.accumulator += 1.0;
 
-        if self.count < self.factor {
-            return None;
+        if self.accumulator >= self.output_interval {
+            self.accumulator -= self.output_interval;
+            let output = self.peak.clone();
+            // The boundary row contributes to the NEXT interval too
+            // (peak-hold is idempotent — including a value twice is safe).
+            if self.accumulator > 0.0 {
+                self.peak.copy_from_slice(row);
+            } else {
+                self.peak.fill(f32::NEG_INFINITY);
+            }
+            Some(output)
+        } else {
+            None
         }
+    }
 
-        let inv = 1.0 / small_usize_to_f32(self.count);
-        let mut out = Vec::with_capacity(self.accum.len());
-        for v in &self.accum {
-            out.push(v * inv);
+    pub(super) fn flush(&mut self) -> Option<Vec<f32>> {
+        if self.accumulator > 0.0
+            && !self.peak.is_empty()
+            && self.peak.iter().any(|&v| v > f32::NEG_INFINITY)
+        {
+            self.accumulator = 0.0;
+            let output = self.peak.clone();
+            self.peak.fill(f32::NEG_INFINITY);
+            Some(output)
+        } else {
+            None
         }
-
-        self.accum.fill(0.0);
-        self.count = 0;
-        Some(out)
     }
 }
 
@@ -317,15 +330,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spectrogram_decimator_averages_rows() {
-        let mut decimator = SpectrogramDecimator::new(2);
-        let first = decimator.push(vec![2.0, 4.0]);
-        assert!(first.is_none());
-        let second = decimator.push(vec![4.0, 6.0]).expect("averaged row");
-        assert_eq!(second, vec![3.0, 5.0]);
-    }
-
-    #[test]
     fn stft_computer_produces_rows_from_samples() {
         let mut stft = StftComputer::new(512, 128);
         let mut samples = Vec::new();
@@ -417,5 +421,70 @@ mod tests {
         // Requesting 4 channels but only 2 samples — out-of-bounds channels
         // should contribute 0.0, not panic.
         assert!((peak_across_channels(&samples, 0, 4) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn peak_hold_resampler_passthrough_at_interval_one() {
+        let mut r = PeakHoldResampler::new(1.0);
+        let out = r.push(&[3.0, 7.0]).expect("interval=1.0 emits every row");
+        assert_eq!(out, vec![3.0, 7.0]);
+    }
+
+    #[test]
+    fn peak_hold_resampler_integer_factor() {
+        let mut r = PeakHoldResampler::new(2.0);
+        assert!(r.push(&[2.0, 4.0]).is_none());
+        let out = r.push(&[4.0, 6.0]).expect("emits after 2 rows");
+        // Peak-hold: max per bin, NOT average.
+        assert_eq!(out, vec![4.0, 6.0]);
+    }
+
+    #[test]
+    fn peak_hold_resampler_fractional_interval() {
+        let mut r = PeakHoldResampler::new(1.5);
+        // Row 1: accum=1.0 < 1.5, no output.
+        assert!(r.push(&[1.0]).is_none());
+        // Row 2: accum=2.0 >= 1.5, emit. Remainder=0.5.
+        let out = r.push(&[3.0]).expect("emits after 1.5 rows");
+        assert_eq!(out, vec![3.0]); // max(1.0, 3.0)
+                                    // Row 3: accum=0.5+1.0=1.5 >= 1.5, emit. Remainder=0.0.
+                                    // The boundary row (3.0) seeded this window; max(3.0, 5.0) = 5.0.
+        let out = r.push(&[5.0]).expect("emits after 1 more row");
+        assert_eq!(out, vec![5.0]); // max(boundary=3.0, this=5.0)
+                                    // Row 4: accum=1.0 < 1.5, no output.
+        assert!(r.push(&[2.0]).is_none());
+        // Row 5: accum=2.0 >= 1.5, emit.
+        let out = r.push(&[4.0]).expect("emits");
+        assert_eq!(out, vec![4.0]); // max(2.0, 4.0)
+    }
+
+    #[test]
+    fn peak_hold_resampler_preserves_transient() {
+        let mut r = PeakHoldResampler::new(4.0);
+        assert!(r.push(&[0.1]).is_none());
+        assert!(r.push(&[0.1]).is_none());
+        assert!(r.push(&[9.0]).is_none()); // transient
+        let out = r.push(&[0.1]).expect("emits after 4 rows");
+        assert_eq!(out, vec![9.0]); // transient preserved
+    }
+
+    #[test]
+    fn peak_hold_resampler_clamps_interval_below_one() {
+        let mut r = PeakHoldResampler::new(0.5);
+        // Should behave as passthrough (interval clamped to 1.0).
+        let out = r.push(&[1.0]).expect("clamped to interval=1.0");
+        assert_eq!(out, vec![1.0]);
+    }
+
+    #[test]
+    fn peak_hold_resampler_flush_emits_partial_window() {
+        let mut r = PeakHoldResampler::new(3.0);
+        assert!(r.push(&[2.0, 4.0]).is_none());
+        assert!(r.push(&[5.0, 1.0]).is_none());
+        // Two rows buffered, interval=3.0 not reached. Flush emits partial.
+        let out = r.flush().expect("flush emits partial window");
+        assert_eq!(out, vec![5.0, 4.0]); // peak across the 2 rows
+                                         // Second flush returns None (already drained).
+        assert!(r.flush().is_none());
     }
 }

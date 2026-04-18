@@ -250,6 +250,11 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.display.channel_buttons_visibility = x.min(2);
                 }
             }
+            "spectrogram_zoom_enabled" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.display.spectrogram_zoom_enabled = x != 0;
+                }
+            }
             "system_media_controls_enabled" => {
                 if let Ok(x) = value.parse::<i32>() {
                     settings.integrations.system_media_controls_enabled = x != 0;
@@ -297,7 +302,7 @@ pub(super) fn save_settings(settings: &BridgeSettings) {
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
@@ -309,6 +314,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         i32::from(settings.display.show_spectrogram_crosshair),
         i32::from(settings.display.show_spectrogram_scale),
         settings.display.channel_buttons_visibility,
+        i32::from(settings.display.spectrogram_zoom_enabled),
         i32::from(settings.integrations.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
         i32::from(settings.integrations.lastfm_scrobbling_enabled),
@@ -341,6 +347,7 @@ mod tests {
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,
+                spectrogram_zoom_enabled: true,
             },
             library_sort_mode: LibrarySortMode::Title,
             integrations: BridgeIntegrationSettings {
@@ -367,6 +374,7 @@ mod tests {
         assert!(parsed.display.show_fps);
         assert!(parsed.display.show_spectrogram_crosshair);
         assert!(parsed.display.show_spectrogram_scale);
+        assert!(parsed.display.spectrogram_zoom_enabled);
         assert!(!parsed.integrations.system_media_controls_enabled);
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
         assert!(parsed.integrations.lastfm_scrobbling_enabled);
@@ -423,6 +431,7 @@ mod tests {
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,
+                spectrogram_zoom_enabled: true,
             },
             ..BridgeSettings::default()
         };
@@ -459,6 +468,21 @@ mod tests {
         let mut settings2 = BridgeSettings::default();
         parse_settings_text(&mut settings2, "channel_buttons_visibility=-1\n");
         assert_eq!(settings2.display.channel_buttons_visibility, 1); // default
+    }
+
+    #[test]
+    fn settings_roundtrip_zoom_enabled() {
+        let mut settings = BridgeSettings::default();
+        settings.display.spectrogram_zoom_enabled = false;
+        let text = format_settings_text(&settings);
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert!(!parsed.display.spectrogram_zoom_enabled);
+
+        // Default (key absent) should be true.
+        let mut default_parsed = BridgeSettings::default();
+        parse_settings_text(&mut default_parsed, "volume=1.0\n");
+        assert!(default_parsed.display.spectrogram_zoom_enabled);
     }
 
     #[test]

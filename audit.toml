@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    # reqwest's optional HTTP/3 stack records quinn in Cargo.lock even though Ferrous
+    # only enables blocking/json/rustls-tls and never activates reqwest/http3.
+    "RUSTSEC-2026-0097",
+]

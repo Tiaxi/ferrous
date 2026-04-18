@@ -95,6 +95,18 @@ pub(super) fn handle_bridge_command(
                 context.analysis.command(AnalysisCommand::SetFftSize(fft));
                 true
             }
+            BridgeAnalysisCommand::SetSpectrogramZoomLevel(level) => {
+                context
+                    .analysis
+                    .command(AnalysisCommand::SetSpectrogramZoomLevel(level));
+                true
+            }
+            BridgeAnalysisCommand::SetSpectrogramWidgetWidth(width) => {
+                context
+                    .analysis
+                    .command(AnalysisCommand::SetSpectrogramWidgetWidth(width));
+                true
+            }
         },
         BridgeCommand::Settings(cmd) => {
             handle_settings_bridge_command(&cmd, state, context);
@@ -244,6 +256,10 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SetChannelButtonsVisibility(value) => {
             state.settings.display.channel_buttons_visibility = (*value).min(2);
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetSpectrogramZoomEnabled(enabled) => {
+            state.settings.display.spectrogram_zoom_enabled = *enabled;
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetSystemMediaControlsEnabled(enabled) => {

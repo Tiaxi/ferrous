@@ -93,6 +93,7 @@ Two-phase: `about-to-finish` pre-arms the next URI (same-format) or sets `pendin
 - Commit at coherent checkpoints when formatting/build checks pass and the tree is runnable.
 - Prefer smaller, incremental commits over large mixed ones.
 - Do not commit half-migrated or knowingly broken states.
+- Commit subjects must follow the repo's existing lowercase conventional style: `<type>: <imperative summary>` (for example `fix: keep centered raw-surround seeks in-window`).
 
 ## Naming Conventions
 

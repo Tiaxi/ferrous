@@ -12,7 +12,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use super::decoders::{
     deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource,
 };
-use super::fft::{waveform_sample_rate_divisor, SpectrogramDecimator, StftComputer};
+use super::fft::{waveform_sample_rate_divisor, PeakHoldResampler, StftComputer};
 use super::{
     f64_to_u64_saturating, AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode,
     SpectrogramViewMode, REFERENCE_HOP,
@@ -69,11 +69,52 @@ fn usize_to_f64_approx(v: usize) -> f64 {
     r
 }
 
-fn decimation_factor_for_hop(hop: usize) -> usize {
+fn output_interval_for_hop(hop: usize, zoom_level: f32) -> f64 {
     if hop == 0 {
-        return 1;
+        return 1.0;
     }
-    (REFERENCE_HOP / hop).max(1)
+    // Continuous fractional interval: target_effective_hop / hop.
+    // Unlike the old integer factor, this is NOT truncated, so every
+    // zoom level produces a distinct output rate.  At zoom=0.8 with
+    // hop=1024, this gives 1.25 (not 1).
+    let zoom = f64::from(zoom_level.clamp(0.001, 1.0));
+    // REFERENCE_HOP and hop are small compile-time/session constants;
+    // precision loss from usize→f64 is negligible.
+    #[allow(clippy::cast_precision_loss)]
+    let target_effective_hop = REFERENCE_HOP as f64 / zoom;
+    #[allow(clippy::cast_precision_loss)]
+    let interval = target_effective_hop / hop as f64;
+    interval.max(1.0)
+}
+
+/// Compute the effective hop size from a fractional output interval.
+/// `hop_size` is a small positive usize; precision loss is negligible.
+fn effective_hop_from_interval(hop_size: usize, output_interval: f64) -> usize {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let hop = (hop_size as f64 * output_interval).round() as usize;
+    hop
+}
+
+/// Rescale a base `total_columns` estimate for a given `effective_hop`.
+/// When the effective hop differs from `REFERENCE_HOP`, the output
+/// column count changes proportionally.
+fn scale_columns_estimate(total_columns: u32, effective_hop: usize) -> u32 {
+    if effective_hop != REFERENCE_HOP && effective_hop > 0 {
+        // REFERENCE_HOP and effective_hop are small constants; precision loss is negligible.
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = REFERENCE_HOP as f64 / effective_hop as f64;
+        let scaled = (f64::from(total_columns) * ratio).ceil();
+        // Ceil result is non-negative and clamped via try_from fallback.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let val = scaled as u64;
+        u32::try_from(val).unwrap_or(u32::MAX)
+    } else {
+        total_columns
+    }
 }
 
 fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
@@ -132,6 +173,8 @@ pub(super) enum SpectrogramWorkerCommand {
         path: PathBuf,
         fft_size: usize,
         hop_size: usize,
+        zoom_level: f32,
+        widget_width: u32,
         channel_count: usize,
         start_seconds: f64,
         emit_initial_reset: bool,
@@ -163,6 +206,14 @@ pub(super) enum SpectrogramWorkerCommand {
     /// Clear any pending continuation that has not yet been consumed at
     /// EOF.  Sent when the gapless prediction is cancelled.
     CancelPendingContinue,
+    /// Grow the running session's widget-width basis so the centered-mode
+    /// lookahead park threshold covers a newly-enlarged display (e.g.
+    /// fullscreen toggle without session restart).  The worker updates
+    /// `session.widget_width` and recomputes `session.lookahead_columns`
+    /// so the decoder produces enough cols to fill the bigger window.
+    UpdateWidgetWidth {
+        widget_width: u32,
+    },
     #[allow(dead_code)]
     SetDisplayMode(SpectrogramDisplayMode),
     Stop,
@@ -171,6 +222,7 @@ pub(super) enum SpectrogramWorkerCommand {
 pub(super) struct SpectrogramWorkerHandles {
     pub(super) cmd_tx: Sender<SpectrogramWorkerCommand>,
     pub(super) decode_generation: Arc<AtomicU64>,
+    pub(super) columns_produced: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +238,7 @@ struct StagingChunkState {
     bins_per_column: usize,
     channel_count: usize,
     effective_rate: u32,
+    effective_hop: usize,
     total_columns_estimate: u32,
     // Mutable accumulation state.
     columns_produced: u64,
@@ -215,7 +268,7 @@ impl StagingChunkState {
             start_column_index: u64_to_u32_saturating(self.chunk_start_index),
             total_columns_estimate: self.total_columns_estimate,
             sample_rate_hz: self.effective_rate,
-            hop_size: clamp_to_u16(REFERENCE_HOP),
+            hop_size: clamp_to_u16(self.effective_hop),
             coverage_seconds: coverage,
             complete: false,
             buffer_reset: false,
@@ -234,7 +287,7 @@ impl StagingChunkState {
 /// Returns `true` to continue decoding, `false` if the receiver dropped.
 fn staging_drain_stft_rows(
     stfts: &mut [StftComputer],
-    decimators: &mut [SpectrogramDecimator],
+    resamplers: &mut [PeakHoldResampler],
     state: &mut StagingChunkState,
     tx: &Sender<PrecomputedSpectrogramChunk>,
 ) -> bool {
@@ -254,11 +307,11 @@ fn staging_drain_stft_rows(
         }
 
         let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(state.channel_count);
-        for (ch, row) in rows.into_iter().enumerate() {
-            if let Some(dec) = decimators.get_mut(ch) {
-                decimated_rows.push(dec.push(row));
+        for (ch, row) in rows.iter().enumerate() {
+            if let Some(resampler) = resamplers.get_mut(ch) {
+                decimated_rows.push(resampler.push(row));
             } else {
-                decimated_rows.push(Some(row));
+                decimated_rows.push(Some(row.clone()));
             }
         }
 
@@ -294,7 +347,7 @@ fn staging_drain_stft_rows(
                 start_column_index: u64_to_u32_saturating(state.chunk_start_index),
                 total_columns_estimate: state.total_columns_estimate,
                 sample_rate_hz: state.effective_rate,
-                hop_size: clamp_to_u16(REFERENCE_HOP),
+                hop_size: clamp_to_u16(state.effective_hop),
                 coverage_seconds: coverage,
                 complete: false,
                 buffer_reset: false,
@@ -318,11 +371,12 @@ fn centered_staging_decode(
     path: &Path,
     fft_size: usize,
     hop_size: usize,
+    zoom_level: f32,
     view_mode: SpectrogramViewMode,
     stop: &AtomicBool,
     tx: &Sender<PrecomputedSpectrogramChunk>,
 ) {
-    let Some((mut source, native_sample_rate, native_channels, total_columns_estimate)) =
+    let Some((mut source, native_sample_rate, native_channels, total_columns)) =
         open_audio_file(path)
     else {
         profile_eprintln!("[staging] failed to open {}", path.display());
@@ -337,20 +391,28 @@ fn centered_staging_decode(
         SpectrogramViewMode::PerChannel => native_channels,
     };
     let bins_per_column = (fft_size / 2) + 1;
-    let decimation_factor = decimation_factor_for_hop(hop_size);
+    let output_interval = if zoom_level > 1.0 {
+        1.0
+    } else {
+        output_interval_for_hop(hop_size, zoom_level)
+    };
 
     let mut stfts: Vec<StftComputer> = (0..channel_count)
         .map(|_| StftComputer::new(fft_size, hop_size))
         .collect();
-    let mut decimators: Vec<SpectrogramDecimator> = (0..channel_count)
-        .map(|_| SpectrogramDecimator::new(decimation_factor))
+    let mut resamplers: Vec<PeakHoldResampler> = (0..channel_count)
+        .map(|_| PeakHoldResampler::new(output_interval))
         .collect();
+
+    let effective_hop = effective_hop_from_interval(hop_size, output_interval);
+    let total_columns_estimate = scale_columns_estimate(total_columns, effective_hop);
 
     let mut state = StagingChunkState {
         fft_size,
         bins_per_column,
         channel_count,
         effective_rate,
+        effective_hop,
         total_columns_estimate,
         columns_produced: 0,
         total_covered_samples: 0,
@@ -403,7 +465,7 @@ fn centered_staging_decode(
             }
         }
 
-        if !staging_drain_stft_rows(&mut stfts, &mut decimators, &mut state, tx) {
+        if !staging_drain_stft_rows(&mut stfts, &mut resamplers, &mut state, tx) {
             return; // receiver dropped
         }
     }
@@ -424,12 +486,11 @@ fn centered_staging_decode(
 /// centered-mode gapless.  Produces `PrecomputedSpectrogramChunk`s
 /// with 0-based column indices and `track_token: 0` (placeholder).
 /// Returns the chunk receiver and the thread's join handle.
-// Callers are added in a subsequent task (handle_prepare_gapless_continuation).
-#[allow(dead_code)]
 pub(super) fn spawn_centered_staging_worker(
     path: PathBuf,
     fft_size: usize,
     hop_size: usize,
+    zoom_level: f32,
     view_mode: SpectrogramViewMode,
     stop: Arc<AtomicBool>,
 ) -> (
@@ -440,7 +501,7 @@ pub(super) fn spawn_centered_staging_worker(
     let handle = std::thread::Builder::new()
         .name("ferrous-spectrogram-staging".to_string())
         .spawn(move || {
-            centered_staging_decode(&path, fft_size, hop_size, view_mode, &stop, &tx);
+            centered_staging_decode(&path, fft_size, hop_size, zoom_level, view_mode, &stop, &tx);
         })
         .expect("failed to spawn staging thread");
     (rx, handle)
@@ -476,6 +537,8 @@ pub(super) fn spawn_spectrogram_decode_worker(
 struct LastSessionParams {
     fft_size: usize,
     hop_size: usize,
+    zoom_level: f32,
+    widget_width: u32,
     channel_count: usize,
     view_mode: SpectrogramViewMode,
     display_mode: SpectrogramDisplayMode,
@@ -503,6 +566,8 @@ fn spectrogram_worker_loop(
             SpectrogramWorkerCommand::NewTrack {
                 fft_size,
                 hop_size,
+                zoom_level,
+                widget_width,
                 channel_count,
                 view_mode,
                 display_mode,
@@ -511,6 +576,8 @@ fn spectrogram_worker_loop(
                 last_params = Some(LastSessionParams {
                     fft_size,
                     hop_size,
+                    zoom_level,
+                    widget_width,
                     channel_count,
                     view_mode,
                     display_mode,
@@ -537,6 +604,8 @@ fn spectrogram_worker_loop(
                         path,
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
+                        zoom_level: params.zoom_level,
+                        widget_width: params.widget_width,
                         channel_count: params.channel_count,
                         start_seconds: 0.0,
                         emit_initial_reset: false,
@@ -547,6 +616,8 @@ fn spectrogram_worker_loop(
                     last_params = Some(LastSessionParams {
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
+                        zoom_level: params.zoom_level,
+                        widget_width: params.widget_width,
                         channel_count: params.channel_count,
                         view_mode: params.view_mode,
                         display_mode: params.display_mode,
@@ -584,6 +655,9 @@ struct SpectrogramSessionState {
     gen: u64,
     fft_size: usize,
     hop_size: usize,
+    effective_hop: usize,
+    zoom_level: f32,
+    widget_width: u32,
     view_mode: SpectrogramViewMode,
     display_mode: SpectrogramDisplayMode,
     channel_count: usize,
@@ -608,7 +682,7 @@ struct SpectrogramSessionState {
 
     // Chunking / STFT state
     stfts: Vec<StftComputer>,
-    decimators: Vec<SpectrogramDecimator>,
+    resamplers: Vec<PeakHoldResampler>,
     packet_counter: usize,
     chunk_buf: Vec<u8>,
     chunk_columns: u16,
@@ -623,6 +697,16 @@ struct SpectrogramSessionState {
     post_reset_unthrottled_columns: u32,
     decode_rate_limit: f64,
     lookahead_columns: u64,
+    /// Seconds-of-audio component of the lookahead park cap.  Stored so
+    /// `UpdateWidgetWidth` can recompute `lookahead_columns` without
+    /// re-reading the env var.
+    lookahead_seconds: f64,
+    /// True once `source.next_frames()` has returned `None` — the
+    /// decoder has consumed the entire audio file.  Used by
+    /// `run_spectrogram_session` to emit a finalize chunk only in the
+    /// real-EOF case, not on a stale-generation termination (where the
+    /// decoder is superseded by a new session before reaching EOF).
+    source_reached_eof: bool,
 
     /// Whether a `GStreamer` duration re-query has already been attempted.
     /// Raw DTS/AC3 files often lack duration at pipeline start; a re-query
@@ -673,6 +757,8 @@ fn run_spectrogram_session(
         ref path,
         fft_size,
         hop_size,
+        zoom_level,
+        widget_width,
         channel_count: _channel_count,
         start_seconds,
         emit_initial_reset,
@@ -692,11 +778,10 @@ fn run_spectrogram_session(
     );
 
     let bins_per_column = (fft_size / 2) + 1;
-    let (mut source, native_sample_rate, native_channels, total_columns_estimate) =
-        open_audio_file(path)?;
+    let (mut source, native_sample_rate, native_channels, total_columns) = open_audio_file(path)?;
 
     profile_eprintln!(
-        "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns_estimate}",
+        "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns}",
         _start.elapsed().as_secs_f64() * 1000.0,
     );
 
@@ -707,18 +792,31 @@ fn run_spectrogram_session(
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
     };
-    let decimation_factor = decimation_factor_for_hop(hop_size);
-    let cols_per_second = f64::from(effective_rate) / usize_to_f64_approx(REFERENCE_HOP);
-
-    // Lookahead configuration: rolling mode parks the decode ~10 s ahead
-    // of the play head; centered mode decodes the entire track.
-    let lookahead_columns = if display_mode == SpectrogramDisplayMode::Centered {
-        u64::MAX
+    let output_interval = if zoom_level > 1.0 {
+        1.0 // Bypass decimation -- keep all STFT rows for fine temporal resolution
     } else {
-        let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(10.0);
+        output_interval_for_hop(hop_size, zoom_level)
+    };
+    let effective_hop = effective_hop_from_interval(hop_size, output_interval);
+    let cols_per_second = f64::from(effective_rate) / usize_to_f64_approx(effective_hop);
+    let total_columns_estimate = scale_columns_estimate(total_columns, effective_hop);
+
+    // Lookahead configuration: how far ahead of the play head the decode
+    // worker runs before parking.
+    let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(10.0);
+    let lookahead_columns = if display_mode == SpectrogramDisplayMode::Centered {
+        // Windowed centered: decode enough to fill the visible window
+        // plus one screen width of buffer for small seeks and playback.
+        // visible_cols covers the display from left to right.
+        // The extra screen width means small forward seeks stay within
+        // the decoded window without a restart.
+        let visible_cols = u64::from(widget_width);
+        visible_cols * 2 + f64_to_u64_saturating(lookahead_seconds * cols_per_second)
+    } else {
+        // Rolling mode: existing logic
         f64_to_u64_saturating(lookahead_seconds * cols_per_second)
     };
 
@@ -753,6 +851,9 @@ fn run_spectrogram_session(
         gen,
         fft_size,
         hop_size,
+        effective_hop,
+        zoom_level,
+        widget_width,
         view_mode,
         display_mode,
         channel_count: actual_channel_count,
@@ -768,8 +869,8 @@ fn run_spectrogram_session(
         stfts: (0..actual_channel_count)
             .map(|_| StftComputer::new(fft_size, hop_size))
             .collect(),
-        decimators: (0..actual_channel_count)
-            .map(|_| SpectrogramDecimator::new(decimation_factor))
+        resamplers: (0..actual_channel_count)
+            .map(|_| PeakHoldResampler::new(output_interval))
             .collect(),
         packet_counter: 0,
         chunk_buf: Vec::new(),
@@ -781,6 +882,8 @@ fn run_spectrogram_session(
         post_reset_unthrottled_columns: post_reset_unthrottled_columns(display_mode),
         decode_rate_limit,
         lookahead_columns,
+        lookahead_seconds,
+        source_reached_eof: false,
         #[cfg(feature = "gst")]
         gst_duration_requeried: false,
         pending_continue: None,
@@ -797,7 +900,7 @@ fn run_spectrogram_session(
             start_column_index: u64_to_u32_saturating(start_column),
             total_columns_estimate,
             sample_rate_hz: effective_rate,
-            hop_size: clamp_to_u16(REFERENCE_HOP),
+            hop_size: clamp_to_u16(effective_hop),
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: emit_initial_reset,
@@ -871,6 +974,8 @@ fn run_spectrogram_session(
                     path,
                     fft_size: session.fft_size,
                     hop_size: session.hop_size,
+                    zoom_level: session.zoom_level,
+                    widget_width: session.widget_width,
                     channel_count: session.channel_count,
                     start_seconds: 0.0,
                     emit_initial_reset: false,
@@ -889,9 +994,30 @@ fn run_spectrogram_session(
                 return Some(cmd);
             }
             None => {
-                // Natural EOF with no pending continuation.
+                // session_decode_loop returns None for two reasons:
+                //   1. Real source EOF (decoder consumed the whole
+                //      file) — post-EOF park then exited via stale-gen
+                //      or cmd_rx close.  cols_produced is the true
+                //      decoded extent and should be sent as a finalize
+                //      chunk so Qt can shrink the estimate.
+                //   2. Stale-generation detection in the main decode
+                //      loop BEFORE reaching source EOF — a new session
+                //      is about to start and cols_produced is just the
+                //      current in-flight count, NOT the track length.
+                //      Emitting a finalize here would clobber the next
+                //      session's estimate with a bogus small value.
+                // Gate the finalize on `source_reached_eof` to tell
+                // them apart.
+                if session.source_reached_eof {
+                    session_emit_finalize_chunk(&session, event_tx);
+                }
                 profile_eprintln!(
-                    "[spect-worker] SESSION END (EOF) elapsed={:.1}ms cols_produced={}",
+                    "[spect-worker] SESSION END ({}) elapsed={:.1}ms cols_produced={}",
+                    if session.source_reached_eof {
+                        "EOF"
+                    } else {
+                        "superseded"
+                    },
                     _start.elapsed().as_secs_f64() * 1000.0,
                     session.columns_produced.saturating_sub(start_column),
                 );
@@ -1043,7 +1169,13 @@ fn session_decode_loop(
         let audio = match source.next_frames() {
             Some(af) if af.frames == 0 => continue, // GStreamer timeout, no data yet
             Some(af) => af,
-            None => break, // EOF
+            None => {
+                // Real source EOF.  Mark so the outer wrapper emits a
+                // finalize chunk for this session (distinguishing EOF
+                // from the stale-generation None return below).
+                session.source_reached_eof = true;
+                break;
+            }
         };
         session.packet_counter += 1;
 
@@ -1176,6 +1308,17 @@ fn process_session_commands(
             SpectrogramWorkerCommand::CancelPendingContinue => {
                 session.pending_continue = None;
             }
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
+                if session.display_mode == SpectrogramDisplayMode::Centered
+                    && widget_width > session.widget_width
+                {
+                    session.widget_width = widget_width;
+                    session.lookahead_columns = u64::from(widget_width) * 2
+                        + f64_to_u64_saturating(
+                            session.lookahead_seconds * session.cols_per_second,
+                        );
+                }
+            }
             SpectrogramWorkerCommand::Stop => {
                 return Some(SessionAction::Stop);
             }
@@ -1273,6 +1416,16 @@ fn handle_single_command(
             session.pending_continue = None;
             SessionAction::Continue
         }
+        SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
+            if session.display_mode == SpectrogramDisplayMode::Centered
+                && widget_width > session.widget_width
+            {
+                session.widget_width = widget_width;
+                session.lookahead_columns = u64::from(widget_width) * 2
+                    + f64_to_u64_saturating(session.lookahead_seconds * session.cols_per_second);
+            }
+            SessionAction::Continue
+        }
         SpectrogramWorkerCommand::Stop => SessionAction::Stop,
     }
 }
@@ -1313,12 +1466,16 @@ fn handle_session_seek(
     source.seek(actual_seek_seconds, native_rate);
 
     // Reset STFT state.
-    let decimation_factor = decimation_factor_for_hop(session.hop_size);
+    let output_interval = if session.zoom_level > 1.0 {
+        1.0
+    } else {
+        output_interval_for_hop(session.hop_size, session.zoom_level)
+    };
     session.stfts = (0..session.channel_count)
         .map(|_| StftComputer::new(session.fft_size, session.hop_size))
         .collect();
-    session.decimators = (0..session.channel_count)
-        .map(|_| SpectrogramDecimator::new(decimation_factor))
+    session.resamplers = (0..session.channel_count)
+        .map(|_| PeakHoldResampler::new(output_interval))
         .collect();
 
     let new_column = f64_to_u64_saturating((position_seconds * session.cols_per_second).floor());
@@ -1344,7 +1501,7 @@ fn handle_session_seek(
             start_column_index: u64_to_u32_saturating(new_column),
             total_columns_estimate: session.total_columns_estimate,
             sample_rate_hz: session.effective_rate,
-            hop_size: clamp_to_u16(REFERENCE_HOP),
+            hop_size: clamp_to_u16(session.effective_hop),
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
@@ -1392,23 +1549,26 @@ fn next_target_chunk_columns(current: u16, display_mode: SpectrogramDisplayMode)
 }
 
 /// Apply a display-mode change to a live session: update rate limit
-/// and lookahead so centered mode decodes the full track immediately.
+/// and lookahead for the new mode.
 fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDisplayMode) {
     session.display_mode = mode;
+    let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(10.0);
     if mode == SpectrogramDisplayMode::Rolling {
         session.decode_rate_limit = std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
             .ok()
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(2.0);
-        let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(10.0);
         session.lookahead_columns =
             f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
     } else {
         session.decode_rate_limit = f64::INFINITY;
-        session.lookahead_columns = u64::MAX;
+        // Windowed centered: visible window + one screen buffer + playback lookahead
+        let visible_cols = u64::from(session.widget_width);
+        session.lookahead_columns =
+            visible_cols * 2 + f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
     }
 }
 
@@ -1454,13 +1614,13 @@ fn session_drain_stft_rows(
             break;
         }
 
-        // Push through decimators.
+        // Push through resamplers.
         let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(session.channel_count);
-        for (ch, row) in rows.into_iter().enumerate() {
-            if let Some(dec) = session.decimators.get_mut(ch) {
-                decimated_rows.push(dec.push(row));
+        for (ch, row) in rows.iter().enumerate() {
+            if let Some(resampler) = session.resamplers.get_mut(ch) {
+                decimated_rows.push(resampler.push(row));
             } else {
-                decimated_rows.push(Some(row));
+                decimated_rows.push(Some(row.clone()));
             }
         }
 
@@ -1509,7 +1669,7 @@ fn session_drain_stft_rows(
                     start_column_index: start_col_u32,
                     total_columns_estimate: session.total_columns_estimate,
                     sample_rate_hz: session.effective_rate,
-                    hop_size: clamp_to_u16(REFERENCE_HOP),
+                    hop_size: clamp_to_u16(session.effective_hop),
                     coverage_seconds: coverage,
                     complete: false,
                     buffer_reset: false,
@@ -1536,6 +1696,25 @@ fn session_drain_stft_rows(
 ///    `GStreamer` may determine the duration after processing the bitstream.
 /// 2. If the re-query fails and we're within 25% of the estimate, double it
 ///    so the UI ring buffer grows before columns are evicted.
+///
+/// Convert an audio-frame count from a duration re-query into a
+/// total-columns estimate in the session's `effective_hop` units.
+///
+/// The raw math (`frames / REFERENCE_HOP`) gives a reference-hop
+/// count — but `session.total_columns_estimate` is always stored in
+/// the current session's `effective_hop` cols, so we must scale.
+/// Without this scaling, zoom-out sessions
+/// (`effective_hop > REFERENCE_HOP`) see a ref-hop figure that is
+/// always larger than the correctly-scaled in-session estimate and
+/// the estimate gets inflated by `effective_hop / REFERENCE_HOP`,
+/// breaking the zoom-out minZoom computation on the Qt side.
+fn duration_requery_estimate_for_session(effective_frames: u64, effective_hop: usize) -> u32 {
+    let new_est_ref =
+        u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
+            .unwrap_or(u32::MAX);
+    scale_columns_estimate(new_est_ref, effective_hop)
+}
+
 fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: &AudioFrameSource) {
     let estimate = u64::from(session.total_columns_estimate);
     let produced = session.columns_produced;
@@ -1550,14 +1729,13 @@ fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: 
             let total_frames = ns * rate / 1_000_000_000;
             let divisor = waveform_sample_rate_divisor(rate);
             let effective = total_frames / divisor;
-            let new_est =
-                u32::try_from(((effective / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
-                    .unwrap_or(u32::MAX);
+            let new_est = duration_requery_estimate_for_session(effective, session.effective_hop);
             if new_est > session.total_columns_estimate {
                 profile_eprintln!(
-                    "[spect-worker] duration re-query OK, est_cols {} → {}",
+                    "[spect-worker] duration re-query OK, est_cols {} → {} (effective_hop={})",
                     session.total_columns_estimate,
                     new_est,
+                    session.effective_hop,
                 );
                 session.total_columns_estimate = new_est;
                 return;
@@ -1568,13 +1746,27 @@ fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: 
     // Suppress the unused-variable warning when GStreamer is disabled.
     let _ = source;
 
-    // Safety net: if we're within 25% of the estimate, double it.
-    // This ensures the UI ring buffer grows before columns get evicted.
-    let threshold = estimate.saturating_sub(estimate / 4);
-    if produced >= threshold && estimate < u64::from(u32::MAX / 2) {
+    // Safety net for sources without a trustworthy duration (the
+    // 300-second fallback in decoders.rs): if the decoder has actually
+    // produced MORE cols than the estimate, the estimate was wrong and
+    // we need to double it so the UI ring/range don't clamp behind the
+    // growing column count.
+    //
+    // Fire strictly when produced exceeds the estimate rather than on
+    // a 75% threshold.  For bounded (file) sources with a real
+    // duration, the estimate already includes +64 cols of STFT tail
+    // padding, so produced tops out AT or slightly BELOW the estimate
+    // and the doubling never fires.  An early-threshold doubling here
+    // inflated zoom-out estimates by 2× (effective_hop > REFERENCE_HOP
+    // means cols_produced climbs fast relative to the already-small
+    // estimate) and left Qt with an estimate that didn't match the
+    // actual decoded extent — post-seek displays showed mostly blank
+    // because displayRight clamped to the inflated estimate but data
+    // only covered the actual decoded cols.
+    if produced > estimate && estimate < u64::from(u32::MAX / 2) {
         let new_est = session.total_columns_estimate.saturating_mul(2);
         profile_eprintln!(
-            "[spect-worker] columns approaching estimate, est_cols {} → {} (produced={})",
+            "[spect-worker] columns overshot estimate, est_cols {} → {} (produced={})",
             session.total_columns_estimate,
             new_est,
             produced,
@@ -1588,6 +1780,34 @@ fn session_flush_chunk(
     event_tx: &Sender<AnalysisEvent>,
     columns_produced_out: &AtomicU64,
 ) {
+    // Drain any partial resampler window at track end.
+    // All channels must flush together — if any channel has no
+    // partial data, skip the flush (same synchronization as the
+    // drain loop).
+    let flushed: Vec<Option<Vec<f32>>> = session
+        .resamplers
+        .iter_mut()
+        .map(PeakHoldResampler::flush)
+        .collect();
+    if !flushed.is_empty() && flushed.iter().all(Option::is_some) {
+        for maybe_row in &flushed {
+            let row = maybe_row.as_ref().unwrap();
+            for &v in row.iter().take(session.bins_per_column) {
+                session
+                    .chunk_buf
+                    .push(precomputed_to_u8_spectrum(v, session.fft_size));
+            }
+            if row.len() < session.bins_per_column {
+                session.chunk_buf.extend(std::iter::repeat_n(
+                    0u8,
+                    session.bins_per_column - row.len(),
+                ));
+            }
+        }
+        session.chunk_columns += 1;
+        session.columns_produced += 1;
+    }
+
     if session.chunk_columns > 0 {
         let coverage = seconds_from_frames(
             session.total_covered_samples,
@@ -1604,7 +1824,7 @@ fn session_flush_chunk(
                 start_column_index: start_col_u32,
                 total_columns_estimate: session.total_columns_estimate,
                 sample_rate_hz: session.effective_rate,
-                hop_size: clamp_to_u16(REFERENCE_HOP),
+                hop_size: clamp_to_u16(session.effective_hop),
                 coverage_seconds: coverage,
                 complete: false,
                 buffer_reset: false,
@@ -1642,7 +1862,7 @@ fn session_flush_token(
             start_column_index: u64_to_u32_saturating(session.columns_produced),
             total_columns_estimate: session.total_columns_estimate,
             sample_rate_hz: session.effective_rate,
-            hop_size: clamp_to_u16(REFERENCE_HOP),
+            hop_size: clamp_to_u16(session.effective_hop),
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: false,
@@ -1660,6 +1880,35 @@ fn flush_chunk_before_lookahead_park(
         return;
     }
     session_flush_chunk(session, event_tx, columns_produced_out);
+}
+
+/// Emit a finalize chunk carrying the actual decoded column count as
+/// `total_columns_estimate`.  Qt uses this to shrink its
+/// `m_precomputedTotalColumnsEstimate` so the centered-mode EOF clamp
+/// fires at the true end of decoded audio instead of the file-metadata
+/// estimate (which may overshoot by seconds at high zoom).
+fn session_emit_finalize_chunk(
+    session: &SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+) {
+    let final_cols = u64_to_u32_saturating(session.columns_produced);
+    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+        PrecomputedSpectrogramChunk {
+            track_token: session.track_token,
+            columns_u8: Vec::new(),
+            bins_per_column: clamp_to_u16(session.bins_per_column),
+            column_count: 0,
+            channel_count: clamp_to_u8(session.channel_count),
+            start_column_index: final_cols,
+            total_columns_estimate: final_cols,
+            sample_rate_hz: session.effective_rate,
+            hop_size: clamp_to_u16(session.effective_hop),
+            coverage_seconds: 0.0,
+            complete: true,
+            buffer_reset: false,
+            clear_history: false,
+        },
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -1692,6 +1941,9 @@ mod tests {
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
+            effective_hop: 1_024,
+            zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1705,7 +1957,7 @@ mod tests {
             columns_produced: 256,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -1716,6 +1968,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -1777,6 +2031,9 @@ mod tests {
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
+            effective_hop: 1_024,
+            zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1790,7 +2047,7 @@ mod tests {
             columns_produced: 400,
             session_start_column: 400,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -1803,6 +2060,8 @@ mod tests {
             ),
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -1823,6 +2082,9 @@ mod tests {
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
+            effective_hop: 1_024,
+            zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1836,7 +2098,7 @@ mod tests {
             columns_produced: 320,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -1847,6 +2109,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -1877,6 +2141,9 @@ mod tests {
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
+            effective_hop: 1_024,
+            zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1890,7 +2157,7 @@ mod tests {
             columns_produced: 320,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -1901,6 +2168,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -1923,6 +2192,9 @@ mod tests {
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
+            effective_hop: 1_024,
+            zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
             channel_count: 1,
@@ -1936,7 +2208,7 @@ mod tests {
             columns_produced: 320,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: vec![1, 2, 3, 4],
             chunk_columns: 1,
@@ -1947,6 +2219,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -1977,6 +2251,9 @@ mod tests {
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
+            effective_hop: 1_024,
+            zoom_level: 1.0,
+            widget_width: 1920,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
             channel_count: 1,
@@ -1990,7 +2267,7 @@ mod tests {
             columns_produced: 256,
             session_start_column: 0,
             stfts: Vec::new(),
-            decimators: Vec::new(),
+            resamplers: Vec::new(),
             packet_counter: 0,
             chunk_buf: Vec::new(),
             chunk_columns: 0,
@@ -2001,6 +2278,8 @@ mod tests {
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
+            lookahead_seconds: 10.0,
+            source_reached_eof: false,
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2044,6 +2323,8 @@ mod tests {
             path: PathBuf::from("/tmp/manual.flac"),
             fft_size: 2_048,
             hop_size: 256,
+            zoom_level: 1.0,
+            widget_width: 1920,
             channel_count: 1,
             start_seconds: 0.0,
             emit_initial_reset: true,
@@ -2095,6 +2376,156 @@ mod tests {
             "expected FlushToken when pending_continue is None"
         );
         assert_eq!(session.track_token, 20);
+    }
+
+    #[test]
+    fn update_widget_width_grows_centered_lookahead() {
+        // Growing the widget width (e.g. fullscreen) must lift the
+        // centered-mode lookahead so the decoder doesn't stay parked at
+        // the old window's threshold and leave the right edge black.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Centered;
+        session.widget_width = 1000;
+        session.cols_per_second = 43.07;
+        session.lookahead_seconds = 10.0;
+        session.lookahead_columns = 2000 + 431; // 1000*2 + 10*43.07
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: 3840 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(session.widget_width, 3840);
+        // new lookahead = 3840*2 + 10*43.07 ≈ 8111.
+        assert!(
+            session.lookahead_columns > 8_000 && session.lookahead_columns < 8_200,
+            "lookahead did not grow to cover the new width: {}",
+            session.lookahead_columns
+        );
+    }
+
+    #[test]
+    fn update_widget_width_ignored_when_shrinking() {
+        // Shrinking the widget must not shrink the running lookahead —
+        // the existing buffer is fine and we don't want to discard
+        // already-decoded cols.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Centered;
+        session.widget_width = 3840;
+        session.lookahead_columns = 8_111;
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: 1200 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(session.widget_width, 3840);
+        assert_eq!(session.lookahead_columns, 8_111);
+    }
+
+    #[test]
+    fn update_widget_width_ignored_in_rolling_mode() {
+        // Rolling mode uses a different lookahead formula that doesn't
+        // depend on widget width; UpdateWidgetWidth must be a no-op.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Rolling;
+        session.widget_width = 1000;
+        session.lookahead_columns = 430;
+
+        let action = handle_single_command(
+            &mut session,
+            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: 3840 },
+        );
+
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(session.widget_width, 1000);
+        assert_eq!(session.lookahead_columns, 430);
+    }
+
+    #[test]
+    fn duration_requery_estimate_scales_to_effective_hop() {
+        // Regression: the GStreamer duration re-query computed new_est
+        // as effective_frames/REFERENCE_HOP + 64 and compared it to
+        // session.total_columns_estimate (stored in effective_hop
+        // cols).  For zoom-out sessions (effective_hop > REFERENCE_HOP)
+        // the ref-hop figure was always larger than the correctly-
+        // scaled in-session estimate, so the estimate got inflated by
+        // effective_hop/REFERENCE_HOP — AC3 at zoom ≈ 0.17 (effective
+        // hop ≈ 6104) turned a correct ~2370-col estimate into a bogus
+        // 16273, which then broke Qt's minimumZoomLevel calc and
+        // trapped the user at a fixed zoom across repeated zoom-out
+        // attempts.  Pipe new_est through scale_columns_estimate.
+        //
+        // Numbers mirror the diagnostics: a ~5-minute AC3 track at
+        // 48 kHz stereo-after-downmix (divisor 1) has
+        // effective_frames = 5 * 60 * 48_000 = 14_400_000.
+        let effective_frames: u64 = 14_400_000;
+        let reference_est = duration_requery_estimate_for_session(effective_frames, REFERENCE_HOP);
+        // Reference-hop gives the raw ~14125 figure + 64 padding.
+        assert!(
+            reference_est >= 14_000 && reference_est <= 14_200,
+            "reference-hop est out of expected range: {}",
+            reference_est,
+        );
+
+        // Zoom-out: effective_hop ≈ 6104 → est in effective-hop cols
+        // must be strictly smaller than the reference-hop count, in the
+        // same ratio scale_columns_estimate uses for a fresh session.
+        let zoom_out_est = duration_requery_estimate_for_session(effective_frames, 6_104);
+        assert!(
+            zoom_out_est < reference_est,
+            "zoom-out est ({}) should scale below reference-hop est ({})",
+            zoom_out_est,
+            reference_est,
+        );
+        // Compare against what scale_columns_estimate(initial_open_file_cols, 6104)
+        // would produce for the same input.  Without the fix the
+        // zoom-out est would be ≈ reference_est (i.e. inflated).
+        let expected_scaled = scale_columns_estimate(reference_est, 6_104);
+        assert_eq!(zoom_out_est, expected_scaled);
+    }
+
+    #[test]
+    fn session_emit_finalize_chunk_carries_cols_produced_and_complete_flag() {
+        // Regression: the finalize chunk must carry the session's
+        // columns_produced as total_columns_estimate and complete=true
+        // so the Qt-side handler recognises it and shrinks its estimate
+        // only for a session that actually consumed the source.
+        let mut session = make_test_session();
+        session.track_token = 42;
+        session.columns_produced = 7_777;
+        session.bins_per_column = 1_025;
+        session.channel_count = 2;
+        session.effective_rate = 44_100;
+        session.effective_hop = 64;
+
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        session_emit_finalize_chunk(&session, &event_tx);
+        let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) =
+            event_rx.try_recv().expect("finalize event")
+        else {
+            panic!("expected a PrecomputedSpectrogramChunk event")
+        };
+        assert!(chunk.complete);
+        assert_eq!(chunk.column_count, 0);
+        assert_eq!(chunk.track_token, 42);
+        assert_eq!(chunk.total_columns_estimate, 7_777);
+        assert_eq!(chunk.start_column_index, 7_777);
+        assert!(!chunk.buffer_reset);
+        assert!(!chunk.clear_history);
+    }
+
+    #[test]
+    fn source_reached_eof_defaults_to_false() {
+        // Regression guard: a freshly-built session must not claim to
+        // have reached source EOF, otherwise a stale-generation
+        // termination (None return before decoding finishes the file)
+        // would be treated as real EOF and emit a spurious finalize
+        // chunk clobbering the next session's total_columns_estimate.
+        let session = make_test_session();
+        assert!(!session.source_reached_eof);
     }
 
     #[test]
@@ -2179,7 +2610,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn apply_display_mode_centered_sets_unlimited_rate_and_lookahead() {
+    fn apply_display_mode_centered_sets_unlimited_rate_and_windowed_lookahead() {
         let mut session = make_test_session();
         session.display_mode = SpectrogramDisplayMode::Rolling;
         session.decode_rate_limit = 2.0;
@@ -2191,7 +2622,9 @@ mod tests {
         apply_display_mode(&mut session, SpectrogramDisplayMode::Centered);
 
         assert!(session.decode_rate_limit.is_infinite());
-        assert_eq!(session.lookahead_columns, u64::MAX);
+        // Windowed centered: ~3 screen widths + lookahead, not u64::MAX.
+        assert!(session.lookahead_columns > 512);
+        assert!(session.lookahead_columns < u64::MAX);
         assert_eq!(session.display_mode, SpectrogramDisplayMode::Centered);
     }
 
@@ -2229,16 +2662,16 @@ mod tests {
 
     #[test]
     fn centered_staging_chunk_indices_are_zero_based_and_monotonic() {
-        // Exercises the same STFT -> decimator -> chunk indexing logic used
+        // Exercises the same STFT -> resampler -> chunk indexing logic used
         // by centered_staging_decode, verifying 0-based start indices and
         // placeholder token 0.
         let fft_size = 512;
         let hop_size = 128;
         let bins_per_column = (fft_size / 2) + 1;
-        let decimation_factor = decimation_factor_for_hop(hop_size);
+        let output_interval = output_interval_for_hop(hop_size, 1.0);
 
         let mut stft = StftComputer::new(fft_size, hop_size);
-        let mut decimator = SpectrogramDecimator::new(decimation_factor);
+        let mut resampler = PeakHoldResampler::new(output_interval);
 
         // Feed a 440 Hz sine wave, enough for several output columns.
         let sample_rate = 48_000u32;
@@ -2246,6 +2679,10 @@ mod tests {
             .map(|i| (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / sample_rate as f32)).sin())
             .collect();
         stft.enqueue_samples(&samples, sample_rate);
+
+        // output_interval >= 1.0 and hop_size is small, so the product fits.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let effective_hop = (hop_size as f64 * output_interval).round() as usize;
 
         let mut columns_produced: u64 = 0;
         let mut chunk_start_index: u64 = 0;
@@ -2259,7 +2696,7 @@ mod tests {
                 break;
             }
             let row = row.into_iter().next().unwrap();
-            let maybe_dec = decimator.push(row);
+            let maybe_dec = resampler.push(&row);
             if maybe_dec.is_none() {
                 continue;
             }
@@ -2277,7 +2714,7 @@ mod tests {
                     start_column_index: u64_to_u32_saturating(chunk_start_index),
                     total_columns_estimate: 1000,
                     sample_rate_hz: sample_rate,
-                    hop_size: clamp_to_u16(REFERENCE_HOP),
+                    hop_size: clamp_to_u16(effective_hop),
                     coverage_seconds: 0.0,
                     complete: false,
                     buffer_reset: false,
@@ -2373,42 +2810,82 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "gst"))]
-    fn columns_estimate_doubles_when_approaching_limit() {
+    fn columns_estimate_holds_when_approaching_without_overshoot() {
+        // Regression for zoom-out blank-post-seek: the doubling used
+        // to fire at the 75% threshold, which inflated a correctly-
+        // scaled zoom-out estimate as the decoder finished the file
+        // (produced climbs naturally toward the real total).  For
+        // bounded sources the estimate already includes STFT tail
+        // padding, so doubling while still within the estimate is
+        // always spurious.
         let mut session = make_test_session();
         session.total_columns_estimate = 1000;
-        session.columns_produced = 600; // below 75% threshold
+        session.columns_produced = 600;
         let source = make_dummy_source();
 
         maybe_update_columns_estimate(&mut session, &source);
         assert_eq!(
             session.total_columns_estimate, 1000,
-            "should not grow below 75%"
+            "should not grow below estimate"
         );
 
-        session.columns_produced = 750; // exactly at 75% threshold
+        session.columns_produced = 750;
         maybe_update_columns_estimate(&mut session, &source);
-        assert_eq!(session.total_columns_estimate, 2000, "should double at 75%");
+        assert_eq!(
+            session.total_columns_estimate, 1000,
+            "75% threshold no longer triggers doubling"
+        );
 
-        // After doubling, 750 is well below the new 75% threshold (1500).
+        session.columns_produced = 1000;
         maybe_update_columns_estimate(&mut session, &source);
-        assert_eq!(session.total_columns_estimate, 2000, "should stay stable");
+        assert_eq!(
+            session.total_columns_estimate, 1000,
+            "AT the estimate must not trigger doubling — bounded \
+             sources legitimately stop here"
+        );
     }
 
     #[test]
     #[cfg(not(feature = "gst"))]
-    fn columns_estimate_doubles_again_when_still_producing() {
+    fn columns_estimate_doubles_when_overshooting() {
+        // Unbounded sources (the decoders.rs 300-second fallback for
+        // missing-duration metadata) legitimately produce more cols
+        // than the estimate.  The safety net must still fire when
+        // produced strictly exceeds the estimate.
         let mut session = make_test_session();
         session.total_columns_estimate = 1000;
         let source = make_dummy_source();
 
-        // Cross first threshold.
-        session.columns_produced = 800;
+        session.columns_produced = 1001;
         maybe_update_columns_estimate(&mut session, &source);
-        assert_eq!(session.total_columns_estimate, 2000);
+        assert_eq!(
+            session.total_columns_estimate, 2000,
+            "overshoot by 1 col must double"
+        );
 
-        // Cross second threshold (75% of 2000 = 1500).
-        session.columns_produced = 1600;
+        // Cross the next estimate too — safety net keeps firing until
+        // it catches up with the real length.
+        session.columns_produced = 2500;
         maybe_update_columns_estimate(&mut session, &source);
         assert_eq!(session.total_columns_estimate, 4000);
+    }
+
+    #[test]
+    fn output_interval_is_continuous() {
+        let i1 = output_interval_for_hop(1024, 1.0);
+        assert!((i1 - 1.0).abs() < 0.001);
+
+        let i2 = output_interval_for_hop(1024, 0.8);
+        assert!((i2 - 1.25).abs() < 0.001);
+        assert!(
+            i2 > i1,
+            "zoom=0.8 must produce a different interval than zoom=1.0"
+        );
+
+        let i3 = output_interval_for_hop(1024, 0.5);
+        assert!((i3 - 2.0).abs() < 0.001);
+
+        let i4 = output_interval_for_hop(128, 0.7);
+        assert!((i4 - 11.43).abs() < 0.1);
     }
 }

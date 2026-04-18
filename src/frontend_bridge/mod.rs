@@ -187,6 +187,8 @@ pub enum BridgeLibraryCommand {
 #[derive(Debug, Clone)]
 pub enum BridgeAnalysisCommand {
     SetFftSize(usize),
+    SetSpectrogramZoomLevel(f32),
+    SetSpectrogramWidgetWidth(u32),
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +209,7 @@ pub enum BridgeSettingsCommand {
     SetLibrarySortMode(LibrarySortMode),
     SetLastFmScrobblingEnabled(bool),
     SetChannelButtonsVisibility(u8),
+    SetSpectrogramZoomEnabled(bool),
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
@@ -371,6 +374,7 @@ pub struct BridgeDisplaySettings {
     pub show_spectrogram_crosshair: bool,
     pub show_spectrogram_scale: bool,
     pub channel_buttons_visibility: u8,
+    pub spectrogram_zoom_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +415,7 @@ impl Default for BridgeSettings {
                 show_spectrogram_crosshair: false,
                 show_spectrogram_scale: false,
                 channel_buttons_visibility: 1,
+                spectrogram_zoom_enabled: true,
             },
             library_sort_mode: LibrarySortMode::Year,
             integrations: BridgeIntegrationSettings {

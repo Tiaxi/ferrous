@@ -199,6 +199,7 @@ Kirigami.ApplicationWindow {
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
+        property bool spectrogramZoomEnabled: true
         property int soloedChannel: -1
         property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
@@ -273,6 +274,9 @@ Kirigami.ApplicationWindow {
         function setShowFps(value) {}
         function setShowSpectrogramCrosshair(value) {}
         function setShowSpectrogramScale(value) {}
+        function setSpectrogramZoomEnabled(value) {}
+        function setSpectrogramZoomLevel(level) {}
+        function setSpectrogramWidgetWidth(width) {}
         function setSystemMediaControlsEnabled(value) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}
@@ -1031,6 +1035,7 @@ Kirigami.ApplicationWindow {
             : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
+        viewerMode: viewerController.spectrogramViewerOpen
         uiBridge: root.uiBridge
         positionSeconds: playbackController.spectrogramPositionSeconds
         seekCommitted: playbackController.seekCommitted

@@ -81,6 +81,9 @@ enum CommandId : quint16 {
     CmdToggleChannelMute = 53,
     CmdSoloChannel = 54,
     CmdSetChannelButtonsVisibility = 55,
+    CmdSetSpectrogramZoomEnabled = 56,
+    CmdSetSpectrogramZoomLevel = 57,
+    CmdSetSpectrogramWidgetWidth = 58,
 };
 
 struct DecodedPlayback {
@@ -175,6 +178,7 @@ struct DecodedSettings {
     bool showSpectrogramCrosshair{false};
     bool showSpectrogramScale{false};
     int channelButtonsVisibility{1};
+    bool spectrogramZoomEnabled{true};
 };
 
 struct DecodedLastFm {

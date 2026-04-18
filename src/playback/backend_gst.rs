@@ -309,6 +309,245 @@ impl GaplessQueue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GstPositionTrace {
+    previous: i128,
+    current: i128,
+    delta: i128,
+    jumped_backward: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackClockMode {
+    Steady,
+    SeekHold,
+    SeekReacquire,
+    Discontinuity,
+}
+
+#[derive(Debug, Clone)]
+struct SmoothedPlaybackClock {
+    anchor_position: Duration,
+    anchor_instant: Instant,
+    rate: f64,
+    learned_rate: f64,
+    last_raw_position: Option<Duration>,
+    last_raw_instant: Option<Instant>,
+    initialized: bool,
+    mode: PlaybackClockMode,
+}
+
+impl SmoothedPlaybackClock {
+    const SNAP_ERROR_SECONDS: f64 = 0.75;
+    const IGNORE_ERROR_SECONDS: f64 = 0.012;
+    const RATE_ALPHA: f64 = 0.35;
+    const PHASE_RECOVERY_HORIZON_SECONDS: f64 = 0.75;
+    const PHASE_RATE_OFFSET_MAX: f64 = 0.10;
+    const RATE_LEARN_MIN: f64 = 0.9;
+    const RATE_LEARN_MAX: f64 = 1.1;
+    const RATE_CLAMP_MIN: f64 = 0.92;
+    const RATE_CLAMP_MAX: f64 = 1.10;
+
+    fn new(now: Instant) -> Self {
+        Self {
+            anchor_position: Duration::ZERO,
+            anchor_instant: now,
+            rate: 1.0,
+            learned_rate: 1.0,
+            last_raw_position: None,
+            last_raw_instant: None,
+            initialized: false,
+            mode: PlaybackClockMode::Discontinuity,
+        }
+    }
+
+    fn current_position(&self, now: Instant) -> Duration {
+        if !self.initialized {
+            return self.anchor_position;
+        }
+        let elapsed_seconds = now
+            .checked_duration_since(self.anchor_instant)
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64();
+        add_signed_seconds(self.anchor_position, elapsed_seconds * self.rate)
+    }
+
+    fn reset(&mut self, position: Duration, now: Instant) {
+        self.reset_with_mode(position, now, PlaybackClockMode::Discontinuity);
+    }
+
+    fn reset_with_mode(&mut self, position: Duration, now: Instant, mode: PlaybackClockMode) {
+        self.anchor_position = position;
+        self.anchor_instant = now;
+        self.rate = 1.0;
+        self.learned_rate = 1.0;
+        self.last_raw_position = Some(position);
+        self.last_raw_instant = Some(now);
+        self.initialized = true;
+        self.mode = mode;
+    }
+
+    fn last_raw_position(&self) -> Option<Duration> {
+        self.last_raw_position
+    }
+
+    #[cfg(feature = "profiling-logs")]
+    fn mode(&self) -> PlaybackClockMode {
+        self.mode
+    }
+
+    fn enter_seek_hold(&mut self, target: Duration, now: Instant) {
+        self.reset_with_mode(target, now, PlaybackClockMode::SeekHold);
+    }
+
+    fn enter_seek_reacquire(&mut self) {
+        self.mode = PlaybackClockMode::SeekReacquire;
+    }
+
+    fn update_playing_sample(&mut self, raw_position: Duration, now: Instant) -> Duration {
+        if !self.initialized {
+            self.reset_with_mode(raw_position, now, PlaybackClockMode::Steady);
+            return raw_position;
+        }
+
+        let predicted = self.current_position(now);
+        let error_seconds = raw_position.as_secs_f64() - predicted.as_secs_f64();
+        if error_seconds.abs() >= Self::SNAP_ERROR_SECONDS {
+            self.reset(raw_position, now);
+            return raw_position;
+        }
+
+        if matches!(self.mode, PlaybackClockMode::SeekReacquire) {
+            self.reset_with_mode(raw_position, now, PlaybackClockMode::Steady);
+            return raw_position;
+        }
+
+        if let (Some(previous_raw), Some(previous_raw_instant)) =
+            (self.last_raw_position, self.last_raw_instant)
+        {
+            let sample_elapsed_seconds = now
+                .checked_duration_since(previous_raw_instant)
+                .unwrap_or(Duration::ZERO)
+                .as_secs_f64();
+            let sample_delta_seconds =
+                (raw_position.as_secs_f64() - previous_raw.as_secs_f64()).max(0.0);
+            if sample_elapsed_seconds >= 0.02 {
+                let measured_rate = sample_delta_seconds / sample_elapsed_seconds;
+                if (Self::RATE_LEARN_MIN..=Self::RATE_LEARN_MAX).contains(&measured_rate) {
+                    self.learned_rate = ((self.learned_rate * (1.0 - Self::RATE_ALPHA))
+                        + (measured_rate * Self::RATE_ALPHA))
+                        .clamp(Self::RATE_LEARN_MIN, Self::RATE_LEARN_MAX);
+                }
+            }
+        }
+
+        let phase_rate_offset = if error_seconds.abs() <= Self::IGNORE_ERROR_SECONDS {
+            0.0
+        } else {
+            (error_seconds / Self::PHASE_RECOVERY_HORIZON_SECONDS)
+                .clamp(-Self::PHASE_RATE_OFFSET_MAX, Self::PHASE_RATE_OFFSET_MAX)
+        };
+        self.rate = (self.learned_rate + phase_rate_offset)
+            .clamp(Self::RATE_CLAMP_MIN, Self::RATE_CLAMP_MAX);
+        let corrected = predicted;
+        self.anchor_position = corrected;
+        self.anchor_instant = now;
+        self.last_raw_position = Some(raw_position);
+        self.last_raw_instant = Some(now);
+        self.mode = PlaybackClockMode::Steady;
+        corrected
+    }
+}
+
+#[cfg(any(test, feature = "profiling-logs"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GstClockTrace {
+    current_state: gst::State,
+    pending_state: gst::State,
+    running: i128,
+    clock: i128,
+    base: i128,
+}
+
+#[cfg(any(test, feature = "profiling-logs"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecentSeekTrace {
+    target: i128,
+    since_issue: i128,
+    since_release: i128,
+}
+
+fn duration_ms_i128(value: Duration) -> i128 {
+    i128::try_from(value.as_millis()).unwrap_or(i128::MAX)
+}
+
+fn add_signed_seconds(base: Duration, delta_seconds: f64) -> Duration {
+    if delta_seconds >= 0.0 {
+        base.saturating_add(Duration::from_secs_f64(delta_seconds))
+    } else {
+        let magnitude = Duration::from_secs_f64(-delta_seconds);
+        base.checked_sub(magnitude).unwrap_or(Duration::ZERO)
+    }
+}
+
+fn release_seek_hold_sample(
+    clock: &mut SmoothedPlaybackClock,
+    _target: Duration,
+    _released_at: Instant,
+    raw_position: Duration,
+    now: Instant,
+) -> Duration {
+    clock.enter_seek_reacquire();
+    clock.update_playing_sample(raw_position, now)
+}
+
+#[cfg(any(test, feature = "profiling-logs"))]
+fn clock_time_ms_i128(value: Option<gst::ClockTime>) -> i128 {
+    value.map_or(-1, |time| i128::from(time.mseconds()))
+}
+
+fn gst_position_trace(previous: Duration, current: Duration) -> GstPositionTrace {
+    let previous_ms = duration_ms_i128(previous);
+    let current_ms = duration_ms_i128(current);
+    let delta_ms = current_ms - previous_ms;
+    GstPositionTrace {
+        previous: previous_ms,
+        current: current_ms,
+        delta: delta_ms,
+        jumped_backward: delta_ms <= -1_000,
+    }
+}
+
+#[cfg(any(test, feature = "profiling-logs"))]
+fn gst_clock_trace(
+    current_state: gst::State,
+    pending_state: gst::State,
+    running_time: Option<gst::ClockTime>,
+    clock_time: Option<gst::ClockTime>,
+    base_time: Option<gst::ClockTime>,
+) -> GstClockTrace {
+    GstClockTrace {
+        current_state,
+        pending_state,
+        running: clock_time_ms_i128(running_time),
+        clock: clock_time_ms_i128(clock_time),
+        base: clock_time_ms_i128(base_time),
+    }
+}
+
+#[cfg(any(test, feature = "profiling-logs"))]
+fn recent_seek_trace(
+    target: Option<Duration>,
+    since_issue: Option<Duration>,
+    since_release: Option<Duration>,
+) -> RecentSeekTrace {
+    RecentSeekTrace {
+        target: target.map_or(-1, duration_ms_i128),
+        since_issue: since_issue.map_or(-1, duration_ms_i128),
+        since_release: since_release.map_or(-1, duration_ms_i128),
+    }
+}
+
 struct GstPlaybackRuntime {
     playbin: gst::Element,
     queue_state: Arc<Mutex<GaplessQueue>>,
@@ -328,6 +567,9 @@ struct GstPlaybackRuntime {
     startup_ramp_hold_until: Option<Instant>,
     buffering_active: bool,
     seek_hold: Option<(Instant, Duration)>,
+    last_seek_issued_at: Option<Instant>,
+    last_seek_released_at: Option<Instant>,
+    last_seek_target: Option<Duration>,
     /// Set by the about-to-finish handler when the next track has a
     /// different codec (file extension).  The EOS handler will perform
     /// a full pipeline switch instead of relying on gapless playback.
@@ -338,6 +580,7 @@ struct GstPlaybackRuntime {
     /// commit it when the position actually confirms the stream switch
     /// (i.e., position jumps backward).
     pending_gapless_duration: Option<Duration>,
+    position_clock: SmoothedPlaybackClock,
     /// Set by the about-to-finish handler when a spectrogram staging
     /// thread has been started for the likely next track.  Checked on
     /// cancellation paths to send `CancelStagedContinuation`.
@@ -422,8 +665,12 @@ impl GstPlaybackRuntime {
             startup_ramp_hold_until: None,
             buffering_active: false,
             seek_hold: None,
+            last_seek_issued_at: None,
+            last_seek_released_at: None,
+            last_seek_target: None,
             pending_eos_track_switch,
             pending_gapless_duration: None,
+            position_clock: SmoothedPlaybackClock::new(Instant::now()),
             staged_continuation_active,
             playing_state_requested_at: None,
             channel_mute_mask,
@@ -436,6 +683,170 @@ impl GstPlaybackRuntime {
         let _ = self
             .event_tx
             .send(PlaybackEvent::Snapshot(self.snapshot.clone()));
+    }
+
+    fn clear_recent_seek_trace(&mut self) {
+        self.last_seek_issued_at = None;
+        self.last_seek_released_at = None;
+        self.last_seek_target = None;
+    }
+
+    fn begin_seek_hold(&mut self, target: Duration) {
+        let issued_at = Instant::now();
+        self.snapshot.position = target;
+        self.position_clock.enter_seek_hold(target, issued_at);
+        self.last_seek_issued_at = Some(issued_at);
+        self.last_seek_released_at = None;
+        self.last_seek_target = Some(target);
+        self.seek_hold = Some((issued_at + Duration::from_millis(220), target));
+    }
+
+    #[cfg(feature = "profiling-logs")]
+    fn recent_seek_trace(&self) -> RecentSeekTrace {
+        recent_seek_trace(
+            self.last_seek_target,
+            self.last_seek_issued_at.map(|issued| issued.elapsed()),
+            self.last_seek_released_at
+                .map(|released| released.elapsed()),
+        )
+    }
+
+    #[cfg(feature = "profiling-logs")]
+    fn clock_trace(&self) -> GstClockTrace {
+        gst_clock_trace(
+            self.playbin.current_state(),
+            self.playbin.pending_state(),
+            self.playbin.current_running_time(),
+            self.playbin.current_clock_time(),
+            self.playbin.base_time(),
+        )
+    }
+
+    #[cfg(feature = "profiling-logs")]
+    fn log_seek_event(
+        &self,
+        requested: Duration,
+        target: Duration,
+        cancelled_gapless_advance: bool,
+        seek_result_ok: bool,
+    ) {
+        let clock_trace = self.clock_trace();
+        profile_eprintln!(
+            "[gst-seek] requested_ms={} target_ms={} result={} cancelled_gapless={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} current={}",
+            duration_ms_i128(requested),
+            duration_ms_i128(target),
+            if seek_result_ok { "ok" } else { "err" },
+            if cancelled_gapless_advance { 1 } else { 0 },
+            clock_trace.current_state,
+            clock_trace.pending_state,
+            clock_trace.running,
+            clock_trace.clock,
+            clock_trace.base,
+            self
+                .snapshot
+                .current
+                .as_ref()
+                .map_or_else(|| "<none>".to_string(), |current| current.display().to_string()),
+        );
+    }
+
+    #[cfg(feature = "profiling-logs")]
+    fn log_seek_hold_release(&self, target: Duration) {
+        let seek_trace = recent_seek_trace(
+            Some(target),
+            self.last_seek_issued_at.map(|issued| issued.elapsed()),
+            Some(Duration::ZERO),
+        );
+        let clock_trace = self.clock_trace();
+        profile_eprintln!(
+            "[gst-seek-hold] phase=clear target_ms={} since_seek_ms={} since_seek_release_ms={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} current={}",
+            seek_trace.target,
+            seek_trace.since_issue,
+            seek_trace.since_release,
+            clock_trace.current_state,
+            clock_trace.pending_state,
+            clock_trace.running,
+            clock_trace.clock,
+            clock_trace.base,
+            self
+                .snapshot
+                .current
+                .as_ref()
+                .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
+        );
+    }
+
+    #[cfg(feature = "profiling-logs")]
+    fn log_position_sample(
+        &self,
+        trace: GstPositionTrace,
+        mode: PlaybackClockMode,
+        accepted: Duration,
+    ) {
+        let seek_trace = self.recent_seek_trace();
+        let clock_trace = self.clock_trace();
+        profile_eprintln!(
+            "[gst-pos] prev_ms={} next_ms={} delta_ms={} jumped_backward={} mode={:?} accepted_ms={} seek_locked=0 seek_target_ms={} since_seek_ms={} since_seek_release_ms={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} pending_gapless_duration={} current={}",
+            trace.previous,
+            trace.current,
+            trace.delta,
+            if trace.jumped_backward { 1 } else { 0 },
+            mode,
+            duration_ms_i128(accepted),
+            seek_trace.target,
+            seek_trace.since_issue,
+            seek_trace.since_release,
+            clock_trace.current_state,
+            clock_trace.pending_state,
+            clock_trace.running,
+            clock_trace.clock,
+            clock_trace.base,
+            if self.pending_gapless_duration.is_some() { 1 } else { 0 },
+            self
+                .snapshot
+                .current
+                .as_ref()
+                .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
+        );
+    }
+
+    #[cfg(feature = "profiling-logs")]
+    fn log_playbin_state_change(&self, old: gst::State, current: gst::State, pending: gst::State) {
+        let seek_trace = self.recent_seek_trace();
+        eprintln!(
+            "[ferrous] playbin state: {:?} → {:?} (pending {:?}) seek_target_ms={} since_seek_ms={} since_seek_release_ms={}",
+            old,
+            current,
+            pending,
+            seek_trace.target,
+            seek_trace.since_issue,
+            seek_trace.since_release,
+        );
+    }
+
+    fn poll_seek_hold(&mut self) -> (bool, bool, Option<(Duration, Instant)>) {
+        let mut position_locked = false;
+        let mut snapshot_changed = false;
+        let mut released_seek_sample = None;
+        if let Some((until, target)) = self.seek_hold.as_ref().copied() {
+            let now = Instant::now();
+            if now < until {
+                let hold_position = self.position_clock.current_position(now);
+                if self.snapshot.position != hold_position {
+                    self.snapshot.position = hold_position;
+                    snapshot_changed = true;
+                }
+                position_locked = true;
+            } else {
+                self.seek_hold = None;
+                let released_at = now;
+                self.last_seek_released_at = Some(released_at);
+                released_seek_sample = Some((target, released_at));
+                #[cfg(feature = "profiling-logs")]
+                self.log_seek_hold_release(target);
+            }
+        }
+        (position_locked, snapshot_changed, released_seek_sample)
     }
 
     /// Advance the track token for a non-gapless transition (manual or
@@ -528,6 +939,7 @@ impl GstPlaybackRuntime {
         self.snapshot.state = PlaybackState::Stopped;
         self.snapshot.position = Duration::ZERO;
         self.snapshot.duration = Duration::ZERO;
+        self.position_clock.reset(Duration::ZERO, Instant::now());
     }
 
     fn load_queue(&mut self, paths: Vec<PathBuf>) {
@@ -707,7 +1119,9 @@ impl GstPlaybackRuntime {
         }
         self.buffering_active = false;
         if self.playbin.set_state(gst::State::Playing).is_ok() {
-            self.playing_state_requested_at = Some(Instant::now());
+            let now = Instant::now();
+            self.playing_state_requested_at = Some(now);
+            self.position_clock.reset(self.snapshot.position, now);
             if was_stopped {
                 // Re-assert mute after state transition to close the race
                 // window where new internal elements may not have volume=0.
@@ -729,6 +1143,8 @@ impl GstPlaybackRuntime {
         self.buffering_active = false;
         if self.playbin.set_state(gst::State::Paused).is_ok() {
             self.snapshot.state = PlaybackState::Paused;
+            self.position_clock
+                .reset(self.snapshot.position, Instant::now());
             self.emit_snapshot();
         }
     }
@@ -741,12 +1157,14 @@ impl GstPlaybackRuntime {
             self.startup_ramp_hold_until = None;
             self.buffering_active = false;
             self.seek_hold = None;
+            self.clear_recent_seek_trace();
             self.pending_eos_track_switch
                 .store(false, Ordering::Release);
             self.clear_staged_spectrogram();
             self.reset_channel_mute_state();
             self.snapshot.state = PlaybackState::Stopped;
             self.snapshot.position = Duration::ZERO;
+            self.position_clock.reset(Duration::ZERO, Instant::now());
             self.snapshot.current_queue_index = None;
             self.snapshot.current_bitrate_kbps = None;
             self.emit_snapshot();
@@ -756,13 +1174,15 @@ impl GstPlaybackRuntime {
     fn seek(&mut self, pos: Duration) {
         let nanos = u64::try_from(pos.as_nanos().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
         let target = gst::ClockTime::from_nseconds(nanos);
+        let requested = pos.min(self.snapshot.duration);
 
         // If about-to-finish has already advanced the queue past what the
         // UI considers the current track, revert the queue and reset the
         // pipeline so the seek applies to the correct (displayed) track.
         // Without this, seeking near the end of a track can land on the
         // next track's audio while the UI still shows the previous one.
-        if self.cancel_pending_gapless_advance() {
+        let cancelled_gapless_advance = self.cancel_pending_gapless_advance();
+        if cancelled_gapless_advance {
             if let Some(ref path) = self.snapshot.current.clone() {
                 if let Some(uri) = file_uri(path) {
                     self.soft_mute();
@@ -777,7 +1197,9 @@ impl GstPlaybackRuntime {
                     let _ = self.playbin.state(Some(gst::ClockTime::from_mseconds(500)));
 
                     let seek_flags = seek_flags_for_path(self.snapshot.current.as_deref());
-                    let _ = self.playbin.seek_simple(seek_flags, target);
+                    let seek_result_ok = self.playbin.seek_simple(seek_flags, target).is_ok();
+                    #[cfg(not(feature = "profiling-logs"))]
+                    let _ = seek_result_ok;
 
                     let was_playing = self.snapshot.state == PlaybackState::Playing;
                     if was_playing {
@@ -791,11 +1213,9 @@ impl GstPlaybackRuntime {
                         };
                     }
 
-                    self.snapshot.position = pos.min(self.snapshot.duration);
-                    self.seek_hold = Some((
-                        Instant::now() + Duration::from_millis(220),
-                        self.snapshot.position,
-                    ));
+                    self.begin_seek_hold(requested);
+                    #[cfg(feature = "profiling-logs")]
+                    self.log_seek_event(pos, requested, true, seek_result_ok);
                     let _ = self.event_tx.send(PlaybackEvent::Seeked {
                         position: self.snapshot.position,
                     });
@@ -805,12 +1225,12 @@ impl GstPlaybackRuntime {
         }
 
         let seek_flags = seek_flags_for_path(self.snapshot.current.as_deref());
-        let _ = self.playbin.seek_simple(seek_flags, target);
-        self.snapshot.position = pos.min(self.snapshot.duration);
-        self.seek_hold = Some((
-            Instant::now() + Duration::from_millis(220),
-            self.snapshot.position,
-        ));
+        let seek_result_ok = self.playbin.seek_simple(seek_flags, target).is_ok();
+        #[cfg(not(feature = "profiling-logs"))]
+        let _ = seek_result_ok;
+        self.begin_seek_hold(requested);
+        #[cfg(feature = "profiling-logs")]
+        self.log_seek_event(pos, requested, false, seek_result_ok);
         let _ = self.event_tx.send(PlaybackEvent::Seeked {
             position: self.snapshot.position,
         });
@@ -950,28 +1370,22 @@ impl GstPlaybackRuntime {
         }
 
         let mut snapshot_changed = self.poll_volume_ramp();
-
-        let mut position_locked = false;
-        if let Some((until, target)) = self.seek_hold.as_ref().copied() {
-            if Instant::now() < until {
-                if self.snapshot.position != target {
-                    self.snapshot.position = target;
-                    snapshot_changed = true;
-                }
-                position_locked = true;
-            } else {
-                self.seek_hold = None;
-            }
-        }
+        let (position_locked, seek_hold_changed, released_seek_sample) = self.poll_seek_hold();
+        snapshot_changed |= seek_hold_changed;
         if !position_locked && self.snapshot.state != PlaybackState::Stopped {
             if let Some(pos) = self.playbin.query_position::<gst::ClockTime>() {
-                let next_pos = Duration::from_nanos(pos.nseconds());
+                let now = Instant::now();
+                let previous_raw_pos = self
+                    .position_clock
+                    .last_raw_position()
+                    .unwrap_or(self.snapshot.position);
+                let raw_pos = Duration::from_nanos(pos.nseconds());
                 // playbin3 pre-rolls the next stream ~2 s before the
                 // current track ends.  Detect the actual stream switch by
                 // a large backward position jump (the new stream starts
                 // near zero while the old was near the end).
-                let jumped_backward = next_pos < self.snapshot.position
-                    && self.snapshot.position.saturating_sub(next_pos) > Duration::from_secs(1);
+                let trace = gst_position_trace(previous_raw_pos, raw_pos);
+                let jumped_backward = trace.jumped_backward;
                 if jumped_backward {
                     // Commit the deferred duration from the pre-rolled
                     // stream now that the switch has actually happened.
@@ -980,9 +1394,36 @@ impl GstPlaybackRuntime {
                         snapshot_changed = true;
                     }
                 }
+                let next_pos = if self.snapshot.state == PlaybackState::Playing {
+                    if let Some((target, released_at)) = released_seek_sample {
+                        release_seek_hold_sample(
+                            &mut self.position_clock,
+                            target,
+                            released_at,
+                            raw_pos,
+                            now,
+                        )
+                    } else {
+                        self.position_clock.update_playing_sample(raw_pos, now)
+                    }
+                } else {
+                    self.position_clock.reset(raw_pos, now);
+                    raw_pos
+                };
                 if self.snapshot.position != next_pos {
                     self.snapshot.position = next_pos;
                     snapshot_changed = true;
+                }
+                if previous_raw_pos != raw_pos {
+                    #[cfg(feature = "profiling-logs")]
+                    {
+                        let mode_before_sample = if released_seek_sample.is_some() {
+                            PlaybackClockMode::SeekReacquire
+                        } else {
+                            self.position_clock.mode()
+                        };
+                        self.log_position_sample(trace, mode_before_sample, next_pos);
+                    }
                 }
             }
         }
@@ -1180,6 +1621,8 @@ impl GstPlaybackRuntime {
                 self.playing_state_requested_at = None;
                 self.buffering_active = false;
                 self.seek_hold = None;
+                self.position_clock.reset(Duration::ZERO, Instant::now());
+                self.clear_recent_seek_trace();
                 self.startup_gain_ramp = false;
                 self.startup_ramp_hold_until = None;
                 self.pending_gapless_duration = None;
@@ -1196,6 +1639,8 @@ impl GstPlaybackRuntime {
                 );
                 self.playing_state_requested_at = None;
                 self.buffering_active = false;
+                self.position_clock
+                    .reset(self.snapshot.position, Instant::now());
                 self.snapshot.state = PlaybackState::Stopped;
                 // Tear down the faulted pipeline fully so subsequent
                 // tracks can start from a clean state.
@@ -1214,13 +1659,8 @@ impl GstPlaybackRuntime {
             }
             gst::MessageView::StateChanged(sc) => {
                 if sc.src().is_some_and(|s| s == &self.playbin) {
-                    if cfg!(feature = "profiling-logs") {
-                        eprintln!(
-                            "[ferrous] playbin state: {:?} → {:?}",
-                            sc.old(),
-                            sc.current()
-                        );
-                    }
+                    #[cfg(feature = "profiling-logs")]
+                    self.log_playbin_state_change(sc.old(), sc.current(), sc.pending());
                     if sc.current() == gst::State::Playing {
                         self.playing_state_requested_at = None;
                     }
@@ -1290,6 +1730,8 @@ impl GstPlaybackRuntime {
         self.snapshot.position = Duration::ZERO;
         self.snapshot.duration = Duration::ZERO;
         self.snapshot.current_bitrate_kbps = None;
+        self.position_clock.reset(Duration::ZERO, Instant::now());
+        self.clear_recent_seek_trace();
     }
 }
 
@@ -2247,6 +2689,182 @@ mod tests {
         let emitted = maybe_emit_natural_handoff(&queue_state, &mut snapshot);
         assert_eq!(emitted, Some((second.clone(), 1)));
         assert_eq!(snapshot.current.as_ref(), Some(&second));
+    }
+
+    #[test]
+    fn gst_position_trace_computes_signed_delta_ms() {
+        let trace = gst_position_trace(Duration::from_millis(6_880), Duration::from_millis(7_050));
+        assert_eq!(trace.previous, 6_880);
+        assert_eq!(trace.current, 7_050);
+        assert_eq!(trace.delta, 170);
+        assert!(!trace.jumped_backward);
+    }
+
+    #[test]
+    fn gst_position_trace_flags_large_backward_jump() {
+        let trace = gst_position_trace(Duration::from_secs(15), Duration::from_millis(800));
+        assert_eq!(trace.delta, -14_200);
+        assert!(trace.jumped_backward);
+    }
+
+    #[test]
+    fn smoothed_playback_clock_damps_large_forward_sample_jump() {
+        let base = Instant::now();
+        let mut clock = SmoothedPlaybackClock::new(base);
+        clock.reset(Duration::from_secs_f64(12.0), base);
+
+        let first = clock.update_playing_sample(
+            Duration::from_secs_f64(12.039),
+            base + Duration::from_millis(40),
+        );
+        let second = clock.update_playing_sample(
+            Duration::from_secs_f64(12.148),
+            base + Duration::from_millis(80),
+        );
+
+        let first_jump = first.as_secs_f64() - 12.0;
+        let second_jump = second.as_secs_f64() - first.as_secs_f64();
+        assert!(first_jump > 0.03);
+        assert!(
+            second_jump < 0.07,
+            "modeled jump should be damped, got {second_jump:.6}"
+        );
+        assert!(
+            (Duration::from_secs_f64(12.148).as_secs_f64() - second.as_secs_f64()) > 0.04,
+            "modeled position should not fully follow the raw jump immediately"
+        );
+    }
+
+    #[test]
+    fn smoothed_playback_clock_recovers_burst_via_bounded_cadence() {
+        let base = Instant::now();
+        let mut clock = SmoothedPlaybackClock::new(base);
+        clock.reset(Duration::from_secs_f64(12.0), base);
+
+        let first = clock.update_playing_sample(
+            Duration::from_secs_f64(12.039),
+            base + Duration::from_millis(40),
+        );
+        let mut modeled = clock.update_playing_sample(
+            Duration::from_secs_f64(12.160),
+            base + Duration::from_millis(80),
+        );
+        let mut previous_modeled = modeled;
+        let mut maximum_step = modeled.as_secs_f64() - first.as_secs_f64();
+
+        for tick in 3..=20 {
+            let raw_position = Duration::from_secs_f64(12.160 + (0.039 * f64::from(tick - 2)));
+            modeled = clock.update_playing_sample(
+                raw_position,
+                base + Duration::from_millis(40 * u64::from(tick as u32)),
+            );
+            let step = modeled.as_secs_f64() - previous_modeled.as_secs_f64();
+            maximum_step = maximum_step.max(step);
+            previous_modeled = modeled;
+        }
+
+        assert!(
+            maximum_step < 0.05,
+            "modeled recovery should stay near realtime cadence, got max step {maximum_step:.6}"
+        );
+        let final_raw = Duration::from_secs_f64(12.160 + (0.039 * 18.0));
+        let remaining_error = final_raw.as_secs_f64() - modeled.as_secs_f64();
+        assert!(
+            remaining_error.abs() < 0.03,
+            "modeled recovery should converge back near raw position, remaining error {remaining_error:.6}"
+        );
+    }
+
+    #[test]
+    fn seek_hold_advances_visible_position_from_target() {
+        let base = Instant::now();
+        let mut clock = SmoothedPlaybackClock::new(base);
+        clock.enter_seek_hold(Duration::from_secs_f64(12.0), base);
+
+        let visible = clock.current_position(base + Duration::from_millis(120));
+        assert!(
+            visible > Duration::from_secs_f64(12.10),
+            "seek hold should advance from target, got {:.6}",
+            visible.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn smoothed_playback_clock_resets_exactly_on_seek_target() {
+        let base = Instant::now();
+        let mut clock = SmoothedPlaybackClock::new(base);
+        clock.reset(Duration::from_secs_f64(48.0), base);
+
+        assert_eq!(clock.current_position(base), Duration::from_secs(48));
+
+        let post_release = clock.update_playing_sample(
+            Duration::from_secs_f64(48.24),
+            base + Duration::from_millis(240),
+        );
+        let visible_jump = post_release.as_secs_f64() - 48.0;
+        assert!(
+            visible_jump < 0.26,
+            "post-seek modeled jump should stay below the raw catch-up, got {visible_jump:.6}"
+        );
+    }
+
+    #[test]
+    fn post_seek_hold_release_preserves_first_catch_up_sample() {
+        let base = Instant::now();
+        let target = Duration::from_secs_f64(48.0);
+        let mut clock = SmoothedPlaybackClock::new(base);
+        clock.reset(target, base);
+        let raw = Duration::from_secs_f64(48.24);
+
+        let modeled = release_seek_hold_sample(
+            &mut clock,
+            target,
+            base + Duration::from_millis(220),
+            raw,
+            base + Duration::from_millis(240),
+        );
+
+        assert!(
+            (raw.as_secs_f64() - modeled.as_secs_f64()) < 0.05,
+            "post-seek release should stay close to the first raw sample, raw={:.6} modeled={:.6}",
+            raw.as_secs_f64(),
+            modeled.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn gst_clock_trace_converts_unknown_clock_values_to_negative_one() {
+        let trace = gst_clock_trace(
+            gst::State::Playing,
+            gst::State::VoidPending,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(trace.current_state, gst::State::Playing);
+        assert_eq!(trace.pending_state, gst::State::VoidPending);
+        assert_eq!(trace.running, -1);
+        assert_eq!(trace.clock, -1);
+        assert_eq!(trace.base, -1);
+    }
+
+    #[test]
+    fn backend_clock_trace_reports_mode() {
+        let mode = PlaybackClockMode::SeekReacquire;
+        let text = format!("{mode:?}");
+        assert!(text.contains("SeekReacquire"));
+    }
+
+    #[test]
+    fn recent_seek_trace_preserves_target_and_elapsed_ms() {
+        let trace = recent_seek_trace(
+            Some(Duration::from_millis(2_500)),
+            Some(Duration::from_millis(180)),
+            Some(Duration::from_millis(35)),
+        );
+        assert_eq!(trace.target, 2_500);
+        assert_eq!(trace.since_issue, 180);
+        assert_eq!(trace.since_release, 35);
     }
 
     #[test]

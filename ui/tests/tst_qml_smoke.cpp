@@ -375,18 +375,30 @@ private slots:
     void artistPrefixSearchUsesModelLookup();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
+    void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void testMutedChannelRendersGrayscale();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
+    void spectrogramRollingZoomResetAnchorsEpochToResetStart();
     void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
     void diagnosticsLogUsesLowercaseAppDir();
-    void playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate();
-    void playbackControllerPlaybackUpdateDoesNotPredictSpectrogramForward();
+    void playbackControllerSeekImmediatelyUpdatesSpectrogramPosition();
+    void playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock();
+    void playbackControllerPostSeekHeartbeatSnapsToBackendPosition();
+    void playbackControllerPostSeekHoldHeartbeatKeepsDisplayPinnedUntilReacquired();
+    void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
+    void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
+    void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
+    void playbackControllerIgnoresSteadyStateHeartbeatJitter();
+    void playbackControllerAdaptsInterpolationRateToHeartbeatCadence();
+    void playbackControllerSteadyStateTrimReducesNoticeableLag();
+    void playbackControllerFollowsBoundedRecoveryCadenceWithoutBurst();
     void spectrogramSeekProfileFlagsStalledPostSeekWindow();
     void spectrogramSmoothnessProfileFlagsGapHeavyWindow();
+    void spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals();
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
@@ -396,6 +408,19 @@ private slots:
     void spectrogramCenteredModeSeekPreservesRing();
     void spectrogramCenteredGaplessPreStagedFill();
     void spectrogramCenteredGaplessSnapsAnchorToZero();
+    void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
+    void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
+    void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
+    void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
+    void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
+    void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
+    void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
+    void spectrogramRollingGaplessTrackChangePreservesZoom();
+    void spectrogramCenteredGaplessTrackChangeResetsZoom();
+    void spectrogramRollingResetTrackChangeResetsZoom();
+    void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
+    void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
+    void spectrogramTrackChangeCancelsPendingZoomDebounce();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void playbackControllerInterpolationActivatesOnPlayback();
@@ -420,6 +445,20 @@ private slots:
     void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
     void spectrogramLeftClickDoesNotSeek();
     void spectrogramClickToSeekDisabledInRollingMode();
+    void spectrogramZoomProperty();
+    void spectrogramZoomLimitsWithTrackData();
+    void spectrogramZoomOutBlockedWhenSongFits();
+    void spectrogramEffectiveZoomMatchesBackendHop();
+    void spectrogramAdvanceWorksWhenBackendMatchesZoom();
+    void spectrogramEffectiveZoomDuringTransition();
+    void spectrogramDeferredZoomAppliesOnBackendData();
+    void spectrogramZoomOutProducesDistinctHop();
+    void spectrogramMinZoomAdaptsToWidthChange();
+    void spectrogramCenteredModeUsesWindowedCapacity();
+    void spectrogramPeakHoldRebuildUsesMaxNotNearest();
+    void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramSyntheticClearPreservesCanvasDuringSeek();
+    void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -537,6 +576,7 @@ Item {
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
+        property bool spectrogramZoomEnabled: true
         property int soloedChannel: -1
         property int channelButtonsVisibility: 1
         property int viewerFullscreenMode: 0
@@ -593,6 +633,9 @@ Item {
         function setShowFps(value) {}
         function setShowSpectrogramCrosshair(value) {}
         function setShowSpectrogramScale(value) {}
+        function setSpectrogramZoomEnabled(value) {}
+        function setSpectrogramZoomLevel(level) {}
+        function setSpectrogramWidgetWidth(width) {}
         function setViewerFullscreenMode(mode) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}
@@ -1052,7 +1095,7 @@ void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
 }
 
-void QmlSmokeTest::playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate() {
+void QmlSmokeTest::playbackControllerSeekImmediatelyUpdatesSpectrogramPosition() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -1099,10 +1142,18 @@ Item {
         Q_ARG(QVariant, QVariant::fromValue(48.0))));
 
     QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 48.0);
-    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 12.0);
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 48.0);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommitted",
+        Q_ARG(QVariant, QVariant::fromValue(23.16))));
+
+    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 23.16);
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 23.16);
 }
 
-void QmlSmokeTest::playbackControllerPlaybackUpdateDoesNotPredictSpectrogramForward() {
+void QmlSmokeTest::playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -1136,7 +1187,9 @@ Item {
     QVERIFY(controller != nullptr);
 
     QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTest::qWait(130);
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+    const double displayedBeforeUpdate =
+        controller->property("displayedPositionSeconds").toDouble();
 
     QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
     QVERIFY(bridge != nullptr);
@@ -1148,7 +1201,615 @@ Item {
         Q_ARG(QVariant, QVariant()),
         Q_ARG(QVariant, QVariant())));
 
-    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 12.12);
+    const double displayedAfterUpdate =
+        controller->property("displayedPositionSeconds").toDouble();
+    const double spectrogramPosition =
+        controller->property("spectrogramPositionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedAfterUpdate - 12.12) < 0.02,
+        qPrintable(
+            QStringLiteral("displayed=%1 displayed_before=%2")
+                .arg(displayedAfterUpdate, 0, 'f', 6)
+                .arg(displayedBeforeUpdate, 0, 'f', 6)));
+    QVERIFY2(
+        std::abs(spectrogramPosition - 12.12) < 0.02,
+        qPrintable(QStringLiteral("spectrogram=%1").arg(spectrogramPosition, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerPostSeekHeartbeatSnapsToBackendPosition() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommitted",
+        Q_ARG(QVariant, QVariant::fromValue(48.0))));
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("positionSeconds", 48.26);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedAfterHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    const double spectrogramAfterHeartbeat =
+        controller->property("spectrogramPositionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedAfterHeartbeat - 48.26) < 0.02,
+        qPrintable(QStringLiteral("displayed=%1").arg(displayedAfterHeartbeat, 0, 'f', 6)));
+    QVERIFY2(
+        std::abs(spectrogramAfterHeartbeat - 48.26) < 0.02,
+        qPrintable(QStringLiteral("spectrogram=%1").arg(spectrogramAfterHeartbeat, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerPostSeekHoldHeartbeatKeepsDisplayPinnedUntilReacquired() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommitted",
+        Q_ARG(QVariant, QVariant::fromValue(48.0))));
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+
+    bridge->setProperty("positionSeconds", 48.0);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    QTest::qWait(260);
+
+    const double displayedDuringHold =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedDuringHold - 48.0) < 0.03,
+        qPrintable(QStringLiteral("displayed_during_hold=%1").arg(displayedDuringHold, 0, 'f', 6)));
+
+    bridge->setProperty("positionSeconds", 48.04);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedOnReacquire =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        displayedOnReacquire < 48.08,
+        qPrintable(
+            QStringLiteral("displayed_on_reacquire=%1").arg(displayedOnReacquire, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.18);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedImmediately =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedImmediately - (displayedBeforeHeartbeat + 0.18)) < 0.02,
+        qPrintable(
+            QStringLiteral("displayed_immediately=%1 displayed_before=%2")
+                .arg(displayedImmediately, 0, 'f', 6)
+                .arg(displayedBeforeHeartbeat, 0, 'f', 6)));
+
+    QTest::qWait(20);
+
+    const double displayedAfterOneFrame =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        displayedAfterOneFrame >= (displayedImmediately - 0.001)
+            && displayedAfterOneFrame <= (displayedImmediately + 0.03),
+        qPrintable(
+            QStringLiteral("displayed_immediately=%1 displayed_after=%2")
+                .arg(displayedImmediately, 0, 'f', 6)
+                .arg(displayedAfterOneFrame, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerModerateSteadyStateLagUsesTrimNotBleed() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property bool profileLogsEnabled: true
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    clearCapturedMessages();
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.078);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const QString warnings = takeCapturedMessagesText();
+    QVERIFY2(warnings.contains(QStringLiteral("action=follow")), qPrintable(warnings));
+    QVERIFY2(!warnings.contains(QStringLiteral("action=trim")), qPrintable(warnings));
+    QVERIFY2(!warnings.contains(QStringLiteral("action=bleed")), qPrintable(warnings));
+}
+
+void QmlSmokeTest::playbackControllerProfileLogsHeartbeatCorrectionAndBleed() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property bool profileLogsEnabled: true
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    clearCapturedMessages();
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.18);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const QString warnings = takeCapturedMessagesText();
+    QVERIFY2(
+        warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
+        qPrintable(warnings));
+    QVERIFY2(
+        warnings.contains(QStringLiteral("action=follow")),
+        qPrintable(warnings));
+    QVERIFY2(
+        !warnings.contains(QStringLiteral("[qml-playback-profile] bleed")),
+        qPrintable(warnings));
+}
+
+void QmlSmokeTest::playbackControllerIgnoresSteadyStateHeartbeatJitter() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.05);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedImmediately =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedImmediately - (displayedBeforeHeartbeat + 0.05)) < 0.02,
+        qPrintable(
+            QStringLiteral("displayed_immediately=%1 displayed_before=%2")
+                .arg(displayedImmediately, 0, 'f', 6)
+                .arg(displayedBeforeHeartbeat, 0, 'f', 6)));
+
+    const double correctionDebt =
+        controller->property("interpolationCorrectionDebtSeconds").toDouble();
+    QVERIFY2(
+        std::abs(correctionDebt) < 0.001,
+        qPrintable(QStringLiteral("correction_debt=%1").arg(correctionDebt, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerAdaptsInterpolationRateToHeartbeatCadence() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+
+    for (int i = 0; i < 60; ++i) {
+        QTest::qWait(40);
+        const double nextIncomingPosition = 12.0 + (static_cast<double>(i + 1) * 0.038);
+        bridge->setProperty("positionSeconds", nextIncomingPosition);
+        QVERIFY(QMetaObject::invokeMethod(
+            controller,
+            "handlePlaybackChanged",
+            Q_ARG(QVariant, QVariant()),
+            Q_ARG(QVariant, QVariant())));
+    }
+
+    const double displayedPosition = controller->property("displayedPositionSeconds").toDouble();
+    const double backendPosition = bridge->property("positionSeconds").toDouble();
+    const double interpolationRate = controller->property("interpolationRate").toDouble();
+    QVERIFY2(
+        std::abs(displayedPosition - backendPosition) < 0.06,
+        qPrintable(
+            QStringLiteral("displayed=%1 backend=%2 rate=%3")
+                .arg(displayedPosition, 0, 'f', 6)
+                .arg(backendPosition, 0, 'f', 6)
+                .arg(interpolationRate, 0, 'f', 6)));
+    QVERIFY2(
+        interpolationRate > 0.9 && interpolationRate < 1.0,
+        qPrintable(QStringLiteral("rate=%1").arg(interpolationRate, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerSteadyStateTrimReducesNoticeableLag() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+
+    double incomingPosition =
+        controller->property("displayedPositionSeconds").toDouble() + 0.10;
+    for (int i = 0; i < 20; ++i) {
+        bridge->setProperty("positionSeconds", incomingPosition);
+        QVERIFY(QMetaObject::invokeMethod(
+            controller,
+            "handlePlaybackChanged",
+            Q_ARG(QVariant, QVariant()),
+            Q_ARG(QVariant, QVariant())));
+        QTest::qWait(40);
+        incomingPosition += 0.039;
+    }
+
+    const double displayedPosition = controller->property("displayedPositionSeconds").toDouble();
+    const double backendPosition = bridge->property("positionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedPosition - backendPosition) < 0.07,
+        qPrintable(
+            QStringLiteral("displayed=%1 backend=%2")
+                .arg(displayedPosition, 0, 'f', 6)
+                .arg(backendPosition, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerFollowsBoundedRecoveryCadenceWithoutBurst() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+
+    const std::array<double, 6> positions = {12.039, 12.079, 12.122, 12.165, 12.208, 12.251};
+    double previousDisplayed = controller->property("displayedPositionSeconds").toDouble();
+    double maximumStep = 0.0;
+
+    for (double nextPosition : positions) {
+        QTest::qWait(40);
+        bridge->setProperty("positionSeconds", nextPosition);
+        QVERIFY(QMetaObject::invokeMethod(
+            controller,
+            "handlePlaybackChanged",
+            Q_ARG(QVariant, QVariant()),
+            Q_ARG(QVariant, QVariant())));
+        const double displayed = controller->property("displayedPositionSeconds").toDouble();
+        maximumStep = std::max(maximumStep, displayed - previousDisplayed);
+        previousDisplayed = displayed;
+    }
+
+    QVERIFY2(
+        maximumStep < 0.05,
+        qPrintable(QStringLiteral("maximum_step=%1").arg(maximumStep, 0, 'f', 6)));
+    const double displayedPosition = controller->property("displayedPositionSeconds").toDouble();
+    const double backendPosition = bridge->property("positionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedPosition - backendPosition) < 0.02,
+        qPrintable(
+            QStringLiteral("displayed=%1 backend=%2")
+                .arg(displayedPosition, 0, 'f', 6)
+                .arg(backendPosition, 0, 'f', 6)));
 }
 
 void QmlSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
@@ -1295,6 +1956,74 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
     QCOMPARE(item.m_ringSequenceId[10], 10);
     QCOMPARE(item.m_ringColumnId[10], 401);
     QCOMPARE(item.m_ringSequenceId[11], static_cast<qint64>(-1));
+}
+
+void QmlSmokeTest::spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int binsPerColumn = 8;
+    constexpr int sampleRate = 44'100;
+    constexpr int hop = 64; // max zoom
+    constexpr int resetStart = 139'812;
+    constexpr int columns = 2'048;
+    constexpr int currentSeq = 1'000;
+    constexpr int totalEstimate = 188'208;
+    constexpr quint64 trackToken = 3;
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        hop,
+        false,
+        true,
+        trackToken,
+        true);
+
+    QByteArray data(columns * binsPerColumn, '\x40');
+    item.feedPrecomputedChunk(
+        data,
+        binsPerColumn,
+        0,
+        columns,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        hop,
+        false,
+        false,
+        trackToken,
+        true);
+
+    const int currentTrackCol = resetStart + currentSeq;
+    const double positionSeconds =
+        (static_cast<double>(currentTrackCol) + 0.25)
+        * static_cast<double>(hop)
+        / static_cast<double>(sampleRate);
+    item.setPositionSeconds(positionSeconds);
+
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(0));
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(columns));
+
+    item.setDisplayMode(0); // Rolling
+
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(-resetStart));
+
+    const qint64 nowCol = static_cast<qint64>(std::floor(
+        positionSeconds
+        * static_cast<double>(sampleRate)
+        / static_cast<double>(hop)));
+    const qint64 displaySeq = item.m_rollingEpoch + nowCol;
+    QCOMPARE(displaySeq, static_cast<qint64>(currentSeq));
+    QVERIFY(displaySeq >= item.m_ringOldestSeq);
+    QVERIFY(displaySeq < item.m_ringWriteSeq);
 }
 
 void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
@@ -1586,6 +2315,75 @@ void QmlSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {
     QCOMPARE(item.m_ringTrackToken[1], 12ULL);
 }
 
+void QmlSmokeTest::spectrogramRollingZoomResetAnchorsEpochToResetStart() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int binsPerColumn = 8;
+    constexpr int sampleRate = 44'100;
+    constexpr int oldHop = 655;
+    constexpr int newHop = 524;
+    constexpr int resetStart = 1416;
+    constexpr int totalEstimate = 19'668;
+    constexpr quint64 trackToken = 3;
+
+    QByteArray initialChunk(64 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        initialChunk,
+        binsPerColumn,
+        0,
+        64,
+        0,
+        totalEstimate,
+        sampleRate,
+        oldHop,
+        false,
+        true,
+        trackToken,
+        true);
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        newHop,
+        false,
+        true,
+        trackToken,
+        true);
+
+    QByteArray zoomChunk(127 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        zoomChunk,
+        binsPerColumn,
+        0,
+        127,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        newHop,
+        false,
+        false,
+        trackToken,
+        true);
+
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(127));
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(-resetStart));
+
+    const double colsPerSecond =
+        static_cast<double>(sampleRate) / static_cast<double>(newHop);
+    const qint64 anchoredCol = static_cast<qint64>(std::floor(
+        item.m_positionAnchorSeconds * colsPerSecond));
+    QCOMPARE(anchoredCol, static_cast<qint64>(resetStart));
+    QCOMPARE(item.m_rollingEpoch + anchoredCol, static_cast<qint64>(0));
+}
+
 void QmlSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
     SpectrogramItem item;
     item.setWidth(320);
@@ -1729,6 +2527,54 @@ void QmlSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
     QVERIFY(state.value("incidentDetected").toBool());
     QCOMPARE(state.value("gapFrames").toInt(), 4);
     QCOMPARE(state.value("paintSpikeCount").toInt(), 2);
+#else
+    QSKIP("Smoothness profiling instrumentation is compiled out");
+#endif
+}
+
+void QmlSmokeTest::spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    qputenv("FERROUS_PROFILE_UI", "1");
+
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_profileEnabled = true;
+        item.resetSmoothnessProfileLocked();
+        item.m_smoothnessProfile.active = true;
+        item.m_smoothnessProfile.startedAtMs = QDateTime::currentMSecsSinceEpoch();
+        item.m_smoothnessProfile.lastFrameAtMs = item.m_smoothnessProfile.startedAtMs;
+        item.m_precomputedReady = true;
+        item.m_playing = true;
+        item.m_positionAnchorInitialized = true;
+        item.m_positionSeconds = 10.0;
+        item.m_positionAnchorSeconds = 10.0;
+        item.m_positionAnchorUpdatedAt = std::chrono::steady_clock::now();
+    }
+
+    item.setPositionSeconds(10.04);
+    item.setPositionSeconds(9.95);
+
+    QVariantMap state;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 2.0;
+        item.m_precomputedHopSize = 1024;
+        QVERIFY(!item.advancePrecomputedCanvasLocked(1, 10, false));
+        state = item.debugSmoothnessProfileStateLocked();
+    }
+
+    qunsetenv("FERROUS_PROFILE_UI");
+    QVERIFY(!state.isEmpty());
+    QCOMPARE(state.value("servoFrames").toInt(), 2);
+    QCOMPARE(state.value("servoRegressionDrops").toInt(), 1);
+    QVERIFY(state.value("maxServoErrorMs").toDouble() >= 20.0);
+    QCOMPARE(state.value("advanceFallbackFrames").toInt(), 1);
+    QCOMPARE(state.value("nonUnityAdvanceFallbackFrames").toInt(), 1);
+    QVERIFY(state.value("maxAdvanceFallbackZoomDelta").toDouble() > 0.9);
 #else
     QSKIP("Smoothness profiling instrumentation is compiled out");
 #endif
@@ -1989,6 +2835,663 @@ void QmlSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
     // Ring populated, not growing from zero.
     QVERIFY(item.m_ringWriteSeq >= 800);
     QVERIFY(item.m_ringCapacity > 0);
+}
+
+void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
+    // Regression: repeated small backward seeks at max zoom can force a
+    // same-track centered restart once the earlier left-margin columns
+    // have been evicted from the ring. After the synthetic clear and the
+    // same-token reset, the widget must rebuild the earlier window
+    // instead of stranding a blank left region.
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // max zoom
+    constexpr int total = 20'000;
+    constexpr quint64 token = 9;
+
+    // Fill enough later-track data to force eviction of the earliest
+    // columns from the centered ring.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, hop, false, true, token);
+    QByteArray laterData(13'000 * bins, '\x30');
+    item.feedPrecomputedChunk(
+        laterData, bins, 0, 13'000, 0, total,
+        44100, hop, false, false, token);
+    QVERIFY(item.m_ringOldestSeq > 0);
+
+    // Same-track centered seek restart: synthetic clear first, then the
+    // worker's proper reset and earlier data at the new start index.
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0, 0, 0,
+        0, 0, false, true, token, true);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, hop, false, true, token, true);
+    QByteArray earlierData(4'000 * bins, '\x50');
+    item.feedPrecomputedChunk(
+        earlierData, bins, 0, 4'000, 0, total,
+        44100, hop, false, false, token);
+
+    QCOMPARE(item.m_ringOldestSeq, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedTrackToken, token);
+    QVERIFY(item.m_ringWriteSeq >= 4'000);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel =
+            1024.0 / static_cast<double>(hop); // effectiveZoom == 1.0
+    }
+
+    item.setPositionSeconds(3.554);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const auto tokenMap = item.m_trackColumnToSeqByToken.value(token);
+    QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayLeft)));
+    QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayRight)));
+}
+
+void QmlSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate() {
+    // Regression for zoom-dependent playhead detachment at track end.
+    // The backend emits a finalize chunk (columns=0, complete=true)
+    // carrying the actual decoded-column count; the widget must shrink
+    // its m_precomputedTotalColumnsEstimate so the centered-mode EOF
+    // clamp fires at the real audio end.  The initial file-metadata
+    // estimate can overshoot by ~1 s worth of columns at max zoom,
+    // which at hop=64 is ~700 cols — far more than the former 128-col
+    // tolerance could absorb.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 1025;
+    constexpr int fileMetadataEstimate = 161024; // cols at hop=64 for ~233.6 s
+    constexpr int actualDecodedCols = 159980;    // true end ~232.1 s
+    constexpr quint64 token = 7;
+
+    // Initial reset carries the file-metadata estimate.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, fileMetadataEstimate,
+        44100, 64, false, true, token);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, fileMetadataEstimate);
+
+    // A small amount of data so the widget is "live".
+    QByteArray data(200 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 200, 0, fileMetadataEstimate,
+        44100, 64, false, false, token);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, fileMetadataEstimate);
+
+    // Finalize chunk arrives with the true decoded extent.  complete=true,
+    // columns=0, no bufferReset, no clearHistory.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, actualDecodedCols, actualDecodedCols,
+        44100, 64, /*complete=*/true, /*bufferReset=*/false, token,
+        /*clearHistoryOnReset=*/false);
+
+    // Estimate must have shrunk to the true extent.  The max column
+    // index and ring write state must not have been disturbed.
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, actualDecodedCols);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 199);
+    QVERIFY(item.m_ringWriteSeq > 0);
+}
+
+void QmlSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {
+    // A finalize chunk for a track that has already been superseded by
+    // a buffer_reset for a newer token must not clobber the new track's
+    // total_columns_estimate.  Otherwise a late-arriving finalize from
+    // the outgoing track would corrupt the new track's display.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 1025;
+    constexpr int oldEstimate = 161024;
+    constexpr int newEstimate = 167936;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    // Old-track reset + data.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, oldEstimate,
+        44100, 64, false, true, oldToken);
+    QByteArray oldData(100 * bins, '\x10');
+    item.feedPrecomputedChunk(
+        oldData, bins, 0, 100, 0, oldEstimate,
+        44100, 64, false, false, oldToken);
+
+    // New-track buffer_reset + data bumps the committed token and
+    // commits the new estimate (track-change path accepts increases).
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, newEstimate,
+        44100, 64, false, true, newToken);
+    QByteArray newData(50 * bins, '\x20');
+    item.feedPrecomputedChunk(
+        newData, bins, 0, 50, 0, newEstimate,
+        44100, 64, false, false, newToken);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, newEstimate);
+
+    // Late-arriving finalize for the OLD token should be ignored.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 159980, 159980,
+        44100, 64, /*complete=*/true, /*bufferReset=*/false, oldToken,
+        /*clearHistoryOnReset=*/false);
+
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, newEstimate);
+}
+
+void QmlSmokeTest::spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit() {
+    // Regression for 6ch AC3 max-zoom-out: the worker can start with a
+    // fallback/header estimate, then raise it on the same hop once a
+    // duration re-query succeeds.  Qt must accept that larger estimate
+    // or minimumZoomLevel stays clamped to the stale shorter length and
+    // centered-mode EOF/seek math stops before the real end.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 1025;
+    constexpr int initialEstimate = 14126;
+    constexpr int requeriedEstimate = 16273;
+    constexpr quint64 token = 3;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, initialEstimate,
+        48000, 1024, false, true, token);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, initialEstimate);
+
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 15, requeriedEstimate,
+        48000, 1024, false, false, token);
+
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, requeriedEstimate);
+
+    const double expectedMinZoom =
+        static_cast<double>(item.width()) / static_cast<double>(requeriedEstimate);
+    QVERIFY(std::abs(item.minimumZoomLevel() - expectedMinZoom) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
+    // Regression: at high zoom the file-metadata total_columns_estimate
+    // overshoots the actual decoded extent by ~1 s worth of cols.  When
+    // the decoder has produced all it's going to and playback is within
+    // one half-window of maxCol, the centered display must clamp its
+    // right edge to maxCol-1 so (a) the playhead detaches from center
+    // toward the right edge, (b) no blank tail is shown past real
+    // content, and (c) the crosshair at the right edge reads a time
+    // <= the true audible end.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // max zoom
+    constexpr int maxColIndex = 8000;
+    constexpr int decodedCols = maxColIndex + 1; // 8001 cols decoded
+    // Estimate overshoots by ~1 second (689 cols at hop=64) — the
+    // same magnitude seen in diagnostics at max zoom.
+    constexpr int inflatedEstimate = decodedCols + 700;
+
+    // Bufferreset + data so the ring is initialized and maxCol is set.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, inflatedEstimate,
+        44100, hop, false, true, 1);
+    QByteArray data(decodedCols * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, decodedCols, 0, inflatedEstimate,
+        44100, hop, false, false, 1);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, maxColIndex);
+
+    // Snap renderZoomLevel so effectiveZoom == 1 (1 px per col).
+    // updatePaintNode normally does this on zoom-matched resets; force
+    // it here so visibleWindowCols = 1200 deterministically.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel =
+            1024.0 / static_cast<double>(hop); // = 16.0
+    }
+
+    // Position the playhead within halfWindow (600 cols) of maxCol so
+    // the EOF clamp must fire.  At 689 cols/s (hop=64, sr=44100),
+    // pos=11.25 s -> col ~ 7750, which is maxCol - 250 (inside the
+    // 600-col half-window trigger).
+    item.setPositionSeconds(11.25);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    // Display right must equal maxCol (decoder's last column), not the
+    // inflated estimate.  The crosshair / grid at the right edge is
+    // driven by this value, so clamping it here keeps the time axis
+    // bounded by real content.
+    QCOMPARE(item.m_precomputedCanvasDisplayRight,
+             static_cast<qint64>(maxColIndex));
+    // DisplayLeft slid right so the window still covers
+    // visibleWindowCols (1200) cols.
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft,
+             static_cast<qint64>(maxColIndex) - 1199);
+}
+
+void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
+    // Regression: the centered ring resets on every session restart
+    // (e.g. zoom change on fullscreen toggle) and recomputes its cap
+    // from the CURRENT widget width.  The Rust decoder's lookahead is
+    // sized against the MAX widget width ever seen, so after a
+    // fullscreen->windowed transition the decoder produces farther
+    // ahead than the shrunken ring can hold and evicts the left-margin
+    // cols around the playhead, painting black.  The ring cap must
+    // also track the max widget width so both sides stay in sync.
+    SpectrogramItem item;
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // max zoom
+    constexpr quint64 token = 1;
+
+    // Simulate fullscreen: widget at a wide width.  First data chunk
+    // triggers the ring-cap sizing path.
+    item.setWidth(3840);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, token);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, token);
+    const int fullscreenCap = item.m_ringCapacity;
+    QVERIFY2(fullscreenCap >= 3840,
+             qPrintable(QString("fullscreen ring cap too small: %1")
+                            .arg(fullscreenCap)));
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+
+    // Simulate the session reset that the backend emits on a zoom
+    // change: bins=0 + bufferReset + clearHistory triggers the
+    // synthetic-clear path that zeroes the ring capacity.
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0, 0, 0,
+        0, 0, false, true, token, true);
+    QCOMPARE(item.m_ringCapacity, 0);
+
+    // Now shrink to windowed width.  The next data chunks (a proper
+    // worker reset followed by data) must still allocate a ring cap
+    // at least as large as the fullscreen run so the decoder's
+    // max-width-sized lookahead fits without evicting left-margin
+    // cols around the playhead.
+    item.setWidth(1213);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, token);
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, token);
+    QVERIFY2(item.m_ringCapacity >= fullscreenCap,
+             qPrintable(QString("post-shrink ring cap %1 < fullscreen cap %2")
+                            .arg(item.m_ringCapacity)
+                            .arg(fullscreenCap)));
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+}
+
+void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
+    // Regression: when the channel count changes (e.g. 6ch PerChannel
+    // → 2ch PerChannel), the old SpectrogramItems are destroyed and
+    // fresh ones are created.  The Rust-side lookahead tracker is a
+    // singleton in AnalysisRuntimeState so it remembers the prior
+    // fullscreen width and keeps producing at that lookahead.  The
+    // Qt tracker must therefore also be singleton-equivalent
+    // (static), otherwise the new widget starts at maxSeen=0, sizes
+    // its ring against the current (smaller) width, the decoder laps
+    // the ring, and left-margin cols around the playhead are evicted
+    // — the user sees a narrow growing-edge of data with the previous
+    // canvas smearing through the rest of the view.
+    SpectrogramItem::s_maxWidgetWidthSeen = 0;
+    constexpr int bins = 4;
+    constexpr int hop = 64;
+    constexpr quint64 firstToken = 100;
+    constexpr quint64 secondToken = 101;
+
+    {
+        SpectrogramItem big;
+        big.setHeight(200);
+        big.setDisplayMode(1);
+        big.setWidth(3840);
+        big.setSampleRateHz(44100);
+        big.feedPrecomputedChunk(
+            QByteArray(), bins, 0, 0, 0, 161024,
+            44100, hop, false, true, firstToken);
+        QByteArray data(16 * bins, '\x40');
+        big.feedPrecomputedChunk(
+            data, bins, 0, 16, 0, 161024,
+            44100, hop, false, false, firstToken);
+        QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+    }
+    // The wide-view instance is now gone; the static must retain the
+    // max so the next instance sizes its ring against it.
+
+    SpectrogramItem fresh;
+    fresh.setHeight(200);
+    fresh.setDisplayMode(1);
+    fresh.setWidth(1213); // windowed
+    fresh.setSampleRateHz(44100);
+    fresh.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, secondToken);
+    QByteArray data(16 * bins, '\x40');
+    fresh.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, secondToken);
+
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+    QVERIFY2(fresh.m_ringCapacity >= 3840,
+             qPrintable(QString("fresh-instance ring cap %1 < 3840")
+                            .arg(fresh.m_ringCapacity)));
+}
+
+void QmlSmokeTest::spectrogramRollingGaplessTrackChangePreservesZoom() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(0); // Rolling
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, oldToken);
+    QByteArray initial(32 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 32, 0, total,
+        44100, 1024, false, false, oldToken);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 4.0;
+        item.m_renderZoomLevel = 4.0;
+    }
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    QByteArray gapless(32 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        gapless, bins, 0, 32, 32, total,
+        44100, 1024, false, false, newToken);
+
+    QCOMPARE(zoomResetSpy.count(), 0);
+    QCOMPARE(backendZoomSpy.count(), 0);
+    QCOMPARE(item.zoomLevel(), 4.0);
+    QCOMPARE(item.m_renderZoomLevel, 4.0);
+}
+
+void QmlSmokeTest::spectrogramCenteredGaplessTrackChangeResetsZoom() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, oldToken);
+    QByteArray initial(32 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 32, 0, total,
+        44100, 1024, false, false, oldToken);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 4.0;
+        item.m_renderZoomLevel = 4.0;
+    }
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    QByteArray gapless(32 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        gapless, bins, 0, 32, 32, total,
+        44100, 1024, false, false, newToken);
+
+    QCOMPARE(zoomResetSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramRollingResetTrackChangeResetsZoom() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(0); // Rolling
+    item.setSampleRateHz(44100);
+
+    constexpr int bins = 4;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, oldToken);
+    QByteArray initial(32 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 32, 0, total,
+        44100, 1024, false, false, oldToken);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 4.0;
+        item.m_renderZoomLevel = 4.0;
+    }
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        44100, 1024, false, true, newToken);
+    QByteArray nextTrack(32 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        nextTrack, bins, 0, 32, 0, total,
+        44100, 1024, false, false, newToken);
+
+    QCOMPARE(zoomResetSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
+    // Regression: the Rust-side zoom_level persists across tracks
+    // (track changes don't reset it).  When a channel-count change
+    // destroys the SpectrogramItem instances and creates fresh ones,
+    // the new instance has m_renderZoomLevel = 1.0 (default) while
+    // the backend may still be at zoom=16 from the previous track,
+    // sending data at hop=64.  Without a zoom resync, Qt renders at
+    // effectiveZoom = renderZoom × hop / refHop = 0.0625, inflating
+    // the centered visible window to thousands of cols.  The decoder
+    // hasn't produced that many yet, so the right side of the widget
+    // has no data and the old canvas smears through.
+    //
+    // On track change with a non-default backend hop, the widget
+    // must emit backendZoomRequested(1.0) even when it's already at
+    // render zoom 1.0 (i.e. fresh instance).  The estimate that just
+    // arrived is the correct one for the new track and must be
+    // preserved (the clear is only for the actual zoom-change case).
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64; // backend at max zoom from prior track
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 7;
+
+    // Seed the widget as if it had just been seeing the prior track
+    // at backend zoom 1.0 (the fresh-instance default).  First chunk
+    // establishes the committed token so the track-change detection
+    // fires on the next non-matching buffer_reset.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 10064,
+        44100, 1024, false, true, oldToken);
+    QByteArray warm(4 * bins, '\x10');
+    item.feedPrecomputedChunk(
+        warm, bins, 0, 4, 0, 10064,
+        44100, 1024, false, false, oldToken);
+    QCOMPARE(backendZoomSpy.count(), 0);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, 10064);
+
+    // Track change with backend at hop=64 (still at max zoom from the
+    // previous track — the backend's zoom_level persisted across the
+    // track change even though Qt's fresh-instance default is 1.0).
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, newToken);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, newToken);
+
+    // Qt must have asked the backend to go back to zoom=1.0 so a
+    // subsequent session restart produces data at the reference hop.
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    // The estimate for the new track must be preserved; a fresh
+    // instance is not a real zoom transition, so the estimate-clear
+    // path must not fire.
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, 161024);
+    QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramFreshInstanceSeekRestartDoesNotResetZoom() {
+    // Regression: centered same-track seeks outside the current
+    // window restart decoding with the same track token but a non-zero
+    // startIndex. Fresh SpectrogramItem instances can see that restart
+    // before they've learned the current token, so a broad
+    // "appliedReset + non-default hop" heuristic wrongly treated the
+    // seek as a track change and emitted backendZoomRequested(1.0),
+    // resetting max zoom-out back to normal.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(48000);
+
+    QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    constexpr int bins = 4;
+    constexpr int hop = 14088; // Non-default max-zoom-out-style hop
+    constexpr int startIndex = 714;
+    constexpr int total = 1027;
+    constexpr quint64 trackToken = 7;
+
+    // Simulate a fresh pane instance seeing only the post-seek worker
+    // restart. The token is the current track's token, not a track
+    // change, but the item has no prior token state yet.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, startIndex, total,
+        48000, hop, false, true, trackToken, true);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, startIndex, total,
+        48000, hop, false, false, trackToken, false);
+
+    QCOMPARE(zoomResetSpy.count(), 0);
+    QCOMPARE(backendZoomSpy.count(), 0);
+    QCOMPARE(item.m_precomputedHopSize, hop);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, total);
+}
+
+void QmlSmokeTest::spectrogramTrackChangeCancelsPendingZoomDebounce() {
+    // Regression: a SpectrogramItem is instantiated with
+    // m_zoomLevel defaulting to 1.0, then the QML zoomLevel
+    // property binding pushes the SpectrogramSurface's existing
+    // _widgetZoomLevel (e.g. 16 from the previous track's max zoom
+    // on the prior instance set) into the new instance.
+    // setZoomLevel(16) arms the 150 ms debounce timer with
+    // m_pendingBackendZoom = 16.  A track change arrives in that
+    // window — our needsZoomReset path emits
+    // backendZoomRequested(1.0) directly, bypassing the timer —
+    // but if we don't ALSO cancel the pending debounce, the timer
+    // fires 150 ms later with the stale 16 and restarts the
+    // backend at max zoom.  The widget then renders at
+    // effectiveZoom = 0.0625 with a smeared right edge because
+    // the ring hasn't filled far enough for the inflated visible
+    // window.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1);
+    item.setSampleRateHz(44100);
+
+    QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+
+    // Simulate the QML binding pushing the prior track's max zoom
+    // into the freshly-created instance: arms the debounce with 16.
+    item.setZoomLevel(16.0);
+    QVERIFY(item.m_zoomDebounceTimer != nullptr);
+    QVERIFY(item.m_zoomDebounceTimer->isActive());
+    QCOMPARE(item.m_pendingBackendZoom, 16.0f);
+
+    // Track change (non-gapless): the initial reset + data chunk
+    // carries the backend's leftover non-default hop (64 at max
+    // zoom), so needsZoomReset fires.
+    constexpr int bins = 4;
+    constexpr int hop = 64;
+    constexpr quint64 newToken = 42;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 161024,
+        44100, hop, false, true, newToken);
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, hop, false, false, newToken);
+
+    // The reset must have fired backendZoomRequested(1.0) and
+    // disarmed the debounce so the stale 16 can't fire after.
+    QCOMPARE(backendZoomSpy.count(), 1);
+    QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
+    QVERIFY2(!item.m_zoomDebounceTimer->isActive(),
+             "pending debounce still armed after track-change zoom reset");
+    QCOMPARE(item.m_pendingBackendZoom, 1.0f);
+    QCOMPARE(item.m_zoomLevel, 1.0);
+
+    // Even if we wait past the original debounce interval, no
+    // further backendZoomRequested should fire — the timer was
+    // cancelled.
+    QTest::qWait(200);
+    QCOMPARE(backendZoomSpy.count(), 0);
 }
 
 void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {
@@ -3021,6 +4524,535 @@ void QmlSmokeTest::spectrogramClickToSeekDisabledInRollingMode() {
     item.mousePressEvent(&pressEvent);
 
     QCOMPARE(seekSpy.count(), 0);
+}
+
+void QmlSmokeTest::spectrogramZoomProperty() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Default zoom is 1.0
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+    QCOMPARE(item.zoomEnabled(), false);
+
+    // Feed enough columns so that zoom < 16.0 is valid (minZoom = 1920/96000 = 0.02 → floor 0.05)
+    constexpr int binsPerColumn = 4;
+    constexpr int columns = 96000;
+    QByteArray chunk(binsPerColumn * columns, '\x20');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // Setting zoom level to 2.0 works when track is long enough
+    item.setZoomLevel(2.0);
+    QVERIFY(std::abs(item.zoomLevel() - 2.0) < 0.0001);
+
+    // Zoom clamps to maximum
+    item.setZoomLevel(100.0);
+    QVERIFY(std::abs(item.zoomLevel() - 16.0) < 0.0001);
+
+    // Zoom clamps to the Rust-side minimum (0.05).  The track-fit
+    // floor (1920/96000 = 0.02) would technically allow a smaller
+    // zoom, but the backend clamps any sub-0.05 value to 0.05, so
+    // Qt must also floor at 0.05 or else successive widthSettle
+    // re-sends oscillate between what Qt requested and what Rust
+    // clamped back.
+    item.setZoomLevel(0.001);
+    QVERIFY(std::abs(item.zoomLevel() - 0.05) < 0.001);
+
+    // Reset to 1.0
+    item.setZoomLevel(1.0);
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramZoomLimitsWithTrackData() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed some precomputed data to set up track columns
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 9600; // ~200 seconds at 48 cols/sec
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // Minimum zoom should allow seeing all columns
+    const double minZoom = item.minimumZoomLevel();
+    QVERIFY(minZoom > 0.0);
+    QVERIFY(minZoom <= 1.0);
+    // 1920 / 9600 = 0.2
+    QVERIFY(std::abs(minZoom - 0.2) < 0.01);
+}
+
+void QmlSmokeTest::spectrogramZoomOutBlockedWhenSongFits() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed a short track that fits entirely at zoom=1.0 (1000 < 1920).
+    constexpr int binsPerColumn = 4;
+    constexpr int columns = 1000;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // Minimum zoom should be 1.0 — no zoom-out possible.
+    QVERIFY(std::abs(item.minimumZoomLevel() - 1.0) < 0.0001);
+
+    // Attempting to zoom out is clamped to 1.0.
+    item.setZoomLevel(0.5);
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+
+    // Zoom-in still works.
+    item.setZoomLevel(2.0);
+    QVERIFY(std::abs(item.zoomLevel() - 2.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed initial data at default hop, then request zoom=4x.
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0.
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 500;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 1024, false,
+        true, 1, false);
+
+    item.setZoomLevel(4.0);
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Simulate backend restart with hop_size=256 (zoom=4x data).
+    // After this buffer_reset, effectiveZoom = 4.0 * 256 / 1024 = 1.0.
+    QByteArray zoomChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 256, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramAdvanceWorksWhenBackendMatchesZoom() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed initial data at default hop, then request zoom=4x.
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0.
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 500;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 1024, false,
+        true, 1, false);
+
+    item.setZoomLevel(4.0);
+
+    // Simulate backend restart with hop_size=256 (zoom=4x data).
+    // After this, effectiveZoom = 4.0 * 256 / 1024 = 1.0 (1:1 rendering).
+    QByteArray zoomChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 256, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramEffectiveZoomDuringTransition() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Feed data with default hop_size=1024 (backend not yet producing zoom=4x data).
+    // Need >= 480 columns so minZoom (1920/cols) <= 4.0, allowing setZoomLevel(4.0).
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 500;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 1024, false,
+        true, 1, false);
+
+    // Set zoom to 4x — backend hasn't responded yet.
+    // The visual zoom (renderZoomLevel) is deferred; the display
+    // keeps showing the existing data at the old zoom until the
+    // backend session restarts with the finer hop size.
+    item.setZoomLevel(4.0);
+
+    // The property reflects the requested zoom immediately.
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Simulate backend restart: feed a buffer_reset chunk with finer hop.
+    // This triggers the deferred render zoom to take effect.
+    QByteArray zoomChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 256, false,
+        true, 1, false);
+
+    // After backend data arrives, zoom is fully applied.
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    // Use small bins so large column counts don't allocate too much memory.
+    constexpr int binsPerColumn = 4;
+    constexpr int columns = 96000;
+
+    // Feed initial data at default hop (backend at zoom=1x).
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+
+    // Request zoom to 4x — property updates immediately.
+    item.setZoomLevel(4.0);
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Feed continuation data at OLD hop (still in pipeline from before the
+    // backend received the zoom command).  This is NOT a buffer_reset, so
+    // the deferred zoom must NOT apply yet.
+    constexpr int staleCols = 50;
+    QByteArray staleChunk(binsPerColumn * staleCols, '\x40');
+    item.feedPrecomputedChunk(
+        staleChunk, binsPerColumn, 0, staleCols,
+        columns, columns, 48000, 1024, false,
+        false, 1, false);
+
+    // Property still shows requested zoom.
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Simulate backend restart: buffer_reset with finer hop.
+    // This triggers the deferred render zoom to take effect.
+    // At zoom=4x with hop=256, the backend produces 4x more columns.
+    constexpr int zoomColumns = columns * 4;
+    QByteArray zoomChunk(binsPerColumn * zoomColumns, '\x40');
+    item.feedPrecomputedChunk(
+        zoomChunk, binsPerColumn, 0, zoomColumns,
+        0, zoomColumns, 48000, 256, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+
+    // Verify zoom back to 1.0 also defers correctly.
+    item.setZoomLevel(1.0);
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+
+    // Backend restarts at default hop.
+    QByteArray resetChunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        resetChunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, false,
+        true, 1, false);
+
+    QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+
+    constexpr int bins = 4;
+    constexpr int cols = 9600;
+
+    // Feed data at zoom=1.0 (hop=1024).
+    QByteArray chunk1(bins * cols, '\x40');
+    item.feedPrecomputedChunk(
+        chunk1, bins, 0, cols,
+        0, cols, 48000, 1024, true,
+        true, 1, false);
+    const int hop1 = item.m_precomputedHopSize;
+
+    // Simulate zoom to 0.8: backend restarts with a DIFFERENT hop.
+    // With fractional resampling: effective_hop = round(1024 * 1.25) = 1280.
+    // This is distinct from 1024.
+    // With the OLD integer decimation: factor=1, effective_hop=1024 (same!).
+    item.setZoomLevel(0.8);
+    QByteArray chunk2(bins * cols, '\x40');
+    item.feedPrecomputedChunk(
+        chunk2, bins, 0, cols,
+        0, cols, 48000, 1280, true,
+        true, 1, false);
+    const int hop2 = item.m_precomputedHopSize;
+
+    // The hops MUST differ — this is the dead zone fix.
+    QVERIFY(hop1 != hop2);
+    // Verify effectiveZoom is close to 1.0.
+    const double ez = item.m_renderZoomLevel
+        * static_cast<double>(hop2) / 1024.0;
+    QVERIFY(std::abs(ez - 1.0) < 0.01);
+}
+
+void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {
+    // Simulates the widget→fullscreen transition: when width increases,
+    // minimumZoomLevel should increase (allow less zoom-out), and a zoom
+    // level valid at the old width should be clamped to the new minimum.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(400);
+
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 9600;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    // At width=1200, minZoom = 1200/9600 = 0.125
+    const double narrowMinZoom = item.minimumZoomLevel();
+    QVERIFY(std::abs(narrowMinZoom - 0.125) < 0.01);
+
+    // Zoom all the way out on the narrow widget.
+    item.setZoomLevel(narrowMinZoom);
+    QVERIFY(std::abs(item.zoomLevel() - narrowMinZoom) < 0.01);
+
+    // Simulate entering fullscreen: width triples.
+    item.setWidth(3600);
+
+    // New minZoom = 3600/9600 = 0.375 — much higher.
+    const double wideMinZoom = item.minimumZoomLevel();
+    QVERIFY(std::abs(wideMinZoom - 0.375) < 0.01);
+
+    // Re-applying the old narrow zoom should clamp to the new minimum.
+    item.setZoomLevel(narrowMinZoom);
+    QVERIFY(std::abs(item.zoomLevel() - wideMinZoom) < 0.01);
+}
+
+void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1); // Centered
+
+    // Feed a large track estimate
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 100;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, 100000, 48000, 1024, false,
+        true, 1, false);
+
+    // Ring capacity should NOT be 100000 (full track).
+    // It should be bounded to ~3 screen widths + lookahead.
+    QVERIFY(item.m_ringCapacity < 20000);
+}
+
+void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(10);
+    item.setDisplayMode(1); // Centered
+
+    // Feed 150 columns into a 100px widget at effectiveZoom=0.8.
+    // zoom=0.8, hop=1024 -> effectiveZoom = 0.8 * 1024/1024 = 0.8.
+    // columnsPerPixel = 1/0.8 = 1.25.  Since 1.25 > 1.0, the rebuild
+    // enters the peak-hold path (colFirst < colLast && !interpolate).
+    // drawPixels = min(100, ceil(150 * 0.8)) = 100.
+    constexpr int bins = 4;
+    constexpr int cols = 150;
+    QByteArray chunk(bins * cols, '\x10'); // dark baseline (0x10)
+
+    // Make column 50 bright: set all bins to 0xF0.
+    for (int b = 0; b < bins; ++b) {
+        chunk[50 * bins + b] = static_cast<char>(static_cast<unsigned char>(0xF0));
+    }
+
+    item.setZoomLevel(0.8);
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, cols,
+        0, cols, 48000, 1024, true,
+        true, 1, false);
+
+    QVERIFY(item.precomputedReady());
+
+    // Trigger a rebuild directly so we can inspect canvas pixels.
+    // The debounce timer is still active in the test (no event loop),
+    // so m_awaitingZoomData was not consumed by feedPrecomputedChunk.
+    // Force m_renderZoomLevel to match m_zoomLevel so effectiveZoom=0.8.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 0.8;
+        item.ensureMapping(10);
+        item.rebuildPrecomputedCanvasLocked(100, 10, 0, cols - 1, false);
+    }
+
+    // Column 50 at columnsPerPixel=1.25:
+    //   pixel 40 -> rangeStart=50.0, rangeEnd=51.25
+    //   colFirst=50, colLast=51 -> peak-hold across cols 50-51.
+    // The bright column 50 (0xF0) is in this range, so pixel 40
+    // should be significantly brighter than pixel 0 (dark baseline).
+    QVERIFY(!item.m_canvas.isNull());
+    const QRgb brightPixel = item.m_canvas.pixel(40, 5);
+    const QRgb darkPixel = item.m_canvas.pixel(0, 5);
+    QVERIFY(qRed(brightPixel) + qGreen(brightPixel) + qBlue(brightPixel)
+            > qRed(darkPixel) + qGreen(darkPixel) + qBlue(darkPixel));
+}
+
+void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
+    // Regression: at max zoom-out in a wide fullscreen canvas the
+    // STFT windowing leaves the decoder a few columns short of the
+    // scaled totalEstimate.  The old readiness check required
+    // ringFill >= fillWidth - 16 (with fillWidth ≈ totalEstimate),
+    // so ringFill could never reach the threshold and
+    // m_zoomFillActive stayed true forever.  The old canvas then
+    // leaked a slice of stale content at the right edge.
+    SpectrogramItem item;
+    item.setWidth(3440);
+    item.setHeight(720);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+
+    // Baseline zoom=1.0 chunk — populates the ring.
+    QByteArray baseline(3440 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 3440,
+        0, 10064, 44100, 1024, false,
+        true, 1, true);
+    QVERIFY(item.m_precomputedReady);
+
+    // Trigger a rebuild so the canvas exists — the real flow does
+    // this on the next paint, but QtTest has no event loop.  The
+    // hop-change detector only arms m_zoomFillActive when a canvas
+    // is already present.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1.0;
+        item.ensureMapping(720);
+        item.rebuildPrecomputedCanvasLocked(3440, 720, 0, 3439, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_zoomFillActive, false);
+
+    // Zoom-out restart: the backend decimates to hop=2996 and the
+    // scaled estimate shrinks to ≈ widget width.  Decoder produces
+    // 3418 columns (22 short of the 3440 estimate) due to the
+    // STFT tail.
+    constexpr int decodedCols = 3418;
+    QByteArray decimated(decodedCols * bins, '\x50');
+    item.feedPrecomputedChunk(
+        decimated, bins, 0, decodedCols,
+        0, 3440, 44100, 2996, false,
+        true, 1, false);
+
+    QCOMPARE(item.m_precomputedMaxColumnIndex, decodedCols - 1);
+    // Must clear: decoder will produce no more columns, so freezing
+    // indefinitely would strand stale pixels at the right edge.
+    QCOMPARE(item.m_zoomFillActive, false);
+    // Dirty flag set so the next paint rebuilds the canvas cleanly.
+    QVERIFY(item.m_precomputedCanvasDirty);
+}
+
+void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
+    // Regression: a seek outside the decoded window emits a synthetic
+    // clear chunk (cols=0, bins=0, clear_history=true) that wipes the
+    // ring and invalidates the canvas.  Without canvas preservation,
+    // the display flashes fully black for ~100 ms while the backend
+    // restarts at (pos − margin) and decodes up to the new playhead.
+    // The freeze should arm instead so the old canvas stays visible
+    // through the brief transition.
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+
+    // Populate the ring with centered-mode data.
+    QByteArray chunk(1920 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, 1920,
+        0, 10064, 44100, 1024, false,
+        true, 7, true);
+    QVERIFY(item.m_precomputedReady);
+
+    // Build a canvas directly with a valid display range — the real
+    // flow does this via updatePaintNode but QtTest has no event loop.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1.0;
+        item.ensureMapping(400);
+        item.rebuildPrecomputedCanvasLocked(1920, 400, 0, 1919, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(1919));
+
+    // Synthetic clear: cols=0, bins=0, buffer_reset=true,
+    // clear_history=true — the signature emitted by
+    // seek_spectrogram_position for far seeks.
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0,
+        0, 0, 0, 0, false,
+        true, 7, true);
+
+    // Ring is wiped.
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(0));
+    QCOMPARE(item.m_ringCapacity, 0);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, -1);
+    QVERIFY(item.m_awaitingWorkerReset);
+
+    // Canvas and its display range are preserved, freeze is armed.
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(1919));
+    QVERIFY(item.m_precomputedReady);
+    QCOMPARE(item.m_zoomFillActive, true);
+}
+
+void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() {
+    // When there's no canvas to preserve (first track load, rolling
+    // mode, or the display range was already invalid), the synthetic
+    // clear must still wipe everything and invalidate — the freeze
+    // would latch onto garbage state otherwise.
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1);
+
+    // No rebuild → canvas stays null.  Still send some data so
+    // m_precomputedReady could be true, which would be misleading
+    // after the clear.
+    QByteArray chunk(100 * 4, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, 4, 0, 100,
+        0, 10064, 44100, 1024, false,
+        true, 7, true);
+    QVERIFY(item.m_canvas.isNull());
+
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0,
+        0, 0, 0, 0, false,
+        true, 7, true);
+
+    QVERIFY(item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedReady, false);
+    QCOMPARE(item.m_zoomFillActive, false);
+    QCOMPARE(item.m_precomputedCanvasDisplayRight,
+             item.m_precomputedCanvasDisplayLeft - 1);
 }
 
 int main(int argc, char **argv) {

@@ -8,6 +8,7 @@
 #include <QMetaObject>
 #include <QMutex>
 #include <QQuickItem>
+#include <QTimer>
 #include <QVariantList>
 
 #include <array>
@@ -17,6 +18,7 @@
 
 class QQuickWindow;
 class QSGNode;
+class QWheelEvent;
 
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
@@ -35,6 +37,8 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
+    Q_PROPERTY(double zoomLevel READ zoomLevel WRITE setZoomLevel NOTIFY zoomLevelChanged)
+    Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -81,6 +85,12 @@ public:
     bool channelMuted() const;
     void setChannelMuted(bool muted);
 
+    double zoomLevel() const;
+    void setZoomLevel(double value);
+
+    bool zoomEnabled() const;
+    void setZoomEnabled(bool value);
+
     double pixelToFrequencyHz(int pixelY, int viewHeight) const;
 
     Q_INVOKABLE void feedPrecomputedChunk(
@@ -94,6 +104,8 @@ public:
     Q_INVOKABLE void reset();
     Q_INVOKABLE void halt();
     Q_INVOKABLE void appendRows(const QVariantList &rows);
+
+    Q_INVOKABLE double minimumZoomLevel() const;
 
 signals:
     void dbRangeChanged();
@@ -112,6 +124,12 @@ signals:
     void crosshairHoverChanged(double x);
     void channelMutedChanged();
     void seekRequested(double seconds);
+    void zoomLevelChanged();
+    void zoomEnabledChanged();
+    void zoomRequested(double newZoomLevel);
+    void zoomResetRequested();
+    void backendZoomRequested(float zoomLevel);
+    void spectrogramWidthChanged(int width);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -119,6 +137,7 @@ protected:
     void hoverEnterEvent(QHoverEvent *event) override;
     void hoverLeaveEvent(QHoverEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
     void releaseResources() override;
 
@@ -131,6 +150,8 @@ private:
     void ensureMapping(int height);
     void invalidateCanvas();
     void ensureCanvas(int width, int height);
+    bool reanchorRollingEpochForCurrentDataLocked(
+        std::chrono::steady_clock::time_point now);
     void applyPrecomputedResetLocked(
         int startIndex,
         int bins,
@@ -156,6 +177,22 @@ private:
         qint64 displayIndex,
         bool rollingMode,
         const std::array<quint8, 256> &dbRemap);
+    void drawPeakHoldColumnRangeLocked(
+        int x,
+        qint64 colFirst,
+        qint64 colLast,
+        bool rollingMode,
+        const std::array<quint8, 256> &dbRemap);
+    void drawInterpolatedColumnAtLocked(
+        int x,
+        qint64 displayIndexL,
+        qint64 displayIndexR,
+        double t,
+        bool rollingMode,
+        const std::array<quint8, 256> &dbRemap);
+    int ringSlotForDisplayIndexLocked(
+        qint64 displayIndex,
+        bool rollingMode) const;
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
@@ -172,6 +209,8 @@ private:
         int width, int height, int padding,
         qint64 displayLeft,
         bool rollingMode, double columnsPerSecond, double drawX);
+    double effectiveZoomLocked() const;
+    double minimumZoomLevelLocked() const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
@@ -187,7 +226,9 @@ private:
     QVariantMap debugSeekProfileStateLocked() const;
     void resetSmoothnessProfileLocked();
     void maybeStartSmoothnessProfileLocked(qint64 nowMs);
+    void noteSmoothnessServoLocked(double errorSeconds, bool regressedDuringPlayback);
     void noteSmoothnessProfileFrameLocked(qint64 nowMs, double elapsedSeconds, bool pending, bool advanced);
+    void noteSmoothnessAdvanceFallbackLocked(double effectiveZoom);
     void noteSmoothnessPaintLocked(double paintMs);
     void finalizeSmoothnessProfileLocked(qint64 nowMs, const char *reason);
     QVariantMap debugSmoothnessProfileStateLocked() const;
@@ -230,6 +271,8 @@ private:
     std::chrono::steady_clock::time_point m_profileLastFrameGapSpike{};
     std::chrono::steady_clock::time_point m_profileLastPaintSpike{};
     std::chrono::steady_clock::time_point m_profileLastWriteHeadClampSpike{};
+    std::chrono::steady_clock::time_point m_profileLastServoSpike{};
+    std::chrono::steady_clock::time_point m_profileLastAdvanceFallbackSpike{};
     quint64 m_profilePaints{0};
     double m_profilePaintMs{0.0};
     quint64 m_sceneGraphGeneration{0};
@@ -243,11 +286,23 @@ private:
     std::vector<quint64> m_ringTrackToken; // per slot: track token stored there, or 0
     QHash<quint64, QHash<qint32, qint64>> m_trackColumnToSeqByToken;
     int m_ringCapacity{0};            // number of column slots
+    // Max widget width ever observed ACROSS ALL SpectrogramItem
+    // instances (static).  The Rust-side max-widget-width tracker that
+    // sizes the decoder lookahead is a singleton in AnalysisRuntimeState
+    // and persists across instance tear-downs (e.g. when the channel
+    // count changes — 6ch PerChannel → 2ch PerChannel destroys the
+    // prior widgets and creates fresh ones).  A per-instance tracker
+    // would reset to 0 on each new widget, under-sizing the ring
+    // relative to the still-large Rust lookahead and letting the
+    // decoder lap the ring, evicting left-margin cols and smearing the
+    // previous canvas through the blanked region.
+    static int s_maxWidgetWidthSeen;
     qint64 m_ringWriteSeq{0};         // next write-order sequence number
     qint64 m_ringOldestSeq{0};        // oldest write-order sequence still retained
     qint64 m_trackEpochSeq{0};        // legacy reset bookkeeping
     qint64 m_rollingEpoch{0};         // maps track columns to rolling write-order history
     qint32 m_precomputedMaxColumnIndex{-1}; // highest column for current token
+    bool m_awaitingWorkerReset{false};    // block data until worker's proper reset
     int m_precomputedBinsPerColumn{0};
     int m_precomputedTotalColumnsEstimate{0};
     int m_precomputedSampleRateHz{44100};
@@ -275,6 +330,18 @@ private:
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
+    double m_zoomLevel{1.0};
+    double m_renderZoomLevel{1.0};
+    bool m_zoomEnabled{false};
+    // Canvas freeze during zoom transition.  Independent of
+    // m_awaitingZoomData (which controls the zoom snap).  Set when a
+    // session restart changes the hop; cleared when the ring covers
+    // the display.  updatePaintNode skips canvas updates while active.
+    bool m_zoomFillActive{false};
+    double m_precomputedCanvasZoomLevel{1.0};
+    QTimer *m_zoomDebounceTimer{nullptr};
+    float m_pendingBackendZoom{1.0f};
+    bool m_awaitingZoomData{false};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};
@@ -339,9 +406,16 @@ private:
         int pendingGapFrames{0};
         double maxGapMs{0.0};
         int regressionCount{0};
+        int servoFrames{0};
+        int servoRegressionDrops{0};
+        double servoErrorMsTotal{0.0};
+        double maxServoErrorMs{0.0};
         int drainPasses{0};
         int drainedColumns{0};
         int maxPendingRows{0};
+        int advanceFallbackFrames{0};
+        int nonUnityAdvanceFallbackFrames{0};
+        double maxAdvanceFallbackZoomDelta{0.0};
         int paintSpikeCount{0};
         double maxPaintMs{0.0};
         double paintMsTotal{0.0};

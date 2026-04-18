@@ -13,9 +13,9 @@ use std::time::Duration;
 use std::os::fd::RawFd;
 
 use super::{
-    BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot,
-    FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
+    BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
+    BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
+    BridgeSnapshot, FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
 use crate::analysis::{PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode};
 use crate::library::{IndexedTrack, LibraryTrack};
@@ -1091,6 +1091,8 @@ fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String>
         command
     } else if let Some(command) = parse_settings_command(cmd_id, &mut reader)? {
         command
+    } else if let Some(command) = parse_analysis_command(cmd_id, &mut reader)? {
+        command
     } else if let Some(command) = parse_system_command(cmd_id, &mut reader)? {
         command
     } else {
@@ -1274,6 +1276,7 @@ fn parse_settings_command(
             let v = reader.read_u8()?.min(2);
             BridgeSettingsCommand::SetChannelButtonsVisibility(v)
         }
+        56 => BridgeSettingsCommand::SetSpectrogramZoomEnabled(reader.read_u8()? != 0),
         40 => BridgeSettingsCommand::SetLastFmScrobblingEnabled(reader.read_u8()? != 0),
         41 => BridgeSettingsCommand::BeginLastFmAuth,
         42 => BridgeSettingsCommand::CompleteLastFmAuth,
@@ -1285,6 +1288,25 @@ fn parse_settings_command(
     };
     reader.expect_done()?;
     Ok(Some(BridgeCommand::Settings(command)))
+}
+
+fn parse_analysis_command(
+    cmd_id: u16,
+    reader: &mut BinaryReader<'_>,
+) -> Result<Option<BridgeCommand>, String> {
+    let command = match cmd_id {
+        57 => {
+            let level = reader.read_f32()?;
+            if !level.is_finite() || level <= 0.0 {
+                return Err("zoom level must be finite and positive".to_string());
+            }
+            BridgeAnalysisCommand::SetSpectrogramZoomLevel(level)
+        }
+        58 => BridgeAnalysisCommand::SetSpectrogramWidgetWidth(reader.read_u32()?),
+        _ => return Ok(None),
+    };
+    reader.expect_done()?;
+    Ok(Some(BridgeCommand::Analysis(command)))
 }
 
 fn parse_system_command(
@@ -1796,6 +1818,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         snapshot.settings.display.channel_buttons_visibility,
     );
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.display.spectrogram_zoom_enabled),
+    );
     out
 }
 
@@ -2152,6 +2178,7 @@ mod tests {
                     show_spectrogram_crosshair: false,
                     show_spectrogram_scale: false,
                     channel_buttons_visibility: 1,
+                    spectrogram_zoom_enabled: true,
                 },
                 library_sort_mode: LibrarySortMode::Year,
                 integrations: super::super::BridgeIntegrationSettings {
@@ -2650,14 +2677,16 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 6 bytes: system_media_controls(0), viewer_fullscreen(1),
-        // display_mode(0), crosshair(0), scale(0), channel_buttons_visibility(1)
-        assert_eq!(settings.iter().rev().nth(5).copied(), Some(0)); // system_media_controls
-        assert_eq!(settings.iter().rev().nth(4).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
-        assert_eq!(settings.iter().rev().nth(3).copied(), Some(0)); // display_mode
-        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0)); // crosshair
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(0)); // scale
-        assert_eq!(settings.last().copied(), Some(1)); // channel_buttons_visibility (default=1)
+        // Last 7 bytes: system_media_controls(0), viewer_fullscreen(1),
+        // display_mode(0), crosshair(0), scale(0), channel_buttons_visibility(1),
+        // spectrogram_zoom_enabled(1)
+        assert_eq!(settings.iter().rev().nth(6).copied(), Some(0)); // system_media_controls
+        assert_eq!(settings.iter().rev().nth(5).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
+        assert_eq!(settings.iter().rev().nth(4).copied(), Some(0)); // display_mode
+        assert_eq!(settings.iter().rev().nth(3).copied(), Some(0)); // crosshair
+        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0)); // scale
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // channel_buttons_visibility (default=1)
+        assert_eq!(settings.last().copied(), Some(1)); // spectrogram_zoom_enabled (default=true)
     }
 
     #[test]
@@ -2678,10 +2707,12 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 3 bytes: crosshair(1), scale(1), channel_buttons_visibility(1)
-        assert_eq!(settings.iter().rev().nth(2).copied(), Some(1)); // crosshair
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // scale
-        assert_eq!(settings.last().copied(), Some(1)); // channel_buttons_visibility (default=1)
+        // Last 4 bytes: crosshair(1), scale(1), channel_buttons_visibility(1),
+        // spectrogram_zoom_enabled(1)
+        assert_eq!(settings.iter().rev().nth(3).copied(), Some(1)); // crosshair
+        assert_eq!(settings.iter().rev().nth(2).copied(), Some(1)); // scale
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // channel_buttons_visibility (default=1)
+        assert_eq!(settings.last().copied(), Some(1)); // spectrogram_zoom_enabled (default=true)
     }
 
     #[test]
