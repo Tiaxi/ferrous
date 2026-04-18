@@ -13,9 +13,10 @@ This document tracks upcoming work for Ferrous.
 
 - Gapless playback with repeat and shuffle modes.
 - Waveform cache persisted in SQLite.
-- Live spectrogram rendering with binary analysis transport.
+- Live spectrogram rendering with binary analysis transport, rolling/centered modes, and zoom.
 - Configurable library roots, folder-first tree browsing, and queue workflows.
 - Global search across artists, albums, and tracks.
+- Tag editing with bulk operations.
 - Last.fm scrobbling with desktop authentication.
 - Seek-drag floating timestamp overlay.
 
@@ -23,16 +24,13 @@ This document tracks upcoming work for Ferrous.
 
 ### P0
 
-- [ ] Reduce end-to-end spectrogram sync latency toward DeaDBeeF behavior (start with no-ticker analysis consumption path).
+- [ ] Make the backend-owned playback clock the single source of truth for visible playback position and post-seek sync.
 
 ### P1
 
 - [ ] Add ReplayGain support and preamp/volume dB behavior options.
 - [ ] Add output device selector persistence.
-- [ ] Expand spectrogram/waveform customization:
-  - spectrogram color-stop editor
-  - preset/save/reset-to-default flow
-  - waveform density/style options
+- [ ] Expand spectrogram and waveform customization.
 - [ ] Add DB schema versioning/evolution policy.
 
 ### P2
@@ -64,10 +62,10 @@ This document tracks upcoming work for Ferrous.
 - [ ] Add spectrogram color-stop editor.
 - [ ] Add spectrogram presets and reset-to-default flow.
 - [ ] Add waveform density/style options.
-- [ ] Reduce end-to-end spectrogram sync latency toward DeaDBeeF behavior.
+- [ ] Make the backend-owned playback clock the source of truth for visible playback position.
+- [ ] Keep reducing end-to-end spectrogram sync lag after repeated seeks and track transitions.
 
 ### Quality/Performance
 
 - [ ] Promote profiling logs to structured, regression-friendly telemetry counters.
 - [ ] Plan and execute Rust edition upgrade to `2024` (`cargo fix --edition`, cleanup, full verification).
-
