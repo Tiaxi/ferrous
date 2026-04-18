@@ -50,7 +50,7 @@ See the [installation guide](docs/INSTALL.md) for full dependency lists, manual 
 
 Ferrous is a personal project tailored for my specific needs and workflow. It is usable for daily listening but still under active development. Contributions and feedback are welcome, though the project direction follows my own priorities.
 
-Areas still in progress include ReplayGain, crossfade, output-device selection, and deeper visualization customization. See the [roadmap](docs/ROADMAP.md) for details.
+Current priorities include backend-owned playback clock cleanup, ReplayGain, output-device selection, and deeper spectrogram and waveform customization. See the [roadmap](docs/ROADMAP.md) for details.
 
 ## Tech Stack
 

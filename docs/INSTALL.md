@@ -76,6 +76,7 @@ Useful variants:
 ```bash
 ./scripts/run-ui.sh --no-run
 ./scripts/run-ui.sh --nuke-all
+./scripts/run-ui.sh --clear-diagnostics-log
 ```
 
 ## Option 3: Build Manually
@@ -147,6 +148,7 @@ Format handling is a combination of:
 Ferrous stores its local state under standard XDG locations:
 
 - library database: `$XDG_DATA_HOME/ferrous/library.sqlite3`
+- diagnostics log: `$XDG_DATA_HOME/ferrous/diagnostics.log`
 - settings: `$XDG_CONFIG_HOME/ferrous/settings.txt`
 - session restore: `$XDG_CONFIG_HOME/ferrous/session.json`
 - cached cover art: `$XDG_CACHE_HOME/ferrous/embedded_covers`

@@ -20,7 +20,9 @@ Useful variants:
 ./scripts/run-ui.sh --nuke-session
 ./scripts/run-ui.sh --nuke-thumbnails
 ./scripts/run-ui.sh --nuke-all
+./scripts/run-ui.sh --clear-diagnostics-log
 ./scripts/run-ui.sh --coredump
+./scripts/run-ui.sh --profile-logs
 ```
 
 ## Validation
@@ -59,13 +61,13 @@ Coverage threshold is controlled by `FERROUS_COVERAGE_MIN`.
 
 ## Backend Debug CLI
 
-For backend-oriented debugging without the Qt UI:
+The shipped app uses the in-process Rust FFI bridge. For backend-oriented debugging without the Qt UI, use the separate CLI entrypoint:
 
 ```bash
 cargo run --bin frontend_cli --features gst
 ```
 
-The CLI exposes playback and settings commands such as:
+This is a debugging tool only; the UI does not launch it as a subprocess. The CLI exposes playback and settings commands such as:
 
 - `play`, `pause`, `stop`, `next`, `prev`
 - `vol <0..1>`
@@ -75,8 +77,13 @@ The CLI exposes playback and settings commands such as:
 - `dbrange <50..120>`
 - `log <0|1>`
 - `snap`
+- `quit`
 
-See `docs/FRONTEND_CLI.md` for the bootstrap context around this entrypoint.
+If you need profiling logs in this path:
+
+```bash
+cargo run --bin frontend_cli --features "gst profiling-logs"
+```
 
 ## Local Build Configuration
 
@@ -93,6 +100,26 @@ Current optional values include:
 - `FERROUS_DNF_CMD`
 
 Last.fm credentials are optional and only needed if you want scrobbling enabled in your build.
+
+## Local Packaging
+
+Build a local RPM:
+
+```bash
+./scripts/build-rpm.sh
+```
+
+Install the newest local RPM:
+
+```bash
+./scripts/install-rpm.sh
+```
+
+Or build and install in one step:
+
+```bash
+./scripts/build-rpm.sh --install
+```
 
 ## Runtime Knobs
 
@@ -125,23 +152,3 @@ With a profile-enabled build, these runtime toggles become active:
 - `FERROUS_PROFILE_UI=1`
 - `FERROUS_PROFILE=1`
 - `FERROUS_SEARCH_PROFILE=1`
-
-## Packaging
-
-Build a local RPM:
-
-```bash
-./scripts/build-rpm.sh
-```
-
-Install the newest local RPM:
-
-```bash
-./scripts/install-rpm.sh
-```
-
-Or build and install in one step:
-
-```bash
-./scripts/build-rpm.sh --install
-```
