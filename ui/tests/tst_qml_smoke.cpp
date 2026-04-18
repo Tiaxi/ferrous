@@ -375,6 +375,7 @@ private slots:
     void artistPrefixSearchUsesModelLookup();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
+    void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void testMutedChannelRendersGrayscale();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
@@ -384,7 +385,7 @@ private slots:
     void spectrogramRollingZoomResetAnchorsEpochToResetStart();
     void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
     void diagnosticsLogUsesLowercaseAppDir();
-    void playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate();
+    void playbackControllerSeekImmediatelyUpdatesSpectrogramPosition();
     void playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock();
     void playbackControllerPostSeekHeartbeatSnapsToBackendPosition();
     void playbackControllerPostSeekHoldHeartbeatKeepsDisplayPinnedUntilReacquired();
@@ -1093,7 +1094,7 @@ void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
 }
 
-void QmlSmokeTest::playbackControllerSeekKeepsSpectrogramPositionUntilBackendUpdate() {
+void QmlSmokeTest::playbackControllerSeekImmediatelyUpdatesSpectrogramPosition() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -1140,7 +1141,15 @@ Item {
         Q_ARG(QVariant, QVariant::fromValue(48.0))));
 
     QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 48.0);
-    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 12.0);
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 48.0);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommitted",
+        Q_ARG(QVariant, QVariant::fromValue(23.16))));
+
+    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 23.16);
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 23.16);
 }
 
 void QmlSmokeTest::playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock() {
@@ -1946,6 +1955,74 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
     QCOMPARE(item.m_ringSequenceId[10], 10);
     QCOMPARE(item.m_ringColumnId[10], 401);
     QCOMPARE(item.m_ringSequenceId[11], static_cast<qint64>(-1));
+}
+
+void QmlSmokeTest::spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int binsPerColumn = 8;
+    constexpr int sampleRate = 44'100;
+    constexpr int hop = 64; // max zoom
+    constexpr int resetStart = 139'812;
+    constexpr int columns = 2'048;
+    constexpr int currentSeq = 1'000;
+    constexpr int totalEstimate = 188'208;
+    constexpr quint64 trackToken = 3;
+
+    item.feedPrecomputedChunk(
+        QByteArray(),
+        binsPerColumn,
+        0,
+        0,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        hop,
+        false,
+        true,
+        trackToken,
+        true);
+
+    QByteArray data(columns * binsPerColumn, '\x40');
+    item.feedPrecomputedChunk(
+        data,
+        binsPerColumn,
+        0,
+        columns,
+        resetStart,
+        totalEstimate,
+        sampleRate,
+        hop,
+        false,
+        false,
+        trackToken,
+        true);
+
+    const int currentTrackCol = resetStart + currentSeq;
+    const double positionSeconds =
+        (static_cast<double>(currentTrackCol) + 0.25)
+        * static_cast<double>(hop)
+        / static_cast<double>(sampleRate);
+    item.setPositionSeconds(positionSeconds);
+
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(0));
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(columns));
+
+    item.setDisplayMode(0); // Rolling
+
+    QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(-resetStart));
+
+    const qint64 nowCol = static_cast<qint64>(std::floor(
+        positionSeconds
+        * static_cast<double>(sampleRate)
+        / static_cast<double>(hop)));
+    const qint64 displaySeq = item.m_rollingEpoch + nowCol;
+    QCOMPARE(displaySeq, static_cast<qint64>(currentSeq));
+    QVERIFY(displaySeq >= item.m_ringOldestSeq);
+    QVERIFY(displaySeq < item.m_ringWriteSeq);
 }
 
 void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {

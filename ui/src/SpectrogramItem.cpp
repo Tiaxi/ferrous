@@ -579,12 +579,75 @@ int SpectrogramItem::displayMode() const {
     return m_displayMode;
 }
 
+bool SpectrogramItem::reanchorRollingEpochForCurrentDataLocked(
+    std::chrono::steady_clock::time_point now) {
+    if (m_ringWriteSeq <= 0
+        || m_ringCapacity <= 0
+        || m_precomputedSampleRateHz <= 0
+        || m_precomputedHopSize <= 0) {
+        return false;
+    }
+
+    const double columnsPerSecond =
+        static_cast<double>(m_precomputedSampleRateHz)
+        / static_cast<double>(m_precomputedHopSize);
+    const qint64 nowCol = static_cast<qint64>(std::floor(
+        std::max(0.0, currentRenderPositionSecondsLocked(now)) * columnsPerSecond));
+
+    qint64 bestSeq = -1;
+    qint64 bestTrackCol = -1;
+    qint64 bestDistance = std::numeric_limits<qint64>::max();
+
+    for (qint64 seq = m_ringOldestSeq; seq < m_ringWriteSeq; ++seq) {
+        const int slot = static_cast<int>(seq % m_ringCapacity);
+        if (slot < 0 || slot >= m_ringCapacity) {
+            continue;
+        }
+        if (m_ringSequenceId.empty()
+            || m_ringColumnId.empty()
+            || m_ringTrackToken.empty()
+            || m_ringSequenceId[static_cast<size_t>(slot)] != seq
+            || m_ringTrackToken[static_cast<size_t>(slot)] != m_precomputedTrackToken) {
+            continue;
+        }
+
+        const qint64 trackCol = m_ringColumnId[static_cast<size_t>(slot)];
+        if (trackCol < 0) {
+            continue;
+        }
+
+        const qint64 distance = std::llabs(trackCol - nowCol);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestSeq = seq;
+            bestTrackCol = trackCol;
+            if (distance == 0) {
+                break;
+            }
+        }
+    }
+
+    if (bestSeq < 0 || bestTrackCol < 0) {
+        return false;
+    }
+
+    m_rollingEpoch = bestSeq - bestTrackCol;
+    return true;
+}
+
 void SpectrogramItem::setDisplayMode(int value) {
     const int clamped = std::clamp(value, 0, 1);
     if (m_displayMode == clamped) {
         return;
     }
-    m_displayMode = clamped;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const int previousMode = m_displayMode;
+        m_displayMode = clamped;
+        if (previousMode == 1 && clamped == 0) {
+            reanchorRollingEpochForCurrentDataLocked(std::chrono::steady_clock::now());
+        }
+    }
     emit displayModeChanged();
     if (m_precomputedReady) {
         m_precomputedLastRightCol = -1;

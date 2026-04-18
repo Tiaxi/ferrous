@@ -246,6 +246,7 @@ QtObject {
         root.interpolationAwaitingSeekReacquire = true
         root.interpolationSeekPinnedPosition = value
         root.displayedPositionSeconds = value
+        root.spectrogramPositionSeconds = value
         root.resetInterpolationState(value, Date.now())
         root.positionSmoothingPrimed = true
         root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
