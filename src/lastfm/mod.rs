@@ -18,6 +18,7 @@ const MAX_SCROBBLES_PER_BATCH: usize = 50;
 const LASTFM_ERROR_INVALID_SESSION: i64 = 9;
 const LASTFM_ERROR_TEMPORARY: i64 = 11;
 const LASTFM_ERROR_SERVICE_OFFLINE: i64 = 16;
+const UNKNOWN_ALBUM_PLACEHOLDER: &str = "Unknown album";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppCredentials {
@@ -155,6 +156,15 @@ pub fn scrobble_threshold_seconds(duration_seconds: u32) -> Option<u32> {
         return None;
     }
     Some((duration_seconds / 2).min(240))
+}
+
+#[must_use]
+pub(crate) fn normalize_album_for_submission(album: &str) -> String {
+    let trimmed = album.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(UNKNOWN_ALBUM_PLACEHOLDER) {
+        return String::new();
+    }
+    trimmed.to_string()
 }
 
 #[must_use]
@@ -507,13 +517,14 @@ fn send_now_playing_request(
     session: &Session,
     track: &NowPlayingTrack,
 ) -> Result<(), RequestError> {
+    let album = normalize_album_for_submission(&track.album);
     let mut params = vec![
         ("artist".to_string(), track.artist.clone()),
         ("track".to_string(), track.track.clone()),
         ("sk".to_string(), session.session_key.clone()),
     ];
-    if !track.album.trim().is_empty() {
-        params.push(("album".to_string(), track.album.clone()));
+    if !album.is_empty() {
+        params.push(("album".to_string(), album));
     }
     if let Some(track_number) = track.track_number {
         params.push(("trackNumber".to_string(), track_number.to_string()));
@@ -534,14 +545,15 @@ fn send_scrobble_batch(
     let mut params = vec![("sk".to_string(), session.session_key.clone())];
     for (index, track) in batch.iter().enumerate() {
         let suffix = format!("[{index}]");
+        let album = normalize_album_for_submission(&track.album);
         params.push((format!("artist{suffix}"), track.artist.clone()));
         params.push((format!("track{suffix}"), track.track.clone()));
         params.push((
             format!("timestamp{suffix}"),
             track.timestamp_utc.to_string(),
         ));
-        if !track.album.trim().is_empty() {
-            params.push((format!("album{suffix}"), track.album.clone()));
+        if !album.is_empty() {
+            params.push((format!("album{suffix}"), album));
         }
         if let Some(track_number) = track.track_number {
             params.push((format!("trackNumber{suffix}"), track_number.to_string()));
@@ -699,5 +711,21 @@ mod tests {
             "secret",
         );
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn normalize_album_for_submission_omits_missing_album_values() {
+        assert!(normalize_album_for_submission("").is_empty());
+        assert!(normalize_album_for_submission("   ").is_empty());
+        assert!(normalize_album_for_submission("Unknown album").is_empty());
+        assert!(normalize_album_for_submission("unknown ALBUM").is_empty());
+    }
+
+    #[test]
+    fn normalize_album_for_submission_preserves_real_album_values() {
+        assert_eq!(
+            normalize_album_for_submission("Music Has the Right to Children"),
+            "Music Has the Right to Children"
+        );
     }
 }
