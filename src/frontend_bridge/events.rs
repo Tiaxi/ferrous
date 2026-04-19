@@ -595,7 +595,7 @@ pub(super) fn tick_lastfm_playback_at(
         lastfm_handle.command(LastFmCommand::SendNowPlaying(LastFmNowPlayingTrack {
             artist: tracker.artist.clone(),
             track: tracker.track.clone(),
-            album: tracker.album.clone(),
+            album: lastfm::normalize_album_for_submission(&tracker.album),
             track_number: tracker.track_number,
             duration_seconds: tracker.duration_seconds,
         }));
@@ -644,7 +644,7 @@ fn queue_lastfm_scrobble_if_ready(
     lastfm_handle.command(LastFmCommand::QueueScrobble(LastFmScrobbleEntry {
         artist: tracker.artist.clone(),
         track: tracker.track.clone(),
-        album: tracker.album.clone(),
+        album: lastfm::normalize_album_for_submission(&tracker.album),
         track_number: tracker.track_number,
         duration_seconds: tracker.duration_seconds,
         timestamp_utc: tracker.started_at_utc.unwrap_or_else(unix_timestamp_now),
@@ -1051,6 +1051,55 @@ mod tests {
         assert!(!tracker.scrobble_queued);
         assert!(wait_for_scrobble_queue(&queue_path, Duration::from_millis(150)).is_none());
         assert!(!queue_path.exists());
+
+        lastfm_handle.command(LastFmCommand::Shutdown);
+    }
+
+    #[test]
+    fn lastfm_scrobble_omits_unknown_album_placeholder() {
+        let _guard = test_guard();
+        let queue_path = test_dir("lastfm-unknown-album-scrobble").join("lastfm_queue.json");
+        let (lastfm_handle, _lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
+            queue_path: Some(queue_path.clone()),
+            initial_enabled: false,
+        });
+        let track_path = p("/music/unknown-album-scrobble.flac");
+        let mut state = BridgeState::default();
+        state.lastfm.enabled = true;
+        state.playback.current = Some(track_path.clone());
+        state.playback.state = PlaybackState::Playing;
+        state.playback.duration = Duration::from_secs(200);
+        state.metadata.source_path = Some(track_path.to_string_lossy().into_owned());
+        state.metadata.artist = "Boards of Canada".to_string();
+        state.metadata.title = "Web Loops".to_string();
+        state.metadata.album = "Unknown album".to_string();
+
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, start, 1_700_000_000);
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(101),
+            1_700_000_101,
+        );
+        state.playback.state = PlaybackState::Stopped;
+        state.playback.current = None;
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(102),
+            1_700_000_102,
+        );
+
+        let queued = wait_for_scrobble_queue(&queue_path, Duration::from_secs(1))
+            .expect("scrobble queued without album tag");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].artist, "Boards of Canada");
+        assert_eq!(queued[0].track, "Web Loops");
+        assert!(queued[0].album.is_empty());
 
         lastfm_handle.command(LastFmCommand::Shutdown);
     }
