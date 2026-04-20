@@ -56,11 +56,7 @@ QtObject {
         interval: 16
         repeat: true
         running: root.interpolationActive && !root.seekPressed
-        onTriggered: {
-            const clampedNext = root.advanceInterpolationClock(Date.now())
-            root.displayedPositionSeconds = clampedNext
-            root.spectrogramPositionSeconds = clampedNext
-        }
+        onTriggered: root.stepInterpolationTo(root.currentTimeMs())
     }
 
     function clampPositionToDuration(value) {
@@ -81,6 +77,15 @@ QtObject {
             return
         }
         console.warn("[qml-playback-profile] " + tag + " " + fields)
+    }
+
+    function currentTimeMs() {
+        return Date.now()
+    }
+
+    function applyInterpolatedPosition(position) {
+        root.displayedPositionSeconds = position
+        root.spectrogramPositionSeconds = position
     }
 
     function currentInterpolatedBasePosition(nowMs) {
@@ -135,6 +140,12 @@ QtObject {
         root.interpolationAnchorPosition = nextPosition
         root.interpolationAnchorMs = nowMs
         return nextPosition
+    }
+
+    function stepInterpolationTo(nowMs) {
+        const clampedNext = root.advanceInterpolationClock(nowMs)
+        root.applyInterpolatedPosition(clampedNext)
+        return clampedNext
     }
 
     function applyBoundedPlaybackCorrection(incomingPosition, nowMs) {
@@ -241,16 +252,20 @@ QtObject {
         }
     }
 
-    function seekCommitted(value) {
+    function seekCommittedAtTime(value, nowMs) {
         root.interpolationActive = false
         root.interpolationAwaitingSeekReacquire = true
         root.interpolationSeekPinnedPosition = value
         root.displayedPositionSeconds = value
         root.spectrogramPositionSeconds = value
-        root.resetInterpolationState(value, Date.now())
+        root.resetInterpolationState(value, nowMs)
         root.positionSmoothingPrimed = true
         root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         root.uiBridge.seek(value)
+    }
+
+    function seekCommitted(value) {
+        root.seekCommittedAtTime(value, root.currentTimeMs())
     }
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
@@ -282,7 +297,7 @@ QtObject {
         root.syncMutedVolumeState()
     }
 
-    function handlePlaybackChanged(haltSpectrogram, resetSpectrogram) {
+    function handlePlaybackChangedAtTime(nowMs, haltSpectrogram, resetSpectrogram) {
         const playbackState = root.uiBridge.playbackState || ""
         if (root.shouldResetSpectrogramForStoppedTrackSwitch(
                     root.lastSpectrogramPlaybackState,
@@ -295,7 +310,6 @@ QtObject {
 
         const incomingPosition = root.uiBridge.positionSeconds
         const trackChanged = root.positionSmoothingTrackPath !== root.uiBridge.currentTrackPath
-        const nowMs = Date.now()
 
         if (playbackState !== "Playing") {
             if (playbackState === "Stopped") {
@@ -343,17 +357,25 @@ QtObject {
         root.lastSpectrogramPlaybackState = playbackState
     }
 
-    function initializeFromBridge() {
+    function handlePlaybackChanged(haltSpectrogram, resetSpectrogram) {
+        root.handlePlaybackChangedAtTime(root.currentTimeMs(), haltSpectrogram, resetSpectrogram)
+    }
+
+    function initializeFromBridgeAtTime(nowMs) {
         root.displayedPositionSeconds = root.uiBridge.positionSeconds
         root.spectrogramPositionSeconds = root.uiBridge.positionSeconds
         root.syncMutedVolumeState()
         root.positionSmoothingPrimed = root.uiBridge.playbackState === "Playing"
-        root.resetInterpolationState(root.uiBridge.positionSeconds, Date.now())
+        root.resetInterpolationState(root.uiBridge.positionSeconds, nowMs)
         root.interpolationActive = root.uiBridge.playbackState === "Playing"
         root.interpolationAwaitingSeekReacquire = false
         root.interpolationSeekPinnedPosition = root.uiBridge.positionSeconds
         root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         root.stoppedSpectrogramTrackPath = root.uiBridge.currentTrackPath || ""
         root.lastSpectrogramPlaybackState = root.uiBridge.playbackState || ""
+    }
+
+    function initializeFromBridge() {
+        root.initializeFromBridgeAtTime(root.currentTimeMs())
     }
 }

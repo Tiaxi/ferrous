@@ -386,6 +386,7 @@ private slots:
     void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
     void diagnosticsLogUsesLowercaseAppDir();
     void playbackControllerSeekImmediatelyUpdatesSpectrogramPosition();
+    void playbackControllerDeterministicTimeHooksDriveInterpolation();
     void playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock();
     void playbackControllerPostSeekHeartbeatSnapsToBackendPosition();
     void playbackControllerPostSeekHoldHeartbeatKeepsDisplayPinnedUntilReacquired();
@@ -1151,6 +1152,76 @@ Item {
 
     QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 23.16);
     QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 23.16);
+}
+
+void QmlSmokeTest::playbackControllerDeterministicTimeHooksDriveInterpolation() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("positionSeconds", 12.12);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1120.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedAfterHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        std::abs(displayedAfterHeartbeat - 12.12) < 0.02,
+        qPrintable(QStringLiteral("displayed_after_heartbeat=%1")
+            .arg(displayedAfterHeartbeat, 0, 'f', 6)));
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(1160.0))));
+
+    const double displayedAfterStep =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        displayedAfterStep > 12.14,
+        qPrintable(QStringLiteral("displayed_after_step=%1")
+            .arg(displayedAfterStep, 0, 'f', 6)));
 }
 
 void QmlSmokeTest::playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock() {
