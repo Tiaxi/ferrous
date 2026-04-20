@@ -2227,6 +2227,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 if (rollingMode) {
                     drawX = static_cast<double>(w - drawCols) - columnPhase * effectiveZoom;
                 } else {
+                    const qint64 decodedRightEdge =
+                        m_precomputedMaxColumnIndex >= 0
+                            ? static_cast<qint64>(m_precomputedMaxColumnIndex)
+                            : static_cast<qint64>(-1);
                     const qint64 totalColsForScroll = std::max(
                         m_precomputedMaxColumnIndex >= 0
                             ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
@@ -2243,9 +2247,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const bool nearFullTrack =
                         totalColsForScroll > 0
                         && displaySpan * 100 / totalColsForScroll >= 90;
+                    const bool eofClampedToDecodedContent =
+                        decodedRightEdge >= 0 && displayRight >= decodedRightEdge;
                     const bool centeredScrolling =
                         !nearFullTrack
                         && displayLeft > 0
+                        && !eofClampedToDecodedContent
                         && displayRight < totalColsForScroll - 1;
                     drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
                 }
