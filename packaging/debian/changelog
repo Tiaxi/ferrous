@@ -1,3 +1,10 @@
+ferrous (0.1.9-1) unstable; urgency=low
+
+  * Move playback clock ownership fully into the backend-owned path.
+  * Fix centered-mode EOF spectrogram jiggle at zoomed-out levels.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Mon, 20 Apr 2026 21:52:37 +0300
+
 ferrous (0.1.8-1) unstable; urgency=low
 
   * Add spectrogram zoom.
