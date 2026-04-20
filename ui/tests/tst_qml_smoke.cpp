@@ -414,6 +414,7 @@ private slots:
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
     void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
+    void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramRollingGaplessTrackChangePreservesZoom();
@@ -3161,6 +3162,53 @@ void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
     // visibleWindowCols (1200) cols.
     QCOMPARE(item.m_precomputedCanvasDisplayLeft,
              static_cast<qint64>(maxColIndex) - 1199);
+}
+
+void QmlSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
+    // Regression: in centered mode near EOF at a zoomed-out level, the
+    // display range clamps to real decoded content and the playhead
+    // detaches toward the right edge. The canvas must stop sub-pixel
+    // scrolling in that state or the spectrogram visibly jiggles.
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+    item.setSampleRateHz(44100);
+    item.setGridEnabled(true);
+
+    constexpr int bins = 4;
+    constexpr int hop = 64;
+    constexpr int maxColIndex = 8000;
+    constexpr int decodedCols = maxColIndex + 1;
+    constexpr int inflatedEstimate = decodedCols + 700;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, inflatedEstimate,
+        44100, hop, false, true, 1);
+    QByteArray data(decodedCols * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, decodedCols, 0, inflatedEstimate,
+        44100, hop, false, false, 1);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 8.0; // effectiveZoom = 0.5
+    }
+
+    item.setPositionSeconds(11.25);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    QCOMPARE(item.m_precomputedCanvasDisplayRight,
+             static_cast<qint64>(maxColIndex));
+    QVERIFY2(
+        std::abs(item.m_timeGridRenderDrawX) < 0.001,
+        qPrintable(QStringLiteral("draw_x=%1 display_left=%2 display_right=%3")
+            .arg(item.m_timeGridRenderDrawX, 0, 'f', 6)
+            .arg(item.m_precomputedCanvasDisplayLeft)
+            .arg(item.m_precomputedCanvasDisplayRight)));
 }
 
 void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
