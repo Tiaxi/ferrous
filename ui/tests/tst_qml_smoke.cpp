@@ -236,6 +236,25 @@ QVector<OverlayLineSample> overlayLineSamples(QSGNode *root) {
     return samples;
 }
 
+int visibleTextureNodeCount(QSGNode *root) {
+    if (root == nullptr) {
+        return 0;
+    }
+
+    int count = 0;
+    for (QSGNode *child = root->firstChild(); child != nullptr; child = child->nextSibling()) {
+        auto *textureNode = dynamic_cast<QSGSimpleTextureNode *>(child);
+        if (textureNode == nullptr) {
+            continue;
+        }
+        if (textureNode->texture() == nullptr || textureNode->rect().isEmpty()) {
+            continue;
+        }
+        ++count;
+    }
+    return count;
+}
+
 std::optional<QLineF> findUniqueLine(
     const QVector<OverlayLineSample> &samples,
     int alpha,
@@ -626,6 +645,7 @@ private slots:
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
     void spectrogramResizeForcesFreshBodyTextureUpload();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
+    void spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutCollapsingToSingleNode();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingPreFillUsesFullViewportWidthCache();
     void spectrogramRollingPreFillHandsOffToSteadyScrollIncrementally();
@@ -5842,6 +5862,79 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
     QVERIFY2(
         updatedTextureNode->texture() == initialTexture,
         "rolling GPU updates should reuse the same scene-graph texture object");
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutCollapsingToSingleNode() {
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(220, 80);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 220;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(20 + (column % 200) + bin));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 4096, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(visibleTextureNodeCount(node) >= 1);
+
+    for (int step = 0; step < 129; ++step) {
+        QByteArray nextChunk(bins, '\x00');
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[bin] = static_cast<char>(
+                static_cast<unsigned char>(120 + ((step + bin) % 100)));
+        }
+        item.feedPrecomputedChunk(
+            nextChunk, bins, 0, 1,
+            initialColumns + step, 4096, 48000, 1024, false, false, 1, false);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto now = std::chrono::steady_clock::now();
+            item.m_positionSeconds =
+                ((static_cast<double>(initialColumns + step) + 0.25) * 1024.0) / 48000.0;
+            item.m_positionAnchorSeconds = item.m_positionSeconds;
+            item.m_positionAnchorUpdatedAt = now;
+            item.m_positionAnchorInitialized = true;
+        }
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(node != nullptr);
+    }
+
+    QVERIFY2(
+        visibleTextureNodeCount(node) >= 2,
+        "crossing the old rolling texture rebase boundary should keep the body segmented instead of falling back to a single full-uploaded texture");
 
     delete node;
 }

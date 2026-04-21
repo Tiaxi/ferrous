@@ -168,6 +168,12 @@ void bumpImageGeneration(quint64 &generation) {
     generation += 1;
 }
 
+struct SpectrogramTailSegment {
+    QSGSimpleTextureNode *node{nullptr};
+    QSGTexture *texture{nullptr};
+    int width{0};
+};
+
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
@@ -204,6 +210,9 @@ struct SpectrogramSceneNode final : public QSGNode {
     ~SpectrogramSceneNode() override {
         delete spectrogramTextureResource;
         delete spectrogramTailTextureResource;
+        for (auto &segment : spectrogramTailSegments) {
+            delete segment.texture;
+        }
         delete overlayTexture;
         delete freqGridOverlayTexture;
         delete timeGridOverlayTexture;
@@ -232,6 +241,9 @@ struct SpectrogramSceneNode final : public QSGNode {
         SpectrogramGpu::DebugMode::Full};
     bool spectrogramTextureUploaded{false};
     int spectrogramTextureScrollPixels{0};
+    int spectrogramTextureWidth{0};
+    int spectrogramTailTextureWidth{0};
+    QVector<SpectrogramTailSegment> spectrogramTailSegments;
     quintptr ownerWindowId{0};
     quint64 generation{0};
 };
@@ -264,6 +276,33 @@ void configureTextureNode(
     node->setFiltering(QSGTexture::Nearest);
     node->setRect(target);
     node->setSourceRect(QRectF(source));
+}
+
+void clearTailSegments(SpectrogramSceneNode *node) {
+    if (node == nullptr) {
+        return;
+    }
+    for (auto &segment : node->spectrogramTailSegments) {
+        delete segment.texture;
+        if (segment.node != nullptr) {
+            node->removeChildNode(segment.node);
+            delete segment.node;
+        }
+    }
+    node->spectrogramTailSegments.clear();
+}
+
+void appendTailSegmentNode(SpectrogramSceneNode *node) {
+    if (node == nullptr || node->overlayLines == nullptr) {
+        return;
+    }
+    auto *segmentNode = new QSGSimpleTextureNode();
+    node->insertChildNodeBefore(segmentNode, node->overlayLines);
+    node->spectrogramTailSegments.push_back(SpectrogramTailSegment{
+        .node = segmentNode,
+        .texture = nullptr,
+        .width = 0,
+    });
 }
 
 void configureLineNode(
@@ -2639,13 +2678,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
     }
 
-    QSGTexture *oldSpectrogramTexture = nullptr;
-    QSGTexture *oldSpectrogramTailTexture = nullptr;
+    QVector<QSGTexture *> staleSpectrogramTextures;
     QSGTexture *oldOverlayTexture = nullptr;
     QSGTexture *oldFreqGridOverlayTexture = nullptr;
     QSGTexture *oldTimeGridOverlayTexture = nullptr;
     QSGTexture *oldCrosshairOverlayTexture = nullptr;
-    constexpr int kSpectrogramScrollRebasePixels = 128;
+    constexpr int kSpectrogramTailSegmentPixels = 128;
     spectrogramTextureChanged =
         showSpectrogram
         && !spectrogramNodeImage.isNull()
@@ -2662,44 +2700,102 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             && node->spectrogramTextureResource != nullptr
             && node->spectrogramTextureDebugMode == SpectrogramGpu::DebugMode::Full
             && nextScrollPixels > 0
-            && nextScrollPixels < spectrogramNodeImage.width()
-            && nextScrollPixels <= kSpectrogramScrollRebasePixels;
+            && nextScrollPixels < spectrogramNodeImage.width();
         if (canAdvanceRollingTexture) {
             node->spectrogramTextureScrollPixels = nextScrollPixels;
-            oldSpectrogramTailTexture = node->spectrogramTailTextureResource;
-            node->spectrogramTailTextureResource = nullptr;
-            if (currentWindow != nullptr) {
-                const QImage tailImage = spectrogramNodeImage.copy(
-                    spectrogramNodeImage.width() - node->spectrogramTextureScrollPixels,
-                    0,
-                    node->spectrogramTextureScrollPixels,
-                    spectrogramNodeImage.height());
-                if (!tailImage.isNull()) {
+            const auto uploadSegmentTexture =
+                [&](const QImage &image) -> QSGTexture * {
+                    if (currentWindow == nullptr || image.isNull()) {
+                        return nullptr;
+                    }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     const auto uploadStart = std::chrono::steady_clock::now();
 #endif
-                    node->spectrogramTailTextureResource =
-                        currentWindow->createTextureFromImage(tailImage);
+                    QSGTexture *texture = currentWindow->createTextureFromImage(image);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileSpectrogramTextureUploadMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - uploadStart).count();
                     profileUsedTailSpectrogramUpload = true;
-                    profileTailUploadWidth = tailImage.width();
+                    profileTailUploadWidth = image.width();
 #endif
-                    if (node->spectrogramTailTextureResource != nullptr) {
-                        node->spectrogramTailTextureResource->setFiltering(QSGTexture::Nearest);
+                    if (texture != nullptr) {
+                        texture->setFiltering(QSGTexture::Nearest);
                     }
+                    return texture;
+                };
+
+            int remainingShift = spectrogramRollingShiftPixels;
+            if (node->spectrogramTailTextureResource != nullptr
+                && node->spectrogramTailTextureWidth < kSpectrogramTailSegmentPixels) {
+                const int extend =
+                    std::min(remainingShift, kSpectrogramTailSegmentPixels - node->spectrogramTailTextureWidth);
+                if (extend > 0) {
+                    const int oldWidth = node->spectrogramTailTextureWidth;
+                    const int mergedWidth = oldWidth + extend;
+                    const int sourceX =
+                        spectrogramNodeImage.width() - (oldWidth + spectrogramRollingShiftPixels);
+                    QImage mergedImage = spectrogramNodeImage.copy(
+                        sourceX,
+                        0,
+                        mergedWidth,
+                        spectrogramNodeImage.height());
+                    staleSpectrogramTextures.push_back(node->spectrogramTailTextureResource);
+                    node->spectrogramTailTextureResource = uploadSegmentTexture(mergedImage);
+                    node->spectrogramTailTextureWidth = mergedWidth;
+                    remainingShift -= extend;
+                }
+            }
+
+            while (remainingShift > 0) {
+                const int chunkWidth = std::min(remainingShift, kSpectrogramTailSegmentPixels);
+                const int sourceX = spectrogramNodeImage.width() - remainingShift;
+                QImage segmentImage = spectrogramNodeImage.copy(
+                    sourceX,
+                    0,
+                    chunkWidth,
+                    spectrogramNodeImage.height());
+                QSGTexture *segmentTexture = uploadSegmentTexture(segmentImage);
+                if (node->spectrogramTailTextureResource == nullptr) {
+                    node->spectrogramTailTextureResource = segmentTexture;
+                    node->spectrogramTailTextureWidth = chunkWidth;
+                } else {
+                    appendTailSegmentNode(node);
+                    auto &segment = node->spectrogramTailSegments.back();
+                    segment.texture = segmentTexture;
+                    segment.width = chunkWidth;
+                }
+                remainingShift -= chunkWidth;
+            }
+
+            while (node->spectrogramTextureScrollPixels >= node->spectrogramTextureWidth
+                   && node->spectrogramTailTextureResource != nullptr) {
+                node->spectrogramTextureScrollPixels -= node->spectrogramTextureWidth;
+                staleSpectrogramTextures.push_back(node->spectrogramTextureResource);
+                node->spectrogramTextureResource = node->spectrogramTailTextureResource;
+                node->spectrogramTextureWidth = node->spectrogramTailTextureWidth;
+                node->spectrogramTailTextureResource = nullptr;
+                node->spectrogramTailTextureWidth = 0;
+                if (!node->spectrogramTailSegments.isEmpty()) {
+                    auto promoted = node->spectrogramTailSegments.front();
+                    node->spectrogramTailTextureResource = promoted.texture;
+                    node->spectrogramTailTextureWidth = promoted.width;
+                    node->removeChildNode(promoted.node);
+                    delete promoted.node;
+                    node->spectrogramTailSegments.removeFirst();
                 }
             }
             node->spectrogramTextureGeneration = spectrogramImageGeneration;
             node->spectrogramTextureDebugMode = spectrogramImageDebugMode;
             node->spectrogramTextureUploaded = true;
         } else {
-            oldSpectrogramTexture = node->spectrogramTextureResource;
-            oldSpectrogramTailTexture = node->spectrogramTailTextureResource;
+            staleSpectrogramTextures.push_back(node->spectrogramTextureResource);
+            staleSpectrogramTextures.push_back(node->spectrogramTailTextureResource);
             node->spectrogramTextureResource = nullptr;
             node->spectrogramTailTextureResource = nullptr;
             node->spectrogramTextureScrollPixels = 0;
+            node->spectrogramTextureWidth = 0;
+            node->spectrogramTailTextureWidth = 0;
+            clearTailSegments(node);
             if (showSpectrogram && !spectrogramNodeImage.isNull() && currentWindow != nullptr) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 const auto uploadStart = std::chrono::steady_clock::now();
@@ -2713,6 +2809,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
                 if (node->spectrogramTextureResource != nullptr) {
                     node->spectrogramTextureResource->setFiltering(QSGTexture::Nearest);
+                    node->spectrogramTextureWidth = spectrogramNodeImage.width();
                     node->spectrogramTextureGeneration = spectrogramImageGeneration;
                     node->spectrogramTextureDebugMode = spectrogramImageDebugMode;
                     node->spectrogramTextureUploaded = true;
@@ -2801,14 +2898,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         const int scrollPixels = std::clamp(
             node->spectrogramTextureScrollPixels,
             0,
-            std::max(0, spectrogramSourceRect.width() - 1));
+            std::max(0, node->spectrogramTextureWidth - 1));
         if (scrollPixels > 0) {
             baseTargetRect.setWidth(
-                std::max(0.0, spectrogramTargetRect.width() - static_cast<double>(scrollPixels)));
+                std::max(0.0, static_cast<double>(node->spectrogramTextureWidth - scrollPixels)));
             baseSourceRect = QRect(
                 scrollPixels,
                 0,
-                spectrogramSourceRect.width() - scrollPixels,
+                node->spectrogramTextureWidth - scrollPixels,
                 spectrogramSourceRect.height());
         }
         configureTextureNode(
@@ -2825,21 +2922,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             QRect(),
             node->placeholderTexture);
     }
-    if (showSpectrogram
-        && node->spectrogramTailTextureResource != nullptr
-        && node->spectrogramTextureScrollPixels > 0) {
-        const QSize tailSize = node->spectrogramTailTextureResource->textureSize();
+    double segmentX = spectrogramTargetRect.x()
+        + std::max(
+            0.0,
+            static_cast<double>(node->spectrogramTextureWidth - node->spectrogramTextureScrollPixels));
+    if (showSpectrogram && node->spectrogramTailTextureResource != nullptr) {
         configureTextureNode(
             node->spectrogramTailTexture,
             node->spectrogramTailTextureResource,
             QRectF(
-                spectrogramTargetRect.x() + spectrogramTargetRect.width()
-                    - static_cast<double>(node->spectrogramTextureScrollPixels),
+                segmentX,
                 spectrogramTargetRect.y(),
-                static_cast<double>(node->spectrogramTextureScrollPixels),
+                static_cast<double>(node->spectrogramTailTextureWidth),
                 spectrogramTargetRect.height()),
-            QRect(0, 0, tailSize.width(), tailSize.height()),
+            QRect(0, 0, node->spectrogramTailTextureWidth, spectrogramSourceRect.height()),
             node->placeholderTexture);
+        segmentX += static_cast<double>(node->spectrogramTailTextureWidth);
     } else {
         configureTextureNode(
             node->spectrogramTailTexture,
@@ -2847,6 +2945,28 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             QRectF(),
             QRect(),
             node->placeholderTexture);
+    }
+    for (auto &segment : node->spectrogramTailSegments) {
+        if (showSpectrogram && segment.texture != nullptr && segment.width > 0) {
+            configureTextureNode(
+                segment.node,
+                segment.texture,
+                QRectF(
+                    segmentX,
+                    spectrogramTargetRect.y(),
+                    static_cast<double>(segment.width),
+                    spectrogramTargetRect.height()),
+                QRect(0, 0, segment.width, spectrogramSourceRect.height()),
+                node->placeholderTexture);
+            segmentX += static_cast<double>(segment.width);
+        } else {
+            configureTextureNode(
+                segment.node,
+                nullptr,
+                QRectF(),
+                QRect(),
+                node->placeholderTexture);
+        }
     }
 
     const bool overlayLinesActive =
@@ -2937,8 +3057,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->placeholderTexture);
     }
 
-    delete oldSpectrogramTexture;
-    delete oldSpectrogramTailTexture;
+    for (QSGTexture *texture : staleSpectrogramTextures) {
+        delete texture;
+    }
     delete oldOverlayTexture;
     delete oldFreqGridOverlayTexture;
     delete oldTimeGridOverlayTexture;
