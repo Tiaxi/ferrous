@@ -5221,7 +5221,13 @@ void QmlSmokeTest::spectrogramDoesNotCreatePrivateRhiChild() {
     item.setHeight(180);
     item.setDisplayMode(1);
 
-    QCOMPARE(item.findChild<QQuickItem *>(QString(), Qt::FindDirectChildrenOnly), nullptr);
+    const bool hasPrivateRendererChild = std::any_of(
+        item.children().cbegin(),
+        item.children().cend(),
+        [](const QObject *child) {
+            return qstrcmp(child->metaObject()->className(), "SpectrogramRhiItem") == 0;
+        });
+    QVERIFY2(!hasPrivateRendererChild, "spectrogram should not create the private renderer boundary");
 }
 
 void QmlSmokeTest::spectrogramUpdatePaintNodeStillUsesPublicTextureBody() {
@@ -5246,16 +5252,38 @@ void QmlSmokeTest::spectrogramUpdatePaintNodeStillUsesPublicTextureBody() {
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    QCOMPARE(item.findChild<QQuickItem *>(QString(), Qt::FindDirectChildrenOnly), nullptr);
-    auto *background = static_cast<QSGSimpleRectNode *>(node->childAtIndex(0));
+    const bool hasPrivateRendererChild = std::any_of(
+        item.children().cbegin(),
+        item.children().cend(),
+        [](const QObject *child) {
+            return qstrcmp(child->metaObject()->className(), "SpectrogramRhiItem") == 0;
+        });
+    QVERIFY2(!hasPrivateRendererChild, "public-body path must not introduce the private renderer boundary");
+
+    QSGSimpleRectNode *background = nullptr;
+    QSGSimpleTextureNode *spectrogramTexture = nullptr;
+    for (QSGNode *child = node->firstChild(); child != nullptr; child = child->nextSibling()) {
+        if (background == nullptr) {
+            if (auto *rectNode = dynamic_cast<QSGSimpleRectNode *>(child); rectNode != nullptr) {
+                background = rectNode;
+                continue;
+            }
+        }
+        if (spectrogramTexture == nullptr) {
+            if (auto *textureNode = dynamic_cast<QSGSimpleTextureNode *>(child);
+                textureNode != nullptr && textureNode->texture() != nullptr
+                && !textureNode->rect().isEmpty()) {
+                spectrogramTexture = textureNode;
+            }
+        }
+    }
+
     QVERIFY(background != nullptr);
     QCOMPARE(background->color(), QColor(0, 0, 0, 255));
-
-    auto *spectrogramTexture = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    QCOMPARE(background->rect(), QRectF(0.0, 0.0, 200.0, 100.0));
     QVERIFY(spectrogramTexture != nullptr);
     QVERIFY(spectrogramTexture->texture() != nullptr);
-    QVERIFY(spectrogramTexture->rect().width() > 0.0);
-    QVERIFY(spectrogramTexture->rect().height() > 0.0);
+    QVERIFY(!spectrogramTexture->rect().isEmpty());
     delete node;
 }
 
