@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QQuickRhiItem>
 #include <QSGSimpleTextureNode>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
@@ -27,6 +28,7 @@
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/SpectrogramGpuRenderer.h"
+#include "../src/SpectrogramRhiItem.h"
 #include "../src/SpectrogramSeekTrace.h"
 #define protected public
 #define private public
@@ -466,6 +468,8 @@ private slots:
     void spectrogramGpuImagesUseRgbaCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
     void spectrogramGpuCompressesOversizedSourceTexture();
+    void spectrogramCreatesRhiChildForActiveRenderer();
+    void spectrogramRhiRendererConsumesViewSyncState();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
@@ -5212,6 +5216,47 @@ void QmlSmokeTest::spectrogramGpuCompressesOversizedSourceTexture() {
         }
         QVERIFY2(sawBrightPixel, "Compressed GPU source image lost the bright column band");
     }
+}
+
+void QmlSmokeTest::spectrogramCreatesRhiChildForActiveRenderer() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1);
+
+    auto *rhiChild = item.findChild<QQuickRhiItem *>();
+    QVERIFY2(rhiChild != nullptr, "active spectrogram path should create a QQuickRhiItem child");
+    QCOMPARE(rhiChild->parent(), &item);
+}
+
+void QmlSmokeTest::spectrogramRhiRendererConsumesViewSyncState() {
+    SpectrogramItem item;
+    item.setWidth(240);
+    item.setHeight(120);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int bins = 8;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    item.setPositionSeconds(1.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
+    QVERIFY(rhiChild != nullptr);
+    const SpectrogramRhiSyncState state = rhiChild->debugLastSyncState();
+    QVERIFY(state.sourceColumns > 0);
+    QCOMPARE(state.bins, bins);
+    QVERIFY(state.displayRight >= state.displayLeft);
+    QVERIFY(state.drawPixels > 0);
+    QVERIFY(state.effectiveZoom > 0.0);
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {

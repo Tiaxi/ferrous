@@ -3,6 +3,7 @@
 #include "SpectrogramItem.h"
 
 #include "SpectrogramGpuRenderer.h"
+#include "SpectrogramRhiItem.h"
 #include "SpectrogramSeekTrace.h"
 
 #include <QDir>
@@ -16,6 +17,7 @@
 #include <QMutexLocker>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QSGNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
@@ -400,13 +402,20 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
 #endif
     rebuildPalette();
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
+    connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::syncRhiChildAttachment);
     bindWindowFpsTracking(window());
+    syncRhiChildAttachment(window());
     m_zoomDebounceTimer = new QTimer(this);
     m_zoomDebounceTimer->setSingleShot(true);
     m_zoomDebounceTimer->setInterval(150);
     connect(m_zoomDebounceTimer, &QTimer::timeout, this, [this]() {
         emit backendZoomRequested(m_pendingBackendZoom);
     });
+    m_rhiItem = new SpectrogramRhiItem(this);
+    m_rhiItem->setPosition(QPointF(0.0, 0.0));
+    m_rhiItem->setSize(QSizeF(width(), height()));
+    m_rhiItem->setZ(-1.0);
+    m_rhiItem->setVisible(false);
 }
 
 double SpectrogramItem::dbRange() const {
@@ -1913,12 +1922,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     double drawX = 0.0;
     int drawPixels = 0;
     bool showSpectrogram = false;
+    bool haveRhiSyncState = false;
     bool spectrogramTextureChanged = false;
     quint64 spectrogramImageGeneration = 0;
     SpectrogramGpu::DebugMode spectrogramImageDebugMode = gpuDebugMode;
     QRectF spectrogramTargetRect;
     QRect spectrogramSourceRect;
     QImage spectrogramNodeImage;
+    SpectrogramRhiSyncState rhiSyncState;
     bool spectrogramRollingIncrementalScroll = false;
     int spectrogramRollingShiftPixels = 0;
     bool showPlayhead = false;
@@ -2241,6 +2252,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     w, displayLeft, displayRight, effectiveZoom);
             }
 
+            if (visibleCols > 0) {
+                rhiSyncState = SpectrogramRhiSyncState{
+                    .sourceColumns = static_cast<int>(displayRight - displayLeft + 1),
+                    .bins = m_precomputedBinsPerColumn,
+                    .displayLeft = displayLeft,
+                    .displayRight = displayRight,
+                    .drawPixels = drawPixels,
+                    .effectiveZoom = effectiveZoom,
+                    .rollingMode = rollingMode,
+                };
+                haveRhiSyncState = true;
+            }
+
             const bool needsSourceCache =
                 gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
 
@@ -2470,6 +2494,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         profileColumnCount = m_columns.size();
         profileBinsPerColumn = m_binsPerColumn;
 #endif
+    }
+
+    if (haveRhiSyncState && m_rhiItem != nullptr) {
+        m_rhiItem->setSyncState(rhiSyncState);
     }
 
     QSGTexture *oldSpectrogramTexture = nullptr;
@@ -2828,6 +2856,10 @@ void SpectrogramItem::releaseResources() {
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
+    if (m_rhiItem != nullptr && m_rhiItem->parentItem() == this) {
+        m_rhiItem->setPosition(QPointF(0.0, 0.0));
+        m_rhiItem->setSize(newGeometry.size());
+    }
     if (newGeometry.size() != oldGeometry.size()) {
         QMutexLocker lock(&m_stateMutex);
         invalidateMapping();
@@ -4405,6 +4437,36 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
         },
         Qt::QueuedConnection);
     update();
+}
+
+void SpectrogramItem::syncRhiChildAttachment(QQuickWindow *window) {
+    if (m_rhiItem == nullptr) {
+        return;
+    }
+
+    bool canAttach = false;
+    if (window != nullptr) {
+        if (QSGRendererInterface *renderer = window->rendererInterface(); renderer != nullptr) {
+            const auto api = renderer->graphicsApi();
+            canAttach = api != QSGRendererInterface::Unknown
+                && api != QSGRendererInterface::Software;
+        }
+    }
+
+    if (canAttach) {
+        if (m_rhiItem->parentItem() != this) {
+            m_rhiItem->setParentItem(this);
+        }
+        m_rhiItem->setPosition(QPointF(0.0, 0.0));
+        m_rhiItem->setSize(QSizeF(width(), height()));
+        m_rhiItem->setVisible(true);
+        return;
+    }
+
+    m_rhiItem->setVisible(false);
+    if (m_rhiItem->parentItem() != nullptr) {
+        m_rhiItem->setParentItem(nullptr);
+    }
 }
 
 void SpectrogramItem::handleWindowAfterAnimating() {
