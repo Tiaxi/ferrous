@@ -402,6 +402,7 @@ private slots:
     void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
     void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
     void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
+    void playbackControllerProfileSkipsMinorFollowHeartbeatLogs();
     void playbackControllerIgnoresSteadyStateHeartbeatJitter();
     void playbackControllerKeepsWallClockInterpolationAfterSubRealtimeHeartbeats();
     void playbackControllerSteadyStateTrimReducesNoticeableLag();
@@ -2005,6 +2006,64 @@ Item {
         qPrintable(warnings));
     QVERIFY2(
         !warnings.contains(QStringLiteral("[qml-playback-profile] bleed")),
+        qPrintable(warnings));
+}
+
+void QmlSmokeTest::playbackControllerProfileSkipsMinorFollowHeartbeatLogs() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property bool profileLogsEnabled: true
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    clearCapturedMessages();
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.006);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const QString warnings = takeCapturedMessagesText();
+    QVERIFY2(
+        !warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
         qPrintable(warnings));
 }
 
