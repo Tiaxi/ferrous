@@ -8,12 +8,14 @@
 #include <QMetaObject>
 #include <QMutex>
 #include <QQuickItem>
+#include <QString>
 #include <QTimer>
 #include <QVariantList>
 
 #include <array>
 #include <chrono>
 #include <deque>
+#include <limits>
 #include <vector>
 
 class QQuickWindow;
@@ -143,7 +145,6 @@ protected:
 
 private:
     static constexpr int kGradientTableSize = 2048;
-    static constexpr int kCanvasTileWidth = 64;
 
     void rebuildPalette();
     void invalidateMapping();
@@ -162,43 +163,51 @@ private:
     double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
     void setPositionAnchorLocked(double value, std::chrono::steady_clock::time_point now);
     void syncPositionAnchorLocked(std::chrono::steady_clock::time_point now);
-    void rebuildPrecomputedCanvasLocked(
-        int width,
-        int height,
-        qint64 displayLeft,
-        qint64 displayRight,
-        bool rollingMode);
-    bool advancePrecomputedCanvasLocked(
-        qint64 displayLeft,
-        qint64 displayRight,
-        bool rollingMode);
-    void drawPrecomputedColumnAtLocked(
-        int x,
-        qint64 displayIndex,
-        bool rollingMode,
-        const std::array<quint8, 256> &dbRemap);
-    void drawPeakHoldColumnRangeLocked(
-        int x,
-        qint64 colFirst,
-        qint64 colLast,
-        bool rollingMode,
-        const std::array<quint8, 256> &dbRemap);
-    void drawInterpolatedColumnAtLocked(
-        int x,
-        qint64 displayIndexL,
-        qint64 displayIndexR,
-        double t,
-        bool rollingMode,
-        const std::array<quint8, 256> &dbRemap);
     int ringSlotForDisplayIndexLocked(
         qint64 displayIndex,
         bool rollingMode) const;
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
+    void paintPrecomputedGpuSourceColumnsLocked(
+        QImage &image,
+        int xBegin,
+        int xEnd,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode) const;
+    void syncPrecomputedGpuImagesLocked(
+        int width,
+        int height,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode,
+        double effectiveZoom,
+        int maxTextureColumns);
+    void syncPrecomputedDisplayImageLocked(
+        int drawPixels,
+        int height,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode,
+        double effectiveZoom);
+    void paintPrecomputedDisplayColumnsLocked(
+        QImage &image,
+        int xBegin,
+        int xEnd,
+        int drawPixels,
+        int height,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode,
+        const std::array<quint8, 256> &dbRemap,
+        const QRgb *palette) const;
+    int gpuMaxTextureColumns(QQuickWindow *window) const;
+    int gpuDrawWidthForSourceColumnsLocked(
+        int width,
+        qint64 displayLeft,
+        qint64 displayRight,
+        double effectiveZoom) const;
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
-    void resizeDirtyTilesLocked();
-    void markTileDirtyLocked(int x);
-    void markAllTilesDirtyLocked();
     void updateOverlayImageLocked();
     void updateCrosshairOverlayLocked(
         int width, int height,
@@ -216,6 +225,7 @@ private:
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
+    void maybeDumpGpuDebugFrame();
     void updateFpsEstimateLocked();
     double targetRowsPerSecondLocked() const;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -254,7 +264,6 @@ private:
     int m_canvasWriteX{0};
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
-    std::vector<unsigned char> m_dirtyTiles;
     bool m_seedHistoryOnNextAppend{true};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};
@@ -264,6 +273,9 @@ private:
     int m_fpsValue{0};
     int m_fpsAccumFrames{0};
     double m_fpsAccumSeconds{0.0};
+    int m_gpuDumpFramesRemaining{0};
+    int m_gpuDumpFrameSerial{0};
+    QString m_gpuDumpDirectory;
     std::chrono::steady_clock::time_point m_lastFrameTime{};
     bool m_profileEnabled{false};
     std::chrono::steady_clock::time_point m_profileLast{};
@@ -330,6 +342,41 @@ private:
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
+    QImage m_gpuSourceImage;
+    QImage m_gpuDisplayImage;
+    quint64 m_gpuSourceGeneration{0};
+    quint64 m_gpuDisplayGeneration{0};
+    quint64 m_gpuDisplaySourceGeneration{0};
+    int m_gpuDisplayWidth{0};
+    int m_gpuDisplayHeight{0};
+    int m_gpuDisplaySampleRateHz{0};
+    int m_gpuDisplayBins{0};
+    double m_gpuDisplayDbRange{132.0};
+    bool m_gpuDisplayMuted{false};
+    bool m_gpuDisplayLogScale{false};
+    qint64 m_gpuDisplayDisplayLeft{0};
+    qint64 m_gpuDisplayDisplayRight{-1};
+    bool m_gpuDisplayRolling{false};
+    qint64 m_gpuDisplayRingWriteSeq{-1};
+    qint64 m_gpuDisplayRingOldestSeq{-1};
+    qint32 m_gpuDisplayMaxColumnIndex{-1};
+    quint64 m_gpuDisplayTrackToken{0};
+    double m_gpuDisplayEffectiveZoom{1.0};
+    bool m_gpuDisplayLastUpdateWasIncremental{false};
+    int m_gpuDisplayLastShiftPixels{0};
+    int m_gpuDisplayLastUpdatedColumns{0};
+    qint64 m_gpuSourceDisplayLeft{0};
+    qint64 m_gpuSourceDisplayRight{-1};
+    bool m_gpuSourceRolling{false};
+    int m_gpuSourceActualColumns{0};
+    qint64 m_gpuSourceRingWriteSeq{-1};
+    qint64 m_gpuSourceRingOldestSeq{-1};
+    qint32 m_gpuSourceMaxColumnIndex{-1};
+    quint64 m_gpuSourceTrackToken{0};
+    bool m_gpuSourceLastUpdateWasIncremental{false};
+    int m_gpuSourceLastShiftColumns{0};
+    int m_gpuSourceLastUpdatedColumns{0};
+    int m_gpuMaxTextureColumns{std::numeric_limits<int>::max()};
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};
     bool m_zoomEnabled{false};

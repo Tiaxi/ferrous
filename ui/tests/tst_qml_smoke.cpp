@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QSGSimpleTextureNode>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -19,10 +20,13 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <limits>
 
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
+#include "../src/SpectrogramGpuRenderer.h"
 #include "../src/SpectrogramSeekTrace.h"
 #define protected public
 #define private public
@@ -457,10 +461,29 @@ private slots:
     void spectrogramZoomOutProducesDistinctHop();
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
-    void spectrogramPeakHoldRebuildUsesMaxNotNearest();
+    void spectrogramPeakHoldColumnSpanUsesMaxNotNearest();
+    void spectrogramGpuVisibleSourceImageTracksDisplayWindow();
+    void spectrogramGpuImagesUseRgbaCompatibleFormats();
+    void spectrogramGpuDebugModeParsesEnvironmentValues();
+    void spectrogramGpuCompressesOversizedSourceTexture();
+    void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
+    void spectrogramGpuTextureUploadSkipsRedundantRecreation();
+    void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
+    void spectrogramRollingFullModeSkipsGpuSourceCacheUpdates();
+    void spectrogramCenteredFullModeSkipsGpuSourceCacheUpdates();
+    void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
+    void spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth();
+    void spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth();
+    void spectrogramRollingGpuDisplayCacheAdvancesIncrementally();
+    void spectrogramCenteredGpuDisplayCacheAdvancesIncrementally();
+    void spectrogramGpuWindowCaptureShowsVisiblePixels();
+    void spectrogramGpuWindowCaptureShowsTextureNodeDebugStage();
+    void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
+    void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
+    void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
-    void spectrogramSyntheticClearPreservesCanvasDuringSeek();
-    void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
+    void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
+    void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -2641,7 +2664,7 @@ void QmlSmokeTest::spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSign
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 2.0;
         item.m_precomputedHopSize = 1024;
-        QVERIFY(!item.advancePrecomputedCanvasLocked(1, 10, false));
+        item.noteSmoothnessAdvanceFallbackLocked(item.effectiveZoomLocked());
         state = item.debugSmoothnessProfileStateLocked();
     }
 
@@ -4985,7 +5008,7 @@ void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
     QVERIFY(item.m_ringCapacity < 20000);
 }
 
-void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
+void QmlSmokeTest::spectrogramPeakHoldColumnSpanUsesMaxNotNearest() {
     SpectrogramItem item;
     item.setWidth(100);
     item.setHeight(10);
@@ -5013,27 +5036,1121 @@ void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
 
     QVERIFY(item.precomputedReady());
 
-    // Trigger a rebuild directly so we can inspect canvas pixels.
-    // The debounce timer is still active in the test (no event loop),
-    // so m_awaitingZoomData was not consumed by feedPrecomputedChunk.
-    // Force m_renderZoomLevel to match m_zoomLevel so effectiveZoom=0.8.
+    const SpectrogramGpu::ColumnSpan peakHoldSpan =
+        SpectrogramGpu::resolveColumnSpanForPixel(40, cols, 0.8);
+    QCOMPARE(peakHoldSpan.firstColumn, 50);
+    QCOMPARE(peakHoldSpan.lastColumn, 51);
+    QCOMPARE(peakHoldSpan.interpolate, false);
+
+    const SpectrogramGpu::ColumnSpan interpolationSpan =
+        SpectrogramGpu::resolveColumnSpanForPixel(3, cols, 2.0);
+    QCOMPARE(interpolationSpan.firstColumn, 1);
+    QCOMPARE(interpolationSpan.lastColumn, 2);
+    QVERIFY(interpolationSpan.interpolate);
+    QVERIFY(interpolationSpan.interpolationT > 0.49);
+    QVERIFY(interpolationSpan.interpolationT < 0.51);
+}
+
+void QmlSmokeTest::spectrogramGpuVisibleSourceImageTracksDisplayWindow() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(10);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int cols = 150;
+    QByteArray chunk(bins * cols, '\x10');
+    for (int b = 0; b < bins; ++b) {
+        chunk[50 * bins + b] = static_cast<char>(
+            static_cast<unsigned char>(0xF0));
+    }
+
+    item.setZoomLevel(0.8);
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, cols,
+        0, cols, 48000, 1024, true,
+        true, 1, false);
+
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 0.8;
-        item.ensureMapping(10);
-        item.rebuildPrecomputedCanvasLocked(100, 10, 0, cols - 1, false);
     }
 
-    // Column 50 at columnsPerPixel=1.25:
-    //   pixel 40 -> rangeStart=50.0, rangeEnd=51.25
-    //   colFirst=50, colLast=51 -> peak-hold across cols 50-51.
-    // The bright column 50 (0xF0) is in this range, so pixel 40
-    // should be significantly brighter than pixel 0 (dark baseline).
-    QVERIFY(!item.m_canvas.isNull());
-    const QRgb brightPixel = item.m_canvas.pixel(40, 5);
-    const QRgb darkPixel = item.m_canvas.pixel(0, 5);
-    QVERIFY(qRed(brightPixel) + qGreen(brightPixel) + qBlue(brightPixel)
-            > qRed(darkPixel) + qGreen(darkPixel) + qBlue(darkPixel));
+    item.setPositionSeconds(0.0);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuSourceImage.isNull());
+        QCOMPARE(item.m_gpuSourceImage.width(), 125);
+        QCOMPARE(item.m_gpuSourceImage.height(), bins);
+
+        const QColor brightSample =
+            item.m_gpuSourceImage.pixelColor(50, 0);
+        const QColor darkSample =
+            item.m_gpuSourceImage.pixelColor(0, 0);
+        QVERIFY(qGray(brightSample.rgb()) > qGray(darkSample.rgb()));
+    }
+
+    delete node;
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+}
+
+void QmlSmokeTest::spectrogramGpuImagesUseRgbaCompatibleFormats() {
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(10);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int cols = 150;
+    QByteArray chunk(bins * cols, '\x10');
+    for (int b = 0; b < bins; ++b) {
+        chunk[50 * bins + b] = static_cast<char>(
+            static_cast<unsigned char>(0xF0));
+    }
+
+    item.setZoomLevel(0.8);
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, cols,
+        0, cols, 48000, 1024, true,
+        true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 0.8;
+        item.syncPrecomputedGpuImagesLocked(
+            100,
+            10,
+            0,
+            124,
+            false,
+            0.8,
+            std::numeric_limits<int>::max());
+        item.syncPrecomputedDisplayImageLocked(100, 10, 0, 124, false, 0.8);
+
+        QCOMPARE(item.m_gpuSourceImage.format(), QImage::Format_RGBA8888);
+
+        const QColor brightSample = item.m_gpuSourceImage.pixelColor(50, 0);
+        const QColor darkSample = item.m_gpuSourceImage.pixelColor(0, 0);
+        QVERIFY(brightSample.red() > darkSample.red());
+        QCOMPARE(brightSample.alpha(), 255);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_gpuDisplayImage.format(), QImage::Format_ARGB32_Premultiplied);
+    }
+}
+
+void QmlSmokeTest::spectrogramGpuDebugModeParsesEnvironmentValues() {
+    QCOMPARE(
+        SpectrogramGpu::parseDebugModeForTests(""),
+        SpectrogramGpu::DebugMode::Full);
+    QCOMPARE(
+        SpectrogramGpu::parseDebugModeForTests("texture-node"),
+        SpectrogramGpu::DebugMode::TextureNode);
+    QCOMPARE(
+        SpectrogramGpu::parseDebugModeForTests("shader-solid"),
+        SpectrogramGpu::DebugMode::Full);
+    QCOMPARE(
+        SpectrogramGpu::parseDebugModeForTests("shader-source"),
+        SpectrogramGpu::DebugMode::Full);
+    QCOMPARE(
+        SpectrogramGpu::parseDebugModeForTests("geometry-solid"),
+        SpectrogramGpu::DebugMode::Full);
+    QCOMPARE(
+        SpectrogramGpu::parseDebugModeForTests("full"),
+        SpectrogramGpu::DebugMode::Full);
+}
+
+void QmlSmokeTest::spectrogramGpuCompressesOversizedSourceTexture() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(16);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 1000;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 450; column < 550; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(0xF0));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true,
+        true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_gpuMaxTextureColumns = 256;
+        item.m_renderZoomLevel = 0.2;
+        item.syncPrecomputedGpuImagesLocked(
+            200,
+            16,
+            0,
+            totalColumns - 1,
+            false,
+            0.2,
+            item.m_gpuMaxTextureColumns);
+
+        QVERIFY(!item.m_gpuSourceImage.isNull());
+        QCOMPARE(item.m_gpuSourceActualColumns, totalColumns);
+        QCOMPARE(item.m_gpuSourceImage.width(), 256);
+        QCOMPARE(item.m_gpuSourceImage.height(), bins);
+
+        bool sawBrightPixel = false;
+        for (int x = 0; x < item.m_gpuSourceImage.width() && !sawBrightPixel; ++x) {
+            const QColor pixel = item.m_gpuSourceImage.pixelColor(x, 0);
+            if (pixel.red() > 0x80) {
+                sawBrightPixel = true;
+            }
+        }
+        QVERIFY2(sawBrightPixel, "Compressed GPU source image lost the bright column band");
+    }
+}
+
+void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 64;
+    constexpr int columns = 500;
+    QByteArray data(bins * columns, '\x80');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns, 48000, 1024,
+        false, true, 1, false);
+
+    item.setPositionSeconds(1.0);
+    item.setPlaying(false);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(node->childCount() >= 2);
+    QCOMPARE(node->childAtIndex(1)->type(), QSGNode::GeometryNodeType);
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramGpuTextureUploadSkipsRedundantRecreation() {
+    QQuickWindow window;
+    window.resize(200, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(200);
+    item->setHeight(100);
+    item->setDisplayMode(1); // Centered
+    item->setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int columns = 240;
+    QByteArray data(bins * columns, '\x20');
+    for (int column = 80; column < 120; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(128 + bin));
+        }
+    }
+
+    item->feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns,
+        48000, 1024, false, true, 1, false);
+    item->setPositionSeconds(1.0);
+
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(node->childCount() >= 2);
+    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    QVERIFY(textureNode != nullptr);
+    QSGTexture *initialTexture = textureNode->texture();
+    QVERIFY(initialTexture != nullptr);
+
+    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
+    QVERIFY(updatedTextureNode != nullptr);
+    QVERIFY(updatedTextureNode->texture() == initialTexture);
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
+    QQuickWindow window;
+    window.resize(200, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    auto *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(8);
+    item->setHeight(6);
+    item->setDisplayMode(0); // Rolling
+    item->setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 12;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 8 + bin));
+        }
+    }
+
+    item->feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item->m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item->m_positionAnchorSeconds = item->m_positionSeconds;
+        item->m_positionAnchorUpdatedAt = now;
+        item->m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    QVERIFY(textureNode != nullptr);
+    QSGTexture *initialTexture = textureNode->texture();
+    QVERIFY(initialTexture != nullptr);
+
+    QByteArray nextChunk(bins, '\x00');
+    for (int bin = 0; bin < bins; ++bin) {
+        nextChunk[bin] = static_cast<char>(static_cast<unsigned char>(220 + bin));
+    }
+
+    item->feedPrecomputedChunk(
+        nextChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item->m_positionSeconds =
+            ((static_cast<double>(initialColumns) + 0.25) * 1024.0) / 48000.0;
+        item->m_positionAnchorSeconds = item->m_positionSeconds;
+        item->m_positionAnchorUpdatedAt = now;
+        item->m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
+    QVERIFY(updatedTextureNode != nullptr);
+    QVERIFY2(
+        updatedTextureNode->texture() == initialTexture,
+        "rolling GPU updates should reuse the same scene-graph texture object");
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingFullModeSkipsGpuSourceCacheUpdates() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+
+    SpectrogramItem item;
+    item.setWidth(8);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 12;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 8 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    quint64 initialSourceGeneration = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        initialSourceGeneration = item.m_gpuSourceGeneration;
+    }
+
+    QByteArray nextChunk(bins, '\x00');
+    for (int bin = 0; bin < bins; ++bin) {
+        nextChunk[bin] = static_cast<char>(static_cast<unsigned char>(220 + bin));
+    }
+
+    item.feedPrecomputedChunk(
+        nextChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(
+            item.m_gpuSourceGeneration,
+            initialSourceGeneration);
+        QVERIFY2(
+            item.m_gpuDisplayLastUpdateWasIncremental,
+            "full renderer should advance the display cache without rebuilding the rolling source cache");
+    }
+
+    delete node;
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+}
+
+void QmlSmokeTest::spectrogramCenteredFullModeSkipsGpuSourceCacheUpdates() {
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+
+    SpectrogramItem item;
+    item.setWidth(8);
+    item.setHeight(6);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 64;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 3 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds = (10.25 * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    quint64 initialSourceGeneration = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        initialSourceGeneration = item.m_gpuSourceGeneration;
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds = (11.25 * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_gpuSourceGeneration, initialSourceGeneration);
+        QVERIFY2(
+            item.m_gpuDisplayLastUpdateWasIncremental,
+            "centered full mode should advance the display cache without rebuilding the source cache");
+    }
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingGpuSourceCacheAdvancesIncrementally() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+
+    SpectrogramItem item;
+    item.setWidth(8);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 12;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 8 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QImage initialSource;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuSourceImage.isNull());
+        initialSource = item.m_gpuSourceImage.copy();
+    }
+
+    QByteArray nextChunk(bins, '\x00');
+    for (int bin = 0; bin < bins; ++bin) {
+        nextChunk[bin] = static_cast<char>(static_cast<unsigned char>(220 + bin));
+    }
+
+    item.feedPrecomputedChunk(
+        nextChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            item.m_gpuSourceLastUpdateWasIncremental,
+            "rolling source cache should shift/repaint incrementally for a one-column advance");
+        QCOMPARE(item.m_gpuSourceLastShiftColumns, 1);
+        QCOMPARE(item.m_gpuSourceLastUpdatedColumns, 1);
+        QVERIFY(!item.m_gpuSourceImage.isNull());
+        QCOMPARE(item.m_gpuSourceImage.width(), initialSource.width());
+        QCOMPARE(item.m_gpuSourceImage.height(), initialSource.height());
+        for (int y = 0; y < initialSource.height(); ++y) {
+            for (int x = 0; x < initialSource.width() - 1; ++x) {
+                QCOMPARE(
+                    item.m_gpuSourceImage.pixelColor(x, y),
+                    initialSource.pixelColor(x + 1, y));
+            }
+        }
+    }
+
+    delete node;
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+}
+
+void QmlSmokeTest::spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+
+    SpectrogramItem item;
+    item.setWidth(8);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 20;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 4 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(7) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    quint64 initialDisplayGeneration = 0;
+    QImage initialDisplay;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        initialDisplayGeneration = item.m_gpuDisplayGeneration;
+        initialDisplay = item.m_gpuDisplayImage.copy();
+    }
+
+    QByteArray nextChunk(bins * 4, '\x00');
+    for (int column = 0; column < 4; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(200 + column * 4 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        nextChunk, bins, 0, 4,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_gpuDisplayGeneration, initialDisplayGeneration);
+        QCOMPARE(item.m_gpuDisplayImage, initialDisplay);
+        QVERIFY2(
+            !item.m_gpuDisplayLastUpdateWasIncremental,
+            "offscreen write-head growth should not touch the visible rolling display cache");
+    }
+
+    delete node;
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+}
+
+void QmlSmokeTest::spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth() {
+    SpectrogramItem item;
+    item.setWidth(8);
+    item.setHeight(6);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 32;
+    constexpr int totalColumns = 256;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 4 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, totalColumns, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds = (10.25 * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    quint64 initialDisplayGeneration = 0;
+    QImage initialDisplay;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        initialDisplayGeneration = item.m_gpuDisplayGeneration;
+        initialDisplay = item.m_gpuDisplayImage.copy();
+    }
+
+    QByteArray nextChunk(bins * 8, '\x00');
+    for (int column = 0; column < 8; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(180 + column * 4 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        nextChunk, bins, 0, 8,
+        initialColumns, totalColumns, 48000, 1024, false, false, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_gpuDisplayGeneration, initialDisplayGeneration);
+        QCOMPARE(item.m_gpuDisplayImage, initialDisplay);
+        QVERIFY2(
+            !item.m_gpuDisplayLastUpdateWasIncremental,
+            "offscreen centered decode growth should not touch a fully covered visible cache");
+    }
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingGpuDisplayCacheAdvancesIncrementally() {
+    SpectrogramItem item;
+    item.setWidth(8);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 12;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 8 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QImage initialDisplay;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        initialDisplay = item.m_gpuDisplayImage.copy();
+    }
+
+    QByteArray nextChunk(bins, '\x00');
+    for (int bin = 0; bin < bins; ++bin) {
+        nextChunk[bin] = static_cast<char>(static_cast<unsigned char>(220 + bin));
+    }
+
+    item.feedPrecomputedChunk(
+        nextChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            item.m_gpuDisplayLastUpdateWasIncremental,
+            "rolling display cache should shift/repaint incrementally for a one-column advance");
+        QCOMPARE(item.m_gpuDisplayLastShiftPixels, 1);
+        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 1);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_gpuDisplayImage.width(), initialDisplay.width());
+        QCOMPARE(item.m_gpuDisplayImage.height(), initialDisplay.height());
+        for (int y = 0; y < initialDisplay.height(); ++y) {
+            for (int x = 0; x < initialDisplay.width() - 1; ++x) {
+                QCOMPARE(
+                    item.m_gpuDisplayImage.pixelColor(x, y),
+                    initialDisplay.pixelColor(x + 1, y));
+            }
+        }
+    }
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramCenteredGpuDisplayCacheAdvancesIncrementally() {
+    SpectrogramItem item;
+    item.setWidth(8);
+    item.setHeight(6);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 64;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(16 + column * 3 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds = (10.25 * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QImage initialDisplay;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        initialDisplay = item.m_gpuDisplayImage.copy();
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds = (11.25 * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            item.m_gpuDisplayLastUpdateWasIncremental,
+            "centered display cache should shift/repaint incrementally for a one-column advance");
+        QCOMPARE(item.m_gpuDisplayLastShiftPixels, 1);
+        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 1);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_gpuDisplayImage.width(), initialDisplay.width());
+        QCOMPARE(item.m_gpuDisplayImage.height(), initialDisplay.height());
+        for (int y = 0; y < initialDisplay.height(); ++y) {
+            for (int x = 0; x < initialDisplay.width() - 1; ++x) {
+                QCOMPARE(
+                    item.m_gpuDisplayImage.pixelColor(x, y),
+                    initialDisplay.pixelColor(x + 1, y));
+            }
+        }
+    }
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisiblePixels() {
+    QQuickWindow window;
+    window.resize(200, 100);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(200);
+    item->setHeight(100);
+    item->setDisplayMode(1); // Centered
+
+    constexpr int bins = 64;
+    constexpr int columns = 200;
+    QByteArray data(bins * columns, '\x00');
+    for (int column = 0; column < columns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            const int base = 96 + (column * 96) / std::max(1, columns - 1);
+            const int ripple = (bin * 48) / std::max(1, bins - 1);
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(std::min(255, base + ripple)));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns, 48000, 1024,
+        false, true, 1, false);
+    item->setPositionSeconds(2.0);
+    item->setPlaying(false);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    int visiblePixels = 0;
+    for (int y = 0; y < frame.height(); ++y) {
+        for (int x = 0; x < frame.width(); ++x) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
+                visiblePixels += 1;
+            }
+        }
+    }
+    QVERIFY2(
+        visiblePixels > 15000,
+        "GPU spectrogram capture should show the spectrogram body, not just a thin line");
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCaptureShowsTextureNodeDebugStage() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>((column + bin) % 256);
+        }
+    }
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, false, true, 31);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    int visiblePixels = 0;
+    for (int y = 0; y < frame.height(); ++y) {
+        for (int x = 0; x < frame.width(); ++x) {
+            const QColor color = frame.pixelColor(x, y);
+            if (color.red() > 10 || color.green() > 10 || color.blue() > 10) {
+                visiblePixels += 1;
+            }
+        }
+    }
+    QVERIFY2(visiblePixels > 0, "texture-node debug stage should render visible pixels");
+
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays() {
+    QQuickWindow window;
+    window.resize(240, 140);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(240);
+    item->setHeight(140);
+    item->setDisplayMode(1); // Centered
+    item->setGridEnabled(false);
+    item->setCrosshairEnabled(false);
+    item->setShowFpsOverlay(false);
+    item->setPlaying(false);
+
+    constexpr int bins = 64;
+    constexpr int columns = 240;
+    QByteArray data(bins * columns, '\x00');
+    for (int column = 90; column < 150; ++column) {
+        for (int bin = 20; bin < 44; ++bin) {
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(0xF0));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns, 48000, 1024,
+        false, true, 1, false);
+    item->setPositionSeconds(2.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    bool sawSpectrogramPixel = false;
+    for (int y = 20; y < frame.height() - 20 && !sawSpectrogramPixel; ++y) {
+        for (int x = 20; x < frame.width() - 20; ++x) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
+                sawSpectrogramPixel = true;
+                break;
+            }
+        }
+    }
+
+    QVERIFY2(sawSpectrogramPixel, "Spectrogram content remained black without overlays");
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels() {
+    QQuickWindow window;
+    window.resize(1126, 214);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(1126);
+    item->setHeight(214);
+    item->setDisplayMode(1); // Centered
+    item->setGridEnabled(false);
+    item->setCrosshairEnabled(false);
+    item->setShowFpsOverlay(false);
+    item->setPlaying(false);
+
+    constexpr int bins = 256;
+    constexpr int columns = 9000;
+    QByteArray data(bins * columns, '\x00');
+    for (int column = 4300; column < 4400; ++column) {
+        for (int bin = 40; bin < 180; ++bin) {
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(0xE0));
+        }
+    }
+
+    item->setZoomLevel(static_cast<double>(item->width()) / static_cast<double>(columns));
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns, 48000, 1024,
+        true, true, 1, false);
+    item->setPositionSeconds(96.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(100);
+    QCoreApplication::processEvents();
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    bool sawSpectrogramPixel = false;
+    for (int y = 10; y < frame.height() - 10 && !sawSpectrogramPixel; ++y) {
+        for (int x = 10; x < frame.width() - 10; ++x) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
+                sawSpectrogramPixel = true;
+                break;
+            }
+        }
+    }
+
+    QVERIFY2(sawSpectrogramPixel, "Large centered GPU spectrogram capture remained black");
+}
+
+void QmlSmokeTest::spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(false);
+
+    constexpr int bins = 8;
+    constexpr int firstChunkColumns = 900;
+    constexpr int totalColumns = 8000;
+
+    QByteArray firstChunk(bins * firstChunkColumns, '\x00');
+    for (int column = 300; column < 500; ++column) {
+        for (int bin = 2; bin < 6; ++bin) {
+            firstChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(0xE0));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        firstChunk, bins, 0, firstChunkColumns, 0, totalColumns,
+        48000, 1024, false, true, 1, false);
+    item.setPositionSeconds(9.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QImage cachedDisplayImage;
+    qint64 cachedDisplayLeft = -1;
+    qint64 cachedDisplayRight = -1;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        cachedDisplayImage = item.m_gpuDisplayImage.copy();
+        cachedDisplayLeft = item.m_precomputedCanvasDisplayLeft;
+        cachedDisplayRight = item.m_precomputedCanvasDisplayRight;
+    }
+
+    const int secondChunkColumns = totalColumns - firstChunkColumns;
+    QByteArray secondChunk(bins * secondChunkColumns, '\x10');
+    item.feedPrecomputedChunk(
+        secondChunk, bins, 0, secondChunkColumns, firstChunkColumns, totalColumns,
+        48000, 1024, true, false, 1, false);
+
+    item.setPositionSeconds(9.0);
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, cachedDisplayLeft);
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, cachedDisplayRight);
+        QCOMPARE(item.m_gpuDisplayImage, cachedDisplayImage);
+    }
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
@@ -5059,17 +6176,22 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
         true, 1, true);
     QVERIFY(item.m_precomputedReady);
 
-    // Trigger a rebuild so the canvas exists — the real flow does
-    // this on the next paint, but QtTest has no event loop.  The
-    // hop-change detector only arms m_zoomFillActive when a canvas
-    // is already present.
+    // Prime the GPU cache so the hop-change detector has an old frame
+    // to preserve across the zoom restart.
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 1.0;
         item.ensureMapping(720);
-        item.rebuildPrecomputedCanvasLocked(3440, 720, 0, 3439, false);
+        item.syncPrecomputedGpuImagesLocked(
+            3440,
+            720,
+            0,
+            3439,
+            false,
+            1.0,
+            std::numeric_limits<int>::max());
     }
-    QVERIFY(!item.m_canvas.isNull());
+    QVERIFY(!item.m_gpuSourceImage.isNull());
     QCOMPARE(item.m_zoomFillActive, false);
 
     // Zoom-out restart: the backend decimates to hop=2996 and the
@@ -5091,7 +6213,7 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     QVERIFY(item.m_precomputedCanvasDirty);
 }
 
-void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
+void QmlSmokeTest::spectrogramSyntheticClearPreservesGpuCacheDuringSeek() {
     // Regression: a seek outside the decoded window emits a synthetic
     // clear chunk (cols=0, bins=0, clear_history=true) that wipes the
     // ring and invalidates the canvas.  Without canvas preservation,
@@ -5114,15 +6236,22 @@ void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
         true, 7, true);
     QVERIFY(item.m_precomputedReady);
 
-    // Build a canvas directly with a valid display range — the real
+    // Build the GPU cache directly with a valid display range — the real
     // flow does this via updatePaintNode but QtTest has no event loop.
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 1.0;
         item.ensureMapping(400);
-        item.rebuildPrecomputedCanvasLocked(1920, 400, 0, 1919, false);
+        item.syncPrecomputedGpuImagesLocked(
+            1920,
+            400,
+            0,
+            1919,
+            false,
+            1.0,
+            std::numeric_limits<int>::max());
     }
-    QVERIFY(!item.m_canvas.isNull());
+    QVERIFY(!item.m_gpuSourceImage.isNull());
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(1919));
 
@@ -5140,15 +6269,15 @@ void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
     QCOMPARE(item.m_precomputedMaxColumnIndex, -1);
     QVERIFY(item.m_awaitingWorkerReset);
 
-    // Canvas and its display range are preserved, freeze is armed.
-    QVERIFY(!item.m_canvas.isNull());
+    // The GPU cache and its display range are preserved, freeze is armed.
+    QVERIFY(!item.m_gpuSourceImage.isNull());
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(1919));
     QVERIFY(item.m_precomputedReady);
     QCOMPARE(item.m_zoomFillActive, true);
 }
 
-void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() {
+void QmlSmokeTest::spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent() {
     // When there's no canvas to preserve (first track load, rolling
     // mode, or the display range was already invalid), the synthetic
     // clear must still wipe everything and invalidate — the freeze
@@ -5158,7 +6287,7 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() 
     item.setHeight(400);
     item.setDisplayMode(1);
 
-    // No rebuild → canvas stays null.  Still send some data so
+    // No paint/cache sync yet → GPU cache stays null.  Still send some data so
     // m_precomputedReady could be true, which would be misleading
     // after the clear.
     QByteArray chunk(100 * 4, '\x40');
@@ -5166,14 +6295,14 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() 
         chunk, 4, 0, 100,
         0, 10064, 44100, 1024, false,
         true, 7, true);
-    QVERIFY(item.m_canvas.isNull());
+    QVERIFY(item.m_gpuSourceImage.isNull());
 
     item.feedPrecomputedChunk(
         QByteArray(), 0, 0, 0,
         0, 0, 0, 0, false,
         true, 7, true);
 
-    QVERIFY(item.m_canvas.isNull());
+    QVERIFY(item.m_gpuSourceImage.isNull());
     QCOMPARE(item.m_precomputedReady, false);
     QCOMPARE(item.m_zoomFillActive, false);
     QCOMPARE(item.m_precomputedCanvasDisplayRight,

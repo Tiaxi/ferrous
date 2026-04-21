@@ -2,12 +2,16 @@
 
 #include "SpectrogramItem.h"
 
+#include "SpectrogramGpuRenderer.h"
 #include "SpectrogramSeekTrace.h"
 
+#include <QDir>
 #include <QFontMetrics>
 #include <QDateTime>
 #include <QHoverEvent>
 #include <QMouseEvent>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QWheelEvent>
 #include <QMutexLocker>
 #include <QPainter>
@@ -17,10 +21,13 @@
 #include <QSGSimpleTextureNode>
 #include <QSGTexture>
 #include <QString>
+#include <QStandardPaths>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -42,7 +49,6 @@ constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
 // data-driven release always wins, while still being short enough to
 // recover if the backend never sends a reset (e.g. stream interruption).
 constexpr double kPositionJumpHoldTimeoutSeconds = 2.0;
-constexpr int kMaxTileFragments = 96;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 constexpr qint64 kSeekTraceWindowMs = 1800;
 constexpr qint64 kSmoothnessWindowMs = 2000;
@@ -50,6 +56,47 @@ constexpr qint64 kSmoothnessIdleMs = 450;
 #endif
 const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
+std::atomic<int> g_gpuSpectrogramPaintLogBudget{12};
+std::atomic<int> g_gpuDebugStageLogBudget{24};
+
+int readNonNegativeEnvInt(const char *key, int fallback) {
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue(key, &ok);
+    if (!ok || value < 0) {
+        return fallback;
+    }
+    return value;
+}
+
+struct DebugFrameStats {
+    int nonBlackPixels{0};
+    double averageLuma{0.0};
+};
+
+DebugFrameStats analyzeDebugFrame(const QImage &image) {
+    DebugFrameStats stats;
+    if (image.isNull()) {
+        return stats;
+    }
+
+    qint64 lumaSum = 0;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const QColor color = image.pixelColor(x, y);
+            const int luma = (2126 * color.red() + 7152 * color.green() + 722 * color.blue()) / 10000;
+            lumaSum += luma;
+            if (luma > 8) {
+                stats.nonBlackPixels += 1;
+            }
+        }
+    }
+
+    const qint64 pixelCount = static_cast<qint64>(image.width()) * static_cast<qint64>(image.height());
+    if (pixelCount > 0) {
+        stats.averageLuma = static_cast<double>(lumaSum) / static_cast<double>(pixelCount);
+    }
+    return stats;
+}
 
 double linearInterpolate(double y1, double y2, double mu) {
     return y1 * (1.0 - mu) + y2 * mu;
@@ -115,32 +162,26 @@ bool smoothnessLooksIncident(
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
-        tilesRoot = new QSGNode();
-        latest = new QSGSimpleTextureNode();
+        spectrogramTexture = new QSGSimpleTextureNode();
+        spectrogramTailTexture = new QSGSimpleTextureNode();
         playhead = new QSGSimpleRectNode();
         freqGridOverlay = new QSGSimpleTextureNode();
         timeGridOverlay = new QSGSimpleTextureNode();
         crosshairOverlay = new QSGSimpleTextureNode();
         overlay = new QSGSimpleTextureNode();
         appendChildNode(background);
-        appendChildNode(tilesRoot);
-        appendChildNode(latest);
+        appendChildNode(spectrogramTexture);
+        appendChildNode(spectrogramTailTexture);
         appendChildNode(playhead);
         appendChildNode(freqGridOverlay);
         appendChildNode(timeGridOverlay);
         appendChildNode(crosshairOverlay);
         appendChildNode(overlay);
-        // Visible segments can outnumber source tiles when the ring buffer wraps inside a tile.
-        tileFragments.reserve(kMaxTileFragments);
-        for (int i = 0; i < kMaxTileFragments; ++i) {
-            auto *tileNode = new QSGSimpleTextureNode();
-            tilesRoot->appendChildNode(tileNode);
-            tileFragments.push_back(tileNode);
-        }
     }
 
     ~SpectrogramSceneNode() override {
-        qDeleteAll(tileTextures);
+        delete spectrogramTextureResource;
+        delete spectrogramTailTextureResource;
         delete overlayTexture;
         delete freqGridOverlayTexture;
         delete timeGridOverlayTexture;
@@ -149,20 +190,25 @@ struct SpectrogramSceneNode final : public QSGNode {
     }
 
     QSGSimpleRectNode *background{nullptr};
-    QSGNode *tilesRoot{nullptr};
-    QSGSimpleTextureNode *latest{nullptr};
+    QSGSimpleTextureNode *spectrogramTexture{nullptr};
+    QSGSimpleTextureNode *spectrogramTailTexture{nullptr};
     QSGSimpleRectNode *playhead{nullptr};
     QSGSimpleTextureNode *freqGridOverlay{nullptr};
     QSGSimpleTextureNode *timeGridOverlay{nullptr};
     QSGSimpleTextureNode *crosshairOverlay{nullptr};
     QSGSimpleTextureNode *overlay{nullptr};
-    QVector<QSGSimpleTextureNode *> tileFragments;
-    QVector<QSGTexture *> tileTextures;
+    QSGTexture *spectrogramTextureResource{nullptr};
+    QSGTexture *spectrogramTailTextureResource{nullptr};
     QSGTexture *overlayTexture{nullptr};
     QSGTexture *freqGridOverlayTexture{nullptr};
     QSGTexture *timeGridOverlayTexture{nullptr};
     QSGTexture *crosshairOverlayTexture{nullptr};
     QSGTexture *placeholderTexture{nullptr};
+    quint64 spectrogramTextureGeneration{0};
+    SpectrogramGpu::DebugMode spectrogramTextureDebugMode{
+        SpectrogramGpu::DebugMode::Full};
+    bool spectrogramTextureUploaded{false};
+    int spectrogramTextureScrollPixels{0};
     quintptr ownerWindowId{0};
     quint64 generation{0};
 };
@@ -196,6 +242,7 @@ void configureTextureNode(
     node->setRect(target);
     node->setSourceRect(QRectF(source));
 }
+
 QString formatFrequencyLabel(double hz) {
     if (hz < 0.0) {
         return {};
@@ -339,6 +386,11 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
 #endif
     m_showFpsOverlay = m_forceFpsOverlay;
+    m_gpuDumpFramesRemaining = readNonNegativeEnvInt("FERROUS_GPU_DUMP_FRAMES", 0);
+    m_gpuDumpDirectory = qEnvironmentVariable(
+        "FERROUS_GPU_DUMP_DIR",
+        QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+            .filePath(QStringLiteral("ferrous-gpu-dumps")));
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
@@ -742,7 +794,6 @@ void SpectrogramItem::setChannelMuted(bool muted) {
     emit channelMutedChanged();
     {
         QMutexLocker lock(&m_stateMutex);
-        markAllTilesDirtyLocked();
         m_canvasDirty = true;
         m_precomputedCanvasDirty = true;
     }
@@ -943,7 +994,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (hopSize > 0
         && hopSize != m_precomputedHopSize
         && m_displayMode == 1
-        && !m_canvas.isNull()) {
+        && (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())) {
         m_zoomFillActive = true;
     }
 
@@ -972,7 +1023,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         // the brief interval; readiness clears once the new session
         // has produced enough columns to cover the new display range.
         const bool preserveCanvasForSeek =
-            !m_canvas.isNull()
+            (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())
             && m_displayMode == 1
             && m_precomputedCanvasDisplayRight
                 >= m_precomputedCanvasDisplayLeft
@@ -1383,45 +1434,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     m_precomputedLastRightCol = -1;
 
-    if (m_displayMode == 1
-        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
-        && !m_canvas.isNull()
-        && m_precomputedBinsPerColumn > 0) {
-        // Centered mode with existing canvas: draw new columns in-place
-        // using the same column-to-pixel mapping as the rebuild path.
-        // This avoids costly full rebuilds (20-50 ms at 3440x719) while
-        // the growing edge fills in during initial decode.
-        const qint32 chunkEnd =
-            static_cast<qint32>(startIndex) + columns - 1;
-        const qint32 dispL =
-            static_cast<qint32>(m_precomputedCanvasDisplayLeft);
-        const qint32 dispR =
-            static_cast<qint32>(m_precomputedCanvasDisplayRight);
-        const bool overlapsVisible =
-            static_cast<qint32>(startIndex) <= dispR
-            && chunkEnd >= dispL;
-        if (overlapsVisible) {
-            const auto dbRemap = buildPrecomputedDbRemapLocked();
-            const double ez = effectiveZoomLocked();
-            for (qint32 col = std::max(static_cast<qint32>(startIndex), dispL);
-                 col <= std::min(chunkEnd, dispR); ++col) {
-                // Use the rebuild's mapping (inverted): px = (col - dispL) * ez.
-                // This matches rebuildPrecomputedCanvasLocked's
-                // colFirst = displayLeft + floor(px / ez), ensuring no gaps.
-                const int px = static_cast<int>(
-                    static_cast<double>(col - dispL) * ez);
-                if (px >= 0 && px < m_canvas.width()) {
-                    drawPrecomputedColumnAtLocked(
-                        px, static_cast<qint64>(col), false, dbRemap);
-                }
-            }
-        }
-    } else if (m_displayMode == 0
-        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
-        // Rolling mode with existing canvas: the advance path handles
-        // new data incrementally.  Avoid forcing a full rebuild on every
-        // chunk, which is the primary cause of FPS drops during playback.
-    } else {
+    if (m_precomputedCanvasDisplayRight < m_precomputedCanvasDisplayLeft) {
         // No canvas range yet (first data after reset) — force build.
         m_precomputedCanvasDirty = true;
     }
@@ -1669,9 +1682,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_timeGridDirty = true;
     // During a zoom fill, preserve the old canvas so updatePaintNode
     // can keep showing it while the ring refills at the new hop.
-    if (m_zoomFillActive && !m_canvas.isNull()) {
-        // Keep old canvas — canvasFreeze in updatePaintNode will
-        // prevent rebuild/advance until the ring covers the display.
+    if (m_zoomFillActive && (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())) {
+        // Keep the last GPU cache alive while the ring refills. The
+        // next paint freezes against this cached image until the new
+        // session covers the visible display.
     } else {
         invalidateCanvas();
     }
@@ -1867,6 +1881,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     auto *node = static_cast<SpectrogramSceneNode *>(oldNode);
     QQuickWindow *currentWindow = window();
     const quintptr windowId = reinterpret_cast<quintptr>(currentWindow);
+    bool nodeRecreated = false;
     if (node != nullptr
         && (node->ownerWindowId != windowId || node->generation != m_sceneGraphGeneration)) {
         delete node;
@@ -1876,6 +1891,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         node = new SpectrogramSceneNode();
         node->ownerWindowId = windowId;
         node->generation = m_sceneGraphGeneration;
+        nodeRecreated = true;
     }
     if (node->placeholderTexture == nullptr && currentWindow != nullptr) {
         node->placeholderTexture = currentWindow->createTextureFromImage(placeholderImage());
@@ -1886,21 +1902,27 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
+    const SpectrogramGpu::DebugMode gpuDebugMode = SpectrogramGpu::currentDebugMode();
     node->background->setRect(0.0, 0.0, static_cast<double>(w), static_cast<double>(h));
     node->background->setColor(kBackgroundColor);
+    // Force the opaque underlay to repaint on every sync. Transparent overlay
+    // textures and the moving playhead rely on a fresh background in retained
+    // scene-graph backends; otherwise old pixels can survive as smear trails.
+    node->background->markDirty(QSGNode::DirtyGeometry | QSGNode::DirtyMaterial);
 
-    bool hasCanvas = false;
-    QSize canvasSize;
-    int drawCols = 0;
-    int srcStart = 0;
-    int latestX = 0;
-    double scrollOffset = 0.0;
     double drawX = 0.0;
+    int drawPixels = 0;
+    bool showSpectrogram = false;
+    bool spectrogramTextureChanged = false;
+    quint64 spectrogramImageGeneration = 0;
+    SpectrogramGpu::DebugMode spectrogramImageDebugMode = gpuDebugMode;
+    QRectF spectrogramTargetRect;
+    QRect spectrogramSourceRect;
+    QImage spectrogramNodeImage;
+    bool spectrogramRollingIncrementalScroll = false;
+    int spectrogramRollingShiftPixels = 0;
     bool showPlayhead = false;
     QRectF playheadRect;
-    QVector<QImage> tileImages;
-    QVector<int> tileDirtyIndexes;
-    int tileCount = 0;
     bool showOverlay = false;
     bool overlayChanged = false;
     QImage overlayImage;
@@ -1922,6 +1944,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QImage crosshairOverlayImage;
     QSize crosshairOverlaySize;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    double profileCacheSyncMs = 0.0;
+    double profileOverlayBuildMs = 0.0;
+    double profileSpectrogramTextureUploadMs = 0.0;
+    double profileOverlayTextureUploadMs = 0.0;
+    bool profileUsedFullSpectrogramUpload = false;
+    bool profileUsedTailSpectrogramUpload = false;
+    int profileTailUploadWidth = 0;
+    bool profileOverlayTextureUploaded = false;
+    bool profileFreqGridTextureUploaded = false;
+    bool profileTimeGridTextureUploaded = false;
+    bool profileCrosshairTextureUploaded = false;
     size_t profilePendingColumns = 0;
     size_t profileColumnCount = 0;
     int profileBinsPerColumn = 0;
@@ -2168,114 +2201,126 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 w,
                 static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
 
-            const bool hasCanvasRange =
-                m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
-            const bool rangeChanged =
-                !hasCanvasRange
-                || displayLeft != m_precomputedCanvasDisplayLeft
-                || (visibleCols > 0
-                    ? displayLeft + static_cast<qint64>(visibleCols) - 1
-                    : displayLeft - 1) != m_precomputedCanvasDisplayRight
-                || rollingMode != m_precomputedCanvasRolling;
-            const bool needsFullRebuild =
-                visibleCols > 0
-                && (m_canvas.isNull()
-                    || m_canvas.width() != w
-                    || m_canvas.height() != h
-                    || rollingMode != m_precomputedCanvasRolling
-                    || !hasCanvasRange
-                    || displayLeft < m_precomputedCanvasDisplayLeft
-                    || displayRight < m_precomputedCanvasDisplayRight
-                    || std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) > 0.001);
+            const bool haveFreezeCache =
+                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                    ? !m_gpuSourceImage.isNull()
+                    : (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull());
+            const bool rendererFreeze =
+                m_zoomFillActive
+                && haveFreezeCache
+                && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
 
-            // During a zoom fill, keep the old canvas visible.
-            // m_zoomFillActive is independent of m_awaitingZoomData.
-            const bool canvasFreeze =
-                m_zoomFillActive && !m_canvas.isNull()
-                && m_precomputedCanvasDisplayRight
-                    >= m_precomputedCanvasDisplayLeft;
+            if (rollingMode) {
+                drawPixels = gpuDrawWidthForSourceColumnsLocked(
+                    w, displayLeft, displayRight, effectiveZoom);
+                drawX = static_cast<double>(w - drawPixels) - columnPhase * effectiveZoom;
+            } else {
+                const qint64 decodedRightEdge =
+                    m_precomputedMaxColumnIndex >= 0
+                        ? static_cast<qint64>(m_precomputedMaxColumnIndex)
+                        : static_cast<qint64>(-1);
+                const qint64 totalColsForScroll = std::max(
+                    m_precomputedMaxColumnIndex >= 0
+                        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                        : static_cast<qint64>(0),
+                    std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                             static_cast<qint64>(1)));
+                const qint64 displaySpan = displayRight - displayLeft + 1;
+                const bool nearFullTrack =
+                    totalColsForScroll > 0
+                    && displaySpan * 100 / totalColsForScroll >= 90;
+                const bool eofClampedToDecodedContent =
+                    decodedRightEdge >= 0 && displayRight >= decodedRightEdge;
+                const bool centeredScrolling =
+                    !nearFullTrack
+                    && displayLeft > 0
+                    && !eofClampedToDecodedContent
+                    && displayRight < totalColsForScroll - 1;
+                drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
+                drawPixels = gpuDrawWidthForSourceColumnsLocked(
+                    w, displayLeft, displayRight, effectiveZoom);
+            }
 
-            if (visibleCols > 0 && !canvasFreeze) {
-                if (needsFullRebuild || m_precomputedCanvasDirty) {
-                    rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
-                } else if (rangeChanged) {
-                    // At sub-1.0 zoom, multiple source columns map to each
-                    // pixel.  Small column shifts don't produce visible
-                    // changes — skip the expensive full rebuild until the
-                    // accumulated shift reaches at least one pixel.
-                    const double pixelShift = std::abs(
-                        static_cast<double>(displayLeft - m_precomputedCanvasDisplayLeft))
-                        * effectiveZoom;
-                    if (effectiveZoom < 0.999 && pixelShift < 1.0) {
-                        // Old canvas is still close enough — skip.
-                    } else if (!advancePrecomputedCanvasLocked(displayLeft, displayRight, rollingMode)) {
-                        rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
-                    }
+            const bool needsSourceCache =
+                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
+
+            if (visibleCols > 0 && !rendererFreeze) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                const auto syncStart = std::chrono::steady_clock::now();
+#endif
+                if (needsSourceCache) {
+                    const int maxTextureColumns = gpuMaxTextureColumns(currentWindow);
+                    syncPrecomputedGpuImagesLocked(
+                        w, h, displayLeft, displayRight, rollingMode, effectiveZoom, maxTextureColumns);
                 }
+                syncPrecomputedDisplayImageLocked(
+                    drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileCacheSyncMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - syncStart).count();
+#endif
                 m_precomputedLastRightCol = nowCol;
                 m_precomputedLastDisplaySeq = rollingMode
                     ? displayRight
                     : static_cast<qint64>(nowCol);
             }
 
-            if (!m_canvas.isNull() && m_canvasFilledCols > 0) {
-                hasCanvas = true;
-                canvasSize = m_canvas.size();
-                drawCols = std::min(m_canvasFilledCols, canvasSize.width());
-                srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
-                scrollOffset = columnPhase * effectiveZoom;
-                if (rollingMode) {
-                    drawX = static_cast<double>(w - drawCols) - columnPhase * effectiveZoom;
-                } else {
-                    const qint64 decodedRightEdge =
-                        m_precomputedMaxColumnIndex >= 0
-                            ? static_cast<qint64>(m_precomputedMaxColumnIndex)
-                            : static_cast<qint64>(-1);
-                    const qint64 totalColsForScroll = std::max(
-                        m_precomputedMaxColumnIndex >= 0
-                            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                            : static_cast<qint64>(0),
-                        std::max(static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                                 static_cast<qint64>(1)));
-                    // Disable smooth sub-pixel scrolling when the display
-                    // covers most of the track (near full-song zoom).  At
-                    // these zoom levels the entire spectrogram is visible
-                    // and the sub-pixel canvas shift makes it visually
-                    // "swim" instead of staying static with the playhead
-                    // moving across it.
-                    const qint64 displaySpan = displayRight - displayLeft + 1;
-                    const bool nearFullTrack =
-                        totalColsForScroll > 0
-                        && displaySpan * 100 / totalColsForScroll >= 90;
-                    const bool eofClampedToDecodedContent =
-                        decodedRightEdge >= 0 && displayRight >= decodedRightEdge;
-                    const bool centeredScrolling =
-                        !nearFullTrack
-                        && displayLeft > 0
-                        && !eofClampedToDecodedContent
-                        && displayRight < totalColsForScroll - 1;
-                    drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
+            const bool haveSelectedSpectrogramImage =
+                (gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode)
+                    ? !m_gpuSourceImage.isNull()
+                    : !m_gpuDisplayImage.isNull();
+
+            if (haveSelectedSpectrogramImage && drawPixels > 0) {
+                if (m_gpuDisplayImage.isNull()) {
+                    syncPrecomputedDisplayImageLocked(
+                        drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
                 }
-                latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
-                tileCount = static_cast<int>(m_dirtyTiles.size());
-                const bool refreshAllTiles = node->tileTextures.size() != tileCount;
-                tileImages.reserve(tileCount);
-                tileDirtyIndexes.reserve(tileCount);
-                for (int tileIndex = 0; tileIndex < tileCount; ++tileIndex) {
-                    if (!refreshAllTiles
-                        && !m_dirtyTiles[static_cast<size_t>(tileIndex)]
-                        && node->tileTextures.value(tileIndex) != nullptr) {
-                        continue;
-                    }
-                    const int tileStart = tileIndex * kCanvasTileWidth;
-                    const int tileWidth = std::min(kCanvasTileWidth, canvasSize.width() - tileStart);
-                    if (tileWidth <= 0) {
-                        continue;
-                    }
-                    tileDirtyIndexes.push_back(tileIndex);
-                    tileImages.push_back(m_canvas.copy(tileStart, 0, tileWidth, canvasSize.height()));
-                    m_dirtyTiles[static_cast<size_t>(tileIndex)] = 0;
+                showSpectrogram = true;
+                spectrogramTargetRect = QRectF(
+                    drawX,
+                    0.0,
+                    static_cast<double>(drawPixels),
+                    static_cast<double>(h));
+                spectrogramNodeImage = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                    ? m_gpuSourceImage
+                    : m_gpuDisplayImage;
+                spectrogramImageGeneration = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                    ? m_gpuSourceGeneration
+                    : m_gpuDisplayGeneration;
+                spectrogramImageDebugMode = gpuDebugMode;
+                spectrogramSourceRect = QRect(
+                    0,
+                    0,
+                    spectrogramNodeImage.width(),
+                    spectrogramNodeImage.height());
+                spectrogramRollingIncrementalScroll =
+                    gpuDebugMode == SpectrogramGpu::DebugMode::Full
+                    && rollingMode
+                    && m_gpuDisplayLastUpdateWasIncremental
+                    && m_gpuDisplayLastShiftPixels > 0
+                    && m_gpuDisplayLastUpdatedColumns == m_gpuDisplayLastShiftPixels
+                    && m_gpuDisplayImage.width() == drawPixels;
+                spectrogramRollingShiftPixels = m_gpuDisplayLastShiftPixels;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                const double gpuEffectiveZoom =
+                    static_cast<double>(drawPixels)
+                    / static_cast<double>(std::max(1, m_gpuSourceImage.width()));
+                const int remainingLogs = g_gpuDebugStageLogBudget.fetch_sub(1);
+                if (remainingLogs > 0 && gpuDebugMode != SpectrogramGpu::DebugMode::Full) {
+                    FERROUS_SPECTROGRAM_LOGF(
+                        stderr,
+                        "[Qt-gpu-stage@%p] mode=%s rect=%.1f,%.1f %.1fx%.1f src=%dx%d zoom=%.4f\n",
+                        static_cast<const void *>(this),
+                        SpectrogramGpu::debugModeName(gpuDebugMode),
+                        spectrogramTargetRect.x(),
+                        spectrogramTargetRect.y(),
+                        spectrogramTargetRect.width(),
+                        spectrogramTargetRect.height(),
+                        spectrogramNodeImage.width(),
+                        spectrogramNodeImage.height(),
+                        gpuEffectiveZoom);
                 }
+#endif
             }
 
             if (!rollingMode && playheadPixel >= 0) {
@@ -2298,7 +2343,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     || m_binsPerColumn != m_freqGridCachedBinsPerColumn
                     || node->freqGridOverlayTexture == nullptr;
                 if (freqStale) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    const auto overlayStart = std::chrono::steady_clock::now();
+#endif
                     updateFreqGridOverlayLocked(w, h);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - overlayStart).count();
+#endif
                     freqGridOverlayImage = m_freqGridImage;
                     freqGridOverlaySize = m_freqGridImage.size();
                     freqGridOverlayChanged = true;
@@ -2332,7 +2384,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const double cps =
                         static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    const auto overlayStart = std::chrono::steady_clock::now();
+#endif
                     updateTimeGridOverlayLocked(w, h, kTimeGridPadding, displayLeft, rollingMode, cps, drawX);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - overlayStart).count();
+#endif
                     timeGridOverlayImage = m_timeGridImage;
                     timeGridOverlayChanged = true;
                     timeGridSourceShift = 0;
@@ -2365,7 +2424,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const double cps =
                         static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    const auto overlayStart = std::chrono::steady_clock::now();
+#endif
                     updateCrosshairOverlayLocked(w, h, displayLeft, rollingMode, cps, drawX);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - overlayStart).count();
+#endif
                     crosshairOverlayImage = m_crosshairImage;
                     crosshairOverlaySize = m_crosshairImage.size();
                     crosshairOverlayChanged = true;
@@ -2379,43 +2445,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (!m_canvas.isNull() && m_canvasDirty) {
                 rebuildCanvasFromColumns();
             }
-            if (!m_canvas.isNull()) {
-                resizeDirtyTilesLocked();
-                drawCols = std::min(m_canvasFilledCols, m_canvas.width());
-                if (drawCols > 0) {
-                    hasCanvas = true;
-                    canvasSize = m_canvas.size();
-                    srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
-                    scrollOffset = 0.0;
-                    drawX = static_cast<double>(w - drawCols) - scrollOffset;
-                    latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
-                    tileCount = static_cast<int>(m_dirtyTiles.size());
-                    const bool refreshAllTiles = node->tileTextures.size() != tileCount;
-                    tileImages.reserve(tileCount);
-                    tileDirtyIndexes.reserve(tileCount);
-                    for (int tileIndex = 0; tileIndex < tileCount; ++tileIndex) {
-                        if (!refreshAllTiles
-                            && !m_dirtyTiles[static_cast<size_t>(tileIndex)]
-                            && node->tileTextures.value(tileIndex) != nullptr) {
-                            continue;
-                        }
-                        const int tileStart = tileIndex * kCanvasTileWidth;
-                        const int tileWidth = std::min(kCanvasTileWidth, m_canvas.width() - tileStart);
-                        if (tileWidth <= 0) {
-                            continue;
-                        }
-                        tileDirtyIndexes.push_back(tileIndex);
-                        tileImages.push_back(m_canvas.copy(tileStart, 0, tileWidth, m_canvas.height()));
-                        m_dirtyTiles[static_cast<size_t>(tileIndex)] = 0;
-                    }
-                }
-            }
         }
 
         showOverlay = m_showFpsOverlay && m_fpsValue > 0;
         if (showOverlay) {
             if (m_overlayDirty || node->overlayTexture == nullptr) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                const auto overlayStart = std::chrono::steady_clock::now();
+#endif
                 updateOverlayImageLocked();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - overlayStart).count();
+#endif
                 overlayImage = m_overlayImage;
                 overlaySize = m_overlayImage.size();
                 overlayChanged = true;
@@ -2430,44 +2472,100 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
     }
 
-    QVector<QSGTexture *> retiredTileTextures;
-    retiredTileTextures.reserve(std::max(tileCount, static_cast<int>(node->tileTextures.size())));
+    QSGTexture *oldSpectrogramTexture = nullptr;
+    QSGTexture *oldSpectrogramTailTexture = nullptr;
     QSGTexture *oldOverlayTexture = nullptr;
     QSGTexture *oldFreqGridOverlayTexture = nullptr;
     QSGTexture *oldTimeGridOverlayTexture = nullptr;
     QSGTexture *oldCrosshairOverlayTexture = nullptr;
-
-    if (node->tileTextures.size() > tileCount) {
-        for (int i = tileCount; i < node->tileTextures.size(); ++i) {
-            if (node->tileTextures[i] != nullptr) {
-                retiredTileTextures.push_back(node->tileTextures[i]);
+    constexpr int kSpectrogramScrollRebasePixels = 128;
+    spectrogramTextureChanged =
+        showSpectrogram
+        && !spectrogramNodeImage.isNull()
+        && (nodeRecreated
+            || !node->spectrogramTextureUploaded
+            || node->spectrogramTextureGeneration != spectrogramImageGeneration
+            || node->spectrogramTextureDebugMode != spectrogramImageDebugMode);
+    if (spectrogramTextureChanged) {
+        const int nextScrollPixels =
+            node->spectrogramTextureScrollPixels + spectrogramRollingShiftPixels;
+        const bool canAdvanceRollingTexture =
+            spectrogramRollingIncrementalScroll
+            && node->spectrogramTextureUploaded
+            && node->spectrogramTextureResource != nullptr
+            && node->spectrogramTextureDebugMode == SpectrogramGpu::DebugMode::Full
+            && nextScrollPixels > 0
+            && nextScrollPixels < spectrogramNodeImage.width()
+            && nextScrollPixels <= kSpectrogramScrollRebasePixels;
+        if (canAdvanceRollingTexture) {
+            node->spectrogramTextureScrollPixels = nextScrollPixels;
+            oldSpectrogramTailTexture = node->spectrogramTailTextureResource;
+            node->spectrogramTailTextureResource = nullptr;
+            if (currentWindow != nullptr) {
+                const QImage tailImage = spectrogramNodeImage.copy(
+                    spectrogramNodeImage.width() - node->spectrogramTextureScrollPixels,
+                    0,
+                    node->spectrogramTextureScrollPixels,
+                    spectrogramNodeImage.height());
+                if (!tailImage.isNull()) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    const auto uploadStart = std::chrono::steady_clock::now();
+#endif
+                    node->spectrogramTailTextureResource =
+                        currentWindow->createTextureFromImage(tailImage);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profileSpectrogramTextureUploadMs += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - uploadStart).count();
+                    profileUsedTailSpectrogramUpload = true;
+                    profileTailUploadWidth = tailImage.width();
+#endif
+                    if (node->spectrogramTailTextureResource != nullptr) {
+                        node->spectrogramTailTextureResource->setFiltering(QSGTexture::Nearest);
+                    }
+                }
+            }
+            node->spectrogramTextureGeneration = spectrogramImageGeneration;
+            node->spectrogramTextureDebugMode = spectrogramImageDebugMode;
+            node->spectrogramTextureUploaded = true;
+        } else {
+            oldSpectrogramTexture = node->spectrogramTextureResource;
+            oldSpectrogramTailTexture = node->spectrogramTailTextureResource;
+            node->spectrogramTextureResource = nullptr;
+            node->spectrogramTailTextureResource = nullptr;
+            node->spectrogramTextureScrollPixels = 0;
+            if (showSpectrogram && !spectrogramNodeImage.isNull() && currentWindow != nullptr) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                const auto uploadStart = std::chrono::steady_clock::now();
+#endif
+                node->spectrogramTextureResource =
+                    currentWindow->createTextureFromImage(spectrogramNodeImage);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileSpectrogramTextureUploadMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - uploadStart).count();
+                profileUsedFullSpectrogramUpload = true;
+#endif
+                if (node->spectrogramTextureResource != nullptr) {
+                    node->spectrogramTextureResource->setFiltering(QSGTexture::Nearest);
+                    node->spectrogramTextureGeneration = spectrogramImageGeneration;
+                    node->spectrogramTextureDebugMode = spectrogramImageDebugMode;
+                    node->spectrogramTextureUploaded = true;
+                }
             }
         }
-    }
-    node->tileTextures.resize(tileCount);
-
-    for (int i = 0; i < tileDirtyIndexes.size(); ++i) {
-        const int tileIndex = tileDirtyIndexes[i];
-        if (tileIndex < 0 || tileIndex >= node->tileTextures.size()) {
-            continue;
-        }
-        QSGTexture *newTexture = nullptr;
-        if (!tileImages[i].isNull() && currentWindow != nullptr) {
-            newTexture = currentWindow->createTextureFromImage(tileImages[i]);
-            if (newTexture != nullptr) {
-                newTexture->setFiltering(QSGTexture::Nearest);
-            }
-        }
-        if (node->tileTextures[tileIndex] != nullptr) {
-            retiredTileTextures.push_back(node->tileTextures[tileIndex]);
-        }
-        node->tileTextures[tileIndex] = newTexture;
     }
     if (overlayChanged) {
         oldOverlayTexture = node->overlayTexture;
         node->overlayTexture = nullptr;
         if (!overlayImage.isNull() && currentWindow != nullptr) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            const auto uploadStart = std::chrono::steady_clock::now();
+#endif
             node->overlayTexture = currentWindow->createTextureFromImage(overlayImage);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            profileOverlayTextureUploadMs += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - uploadStart).count();
+            profileOverlayTextureUploaded = true;
+#endif
             if (node->overlayTexture != nullptr) {
                 node->overlayTexture->setFiltering(QSGTexture::Linear);
             }
@@ -2478,7 +2576,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         oldFreqGridOverlayTexture = node->freqGridOverlayTexture;
         node->freqGridOverlayTexture = nullptr;
         if (!freqGridOverlayImage.isNull() && currentWindow != nullptr) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            const auto uploadStart = std::chrono::steady_clock::now();
+#endif
             node->freqGridOverlayTexture = currentWindow->createTextureFromImage(freqGridOverlayImage);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            profileOverlayTextureUploadMs += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - uploadStart).count();
+            profileFreqGridTextureUploaded = true;
+#endif
             if (node->freqGridOverlayTexture != nullptr) {
                 node->freqGridOverlayTexture->setFiltering(QSGTexture::Linear);
             }
@@ -2489,7 +2595,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         oldTimeGridOverlayTexture = node->timeGridOverlayTexture;
         node->timeGridOverlayTexture = nullptr;
         if (!timeGridOverlayImage.isNull() && currentWindow != nullptr) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            const auto uploadStart = std::chrono::steady_clock::now();
+#endif
             node->timeGridOverlayTexture = currentWindow->createTextureFromImage(timeGridOverlayImage);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            profileOverlayTextureUploadMs += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - uploadStart).count();
+            profileTimeGridTextureUploaded = true;
+#endif
             if (node->timeGridOverlayTexture != nullptr) {
                 node->timeGridOverlayTexture->setFiltering(QSGTexture::Linear);
             }
@@ -2500,98 +2614,68 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         oldCrosshairOverlayTexture = node->crosshairOverlayTexture;
         node->crosshairOverlayTexture = nullptr;
         if (!crosshairOverlayImage.isNull() && currentWindow != nullptr) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            const auto uploadStart = std::chrono::steady_clock::now();
+#endif
             node->crosshairOverlayTexture = currentWindow->createTextureFromImage(crosshairOverlayImage);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            profileOverlayTextureUploadMs += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - uploadStart).count();
+            profileCrosshairTextureUploaded = true;
+#endif
             if (node->crosshairOverlayTexture != nullptr) {
                 node->crosshairOverlayTexture->setFiltering(QSGTexture::Linear);
             }
         }
     }
-
-    for (QSGSimpleTextureNode *tileNode : node->tileFragments) {
+    if (showSpectrogram && node->spectrogramTextureResource != nullptr && !spectrogramSourceRect.isEmpty()) {
+        QRectF baseTargetRect = spectrogramTargetRect;
+        QRect baseSourceRect = spectrogramSourceRect;
+        const int scrollPixels = std::clamp(
+            node->spectrogramTextureScrollPixels,
+            0,
+            std::max(0, spectrogramSourceRect.width() - 1));
+        if (scrollPixels > 0) {
+            baseTargetRect.setWidth(
+                std::max(0.0, spectrogramTargetRect.width() - static_cast<double>(scrollPixels)));
+            baseSourceRect = QRect(
+                scrollPixels,
+                0,
+                spectrogramSourceRect.width() - scrollPixels,
+                spectrogramSourceRect.height());
+        }
         configureTextureNode(
-            tileNode,
+            node->spectrogramTexture,
+            node->spectrogramTextureResource,
+            baseTargetRect,
+            baseSourceRect,
+            node->placeholderTexture);
+    } else {
+        configureTextureNode(
+            node->spectrogramTexture,
             nullptr,
             QRectF(),
             QRect(),
             node->placeholderTexture);
     }
-
-    if (hasCanvas) {
-        int fragmentCursor = 0;
-        auto configureSegment = [&](int canvasOffset, int length, double targetX) {
-            int remainingLength = length;
-            int segmentOffset = canvasOffset;
-            double segmentTargetX = targetX;
-            while (remainingLength > 0) {
-                const int tileIndex = segmentOffset / kCanvasTileWidth;
-                if (tileIndex < 0
-                    || tileIndex >= node->tileTextures.size()
-                    || fragmentCursor >= node->tileFragments.size()) {
-                    break;
-                }
-                const int tileStart = tileIndex * kCanvasTileWidth;
-                const int tileWidth = std::min(kCanvasTileWidth, canvasSize.width() - tileStart);
-                const int withinTile = segmentOffset - tileStart;
-                const int span = std::min(remainingLength, tileWidth - withinTile);
-                QSGTexture *tileTexture = node->tileTextures[tileIndex];
-                configureTextureNode(
-                    node->tileFragments[fragmentCursor++],
-                    tileTexture,
-                    QRectF(
-                        segmentTargetX,
-                        0.0,
-                        static_cast<double>(span),
-                        static_cast<double>(canvasSize.height())),
-                    QRect(withinTile, 0, span, canvasSize.height()),
-                    node->placeholderTexture);
-                segmentOffset += span;
-                segmentTargetX += static_cast<double>(span);
-                remainingLength -= span;
-            }
-        };
-
-        const int firstLength = std::min(canvasSize.width() - srcStart, drawCols);
-        const int secondLength = drawCols - firstLength;
-        configureSegment(srcStart, firstLength, drawX);
-        if (secondLength > 0) {
-            configureSegment(0, secondLength, drawX + static_cast<double>(firstLength));
-        }
-
-        int latestTileIndex = latestX / kCanvasTileWidth;
-        if (scrollOffset > 0.0
-            && latestTileIndex >= 0
-            && latestTileIndex < node->tileTextures.size()) {
-            QSGTexture *latestTexture = node->tileTextures[latestTileIndex];
-            const int latestWithinTile = latestX - (latestTileIndex * kCanvasTileWidth);
-            configureTextureNode(
-                node->latest,
-                latestTexture,
-                QRectF(
-                    drawX + static_cast<double>(drawCols),
-                    0.0,
-                    scrollOffset,
-                    static_cast<double>(canvasSize.height())),
-                QRect(latestWithinTile, 0, 1, canvasSize.height()),
-                node->placeholderTexture);
-        } else {
-            configureTextureNode(
-                node->latest,
-                nullptr,
-                QRectF(),
-                QRect(),
-                node->placeholderTexture);
-        }
-    } else {
-        for (QSGSimpleTextureNode *tileNode : node->tileFragments) {
-            configureTextureNode(
-                tileNode,
-                nullptr,
-                QRectF(),
-                QRect(),
-                node->placeholderTexture);
-        }
+    if (showSpectrogram
+        && node->spectrogramTailTextureResource != nullptr
+        && node->spectrogramTextureScrollPixels > 0) {
+        const QSize tailSize = node->spectrogramTailTextureResource->textureSize();
         configureTextureNode(
-            node->latest,
+            node->spectrogramTailTexture,
+            node->spectrogramTailTextureResource,
+            QRectF(
+                spectrogramTargetRect.x() + spectrogramTargetRect.width()
+                    - static_cast<double>(node->spectrogramTextureScrollPixels),
+                spectrogramTargetRect.y(),
+                static_cast<double>(node->spectrogramTextureScrollPixels),
+                spectrogramTargetRect.height()),
+            QRect(0, 0, tailSize.width(), tailSize.height()),
+            node->placeholderTexture);
+    } else {
+        configureTextureNode(
+            node->spectrogramTailTexture,
             nullptr,
             QRectF(),
             QRect(),
@@ -2672,11 +2756,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->placeholderTexture);
     }
 
+    delete oldSpectrogramTexture;
+    delete oldSpectrogramTailTexture;
     delete oldOverlayTexture;
     delete oldFreqGridOverlayTexture;
     delete oldTimeGridOverlayTexture;
     delete oldCrosshairOverlayTexture;
-    qDeleteAll(retiredTileTextures);
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
@@ -2691,8 +2776,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         if (paintMs >= 4.0 && shouldLogProfileSpike(&m_profileLastPaintSpike, paintEnd)) {
             FERROUS_SPECTROGRAM_LOGF(
                 stderr,
-                "[ui-spectrogram] paint_spike ms=%.3f pending=%zu cols=%zu bins=%d size=%dx%d\n",
+                "[ui-spectrogram] paint_spike ms=%.3f cache_ms=%.3f overlay_build_ms=%.3f "
+                "tex_ms=%.3f overlay_tex_ms=%.3f full_upload=%d tail_upload=%d tail_w=%d "
+                "ov=%d fg=%d tg=%d ch=%d pending=%zu cols=%zu bins=%d size=%dx%d\n",
                 paintMs,
+                profileCacheSyncMs,
+                profileOverlayBuildMs,
+                profileSpectrogramTextureUploadMs,
+                profileOverlayTextureUploadMs,
+                profileUsedFullSpectrogramUpload ? 1 : 0,
+                profileUsedTailSpectrogramUpload ? 1 : 0,
+                profileTailUploadWidth,
+                profileOverlayTextureUploaded ? 1 : 0,
+                profileFreqGridTextureUploaded ? 1 : 0,
+                profileTimeGridTextureUploaded ? 1 : 0,
+                profileCrosshairTextureUploaded ? 1 : 0,
                 profilePendingColumns,
                 profileColumnCount,
                 profileBinsPerColumn,
@@ -2722,7 +2820,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 void SpectrogramItem::releaseResources() {
     QMutexLocker lock(&m_stateMutex);
     m_sceneGraphGeneration += 1;
-    markAllTilesDirtyLocked();
     m_overlayDirty = true;
     m_freqGridDirty = true;
     m_timeGridDirty = true;
@@ -3285,32 +3382,64 @@ void SpectrogramItem::invalidateCanvas() {
     m_precomputedCanvasDisplayRight = -1;
     m_precomputedCanvasRolling = false;
     m_precomputedCanvasDirty = true;
-    m_dirtyTiles.clear();
+    m_gpuSourceImage = QImage();
+    m_gpuDisplayImage = QImage();
+    m_gpuSourceGeneration = 0;
+    m_gpuDisplayGeneration = 0;
+    m_gpuDisplaySourceGeneration = 0;
+    m_gpuDisplayWidth = 0;
+    m_gpuDisplayHeight = 0;
+    m_gpuDisplaySampleRateHz = 0;
+    m_gpuDisplayBins = 0;
+    m_gpuDisplayDbRange = 132.0;
+    m_gpuDisplayMuted = false;
+    m_gpuDisplayLogScale = false;
+    m_gpuDisplayDisplayLeft = 0;
+    m_gpuDisplayDisplayRight = -1;
+    m_gpuDisplayRolling = false;
+    m_gpuDisplayRingWriteSeq = -1;
+    m_gpuDisplayRingOldestSeq = -1;
+    m_gpuDisplayMaxColumnIndex = -1;
+    m_gpuDisplayTrackToken = 0;
+    m_gpuDisplayEffectiveZoom = 1.0;
+    m_gpuDisplayLastUpdateWasIncremental = false;
+    m_gpuDisplayLastShiftPixels = 0;
+    m_gpuDisplayLastUpdatedColumns = 0;
+    m_gpuSourceDisplayLeft = 0;
+    m_gpuSourceDisplayRight = -1;
+    m_gpuSourceRolling = false;
+    m_gpuSourceActualColumns = 0;
+    m_gpuSourceRingWriteSeq = -1;
+    m_gpuSourceRingOldestSeq = -1;
+    m_gpuSourceMaxColumnIndex = -1;
+    m_gpuSourceTrackToken = 0;
+    m_gpuSourceLastUpdateWasIncremental = false;
+    m_gpuSourceLastShiftColumns = 0;
+    m_gpuSourceLastUpdatedColumns = 0;
 }
 
-void SpectrogramItem::resizeDirtyTilesLocked() {
-    if (m_canvas.isNull() || m_canvas.width() <= 0) {
-        m_dirtyTiles.clear();
-        return;
+int SpectrogramItem::gpuMaxTextureColumns(QQuickWindow *window) const {
+    constexpr int kFallbackMaxTextureColumns = 8192;
+    if (m_gpuMaxTextureColumns > 0
+        && m_gpuMaxTextureColumns != std::numeric_limits<int>::max()) {
+        return m_gpuMaxTextureColumns;
     }
-    const int tileCount = std::max(1, (m_canvas.width() + kCanvasTileWidth - 1) / kCanvasTileWidth);
-    if (static_cast<int>(m_dirtyTiles.size()) != tileCount) {
-        m_dirtyTiles.assign(static_cast<size_t>(tileCount), 1);
+    if (window == nullptr || window->rendererInterface() == nullptr) {
+        return kFallbackMaxTextureColumns;
     }
-}
-
-void SpectrogramItem::markTileDirtyLocked(int x) {
-    if (m_canvas.isNull() || m_canvas.width() <= 0) {
-        return;
+    if (window->rendererInterface()->graphicsApi() == QSGRendererInterface::OpenGL) {
+        if (QOpenGLContext *context = QOpenGLContext::currentContext()) {
+            QOpenGLFunctions *functions = context->functions();
+            if (functions != nullptr) {
+                GLint limit = 0;
+                functions->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
+                if (limit > 0) {
+                    return limit;
+                }
+            }
+        }
     }
-    resizeDirtyTilesLocked();
-    const int tileIndex = std::clamp(x / kCanvasTileWidth, 0, static_cast<int>(m_dirtyTiles.size()) - 1);
-    m_dirtyTiles[static_cast<size_t>(tileIndex)] = 1;
-}
-
-void SpectrogramItem::markAllTilesDirtyLocked() {
-    resizeDirtyTilesLocked();
-    std::fill(m_dirtyTiles.begin(), m_dirtyTiles.end(), 1);
+    return kFallbackMaxTextureColumns;
 }
 
 void SpectrogramItem::ensureMapping(int height) {
@@ -3360,8 +3489,6 @@ void SpectrogramItem::ensureCanvas(int width, int height) {
         m_canvas = QImage(cols, height, QImage::Format_RGB32);
         m_canvas.fill(Qt::black);
         m_canvasDirty = true;
-        resizeDirtyTilesLocked();
-        markAllTilesDirtyLocked();
     }
     if (m_canvasDirty) {
         rebuildCanvasFromColumns();
@@ -3378,7 +3505,6 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
     const int cols = m_canvas.width();
     if (m_columns.empty() || cols <= 0) {
         m_canvasDirty = false;
-        markAllTilesDirtyLocked();
         return;
     }
     const int available = static_cast<int>(m_columns.size());
@@ -3390,15 +3516,12 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
         m_canvasFilledCols = std::min(cols, m_canvasFilledCols + 1);
     }
     m_canvasDirty = false;
-    markAllTilesDirtyLocked();
 }
 
 void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
     if (m_canvas.isNull() || x < 0 || x >= m_canvas.width() || col.empty()) {
         return;
     }
-
-    markTileDirtyLocked(x);
 
     const int height = m_canvas.height();
     const int srcBins = std::max(1, m_binsPerColumn);
@@ -3502,201 +3625,633 @@ std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
     return dbRemap;
 }
 
-void SpectrogramItem::drawPrecomputedColumnAtLocked(
-    int x,
-    qint64 displayIndex,
-    bool rollingMode,
-    const std::array<quint8, 256> &dbRemap) {
-    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width() || m_precomputedBinsPerColumn <= 0) {
+int SpectrogramItem::gpuDrawWidthForSourceColumnsLocked(
+    int width,
+    qint64 displayLeft,
+    qint64 displayRight,
+    double effectiveZoom) const {
+    const qint64 sourceColumns = std::max<qint64>(0, displayRight - displayLeft + 1);
+    int drawPixels = std::min(width,
+        static_cast<int>(std::ceil(
+            static_cast<double>(sourceColumns) * effectiveZoom)));
+    if (drawPixels < width
+        && displayLeft == 0
+        && sourceColumns + 5 >= static_cast<qint64>(width)) {
+        drawPixels = width;
+    }
+    return drawPixels;
+}
+
+void SpectrogramItem::paintPrecomputedGpuSourceColumnsLocked(
+    QImage &image,
+    int xBegin,
+    int xEnd,
+    qint64 displayLeft,
+    qint64 displayRight,
+    bool rollingMode) const {
+    if (image.isNull()
+        || xBegin > xEnd
+        || displayRight < displayLeft
+        || m_precomputedBinsPerColumn <= 0) {
         return;
     }
 
-    markTileDirtyLocked(x);
+    const int textureColumns = image.width();
+    const int bins = image.height();
+    if (textureColumns <= 0 || bins <= 0) {
+        return;
+    }
 
-    const int bins = m_precomputedBinsPerColumn;
+    const int sourceColumns = static_cast<int>(displayRight - displayLeft + 1);
+    const bool needsCompression = textureColumns < sourceColumns;
     const auto *ringData = reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
-    const QRgb bgColor = kBackgroundColor.rgba();
-    const double gradScale = static_cast<double>(kGradientTableSize) / 255.0;
+    const int clampedXBegin = std::clamp(xBegin, 0, textureColumns - 1);
+    const int clampedXEnd = std::clamp(xEnd, clampedXBegin, textureColumns - 1);
 
-    int slot = -1;
-    bool valid = false;
-    if (rollingMode) {
-        slot = m_ringCapacity > 0
-            ? static_cast<int>(displayIndex % m_ringCapacity)
-            : -1;
-        valid = displayIndex >= m_ringOldestSeq
-            && displayIndex < m_ringWriteSeq
-            && slot >= 0
-            && slot < m_ringCapacity
-            && !m_ringSequenceId.empty()
-            && m_ringSequenceId[static_cast<size_t>(slot)] == displayIndex
-            && !m_ringColumnId.empty()
-            && m_ringColumnId[static_cast<size_t>(slot)] >= 0;
-    } else {
-        const auto tokenColumns = m_trackColumnToSeqByToken.constFind(m_precomputedTrackToken);
-        const qint64 seq = tokenColumns != m_trackColumnToSeqByToken.cend()
-            ? tokenColumns->value(static_cast<qint32>(displayIndex), -1)
-            : -1;
-        slot = seq >= 0 && m_ringCapacity > 0
-            ? static_cast<int>(seq % m_ringCapacity)
-            : -1;
-        valid = displayIndex >= 0
-            && seq >= m_ringOldestSeq
-            && seq < m_ringWriteSeq
-            && slot >= 0
-            && slot < m_ringCapacity
-            && !m_ringSequenceId.empty()
-            && m_ringSequenceId[static_cast<size_t>(slot)] == seq
-            && !m_ringColumnId.empty()
-            && m_ringColumnId[static_cast<size_t>(slot)] == static_cast<qint32>(displayIndex);
-    }
-
-    if (!valid) {
-        for (int y = 0; y < m_canvas.height(); ++y) {
-            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
-        }
-        return;
-    }
-
-    const int baseOff = slot * bins;
-    const int mapSize = static_cast<int>(m_iToBin.size());
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int mi = m_canvas.height() - 1 - y;
-        int binLo = 0;
-        int binHi = 0;
-        if (mi >= 0 && mi < mapSize) {
-            const int bc = m_iToBin[static_cast<size_t>(mi)];
-            const int bp = (mi > 0)
-                ? m_iToBin[static_cast<size_t>(mi - 1)]
-                : bc;
-            const int bn = (mi + 1 < mapSize)
-                ? m_iToBin[static_cast<size_t>(mi + 1)]
-                : bc;
-            binLo = bp + (bc - bp) / 2;
-            binHi = bc + (bn - bc) / 2;
-            if (binLo == bp && bp != bc) {
-                binLo = bc;
-            }
-            if (binHi == bn && bn != bc) {
-                binHi = bc;
-            }
-            if (binLo > binHi) {
-                std::swap(binLo, binHi);
-            }
-            binLo = std::clamp(binLo, 0, bins - 1);
-            binHi = std::clamp(binHi, 0, bins - 1);
+    for (int x = clampedXBegin; x <= clampedXEnd; ++x) {
+        qint64 firstDisplayIndex = displayLeft + x;
+        qint64 lastDisplayIndex = firstDisplayIndex;
+        if (needsCompression) {
+            const double rangeStart =
+                static_cast<double>(x) * static_cast<double>(sourceColumns)
+                / static_cast<double>(textureColumns);
+            const double rangeEnd =
+                static_cast<double>(x + 1) * static_cast<double>(sourceColumns)
+                / static_cast<double>(textureColumns);
+            firstDisplayIndex =
+                displayLeft + static_cast<qint64>(std::floor(rangeStart));
+            lastDisplayIndex =
+                displayLeft + static_cast<qint64>(std::ceil(rangeEnd)) - 1;
+            firstDisplayIndex = std::clamp(firstDisplayIndex, displayLeft, displayRight);
+            lastDisplayIndex = std::clamp(lastDisplayIndex, firstDisplayIndex, displayRight);
         }
 
-        quint8 rawMax = 0;
-        for (int b = binLo; b <= binHi; ++b) {
-            rawMax = std::max(rawMax, ringData[baseOff + b]);
+        if (ringData == nullptr) {
+            for (int b = 0; b < bins; ++b) {
+                auto *pixel =
+                    reinterpret_cast<uchar *>(image.scanLine(b)) + x * 4;
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+                pixel[3] = 255;
+            }
+            continue;
         }
-        const quint8 intensity = dbRemap[static_cast<size_t>(rawMax)];
-        int paletteIndex = kGradientTableSize
-            - static_cast<int>(std::lround(gradScale * static_cast<double>(intensity)));
-        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
-        const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
-        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
-            palette[static_cast<size_t>(paletteIndex)];
+
+        if (!needsCompression) {
+            const int slot = ringSlotForDisplayIndexLocked(firstDisplayIndex, rollingMode);
+            if (slot < 0) {
+                for (int b = 0; b < bins; ++b) {
+                    auto *pixel =
+                        reinterpret_cast<uchar *>(image.scanLine(b)) + x * 4;
+                    pixel[0] = 0;
+                    pixel[1] = 0;
+                    pixel[2] = 0;
+                    pixel[3] = 255;
+                }
+                continue;
+            }
+            const int baseOff = slot * bins;
+            for (int b = 0; b < bins; ++b) {
+                const quint8 value = ringData[baseOff + b];
+                auto *pixel =
+                    reinterpret_cast<uchar *>(image.scanLine(b)) + x * 4;
+                pixel[0] = value;
+                pixel[1] = value;
+                pixel[2] = value;
+                pixel[3] = 255;
+            }
+            continue;
+        }
+
+        for (int b = 0; b < bins; ++b) {
+            quint8 value = 0;
+            bool found = false;
+            for (qint64 displayIndex = firstDisplayIndex;
+                 displayIndex <= lastDisplayIndex;
+                 ++displayIndex) {
+                const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
+                if (slot < 0) {
+                    continue;
+                }
+                found = true;
+                value = std::max(value, ringData[slot * bins + b]);
+            }
+            auto *pixel =
+                reinterpret_cast<uchar *>(image.scanLine(b)) + x * 4;
+            pixel[0] = found ? value : 0;
+            pixel[1] = found ? value : 0;
+            pixel[2] = found ? value : 0;
+            pixel[3] = 255;
+        }
     }
 }
 
-void SpectrogramItem::drawPeakHoldColumnRangeLocked(
-    int x,
-    qint64 colFirst,
-    qint64 colLast,
+void SpectrogramItem::syncPrecomputedGpuImagesLocked(
+    int width,
+    int height,
+    qint64 displayLeft,
+    qint64 displayRight,
     bool rollingMode,
-    const std::array<quint8, 256> &dbRemap) {
-    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
-        || m_precomputedBinsPerColumn <= 0 || colFirst > colLast) {
+    double effectiveZoom,
+    int maxTextureColumns) {
+    if (width <= 0 || height <= 0 || displayRight < displayLeft || m_precomputedBinsPerColumn <= 0) {
+        m_gpuSourceImage = QImage();
+        m_gpuDisplayImage = QImage();
+        m_gpuDisplayGeneration = 0;
+        m_gpuDisplaySourceGeneration = 0;
+        m_gpuDisplayWidth = 0;
+        m_gpuDisplayHeight = 0;
+        m_gpuDisplaySampleRateHz = 0;
+        m_gpuDisplayBins = 0;
+        m_gpuDisplayRingWriteSeq = -1;
+        m_gpuDisplayRingOldestSeq = -1;
+        m_gpuDisplayMaxColumnIndex = -1;
+        m_gpuDisplayTrackToken = 0;
+        m_gpuSourceLastUpdateWasIncremental = false;
+        m_gpuSourceLastShiftColumns = 0;
+        m_gpuSourceLastUpdatedColumns = 0;
         return;
     }
 
-    // Single column: delegate to the fast path.
-    if (colFirst == colLast) {
-        drawPrecomputedColumnAtLocked(x, colFirst, rollingMode, dbRemap);
-        return;
-    }
-
-    markTileDirtyLocked(x);
-
+    const int sourceColumns = static_cast<int>(displayRight - displayLeft + 1);
+    const int safeMaxTextureColumns = std::max(1, maxTextureColumns);
+    const int textureColumns = std::min(sourceColumns, safeMaxTextureColumns);
     const int bins = m_precomputedBinsPerColumn;
-    const auto *ringData =
-        reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
-    const QRgb bgColor = kBackgroundColor.rgba();
-    const double gradScale =
-        static_cast<double>(kGradientTableSize) / 255.0;
-    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
+    const bool needsCompression = textureColumns < sourceColumns;
+    const bool sameCachedView =
+        !m_gpuSourceImage.isNull()
+        && m_gpuSourceImage.width() == textureColumns
+        && m_gpuSourceImage.height() == bins
+        && m_gpuSourceActualColumns == sourceColumns
+        && m_gpuSourceDisplayLeft == displayLeft
+        && m_gpuSourceDisplayRight == displayRight
+        && m_gpuSourceRolling == rollingMode
+        && m_gpuSourceTrackToken == m_precomputedTrackToken;
+    const bool centeredCachedViewComplete =
+        sameCachedView
+        && !rollingMode
+        && m_gpuSourceMaxColumnIndex >= displayRight;
+    const qint64 cachedVisibleValidLeft =
+        std::max(m_gpuSourceDisplayLeft, m_gpuSourceRingOldestSeq);
+    const qint64 cachedVisibleValidRight =
+        std::min(m_gpuSourceDisplayRight, m_gpuSourceRingWriteSeq - 1);
+    const qint64 newVisibleValidLeft =
+        std::max(displayLeft, m_ringOldestSeq);
+    const qint64 newVisibleValidRight =
+        std::min(displayRight, m_ringWriteSeq - 1);
+    const bool sourceDirty =
+        !sameCachedView
+        || (rollingMode
+            && (displayLeft != m_gpuSourceDisplayLeft
+                || displayRight != m_gpuSourceDisplayRight
+                || cachedVisibleValidLeft != newVisibleValidLeft
+                || cachedVisibleValidRight != newVisibleValidRight))
+        || (!rollingMode
+            && !centeredCachedViewComplete
+            && m_gpuSourceMaxColumnIndex != m_precomputedMaxColumnIndex);
+    m_gpuSourceLastUpdateWasIncremental = false;
+    m_gpuSourceLastShiftColumns = 0;
+    m_gpuSourceLastUpdatedColumns = 0;
+    if (sourceDirty) {
+        const qint64 advanceColumns =
+            rollingMode && m_gpuSourceRolling
+                ? (displayLeft - m_gpuSourceDisplayLeft)
+                : 0;
+        const qint64 advanceRight =
+            rollingMode && m_gpuSourceRolling
+                ? (displayRight - m_gpuSourceDisplayRight)
+                : 0;
+        const bool canIncrementallyAdvanceRolling =
+            rollingMode
+            && m_gpuSourceRolling
+            && !m_gpuSourceImage.isNull()
+            && m_gpuSourceImage.width() == textureColumns
+            && m_gpuSourceImage.height() == bins
+            && !needsCompression
+            && m_gpuSourceTrackToken == m_precomputedTrackToken
+            && advanceColumns > 0
+            && advanceColumns == advanceRight
+            && advanceColumns < textureColumns
+            && displayLeft >= m_gpuSourceDisplayLeft
+            && displayRight >= m_gpuSourceDisplayRight;
 
-    // Resolve ring slots for each column in the range.
-    // Cap to a reasonable max to avoid pathological cases.
-    const int rangeCols = static_cast<int>(
-        std::min(colLast - colFirst + 1, static_cast<qint64>(64)));
+        if (canIncrementallyAdvanceRolling) {
+            const int shiftColumns = static_cast<int>(advanceColumns);
+            for (int b = 0; b < bins; ++b) {
+                auto *line =
+                    reinterpret_cast<uchar *>(m_gpuSourceImage.scanLine(b));
+                std::memmove(
+                    line,
+                    line + shiftColumns * 4,
+                    static_cast<size_t>(textureColumns - shiftColumns) * 4);
+                std::fill(
+                    line + (textureColumns - shiftColumns) * 4,
+                    line + textureColumns * 4,
+                    static_cast<uchar>(0));
+            }
 
-    // Collect valid slot base offsets.
-    std::array<int, 64> slotBases{};
-    int validCount = 0;
-    for (int i = 0; i < rangeCols; ++i) {
-        const int slot = ringSlotForDisplayIndexLocked(
-            colFirst + i, rollingMode);
-        if (slot >= 0) {
-            slotBases[static_cast<size_t>(validCount)] = slot * bins;
-            ++validCount;
+            const qint64 dirtyStartDisplay =
+                std::max(displayLeft, cachedVisibleValidRight + 1);
+            if (dirtyStartDisplay <= displayRight) {
+                const int dirtyXBegin = static_cast<int>(dirtyStartDisplay - displayLeft);
+                paintPrecomputedGpuSourceColumnsLocked(
+                    m_gpuSourceImage,
+                    dirtyXBegin,
+                    textureColumns - 1,
+                    displayLeft,
+                    displayRight,
+                    rollingMode);
+                m_gpuSourceLastUpdatedColumns = textureColumns - dirtyXBegin;
+            }
+            m_gpuSourceLastUpdateWasIncremental = true;
+            m_gpuSourceLastShiftColumns = shiftColumns;
+            if (m_gpuSourceLastUpdatedColumns == 0) {
+                m_gpuSourceLastUpdatedColumns = shiftColumns;
+            }
+        } else {
+            m_gpuSourceImage = QImage(textureColumns, bins, QImage::Format_RGBA8888);
+            paintPrecomputedGpuSourceColumnsLocked(
+                m_gpuSourceImage,
+                0,
+                textureColumns - 1,
+                displayLeft,
+                displayRight,
+                rollingMode);
+            m_gpuSourceLastUpdatedColumns = textureColumns;
+        }
+        m_gpuSourceActualColumns = sourceColumns;
+        m_gpuSourceDisplayLeft = displayLeft;
+        m_gpuSourceDisplayRight = displayRight;
+        m_gpuSourceRolling = rollingMode;
+        m_gpuSourceRingWriteSeq = m_ringWriteSeq;
+        m_gpuSourceRingOldestSeq = m_ringOldestSeq;
+        m_gpuSourceMaxColumnIndex = m_precomputedMaxColumnIndex;
+        m_gpuSourceTrackToken = m_precomputedTrackToken;
+        m_gpuSourceGeneration += 1;
+
+        const int remainingLogs = g_gpuSpectrogramPaintLogBudget.fetch_sub(1);
+        if (remainingLogs > 0) {
+            const QColor firstPixel = m_gpuSourceImage.pixelColor(0, 0);
+            const QColor lastPixel = m_gpuSourceImage.pixelColor(
+                std::max(0, m_gpuSourceImage.width() - 1),
+                std::max(0, m_gpuSourceImage.height() - 1));
+            std::fprintf(
+                stderr,
+                "[Qt-gpu-source@%p] actualCols=%d texCols=%d bins=%d limit=%d rolling=%d "
+                "left=%lld right=%lld zoom=%.4f compressed=%d first=(%d,%d,%d,%d) "
+                "last=(%d,%d,%d,%d)\n",
+                static_cast<const void *>(this),
+                sourceColumns,
+                textureColumns,
+                bins,
+                safeMaxTextureColumns,
+                rollingMode ? 1 : 0,
+                static_cast<long long>(displayLeft),
+                static_cast<long long>(displayRight),
+                effectiveZoom,
+                needsCompression ? 1 : 0,
+                firstPixel.red(),
+                firstPixel.green(),
+                firstPixel.blue(),
+                firstPixel.alpha(),
+                lastPixel.red(),
+                lastPixel.green(),
+                lastPixel.blue(),
+                lastPixel.alpha());
         }
     }
 
-    if (validCount == 0) {
-        for (int y = 0; y < m_canvas.height(); ++y) {
-            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
-        }
+    m_precomputedCanvasDisplayLeft = displayLeft;
+    m_precomputedCanvasDisplayRight = displayRight;
+    m_precomputedCanvasRolling = rollingMode;
+    m_precomputedCanvasZoomLevel = effectiveZoom;
+    m_precomputedCanvasDirty = false;
+    m_canvasFilledCols = gpuDrawWidthForSourceColumnsLocked(
+        width, displayLeft, displayRight, effectiveZoom);
+}
+
+void SpectrogramItem::paintPrecomputedDisplayColumnsLocked(
+    QImage &image,
+    int xBegin,
+    int xEnd,
+    int drawPixels,
+    int height,
+    qint64 displayLeft,
+    qint64 displayRight,
+    bool rollingMode,
+    const std::array<quint8, 256> &dbRemap,
+    const QRgb *palette) const {
+    if (image.isNull()
+        || xBegin > xEnd
+        || drawPixels <= 0
+        || height <= 0
+        || m_precomputedBinsPerColumn <= 0
+        || displayRight < displayLeft
+        || palette == nullptr) {
         return;
     }
 
-    const int mapSize = static_cast<int>(m_iToBin.size());
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int mi = m_canvas.height() - 1 - y;
-        int binLo = 0;
-        int binHi = 0;
-        if (mi >= 0 && mi < mapSize) {
-            const int bc = m_iToBin[static_cast<size_t>(mi)];
-            const int bp = (mi > 0)
-                ? m_iToBin[static_cast<size_t>(mi - 1)]
-                : bc;
-            const int bn = (mi + 1 < mapSize)
-                ? m_iToBin[static_cast<size_t>(mi + 1)]
-                : bc;
-            binLo = bp + (bc - bp) / 2;
-            binHi = bc + (bn - bc) / 2;
-            if (binLo == bp && bp != bc) {
-                binLo = bc;
+    const int sourceColumns = static_cast<int>(displayRight - displayLeft + 1);
+    const int sourceBins = m_precomputedBinsPerColumn;
+    const double gpuEffectiveZoom =
+        static_cast<double>(drawPixels) / static_cast<double>(std::max(1, sourceColumns));
+    const int maxBin = std::max(0, sourceBins - 1);
+    const int ratio = std::clamp(
+        static_cast<int>(std::lround(
+            static_cast<double>(sourceBins) / static_cast<double>(std::max(1, height)))),
+        0,
+        1023);
+
+    auto sampleColumnRangeFromRing =
+        [this, sourceBins, sourceColumns, displayLeft, displayRight, rollingMode](
+            int columnFirst,
+            int columnLast,
+            int binLo,
+            int binHi) -> double {
+            const int clampedFirst = std::clamp(columnFirst, 0, sourceColumns - 1);
+            const int clampedLast = std::clamp(columnLast, clampedFirst, sourceColumns - 1);
+            const int clampedBinLo = std::clamp(binLo, 0, sourceBins - 1);
+            const int clampedBinHi = std::clamp(binHi, clampedBinLo, sourceBins - 1);
+            quint8 rawMax = 0;
+            for (int column = clampedFirst; column <= clampedLast; ++column) {
+                const qint64 displayIndex = displayLeft + static_cast<qint64>(column);
+                if (displayIndex < displayLeft || displayIndex > displayRight) {
+                    continue;
+                }
+                const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
+                if (slot < 0) {
+                    continue;
+                }
+                const int baseOff = slot * sourceBins;
+                for (int bin = clampedBinLo; bin <= clampedBinHi; ++bin) {
+                    rawMax = std::max(rawMax, static_cast<quint8>(m_ringBuffer[baseOff + bin]));
+                }
             }
-            if (binHi == bn && bn != bc) {
-                binHi = bc;
-            }
-            if (binLo > binHi) {
-                std::swap(binLo, binHi);
-            }
-            binLo = std::clamp(binLo, 0, bins - 1);
-            binHi = std::clamp(binHi, 0, bins - 1);
+            return static_cast<double>(rawMax);
+        };
+
+    const int clampedXBegin = std::clamp(xBegin, 0, drawPixels - 1);
+    const int clampedXEnd = std::clamp(xEnd, clampedXBegin, drawPixels - 1);
+    for (int y = 0; y < height; ++y) {
+        const int i = height - 1 - y;
+
+        int bin0 = 0;
+        int bin1 = 0;
+        int bin2 = 0;
+        if (m_logScale && static_cast<int>(m_iToBin.size()) == height) {
+            bin0 = m_iToBin[static_cast<size_t>(std::clamp(i - 1, 0, height - 1))];
+            bin1 = m_iToBin[static_cast<size_t>(i)];
+            bin2 = m_iToBin[static_cast<size_t>(std::clamp(i + 1, 0, height - 1))];
+        } else {
+            bin0 = (i - 1) * ratio;
+            bin1 = i * ratio;
+            bin2 = (i + 1) * ratio;
         }
 
-        // Peak-hold across all valid columns in the range.
-        quint8 rawMax = 0;
-        for (int c = 0; c < validCount; ++c) {
-            const int base = slotBases[static_cast<size_t>(c)];
-            for (int b = binLo; b <= binHi; ++b) {
-                rawMax = std::max(rawMax, ringData[base + b]);
+        int index0 = bin0 + static_cast<int>(std::lround(static_cast<double>(bin1 - bin0) / 2.0));
+        if (index0 == bin0) {
+            index0 = bin1;
+        }
+        int index1 = bin1 + static_cast<int>(std::lround(static_cast<double>(bin2 - bin1) / 2.0));
+        if (index1 == bin2) {
+            index1 = bin1;
+        }
+        index0 = std::clamp(index0, 0, maxBin);
+        index1 = std::clamp(index1, 0, maxBin);
+
+        const int target = m_logScale && static_cast<int>(m_iToBin.size()) == height
+            ? m_iToBin[static_cast<size_t>(i)]
+            : -1;
+        int nextBin = index1;
+        int span = 0;
+        int leadingCount = 0;
+        if (m_logScale
+            && static_cast<int>(m_iToBin.size()) == height
+            && i <= m_lowResEnd) {
+            int j = 0;
+            while (i + j < height && m_iToBin[static_cast<size_t>(i + j)] == target) {
+                ++j;
             }
+
+            const int nextI = std::min(i + j, height - 1);
+            nextBin = std::clamp(m_iToBin[static_cast<size_t>(nextI)], 0, maxBin);
+            span = j;
+            int k = 0;
+            while (i + k >= 0 && m_iToBin[static_cast<size_t>(i + k)] == target) {
+                ++span;
+                --k;
+            }
+            leadingCount = (-k) - 1;
         }
 
-        const quint8 intensity = dbRemap[static_cast<size_t>(rawMax)];
-        int paletteIndex = kGradientTableSize
-            - static_cast<int>(
-                  std::lround(gradScale * static_cast<double>(intensity)));
-        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
-        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
-            palette[static_cast<size_t>(paletteIndex)];
+        auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+        for (int x = clampedXBegin; x <= clampedXEnd; ++x) {
+            const SpectrogramGpu::ColumnSpan spanInfo =
+                SpectrogramGpu::resolveColumnSpanForPixel(x, sourceColumns, gpuEffectiveZoom);
+            double intensity = 0.0;
+            if (spanInfo.firstColumn >= 0) {
+                if (spanInfo.interpolate) {
+                    const double leftRaw = sampleColumnRangeFromRing(
+                        spanInfo.firstColumn,
+                        spanInfo.firstColumn,
+                        index0,
+                        index1);
+                    const double rightRaw = sampleColumnRangeFromRing(
+                        spanInfo.lastColumn,
+                        spanInfo.lastColumn,
+                        index0,
+                        index1);
+                    intensity = linearInterpolate(
+                        leftRaw,
+                        rightRaw,
+                        std::clamp(spanInfo.interpolationT, 0.0, 1.0));
+                } else {
+                    intensity = sampleColumnRangeFromRing(
+                        spanInfo.firstColumn,
+                        spanInfo.lastColumn,
+                        index0,
+                        index1);
+                }
+            }
+
+            if (span > 1) {
+                const double v1 = sampleColumnRangeFromRing(
+                    std::max(0, spanInfo.firstColumn),
+                    std::max(0, spanInfo.lastColumn),
+                    nextBin,
+                    nextBin);
+                const double mu = (1.0 / static_cast<double>(span - 1))
+                    * static_cast<double>(leadingCount);
+                intensity = linearInterpolate(intensity, v1, std::clamp(mu, 0.0, 1.0));
+            }
+
+            const int remappedIndex = dbRemap[static_cast<size_t>(std::clamp(
+                static_cast<int>(std::lround(intensity)),
+                0,
+                255))];
+            const int paletteIndex = kGradientTableSize - 1
+                - static_cast<int>(std::lround(
+                    (static_cast<double>(kGradientTableSize - 1) / 255.0)
+                    * static_cast<double>(remappedIndex)));
+            line[x] = palette[static_cast<size_t>(std::clamp(
+                paletteIndex,
+                0,
+                kGradientTableSize - 1))];
+        }
     }
+}
+
+void SpectrogramItem::syncPrecomputedDisplayImageLocked(
+    int drawPixels,
+    int height,
+    qint64 displayLeft,
+    qint64 displayRight,
+    bool rollingMode,
+    double effectiveZoom) {
+    if (drawPixels <= 0
+        || height <= 0
+        || displayRight < displayLeft
+        || m_precomputedBinsPerColumn <= 0) {
+        m_gpuDisplayImage = QImage();
+        m_gpuDisplayGeneration = 0;
+        m_gpuDisplaySourceGeneration = 0;
+        m_gpuDisplayWidth = 0;
+        m_gpuDisplayHeight = 0;
+        m_gpuDisplaySampleRateHz = 0;
+        m_gpuDisplayBins = 0;
+        m_gpuDisplayRingWriteSeq = -1;
+        m_gpuDisplayRingOldestSeq = -1;
+        m_gpuDisplayMaxColumnIndex = -1;
+        m_gpuDisplayTrackToken = 0;
+        m_gpuDisplayLastUpdateWasIncremental = false;
+        m_gpuDisplayLastShiftPixels = 0;
+        m_gpuDisplayLastUpdatedColumns = 0;
+        return;
+    }
+
+    m_precomputedCanvasDisplayLeft = displayLeft;
+    m_precomputedCanvasDisplayRight = displayRight;
+    m_precomputedCanvasRolling = rollingMode;
+    m_precomputedCanvasZoomLevel = effectiveZoom;
+    m_precomputedCanvasDirty = false;
+    m_canvasFilledCols = drawPixels;
+
+    const bool displayConfigDirty =
+        m_gpuDisplayImage.isNull()
+        || m_gpuDisplayWidth != drawPixels
+        || m_gpuDisplayHeight != height
+        || m_gpuDisplaySampleRateHz != m_sampleRateHz
+        || m_gpuDisplayBins != m_precomputedBinsPerColumn
+        || std::abs(m_gpuDisplayDbRange - m_dbRange) > 0.001
+        || m_gpuDisplayMuted != m_channelMuted
+        || m_gpuDisplayLogScale != m_logScale;
+    const bool displayWindowChanged =
+        m_gpuDisplayDisplayLeft != displayLeft
+        || m_gpuDisplayDisplayRight != displayRight
+        || m_gpuDisplayRolling != rollingMode
+        || m_gpuDisplayTrackToken != m_precomputedTrackToken;
+    const bool centeredVisibleCoverageIncomplete =
+        !rollingMode && m_gpuDisplayMaxColumnIndex < displayRight;
+    const bool centeredVisibleGrowthDirty =
+        centeredVisibleCoverageIncomplete
+        && m_gpuDisplayMaxColumnIndex != m_precomputedMaxColumnIndex;
+    const bool contentDirty = rollingMode
+        ? displayWindowChanged
+        : (displayWindowChanged || centeredVisibleGrowthDirty);
+    if (!displayConfigDirty && !contentDirty) {
+        return;
+    }
+
+    const auto dbRemap = buildPrecomputedDbRemapLocked();
+    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
+    m_gpuDisplayLastUpdateWasIncremental = false;
+    m_gpuDisplayLastShiftPixels = 0;
+    m_gpuDisplayLastUpdatedColumns = drawPixels;
+
+    const qint64 advanceColumns =
+        m_gpuDisplayRolling == rollingMode
+            ? (displayLeft - m_gpuDisplayDisplayLeft)
+            : 0;
+    const qint64 advanceRight =
+        m_gpuDisplayRolling == rollingMode
+            ? (displayRight - m_gpuDisplayDisplayRight)
+            : 0;
+    const double requestedShiftPixels =
+        static_cast<double>(advanceColumns) * effectiveZoom;
+    const int shiftPixels = static_cast<int>(std::lround(requestedShiftPixels));
+    const bool canIncrementallyAdvanceDisplay =
+        contentDirty
+        && !displayConfigDirty
+        && advanceColumns > 0
+        && advanceColumns == advanceRight
+        && shiftPixels > 0
+        && shiftPixels < drawPixels
+        && std::abs(requestedShiftPixels - static_cast<double>(shiftPixels)) < 0.001
+        && std::abs(effectiveZoom - m_gpuDisplayEffectiveZoom) < 0.001
+        && m_gpuDisplayRolling == rollingMode
+        && displayLeft >= m_gpuDisplayDisplayLeft
+        && displayRight >= m_gpuDisplayDisplayRight;
+
+    if (canIncrementallyAdvanceDisplay) {
+        for (int y = 0; y < height; ++y) {
+            auto *line = reinterpret_cast<QRgb *>(m_gpuDisplayImage.scanLine(y));
+            std::memmove(
+                line,
+                line + shiftPixels,
+                static_cast<size_t>(drawPixels - shiftPixels) * sizeof(QRgb));
+            std::fill(
+                line + (drawPixels - shiftPixels),
+                line + drawPixels,
+                qRgb(0, 0, 0));
+        }
+        paintPrecomputedDisplayColumnsLocked(
+            m_gpuDisplayImage,
+            drawPixels - shiftPixels,
+            drawPixels - 1,
+            drawPixels,
+            height,
+            displayLeft,
+            displayRight,
+            rollingMode,
+            dbRemap,
+            palette.data());
+        m_gpuDisplayLastUpdateWasIncremental = true;
+        m_gpuDisplayLastShiftPixels = shiftPixels;
+        m_gpuDisplayLastUpdatedColumns = shiftPixels;
+    } else {
+        m_gpuDisplayImage = QImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);
+        m_gpuDisplayImage.fill(Qt::black);
+        paintPrecomputedDisplayColumnsLocked(
+            m_gpuDisplayImage,
+            0,
+            drawPixels - 1,
+            drawPixels,
+            height,
+            displayLeft,
+            displayRight,
+            rollingMode,
+            dbRemap,
+            palette.data());
+    }
+
+    m_gpuDisplaySourceGeneration = m_gpuSourceGeneration;
+    m_gpuDisplayGeneration += 1;
+    m_gpuDisplayWidth = drawPixels;
+    m_gpuDisplayHeight = height;
+    m_gpuDisplaySampleRateHz = m_sampleRateHz;
+    m_gpuDisplayBins = m_precomputedBinsPerColumn;
+    m_gpuDisplayDbRange = m_dbRange;
+    m_gpuDisplayMuted = m_channelMuted;
+    m_gpuDisplayLogScale = m_logScale;
+    m_gpuDisplayDisplayLeft = displayLeft;
+    m_gpuDisplayDisplayRight = displayRight;
+    m_gpuDisplayRolling = rollingMode;
+    m_gpuDisplayRingWriteSeq = m_ringWriteSeq;
+    m_gpuDisplayRingOldestSeq = m_ringOldestSeq;
+    m_gpuDisplayMaxColumnIndex = m_precomputedMaxColumnIndex;
+    m_gpuDisplayTrackToken = m_precomputedTrackToken;
+    m_gpuDisplayEffectiveZoom = effectiveZoom;
 }
 
 int SpectrogramItem::ringSlotForDisplayIndexLocked(
@@ -3733,256 +4288,6 @@ int SpectrogramItem::ringSlotForDisplayIndexLocked(
         return slot;
     }
     return -1;
-}
-
-void SpectrogramItem::drawInterpolatedColumnAtLocked(
-    int x,
-    qint64 displayIndexL,
-    qint64 displayIndexR,
-    double t,
-    bool rollingMode,
-    const std::array<quint8, 256> &dbRemap) {
-    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
-        || m_precomputedBinsPerColumn <= 0) {
-        return;
-    }
-
-    markTileDirtyLocked(x);
-
-    const int bins = m_precomputedBinsPerColumn;
-    const auto *ringData =
-        reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
-    const QRgb bgColor = kBackgroundColor.rgba();
-    const double gradScale =
-        static_cast<double>(kGradientTableSize) / 255.0;
-
-    const int slotL = ringSlotForDisplayIndexLocked(displayIndexL, rollingMode);
-    const int slotR = ringSlotForDisplayIndexLocked(displayIndexR, rollingMode);
-
-    if (slotL < 0 && slotR < 0) {
-        for (int y = 0; y < m_canvas.height(); ++y) {
-            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
-        }
-        return;
-    }
-    if (slotL < 0) {
-        drawPrecomputedColumnAtLocked(
-            x, displayIndexR, rollingMode, dbRemap);
-        return;
-    }
-    if (slotR < 0) {
-        drawPrecomputedColumnAtLocked(
-            x, displayIndexL, rollingMode, dbRemap);
-        return;
-    }
-
-    const int baseL = slotL * bins;
-    const int baseR = slotR * bins;
-    const double oneMinusT = 1.0 - t;
-    const int mapSize = static_cast<int>(m_iToBin.size());
-    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
-
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int mi = m_canvas.height() - 1 - y;
-        int binLo = 0;
-        int binHi = 0;
-        if (mi >= 0 && mi < mapSize) {
-            const int bc = m_iToBin[static_cast<size_t>(mi)];
-            const int bp = (mi > 0)
-                ? m_iToBin[static_cast<size_t>(mi - 1)]
-                : bc;
-            const int bn = (mi + 1 < mapSize)
-                ? m_iToBin[static_cast<size_t>(mi + 1)]
-                : bc;
-            binLo = bp + (bc - bp) / 2;
-            binHi = bc + (bn - bc) / 2;
-            if (binLo == bp && bp != bc) {
-                binLo = bc;
-            }
-            if (binHi == bn && bn != bc) {
-                binHi = bc;
-            }
-            if (binLo > binHi) {
-                std::swap(binLo, binHi);
-            }
-            binLo = std::clamp(binLo, 0, bins - 1);
-            binHi = std::clamp(binHi, 0, bins - 1);
-        }
-
-        quint8 rawMaxL = 0;
-        quint8 rawMaxR = 0;
-        for (int b = binLo; b <= binHi; ++b) {
-            rawMaxL = std::max(rawMaxL, ringData[baseL + b]);
-            rawMaxR = std::max(rawMaxR, ringData[baseR + b]);
-        }
-
-        const auto rawBlended = static_cast<quint8>(std::lround(
-            static_cast<double>(rawMaxL) * oneMinusT
-            + static_cast<double>(rawMaxR) * t));
-        const quint8 intensity = dbRemap[static_cast<size_t>(rawBlended)];
-        int paletteIndex = kGradientTableSize
-            - static_cast<int>(
-                  std::lround(gradScale * static_cast<double>(intensity)));
-        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
-        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
-            palette[static_cast<size_t>(paletteIndex)];
-    }
-}
-
-void SpectrogramItem::rebuildPrecomputedCanvasLocked(
-    int width,
-    int height,
-    qint64 displayLeft,
-    qint64 displayRight,
-    bool rollingMode) {
-    if (width <= 0 || height <= 0 || displayRight < displayLeft) {
-        invalidateCanvas();
-        return;
-    }
-
-    if (m_canvas.isNull()
-        || m_canvas.width() != width
-        || m_canvas.height() != height
-        || m_canvas.format() != QImage::Format_RGB32) {
-        m_canvas = QImage(width, height, QImage::Format_RGB32);
-    }
-    m_canvas.fill(Qt::black);
-    resizeDirtyTilesLocked();
-    markAllTilesDirtyLocked();
-
-    const qint64 sourceColumns = displayRight - displayLeft + 1;
-    const double rebuildEffectiveZoom = effectiveZoomLocked();
-    int drawPixels = std::min(width,
-        static_cast<int>(std::ceil(
-            static_cast<double>(sourceColumns) * rebuildEffectiveZoom)));
-    // At max zoom-out, hop rounding can produce a few fewer columns
-    // than the canvas width.  Pad to width when the display covers
-    // nearly all the content — the colFirst clamping in the loop
-    // repeats the last column for the extra pixels.
-    if (drawPixels < width
-        && displayLeft == 0
-        && sourceColumns + 5 >= static_cast<qint64>(width)) {
-        drawPixels = width;
-    }
-    const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
-    const auto dbRemap = buildPrecomputedDbRemapLocked();
-
-    const bool interpolate = rebuildEffectiveZoom > 1.001;
-    for (int px = 0; px < drawPixels; ++px) {
-        const double rangeStart =
-            static_cast<double>(px) * columnsPerPixel;
-        const double rangeEnd =
-            static_cast<double>(px + 1) * columnsPerPixel;
-        const qint64 colFirst = std::min(
-            displayLeft + static_cast<qint64>(std::floor(rangeStart)),
-            displayRight);
-        const qint64 colLast = std::min(
-            displayLeft
-                + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
-            displayRight);
-
-        if (colFirst < colLast && !interpolate) {
-            // Multiple source columns map to this pixel: peak-hold.
-            drawPeakHoldColumnRangeLocked(
-                px, colFirst, colLast, rollingMode, dbRemap);
-        } else if (interpolate) {
-            const double srcColF = rangeStart;
-            const double t = srcColF - std::floor(srcColF);
-            if (t > 0.001) {
-                const qint64 colR = std::min(colFirst + 1, displayRight);
-                if (colR != colFirst) {
-                    drawInterpolatedColumnAtLocked(
-                        px, colFirst, colR, t, rollingMode, dbRemap);
-                    continue;
-                }
-            }
-            drawPrecomputedColumnAtLocked(
-                px, colFirst, rollingMode, dbRemap);
-        } else {
-            drawPrecomputedColumnAtLocked(
-                px, colFirst, rollingMode, dbRemap);
-        }
-    }
-
-    m_canvasWriteX = width > 0 ? (drawPixels % width) : 0;
-    m_canvasFilledCols = drawPixels;
-    m_precomputedCanvasDisplayLeft = displayLeft;
-    m_precomputedCanvasDisplayRight =
-        drawPixels > 0
-            ? (displayLeft + static_cast<qint64>(
-                   static_cast<double>(drawPixels) * columnsPerPixel) - 1)
-            : (displayLeft - 1);
-    m_precomputedCanvasRolling = rollingMode;
-    m_precomputedCanvasZoomLevel = rebuildEffectiveZoom;
-    m_precomputedCanvasDirty = false;
-}
-
-bool SpectrogramItem::advancePrecomputedCanvasLocked(
-    qint64 displayLeft,
-    qint64 displayRight,
-    bool rollingMode) {
-    // Incremental advance only works at 1:1 column-to-pixel mapping.
-    // TODO: Implement incremental advance for non-1.0 zoom levels if
-    // full rebuild shows measurable frame drops on target hardware.
-    const double effectiveZoom = effectiveZoomLocked();
-    if (std::abs(effectiveZoom - 1.0) > 0.001) {
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        if (m_profileEnabled) {
-            noteSmoothnessAdvanceFallbackLocked(effectiveZoom);
-        }
-#endif
-        return false;
-    }
-    if (m_canvas.isNull()
-        || m_canvas.width() <= 0
-        || displayRight < displayLeft
-        || rollingMode != m_precomputedCanvasRolling
-        || m_precomputedCanvasDisplayRight < m_precomputedCanvasDisplayLeft) {
-        return false;
-    }
-
-    if (displayLeft < m_precomputedCanvasDisplayLeft
-        || displayRight < m_precomputedCanvasDisplayRight) {
-        return false;
-    }
-
-    const int width = m_canvas.width();
-    const int nextVisibleCols = std::min(
-        width,
-        static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
-    if (nextVisibleCols <= 0) {
-        m_canvasFilledCols = 0;
-        m_precomputedCanvasDisplayLeft = displayLeft;
-        m_precomputedCanvasDisplayRight = displayLeft - 1;
-        m_precomputedCanvasDirty = false;
-        return true;
-    }
-
-    const qint64 appendStart = std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
-    const qint64 appendCount = std::max<qint64>(0, displayRight - appendStart + 1);
-    if (appendCount > width) {
-        return false;
-    }
-
-    if (appendCount > 0) {
-        const auto dbRemap = buildPrecomputedDbRemapLocked();
-        for (qint64 displayIndex = appendStart; displayIndex <= displayRight; ++displayIndex) {
-            drawPrecomputedColumnAtLocked(
-                m_canvasWriteX,
-                displayIndex,
-                rollingMode,
-                dbRemap);
-            m_canvasWriteX = (m_canvasWriteX + 1) % width;
-            m_canvasFilledCols = std::min(width, m_canvasFilledCols + 1);
-        }
-    }
-
-    m_canvasFilledCols = nextVisibleCols;
-    m_precomputedCanvasDisplayLeft = displayLeft;
-    m_precomputedCanvasDisplayRight =
-        displayLeft + static_cast<qint64>(nextVisibleCols) - 1;
-    m_precomputedCanvasDirty = false;
-    return true;
 }
 
 double SpectrogramItem::targetRowsPerSecondLocked() const {
@@ -4059,7 +4364,6 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     {
         QMutexLocker lock(&m_stateMutex);
         m_sceneGraphGeneration += 1;
-        markAllTilesDirtyLocked();
         m_overlayDirty = true;
         m_fpsInitialized = false;
         m_fpsValue = 0;
@@ -4094,7 +4398,6 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
             }
             {
                 QMutexLocker lock(&m_stateMutex);
-                markAllTilesDirtyLocked();
                 m_overlayDirty = true;
                 m_animationTickInitialized = false;
             }
@@ -4159,9 +4462,65 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     // scrolling (playing).  When stopped/paused the display is static
     // and re-renders are already triggered on demand by data feeds
     // (feedPrecomputedChunk) or property changes (setPositionSeconds).
+    maybeDumpGpuDebugFrame();
     if (changed || (precomputedActive && playing)) {
         update();
     }
+}
+
+void SpectrogramItem::maybeDumpGpuDebugFrame() {
+    if (m_gpuDumpFramesRemaining <= 0) {
+        return;
+    }
+
+    QQuickWindow *currentWindow = window();
+    if (currentWindow == nullptr || width() <= 0.0 || height() <= 0.0) {
+        return;
+    }
+
+    const QImage frame = currentWindow->grabWindow();
+    if (frame.isNull()) {
+        return;
+    }
+
+    const qreal dpr = frame.devicePixelRatio();
+    const QRectF sceneRect = mapRectToScene(boundingRect());
+    const QRect cropRect(
+        static_cast<int>(std::floor(sceneRect.x() * dpr)),
+        static_cast<int>(std::floor(sceneRect.y() * dpr)),
+        static_cast<int>(std::ceil(sceneRect.width() * dpr)),
+        static_cast<int>(std::ceil(sceneRect.height() * dpr)));
+    const QRect boundedCrop = cropRect.intersected(frame.rect());
+    if (boundedCrop.isEmpty()) {
+        return;
+    }
+
+    const QImage crop = frame.copy(boundedCrop);
+    const DebugFrameStats stats = analyzeDebugFrame(crop);
+
+    QDir dumpDir(m_gpuDumpDirectory);
+    if (!dumpDir.exists()) {
+        QDir().mkpath(m_gpuDumpDirectory);
+    }
+    const QString path = dumpDir.filePath(
+        QStringLiteral("spectrogram-%1-%2-%3.png")
+            .arg(reinterpret_cast<quintptr>(this), 0, 16)
+            .arg(SpectrogramGpu::debugModeName(SpectrogramGpu::currentDebugMode()))
+            .arg(m_gpuDumpFrameSerial++, 3, 10, QLatin1Char('0')));
+    crop.save(path);
+
+    std::fprintf(
+        stderr,
+        "[Qt-gpu-dump@%p] mode=%s path=%s crop=%dx%d nonblack=%d avg_luma=%.2f remaining=%d\n",
+        static_cast<const void *>(this),
+        SpectrogramGpu::debugModeName(SpectrogramGpu::currentDebugMode()),
+        path.toUtf8().constData(),
+        crop.width(),
+        crop.height(),
+        stats.nonBlackPixels,
+        stats.averageLuma,
+        m_gpuDumpFramesRemaining - 1);
+    m_gpuDumpFramesRemaining -= 1;
 }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

@@ -70,6 +70,7 @@ qt_add_executable(ferrous
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
+    src/SpectrogramGpuRenderer.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
     src/SpectrogramItem.cpp
@@ -196,6 +197,7 @@ if(BUILD_TESTING)
         src/DiagnosticsLog.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
+        src/SpectrogramGpuRenderer.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -263,6 +265,7 @@ if(BUILD_TESTING)
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
         src/MprisController.cpp
+        src/SpectrogramGpuRenderer.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp

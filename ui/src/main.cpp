@@ -5,6 +5,8 @@
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QQuickStyle>
 #include <QStandardPaths>
 #include <qqml.h>
@@ -39,6 +41,44 @@ bool hasInstalledDesktopEntry(const QString &desktopFileName) {
                 desktopFileName,
                 QStandardPaths::LocateFile)
                 .isEmpty();
+}
+
+QString graphicsApiName(QSGRendererInterface::GraphicsApi api) {
+    switch (api) {
+    case QSGRendererInterface::Unknown:
+        return QStringLiteral("unknown");
+    case QSGRendererInterface::Software:
+        return QStringLiteral("software");
+    case QSGRendererInterface::OpenVG:
+        return QStringLiteral("openvg");
+    case QSGRendererInterface::OpenGL:
+        return QStringLiteral("opengl");
+    case QSGRendererInterface::Direct3D11:
+        return QStringLiteral("d3d11");
+    case QSGRendererInterface::Vulkan:
+        return QStringLiteral("vulkan");
+    case QSGRendererInterface::Metal:
+        return QStringLiteral("metal");
+    case QSGRendererInterface::Null:
+        return QStringLiteral("null");
+    case QSGRendererInterface::Direct3D12:
+        return QStringLiteral("d3d12");
+    }
+    return QStringLiteral("unrecognized");
+}
+
+QString shaderTypeName(QSGRendererInterface::ShaderType type) {
+    switch (type) {
+    case QSGRendererInterface::UnknownShadingLanguage:
+        return QStringLiteral("unknown");
+    case QSGRendererInterface::GLSL:
+        return QStringLiteral("glsl");
+    case QSGRendererInterface::HLSL:
+        return QStringLiteral("hlsl");
+    case QSGRendererInterface::RhiShader:
+        return QStringLiteral("rhi");
+    }
+    return QStringLiteral("unrecognized");
 }
 
 class ConsoleTeeManager {
@@ -287,5 +327,33 @@ int main(int argc, char *argv[]) {
         Qt::QueuedConnection);
 
     engine.loadFromModule("FerrousUi", "Main");
+    if (!engine.rootObjects().isEmpty()) {
+        if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst())) {
+            const QString logPath = DiagnosticsLog::defaultLogPath();
+            const auto logRendererState = [window, logPath](const char *phase) {
+                QSGRendererInterface *renderer = window->rendererInterface();
+                const QString line = QStringLiteral(
+                    "[ui-renderer] phase=%1 platform=%2 api=%3 shader=%4 persistentSceneGraph=%5")
+                                         .arg(QString::fromLatin1(phase))
+                                         .arg(QGuiApplication::platformName())
+                                         .arg(renderer != nullptr
+                                                  ? graphicsApiName(renderer->graphicsApi())
+                                                  : QStringLiteral("null"))
+                                         .arg(renderer != nullptr
+                                                  ? shaderTypeName(renderer->shaderType())
+                                                  : QStringLiteral("null"))
+                                         .arg(window->isPersistentSceneGraph() ? 1 : 0);
+                DiagnosticsLog::appendLine(logPath, line);
+                std::fprintf(stderr, "%s\n", qPrintable(line));
+            };
+            logRendererState("after-load");
+            QObject::connect(
+                window,
+                &QQuickWindow::sceneGraphInitialized,
+                window,
+                [logRendererState]() { logRendererState("scenegraph-initialized"); },
+                Qt::DirectConnection);
+        }
+    }
     return app.exec();
 }
