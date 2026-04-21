@@ -278,32 +278,60 @@ void configureLineNode(
         QColor color;
     };
 
+    auto appendSolidLine = [](QVector<LineSample> &samples, const QLineF &line, const QColor &color) {
+        samples.push_back(LineSample{line, color});
+    };
+
+    auto appendDottedLine = [](QVector<LineSample> &samples, const QLineF &line, const QColor &color) {
+        constexpr double kDotLength = 1.0;
+        constexpr double kDotGap = 1.0;
+
+        const bool vertical = qFuzzyCompare(line.x1() + 1.0, line.x2() + 1.0);
+        const double fixedCoordinate = vertical ? line.x1() : line.y1();
+        const double start = vertical
+            ? std::min(line.y1(), line.y2())
+            : std::min(line.x1(), line.x2());
+        const double end = vertical
+            ? std::max(line.y1(), line.y2())
+            : std::max(line.x1(), line.x2());
+
+        for (double pos = start; pos <= end; pos += kDotLength + kDotGap) {
+            const double segmentEnd = std::min(pos + kDotLength, end);
+            if (vertical) {
+                samples.push_back(LineSample{
+                    QLineF(fixedCoordinate, pos, fixedCoordinate, segmentEnd),
+                    color,
+                });
+            } else {
+                samples.push_back(LineSample{
+                    QLineF(pos, fixedCoordinate, segmentEnd, fixedCoordinate),
+                    color,
+                });
+            }
+        }
+    };
+
     QVector<LineSample> lines;
-    lines.reserve(
-        freqLines.size()
-        + timeLines.size()
-        + (playheadLine.has_value() ? 1 : 0)
-        + (crosshairVerticalLine.has_value() ? 1 : 0)
-        + (crosshairHorizontalLine.has_value() ? 1 : 0));
+    lines.reserve(freqLines.size() + timeLines.size() + 16);
 
     const QColor gridColor(255, 255, 255, 50);
     const QColor playheadColor(255, 255, 255, 128);
     const QColor crosshairColor(255, 255, 255, 140);
 
     for (const QLineF &line : freqLines) {
-        lines.push_back(LineSample{line, gridColor});
+        appendSolidLine(lines, line, gridColor);
     }
     for (const QLineF &line : timeLines) {
-        lines.push_back(LineSample{line, gridColor});
+        appendSolidLine(lines, line, gridColor);
     }
     if (playheadLine.has_value()) {
-        lines.push_back(LineSample{*playheadLine, playheadColor});
+        appendSolidLine(lines, *playheadLine, playheadColor);
     }
     if (crosshairVerticalLine.has_value()) {
-        lines.push_back(LineSample{*crosshairVerticalLine, crosshairColor});
+        appendDottedLine(lines, *crosshairVerticalLine, crosshairColor);
     }
     if (crosshairHorizontalLine.has_value()) {
-        lines.push_back(LineSample{*crosshairHorizontalLine, crosshairColor});
+        appendDottedLine(lines, *crosshairHorizontalLine, crosshairColor);
     }
 
     auto *geometry = node->geometry();

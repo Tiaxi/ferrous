@@ -273,6 +273,76 @@ QString gridLineSignature(const QVector<OverlayLineSample> &samples) {
     return encoded.join(QLatin1Char(';'));
 }
 
+QVector<QLineF> findLinesAtCoordinate(
+    const QVector<OverlayLineSample> &samples,
+    int alpha,
+    bool vertical,
+    int coordinate) {
+    QVector<QLineF> matches;
+    for (const OverlayLineSample &sample : samples) {
+        if (sample.color.alpha() != alpha) {
+            continue;
+        }
+        const bool sampleVertical =
+            qFuzzyCompare(sample.line.x1() + 1.0, sample.line.x2() + 1.0);
+        if (sampleVertical != vertical) {
+            continue;
+        }
+        const int fixedCoordinate = vertical
+            ? qRound(sample.line.x1())
+            : qRound(sample.line.y1());
+        if (fixedCoordinate != coordinate) {
+            continue;
+        }
+        matches.push_back(sample.line);
+    }
+    return matches;
+}
+
+QVector<QLineF> findLinesByOrientation(
+    const QVector<OverlayLineSample> &samples,
+    int alpha,
+    bool vertical) {
+    QVector<QLineF> matches;
+    for (const OverlayLineSample &sample : samples) {
+        if (sample.color.alpha() != alpha) {
+            continue;
+        }
+        const bool sampleVertical =
+            qFuzzyCompare(sample.line.x1() + 1.0, sample.line.x2() + 1.0);
+        if (sampleVertical != vertical) {
+            continue;
+        }
+        matches.push_back(sample.line);
+    }
+    return matches;
+}
+
+double longestLineSpan(const QVector<QLineF> &lines, bool vertical) {
+    double longest = 0.0;
+    for (const QLineF &line : lines) {
+        const double span = vertical
+            ? std::abs(line.y2() - line.y1())
+            : std::abs(line.x2() - line.x1());
+        longest = std::max(longest, span);
+    }
+    return longest;
+}
+
+int countVisiblePixelsInRect(const QImage &image, const QRect &rect, int threshold) {
+    int visiblePixels = 0;
+    const QRect bounded = rect.intersected(image.rect());
+    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
+        for (int x = bounded.left(); x <= bounded.right(); ++x) {
+            const QColor pixel = image.pixelColor(x, y);
+            if (pixel.red() > threshold || pixel.green() > threshold || pixel.blue() > threshold) {
+                ++visiblePixels;
+            }
+        }
+    }
+    return visiblePixels;
+}
+
 QByteArray artistOnlyLazyBinary() {
     QVector<BinaryTreeRow> rows;
     rows.push_back(BinaryTreeRow{
@@ -526,6 +596,7 @@ private slots:
     void spectrogramOverlayDirtiedByLogScaleChange();
     void spectrogramPublicOverlayLineNodeTracksPlayhead();
     void spectrogramPublicOverlayLineNodeTracksGridAndCrosshair();
+    void spectrogramPublicOverlayLineNodeTracksSharedCrosshair();
     void spectrogramOverlayStalenessDetectsBinChange();
     void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
     void spectrogramOverlayStalenessDetectsDisplayRangeChange();
@@ -4540,12 +4611,12 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
     QVERIFY2(overlayNode != nullptr, "overlay lines should be rendered through a public geometry node");
 
     const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
-    const auto firstCrosshairVertical = findUniqueLine(firstSamples, 140, true);
-    const auto firstCrosshairHorizontal = findUniqueLine(firstSamples, 140, false);
-    QVERIFY(firstCrosshairVertical.has_value());
-    QVERIFY(firstCrosshairHorizontal.has_value());
-    QCOMPARE(qRound(firstCrosshairVertical->x1()), 60);
-    QCOMPARE(qRound(firstCrosshairHorizontal->y1()), 40);
+    const QVector<QLineF> firstCrosshairVertical = findLinesAtCoordinate(firstSamples, 140, true, 60);
+    const QVector<QLineF> firstCrosshairHorizontal = findLinesAtCoordinate(firstSamples, 140, false, 40);
+    QVERIFY2(firstCrosshairVertical.size() > 4, "crosshair vertical line should remain dotted in the public overlay path");
+    QVERIFY2(firstCrosshairHorizontal.size() > 4, "crosshair horizontal line should remain dotted in the public overlay path");
+    QVERIFY2(longestLineSpan(firstCrosshairVertical, true) <= 3.0, "crosshair vertical line segments should stay short");
+    QVERIFY2(longestLineSpan(firstCrosshairHorizontal, false) <= 3.0, "crosshair horizontal line segments should stay short");
     const QString firstGridSignature = gridLineSignature(firstSamples);
     QVERIFY2(!firstGridSignature.isEmpty(), "expected geometry grid lines in the overlay node");
 
@@ -4562,17 +4633,47 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
     QVERIFY(updatedNode == node);
 
     const QVector<OverlayLineSample> secondSamples = overlayLineSamples(updatedNode);
-    const auto secondCrosshairVertical = findUniqueLine(secondSamples, 140, true);
-    const auto secondCrosshairHorizontal = findUniqueLine(secondSamples, 140, false);
-    QVERIFY(secondCrosshairVertical.has_value());
-    QVERIFY(secondCrosshairHorizontal.has_value());
-    QCOMPARE(qRound(secondCrosshairVertical->x1()), 110);
-    QCOMPARE(qRound(secondCrosshairHorizontal->y1()), 70);
-    QVERIFY(qRound(firstCrosshairVertical->x1()) != qRound(secondCrosshairVertical->x1()));
-    QVERIFY(qRound(firstCrosshairHorizontal->y1()) != qRound(secondCrosshairHorizontal->y1()));
+    const QVector<QLineF> secondCrosshairVertical = findLinesAtCoordinate(secondSamples, 140, true, 110);
+    const QVector<QLineF> secondCrosshairHorizontal = findLinesAtCoordinate(secondSamples, 140, false, 70);
+    QVERIFY2(secondCrosshairVertical.size() > 4, "moved vertical crosshair should remain dotted");
+    QVERIFY2(secondCrosshairHorizontal.size() > 4, "moved horizontal crosshair should remain dotted");
+    QVERIFY2(longestLineSpan(secondCrosshairVertical, true) <= 3.0, "moved vertical crosshair segments should stay short");
+    QVERIFY2(longestLineSpan(secondCrosshairHorizontal, false) <= 3.0, "moved horizontal crosshair segments should stay short");
+    QVERIFY(firstCrosshairVertical != secondCrosshairVertical);
+    QVERIFY(firstCrosshairHorizontal != secondCrosshairHorizontal);
     QVERIFY(firstGridSignature != gridLineSignature(secondSamples));
 
     delete updatedNode;
+}
+
+void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksSharedCrosshair() {
+    SpectrogramItem item;
+    item.setWidth(240);
+    item.setHeight(120);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setCrosshairEnabled(true);
+    item.setCrosshairSharedX(90.0);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 320;
+    QByteArray chunk(bins * totalColumns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    item.setPositionSeconds(2.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    const QVector<OverlayLineSample> samples = overlayLineSamples(node);
+    const QVector<QLineF> sharedVertical = findLinesAtCoordinate(samples, 140, true, 90);
+    QVERIFY2(sharedVertical.size() > 4, "shared crosshair should render dotted vertical geometry segments");
+    QVERIFY2(longestLineSpan(sharedVertical, true) <= 3.0, "shared crosshair vertical segments should stay short");
+    QVERIFY2(findLinesByOrientation(samples, 140, false).isEmpty(),
+             "shared crosshair branch should not draw a horizontal line without local hover");
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
@@ -6150,19 +6251,9 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverl
 
     const QImage frame = window.grabWindow();
     QVERIFY(!frame.isNull());
-
-    bool sawSpectrogramPixel = false;
-    for (int y = 0; y < frame.height() && !sawSpectrogramPixel; ++y) {
-        for (int x = 0; x < frame.width(); ++x) {
-            const QColor pixel = frame.pixelColor(x, y);
-            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
-                sawSpectrogramPixel = true;
-                break;
-            }
-        }
-    }
-
-    QVERIFY2(sawSpectrogramPixel, "Spectrogram content remained black without overlays");
+    const QRect bodyRegion(40, 15, 120, 70);
+    const int visiblePixels = countVisiblePixelsInRect(frame, bodyRegion, 8);
+    QVERIFY2(visiblePixels > 100, "Spectrogram body region remained black without overlays");
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels() {
