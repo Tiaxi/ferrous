@@ -2782,7 +2782,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
         }
     }
-    if (showSpectrogram && node->spectrogramTextureResource != nullptr && !spectrogramSourceRect.isEmpty()) {
+    const bool useTextureNodeBody =
+        gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+        || m_displayMode == 0;
+    if (useTextureNodeBody
+        && showSpectrogram
+        && node->spectrogramTextureResource != nullptr
+        && !spectrogramSourceRect.isEmpty()) {
         QRectF baseTargetRect = spectrogramTargetRect;
         baseTargetRect.translate(-spectrogramSubpixelOffset, 0.0);
         QRect baseSourceRect = spectrogramSourceRect;

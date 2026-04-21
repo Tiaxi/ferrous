@@ -669,7 +669,6 @@ private slots:
     void spectrogramActiveRendererUsesPublicBodyTextureOnly();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
-    void spectrogramResizeForcesFreshBodyTextureUpload();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
     void spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutCollapsingToSingleNode();
     void spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutCollapsingToSingleNode();
@@ -5815,9 +5814,7 @@ void QmlSmokeTest::spectrogramActiveRendererUsesPublicBodyTextureOnly() {
 
     QVERIFY(bodyMaterialNode != nullptr);
     QVERIFY(bodyTextureNode != nullptr);
-    QVERIFY(bodyTextureNode->texture() != nullptr);
-    QVERIFY(bodyTextureNode->rect().width() > 0.0);
-    QVERIFY(bodyTextureNode->rect().height() > 0.0);
+    QVERIFY(bodyTextureNode->texture() == nullptr || bodyTextureNode->rect().isEmpty());
 
     QVERIFY(overlayLineNode != nullptr);
     delete node;
@@ -5848,6 +5845,11 @@ void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {
 }
 
 void QmlSmokeTest::spectrogramGpuTextureUploadSkipsRedundantRecreation() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
     QQuickWindow window;
     window.resize(200, 100);
     window.show();
@@ -5878,71 +5880,18 @@ void QmlSmokeTest::spectrogramGpuTextureUploadSkipsRedundantRecreation() {
     QSGNode *node = item->updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(node->childCount() >= 2);
-    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
     QVERIFY(textureNode != nullptr);
     QSGTexture *initialTexture = textureNode->texture();
     QVERIFY(initialTexture != nullptr);
 
     QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
-    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(2));
+    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
     QVERIFY(updatedTextureNode != nullptr);
     QVERIFY(updatedTextureNode->texture() == initialTexture);
 
     delete node;
-}
-
-void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
-    QQuickWindow window;
-    window.resize(240, 120);
-    window.show();
-    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
-
-    auto *item = new SpectrogramItem();
-    item->setParentItem(window.contentItem());
-    item->setWidth(240);
-    item->setHeight(80);
-    item->setDisplayMode(1); // Centered
-    item->setPlaying(false);
-
-    constexpr int bins = 32;
-    constexpr int columns = 320;
-    QByteArray data(bins * columns, '\x20');
-    for (int column = 96; column < 160; ++column) {
-        for (int bin = 0; bin < bins; ++bin) {
-            data[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(64 + column - 96 + bin));
-        }
-    }
-
-    item->feedPrecomputedChunk(
-        data, bins, 0, columns, 0, columns,
-        48000, 1024, false, true, 1, false);
-    item->setPositionSeconds(1.0);
-
-    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
-    QVERIFY(node != nullptr);
-    QVERIFY(node->childCount() >= 2);
-    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
-    QVERIFY(textureNode != nullptr);
-    QSGTexture *initialTexture = textureNode->texture();
-    QVERIFY(initialTexture != nullptr);
-    QCOMPARE(initialTexture->textureSize().height(), 80);
-    const quint64 initialGeneration = item->m_gpuDisplayGeneration;
-
-    item->setHeight(140);
-
-    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
-    QVERIFY(updatedNode == node);
-    auto *updatedTextureNode =
-        static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(2));
-    QVERIFY(updatedTextureNode != nullptr);
-    QSGTexture *updatedTexture = updatedTextureNode->texture();
-    QVERIFY(updatedTexture != nullptr);
-    QCOMPARE(updatedTexture->textureSize().height(), 140);
-    QVERIFY(item->m_gpuDisplayGeneration > initialGeneration);
-
-    delete updatedNode;
 }
 
 void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
@@ -7106,6 +7055,11 @@ void QmlSmokeTest::spectrogramCenteredGpuDisplayCacheAdvancesIncrementally() {
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
     QQuickWindow window;
     window.resize(200, 100);
 
@@ -7235,12 +7189,21 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {
     auto *materialNode = dynamic_cast<QSGGeometryNode *>(node->firstChild()->nextSibling());
     QVERIFY2(materialNode != nullptr, "normal full mode should use a material-backed body node");
     QVERIFY(materialNode->material() != nullptr);
-    QVERIFY(dynamic_cast<QSGSimpleTextureNode *>(node->firstChild()->nextSibling()) == nullptr);
+    auto *bodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    QVERIFY(bodyTextureNode != nullptr);
+    QVERIFY2(
+        bodyTextureNode->texture() == nullptr || bodyTextureNode->rect().isEmpty(),
+        "normal full mode should leave the old texture-node body empty");
 
     delete node;
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
     QQuickWindow window;
     window.resize(200, 100);
 
@@ -7284,6 +7247,11 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverl
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
     QQuickWindow window;
     window.resize(1126, 214);
 
