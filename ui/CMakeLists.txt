@@ -13,6 +13,7 @@ option(FERROUS_ENABLE_PROFILE_LOGS "Compile spectrogram instrumentation and prof
 option(FERROUS_WARNINGS_AS_ERRORS "Fail UI builds on compiler warnings" ON)
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
+find_package(Qt6 6.6 REQUIRED COMPONENTS GuiPrivate)
 find_package(KF6Kirigami 6.0 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
@@ -79,9 +80,49 @@ qt_add_executable(ferrous
     src/WaveformItem.cpp
 )
 
+find_program(FERROUS_QSB_EXECUTABLE qsb HINTS /usr/lib64/qt6/bin REQUIRED)
+set(FERROUS_RHI_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/rhi_shaders")
+set(FERROUS_RHI_VERTEX_QSB "${FERROUS_RHI_SHADER_DIR}/SpectrogramRhi.vert.qsb")
+set(FERROUS_RHI_FRAGMENT_QSB "${FERROUS_RHI_SHADER_DIR}/SpectrogramRhi.frag.qsb")
+
+add_custom_command(
+    OUTPUT "${FERROUS_RHI_VERTEX_QSB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FERROUS_RHI_SHADER_DIR}"
+    COMMAND "${FERROUS_QSB_EXECUTABLE}" --qt6
+            -o "${FERROUS_RHI_VERTEX_QSB}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhi.vert"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhi.vert"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${FERROUS_RHI_FRAGMENT_QSB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FERROUS_RHI_SHADER_DIR}"
+    COMMAND "${FERROUS_QSB_EXECUTABLE}" --qt6
+            -o "${FERROUS_RHI_FRAGMENT_QSB}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhi.frag"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhi.frag"
+    VERBATIM
+)
+
+add_custom_target(ferrous_rhi_shaders
+    DEPENDS
+        "${FERROUS_RHI_VERTEX_QSB}"
+        "${FERROUS_RHI_FRAGMENT_QSB}"
+)
+
+qt_add_resources(ferrous ferrous_rhi_shader_resources
+    PREFIX "/rhi"
+    BASE "${FERROUS_RHI_SHADER_DIR}"
+    FILES
+        "${FERROUS_RHI_VERTEX_QSB}"
+        "${FERROUS_RHI_FRAGMENT_QSB}"
+)
+
 target_include_directories(ferrous PRIVATE src)
 target_compile_definitions(ferrous PRIVATE FERROUS_APP_VERSION="${FERROUS_APP_VERSION}")
 add_dependencies(ferrous ferrous_rust_bridge)
+add_dependencies(ferrous ferrous_rhi_shaders)
 ferrous_enable_strict_warnings(ferrous)
 
 qt_add_resources(ferrous ferrous_app_resources
@@ -159,6 +200,7 @@ target_link_libraries(ferrous PRIVATE
     Qt6::Core
     Qt6::DBus
     Qt6::Gui
+    Qt6::GuiPrivate
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
@@ -205,14 +247,23 @@ if(BUILD_TESTING)
         src/SpectrogramItem.cpp
         src/WaveformItem.cpp
     )
+    qt_add_resources(ferrous_qml_smoke_tests ferrous_qml_smoke_shader_resources
+        PREFIX "/rhi"
+        BASE "${FERROUS_RHI_SHADER_DIR}"
+        FILES
+            "${FERROUS_RHI_VERTEX_QSB}"
+            "${FERROUS_RHI_FRAGMENT_QSB}"
+    )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
     add_dependencies(ferrous_qml_smoke_tests ferrous_rust_bridge)
+    add_dependencies(ferrous_qml_smoke_tests ferrous_rhi_shaders)
     target_compile_definitions(ferrous_qml_smoke_tests PRIVATE
         FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_qml_smoke_tests PRIVATE
         Qt6::Core
         Qt6::Gui
+        Qt6::GuiPrivate
         Qt6::Qml
         Qt6::Quick
         Qt6::QuickControls2
@@ -275,12 +326,21 @@ if(BUILD_TESTING)
         src/WindowActivation.cpp
         src/WaveformItem.cpp
     )
+    qt_add_resources(ferrous_bridge_client_tests ferrous_bridge_client_shader_resources
+        PREFIX "/rhi"
+        BASE "${FERROUS_RHI_SHADER_DIR}"
+        FILES
+            "${FERROUS_RHI_VERTEX_QSB}"
+            "${FERROUS_RHI_FRAGMENT_QSB}"
+    )
     target_include_directories(ferrous_bridge_client_tests PRIVATE src)
     add_dependencies(ferrous_bridge_client_tests ferrous_rust_bridge)
+    add_dependencies(ferrous_bridge_client_tests ferrous_rhi_shaders)
     target_link_libraries(ferrous_bridge_client_tests PRIVATE
         Qt6::Core
         Qt6::DBus
         Qt6::Gui
+        Qt6::GuiPrivate
         Qt6::Qml
         Qt6::Quick
         Qt6::QuickControls2

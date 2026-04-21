@@ -1912,8 +1912,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
     const SpectrogramGpu::DebugMode gpuDebugMode = SpectrogramGpu::currentDebugMode();
+    const bool useRhiSpectrogramBody =
+        gpuDebugMode == SpectrogramGpu::DebugMode::Full
+        && m_rhiItem != nullptr
+        && m_rhiItem->parentItem() == this
+        && m_rhiItem->isVisible();
     node->background->setRect(0.0, 0.0, static_cast<double>(w), static_cast<double>(h));
-    node->background->setColor(kBackgroundColor);
+    node->background->setColor(useRhiSpectrogramBody ? QColor(0, 0, 0, 0) : kBackgroundColor);
     // Force the opaque underlay to repaint on every sync. Transparent overlay
     // textures and the moving playhead rely on a fresh background in retained
     // scene-graph backends; otherwise old pixels can survive as smear trails.
@@ -2254,10 +2259,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (visibleCols > 0) {
                 rhiSyncState = SpectrogramRhiSyncState{
+                    .sourceImage = QImage(),
+                    .sourceGeneration = 0,
                     .sourceColumns = static_cast<int>(displayRight - displayLeft + 1),
                     .bins = m_precomputedBinsPerColumn,
                     .displayLeft = displayLeft,
                     .displayRight = displayRight,
+                    .drawX = drawX,
                     .drawPixels = drawPixels,
                     .effectiveZoom = effectiveZoom,
                     .rollingMode = rollingMode,
@@ -2266,7 +2274,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
 
             const bool needsSourceCache =
-                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
+                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                || m_rhiItem != nullptr;
 
             if (visibleCols > 0 && !rendererFreeze) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -2276,6 +2285,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const int maxTextureColumns = gpuMaxTextureColumns(currentWindow);
                     syncPrecomputedGpuImagesLocked(
                         w, h, displayLeft, displayRight, rollingMode, effectiveZoom, maxTextureColumns);
+                    rhiSyncState.sourceImage = m_gpuSourceImage;
+                    rhiSyncState.sourceGeneration = m_gpuSourceGeneration;
                 }
                 syncPrecomputedDisplayImageLocked(
                     drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
@@ -2294,7 +2305,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     ? !m_gpuSourceImage.isNull()
                     : !m_gpuDisplayImage.isNull();
 
-            if (haveSelectedSpectrogramImage && drawPixels > 0) {
+            if (!useRhiSpectrogramBody && haveSelectedSpectrogramImage && drawPixels > 0) {
                 if (m_gpuDisplayImage.isNull()) {
                     syncPrecomputedDisplayImageLocked(
                         drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);

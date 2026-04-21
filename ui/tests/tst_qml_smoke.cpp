@@ -470,11 +470,12 @@ private slots:
     void spectrogramGpuCompressesOversizedSourceTexture();
     void spectrogramCreatesRhiChildForActiveRenderer();
     void spectrogramRhiRendererConsumesViewSyncState();
+    void spectrogramRhiQuadUsesDrawOffsetAndFlipsUv();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
-    void spectrogramRollingFullModeSkipsGpuSourceCacheUpdates();
-    void spectrogramCenteredFullModeSkipsGpuSourceCacheUpdates();
+    void spectrogramRollingFullModeKeepsRhiSourceCacheInSync();
+    void spectrogramCenteredFullModeKeepsRhiSourceCacheInSync();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth();
     void spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth();
@@ -5250,6 +5251,8 @@ void QmlSmokeTest::spectrogramRhiRendererConsumesViewSyncState() {
     auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
     QVERIFY(rhiChild != nullptr);
     const SpectrogramRhiSyncState state = rhiChild->debugLastSyncState();
+    QVERIFY(!state.sourceImage.isNull());
+    QVERIFY(state.sourceGeneration > 0);
     QVERIFY(state.sourceColumns > 0);
     QCOMPARE(state.bins, bins);
     QVERIFY(state.displayRight >= state.displayLeft);
@@ -5257,6 +5260,35 @@ void QmlSmokeTest::spectrogramRhiRendererConsumesViewSyncState() {
     QVERIFY(state.effectiveZoom > 0.0);
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramRhiQuadUsesDrawOffsetAndFlipsUv() {
+    SpectrogramRhiSyncState state;
+    state.drawX = 40.0;
+    state.drawPixels = 120;
+
+    const auto vertices =
+        SpectrogramRhiItem::debugBuildQuadVertices(state, QSize(200, 100));
+
+    QCOMPARE(vertices[0].x, -0.6f);
+    QCOMPARE(vertices[0].y, -1.0f);
+    QCOMPARE(vertices[0].u, 0.0f);
+    QCOMPARE(vertices[0].v, 1.0f);
+
+    QCOMPARE(vertices[1].x, 0.6f);
+    QCOMPARE(vertices[1].y, -1.0f);
+    QCOMPARE(vertices[1].u, 1.0f);
+    QCOMPARE(vertices[1].v, 1.0f);
+
+    QCOMPARE(vertices[2].x, -0.6f);
+    QCOMPARE(vertices[2].y, 1.0f);
+    QCOMPARE(vertices[2].u, 0.0f);
+    QCOMPARE(vertices[2].v, 0.0f);
+
+    QCOMPARE(vertices[3].x, 0.6f);
+    QCOMPARE(vertices[3].y, 1.0f);
+    QCOMPARE(vertices[3].u, 1.0f);
+    QCOMPARE(vertices[3].v, 0.0f);
 }
 
 void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {
@@ -5400,7 +5432,7 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramRollingFullModeSkipsGpuSourceCacheUpdates() {
+void QmlSmokeTest::spectrogramRollingFullModeKeepsRhiSourceCacheInSync() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
 
     SpectrogramItem item;
@@ -5464,19 +5496,18 @@ void QmlSmokeTest::spectrogramRollingFullModeSkipsGpuSourceCacheUpdates() {
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QCOMPARE(
-            item.m_gpuSourceGeneration,
-            initialSourceGeneration);
+        QVERIFY(item.m_gpuSourceGeneration > initialSourceGeneration);
+        QVERIFY(!item.m_gpuSourceImage.isNull());
         QVERIFY2(
             item.m_gpuDisplayLastUpdateWasIncremental,
-            "full renderer should advance the display cache without rebuilding the rolling source cache");
+            "full renderer should still advance the display cache incrementally while keeping the RHI source cache current");
     }
 
     delete node;
     qunsetenv("FERROUS_GPU_DEBUG_MODE");
 }
 
-void QmlSmokeTest::spectrogramCenteredFullModeSkipsGpuSourceCacheUpdates() {
+void QmlSmokeTest::spectrogramCenteredFullModeKeepsRhiSourceCacheInSync() {
     qunsetenv("FERROUS_GPU_DEBUG_MODE");
 
     SpectrogramItem item;
@@ -5530,10 +5561,11 @@ void QmlSmokeTest::spectrogramCenteredFullModeSkipsGpuSourceCacheUpdates() {
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QCOMPARE(item.m_gpuSourceGeneration, initialSourceGeneration);
+        QVERIFY(item.m_gpuSourceGeneration > initialSourceGeneration);
+        QVERIFY(!item.m_gpuSourceImage.isNull());
         QVERIFY2(
             item.m_gpuDisplayLastUpdateWasIncremental,
-            "centered full mode should advance the display cache without rebuilding the source cache");
+            "centered full mode should keep the RHI source cache current while advancing the display cache incrementally");
     }
 
     delete node;
