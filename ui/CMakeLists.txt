@@ -70,6 +70,7 @@ qt_add_executable(ferrous
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
+    src/SpectrogramBodyMaterial.cpp
     src/SpectrogramRenderUtils.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
@@ -195,13 +196,14 @@ if(BUILD_TESTING)
         src/BridgeClient.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
-    src/GlobalSearchResultsModel.cpp
-    src/LibraryTreeModel.cpp
-    src/SpectrogramRenderUtils.cpp
-    src/TagEditorController.cpp
-    src/TagEditorTableModel.cpp
-    src/SpectrogramItem.cpp
-    src/WaveformItem.cpp
+        src/GlobalSearchResultsModel.cpp
+        src/LibraryTreeModel.cpp
+        src/SpectrogramBodyMaterial.cpp
+        src/SpectrogramRenderUtils.cpp
+        src/TagEditorController.cpp
+        src/TagEditorTableModel.cpp
+        src/SpectrogramItem.cpp
+        src/WaveformItem.cpp
     )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
     add_dependencies(ferrous_qml_smoke_tests ferrous_rust_bridge)
@@ -263,14 +265,15 @@ if(BUILD_TESTING)
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
         src/GlobalSearchResultsModel.cpp
-    src/LibraryTreeModel.cpp
-    src/MprisController.cpp
-    src/SpectrogramRenderUtils.cpp
-    src/TagEditorController.cpp
-    src/TagEditorTableModel.cpp
-    src/SpectrogramItem.cpp
-    src/WindowActivation.cpp
-    src/WaveformItem.cpp
+        src/LibraryTreeModel.cpp
+        src/MprisController.cpp
+        src/SpectrogramBodyMaterial.cpp
+        src/SpectrogramRenderUtils.cpp
+        src/TagEditorController.cpp
+        src/TagEditorTableModel.cpp
+        src/SpectrogramItem.cpp
+        src/WindowActivation.cpp
+        src/WaveformItem.cpp
     )
     target_include_directories(ferrous_bridge_client_tests PRIVATE src)
     add_dependencies(ferrous_bridge_client_tests ferrous_rust_bridge)

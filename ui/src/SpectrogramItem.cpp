@@ -2,6 +2,7 @@
 
 #include "SpectrogramItem.h"
 
+#include "SpectrogramBodyMaterial.h"
 #include "SpectrogramRenderUtils.h"
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
@@ -173,7 +174,9 @@ struct SpectrogramTailSegment {
 
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
+        spectrogramTextureDebugMode = SpectrogramGpu::currentDebugMode();
         background = new QSGSimpleRectNode();
+        spectrogramMaterialNode = createSpectrogramBodyMaterialNode();
         spectrogramTexture = new QSGSimpleTextureNode();
         spectrogramTailTexture = new QSGSimpleTextureNode();
         overlayLines = new QSGGeometryNode();
@@ -183,7 +186,13 @@ struct SpectrogramSceneNode final : public QSGNode {
         crosshairOverlay = new QSGSimpleTextureNode();
         overlay = new QSGSimpleTextureNode();
         appendChildNode(background);
-        appendChildNode(spectrogramTexture);
+        if (spectrogramTextureDebugMode == SpectrogramGpu::DebugMode::TextureNode) {
+            appendChildNode(spectrogramTexture);
+            appendChildNode(spectrogramMaterialNode);
+        } else {
+            appendChildNode(spectrogramMaterialNode);
+            appendChildNode(spectrogramTexture);
+        }
         appendChildNode(spectrogramTailTexture);
         appendChildNode(overlayLines);
         appendChildNode(playhead);
@@ -218,6 +227,7 @@ struct SpectrogramSceneNode final : public QSGNode {
     }
 
     QSGSimpleRectNode *background{nullptr};
+    QSGGeometryNode *spectrogramMaterialNode{nullptr};
     QSGSimpleTextureNode *spectrogramTexture{nullptr};
     QSGSimpleTextureNode *spectrogramTailTexture{nullptr};
     QSGGeometryNode *overlayLines{nullptr};
@@ -2803,6 +2813,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             QRect(),
             node->placeholderTexture);
     }
+
+    SpectrogramBodyMaterial::State bodyState;
+    bodyState.sourceTexture = node->spectrogramTextureResource;
+    bodyState.dbRemapTexture = nullptr;
+    bodyState.paletteTexture = nullptr;
+    bodyState.sourceSize = spectrogramSourceRect.size();
+    bodyState.targetSize = spectrogramTargetRect.size().toSize();
+    bodyState.drawOffset = QPointF(-spectrogramSubpixelOffset, 0.0);
+    bodyState.effectiveZoom = effectiveZoomLocked();
+    bodyState.subpixelOffset = spectrogramSubpixelOffset;
+    bodyState.debugStage = static_cast<int>(gpuDebugMode);
+    syncSpectrogramBodyMaterialNode(
+        node->spectrogramMaterialNode,
+        showSpectrogram ? spectrogramTargetRect : QRectF(),
+        bodyState);
+
     double segmentX = spectrogramTargetRect.x() - spectrogramSubpixelOffset
         + std::max(
             0.0,

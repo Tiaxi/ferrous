@@ -203,11 +203,11 @@ struct OverlayLineSample {
 
 QVector<OverlayLineSample> overlayLineSamples(QSGNode *root) {
     QVector<OverlayLineSample> samples;
-    if (root == nullptr || root->childCount() <= 3) {
+    if (root == nullptr || root->childCount() <= 4) {
         return samples;
     }
 
-    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(root->childAtIndex(3));
+    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(root->childAtIndex(4));
     if (overlayNode == nullptr || overlayNode->geometry() == nullptr) {
         return samples;
     }
@@ -572,6 +572,7 @@ private slots:
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void testMutedChannelRendersGrayscale();
+    void spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
@@ -4699,12 +4700,12 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksPlayhead() {
     item.setPositionSeconds(0.10);
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    QVERIFY(node->childCount() >= 5);
+    QVERIFY(node->childCount() >= 6);
 
-    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(3));
+    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
     QVERIFY2(overlayNode != nullptr, "precomputed path should publish overlay lines as a geometry node");
 
-    auto *playheadRect = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(4));
+    auto *playheadRect = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(5));
     QVERIFY(playheadRect != nullptr);
     QVERIFY2(playheadRect->rect().isEmpty(),
              "CPU playhead rect must be suppressed when geometry overlay lines are active");
@@ -4753,7 +4754,7 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
 
-    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(3));
+    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
     QVERIFY2(overlayNode != nullptr, "overlay lines should be rendered through a public geometry node");
 
     const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
@@ -5804,13 +5805,15 @@ void QmlSmokeTest::spectrogramActiveRendererUsesPublicBodyTextureOnly() {
     QVERIFY(node != nullptr);
 
     auto *background = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(0));
-    auto *bodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
-    auto *overlayLineNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(3));
+    auto *bodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    auto *bodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *overlayLineNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
 
     QVERIFY(background != nullptr);
     QCOMPARE(background->color(), QColor(0, 0, 0, 255));
     QCOMPARE(background->rect(), QRectF(0.0, 0.0, 200.0, 100.0));
 
+    QVERIFY(bodyMaterialNode != nullptr);
     QVERIFY(bodyTextureNode != nullptr);
     QVERIFY(bodyTextureNode->texture() != nullptr);
     QVERIFY(bodyTextureNode->rect().width() > 0.0);
@@ -5875,14 +5878,14 @@ void QmlSmokeTest::spectrogramGpuTextureUploadSkipsRedundantRecreation() {
     QSGNode *node = item->updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(node->childCount() >= 2);
-    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
     QVERIFY(textureNode != nullptr);
     QSGTexture *initialTexture = textureNode->texture();
     QVERIFY(initialTexture != nullptr);
 
     QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
-    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
+    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(2));
     QVERIFY(updatedTextureNode != nullptr);
     QVERIFY(updatedTextureNode->texture() == initialTexture);
 
@@ -5920,7 +5923,7 @@ void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
     QSGNode *node = item->updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(node->childCount() >= 2);
-    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
     QVERIFY(textureNode != nullptr);
     QSGTexture *initialTexture = textureNode->texture();
     QVERIFY(initialTexture != nullptr);
@@ -5932,7 +5935,7 @@ void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
     QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
     auto *updatedTextureNode =
-        static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
+        static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(2));
     QVERIFY(updatedTextureNode != nullptr);
     QSGTexture *updatedTexture = updatedTextureNode->texture();
     QVERIFY(updatedTexture != nullptr);
@@ -5980,7 +5983,7 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
 
     QSGNode *node = item->updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
     QVERIFY(textureNode != nullptr);
     QSGTexture *initialTexture = textureNode->texture();
     QVERIFY(initialTexture != nullptr);
@@ -6005,7 +6008,7 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
 
     QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
-    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
+    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(2));
     QVERIFY(updatedTextureNode != nullptr);
     QVERIFY2(
         updatedTextureNode->texture() == initialTexture,
@@ -6057,7 +6060,7 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(visibleTextureNodeCount(node) >= 1);
-    auto *initialTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    auto *initialTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
     QVERIFY(initialTextureNode != nullptr);
     QSGTexture *initialBodyTexture = initialTextureNode->texture();
     QVERIFY(initialBodyTexture != nullptr);
@@ -7198,6 +7201,43 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsTextureNodeDebugStage() {
     QVERIFY2(visiblePixels > 0, "texture-node debug stage should render visible pixels");
 
     qunsetenv("FERROUS_GPU_DEBUG_MODE");
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>((column + bin) % 256);
+        }
+    }
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, false, true, 31);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(node->firstChild() != nullptr);
+    auto *materialNode = dynamic_cast<QSGGeometryNode *>(node->firstChild()->nextSibling());
+    QVERIFY2(materialNode != nullptr, "normal full mode should use a material-backed body node");
+    QVERIFY(materialNode->material() != nullptr);
+    QVERIFY(dynamic_cast<QSGSimpleTextureNode *>(node->firstChild()->nextSibling()) == nullptr);
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays() {
