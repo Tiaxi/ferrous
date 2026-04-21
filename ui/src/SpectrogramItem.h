@@ -11,11 +11,8 @@
 #include <QQuickItem>
 #include <QString>
 #include <QTimer>
-#include <QVariantList>
-
 #include <array>
 #include <chrono>
-#include <deque>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -31,7 +28,6 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     Q_PROPERTY(bool forceFpsOverlay READ forceFpsOverlay CONSTANT)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz WRITE setSampleRateHz NOTIFY sampleRateHzChanged)
-    Q_PROPERTY(int maxColumns READ maxColumns WRITE setMaxColumns NOTIFY maxColumnsChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(bool playing READ isPlaying WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
@@ -59,9 +55,6 @@ public:
 
     int sampleRateHz() const;
     void setSampleRateHz(int value);
-
-    int maxColumns() const;
-    void setMaxColumns(int value);
 
     double positionSeconds() const;
     void setPositionSeconds(double value);
@@ -107,7 +100,6 @@ public:
 
     Q_INVOKABLE void reset();
     Q_INVOKABLE void halt();
-    Q_INVOKABLE void appendRows(const QVariantList &rows);
 
     Q_INVOKABLE double minimumZoomLevel() const;
 
@@ -116,7 +108,6 @@ signals:
     void logScaleChanged();
     void showFpsOverlayChanged();
     void sampleRateHzChanged();
-    void maxColumnsChanged();
     void positionSecondsChanged();
     void playingChanged();
     void precomputedReadyChanged();
@@ -153,8 +144,7 @@ private:
     void ensureMapping(int height);
     void captureZoomFillFrozenCacheLocked();
     void clearZoomFillFrozenCacheLocked();
-    void invalidateCanvas();
-    void ensureCanvas(int width, int height);
+    void invalidateRenderCachesLocked();
     bool reanchorRollingEpochForCurrentDataLocked(
         std::chrono::steady_clock::time_point now);
     void applyPrecomputedResetLocked(
@@ -214,8 +204,6 @@ private:
         qint64 displayLeft,
         qint64 displayRight,
         double effectiveZoom) const;
-    void rebuildCanvasFromColumns();
-    void drawColumnAt(int x, const std::vector<quint8> &col);
     void updateOverlayImageLocked();
     void updateCrosshairOverlayLocked(
         int width, int height,
@@ -241,7 +229,6 @@ private:
     double minimumZoomLevelLocked() const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
-    std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
     void maybeDumpGpuDebugFrame();
@@ -266,7 +253,6 @@ private:
     double m_dbRange{132.0};
     bool m_logScale{false};
     int m_sampleRateHz{48000};
-    int m_maxColumns{640};
     int m_binsPerColumn{0};
 
     std::array<QRgb, kGradientTableSize> m_palette32{};
@@ -276,14 +262,8 @@ private:
     int m_mappingHeight{-1};
     int m_lowResEnd{0};
 
-    QImage m_canvas;
-    bool m_canvasDirty{true};
     QImage m_overlayImage;
     bool m_overlayDirty{true};
-    int m_canvasWriteX{0};
-    int m_canvasFilledCols{0};
-    std::deque<std::vector<quint8>> m_columns;
-    bool m_seedHistoryOnNextAppend{true};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};
     bool m_forceFpsOverlay{false};

@@ -2,7 +2,6 @@
 
 import QtQuick 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Window 2.15
 import FerrousUi 1.0
 
 Item {
@@ -227,7 +226,6 @@ Item {
                     id: spectrogramPaneItem
                     anchors.fill: parent
                     channelMuted: modelData.muted || false
-                    maxColumns: Math.max(Math.floor(width), Screen.desktopAvailableWidth)
                     dbRange: root.uiBridge.dbRange
                     logScale: root.uiBridge.logScale
                     showFpsOverlay: index === 0 ? (root.uiBridge.showFps || spectrogramPaneItem.forceFpsOverlay) : false

@@ -2,7 +2,7 @@
 
 #include "SpectrogramItem.h"
 
-#include "SpectrogramGpuRenderer.h"
+#include "SpectrogramRenderUtils.h"
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
 
@@ -120,24 +120,6 @@ DebugFrameStats analyzeDebugFrame(const QImage &image) {
 
 double linearInterpolate(double y1, double y2, double mu) {
     return y1 * (1.0 - mu) + y2 * mu;
-}
-
-quint8 spectrogramGetValue(const std::vector<quint8> &row, int start, int end) {
-    if (row.empty()) {
-        return 0;
-    }
-    const int last = static_cast<int>(row.size()) - 1;
-    const int endClamped = std::clamp(end, 0, last);
-    const int startClamped = std::clamp(start, 0, endClamped);
-    if (startClamped >= endClamped) {
-        return row[static_cast<size_t>(endClamped)];
-    }
-
-    quint8 value = 0;
-    for (int i = startClamped; i < endClamped; ++i) {
-        value = std::max(value, row[static_cast<size_t>(i)]);
-    }
-    return value;
 }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -587,7 +569,7 @@ void SpectrogramItem::setDbRange(double value) {
     }
     m_dbRange = clamped;
     emit dbRangeChanged();
-    invalidateCanvas();
+    invalidateRenderCachesLocked();
     update();
 }
 
@@ -603,7 +585,7 @@ void SpectrogramItem::setLogScale(bool value) {
     m_logScale = value;
     emit logScaleChanged();
     invalidateMapping();
-    invalidateCanvas();
+    invalidateRenderCachesLocked();
     m_freqGridDirty = true;
     m_timeGridDirty = true;
     m_crosshairDirty = true;
@@ -646,29 +628,10 @@ void SpectrogramItem::setSampleRateHz(int value) {
     m_sampleRateHz = clamped;
     emit sampleRateHzChanged();
     invalidateMapping();
-    invalidateCanvas();
+    invalidateRenderCachesLocked();
     m_freqGridDirty = true;
     m_timeGridDirty = true;
     m_crosshairDirty = true;
-    update();
-}
-
-int SpectrogramItem::maxColumns() const {
-    return m_maxColumns;
-}
-
-void SpectrogramItem::setMaxColumns(int value) {
-    QMutexLocker lock(&m_stateMutex);
-    const int clamped = std::clamp(value, 128, 8192);
-    if (m_maxColumns == clamped) {
-        return;
-    }
-    m_maxColumns = clamped;
-    emit maxColumnsChanged();
-    while (static_cast<int>(m_columns.size()) > m_maxColumns) {
-        m_columns.pop_front();
-    }
-    invalidateCanvas();
     update();
 }
 
@@ -869,7 +832,7 @@ void SpectrogramItem::setDisplayMode(int value) {
     emit displayModeChanged();
     if (m_precomputedReady) {
         m_precomputedLastRightCol = -1;
-        invalidateCanvas();
+        invalidateRenderCachesLocked();
         update();
     }
 }
@@ -960,8 +923,7 @@ void SpectrogramItem::setChannelMuted(bool muted) {
     emit channelMutedChanged();
     {
         QMutexLocker lock(&m_stateMutex);
-        m_canvasDirty = true;
-        m_precomputedCanvasDirty = true;
+        invalidateRenderCachesLocked();
     }
     update();
 }
@@ -1153,8 +1115,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
     }
 
-    // Early hop change detection: activate canvas freeze BEFORE any
-    // reset processing that might call invalidateCanvas().  The freeze
+    // Early hop change detection: activate the frozen-image path BEFORE any
+    // reset processing that might invalidate the render caches. The freeze
     // is only needed for finer-hop zoom-in restarts; on coarser-hop
     // zoom-outs, preserving the old centered image makes the view look
     // stuck at 1.0 until almost the full zoomed-out track has decoded.
@@ -1221,7 +1183,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedReady = false;
             m_precomputedCanvasDisplayLeft = 0;
             m_precomputedCanvasDisplayRight = -1;
-            invalidateCanvas();
+            invalidateRenderCachesLocked();
         }
         FERROUS_SPECTROGRAM_TRACE_LOGF(stderr,
             "[Qt-synthetic-clear@%p] ring wiped, gate armed, preserved=%d\n",
@@ -1663,10 +1625,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             || decodeReachedEnd) {
             m_zoomFillActive = false;
             clearZoomFillFrozenCacheLocked();
-            // Don't invalidateCanvas() here — the canvas must stay
-            // non-null so the NEXT zoom transition can activate its
-            // freeze.  Just mark dirty; the rebuild replaces all
-            // canvas content.
+            // Don't invalidate the render caches here — the cached image must
+            // stay valid so the NEXT zoom transition can activate its freeze.
+            // Just mark dirty; the rebuild replaces all displayed content.
             m_precomputedCanvasDirty = true;
         }
     }
@@ -1792,7 +1753,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_timeGridDirty = true;
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
-    invalidateCanvas();
+    invalidateRenderCachesLocked();
     if (wasReady) {
         emit precomputedReadyChanged();
     }
@@ -1862,7 +1823,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         // next paint freezes against this cached image until the new
         // session covers the visible display.
     } else {
-        invalidateCanvas();
+        invalidateRenderCachesLocked();
     }
 }
 
@@ -1972,17 +1933,15 @@ void SpectrogramItem::reset() {
     resetSeekProfileLocked();
     m_lastIncomingRowsAtMs = 0;
 #endif
-    m_columns.clear();
-    m_seedHistoryOnNextAppend = true;
     m_animationTickInitialized = false;
 
-    // When precomputed mode is active, don't destroy the canvas or
-    // mapping — the canvas will be rebuilt from the atlas on the next
-    // frame.  Destroying it causes a visible gap/flash.
+    // When precomputed mode is active, don't destroy the cached render
+    // images or mapping — they will be refreshed from the ring on the
+    // next frame. Destroying them causes a visible gap/flash.
     if (!m_precomputedReady) {
         m_binsPerColumn = 0;
         invalidateMapping();
-        invalidateCanvas();
+        invalidateRenderCachesLocked();
     }
     update();
 }
@@ -1995,56 +1954,6 @@ void SpectrogramItem::halt() {
     m_lastIncomingRowsAtMs = 0;
 #endif
     m_animationTickInitialized = false;
-    update();
-}
-
-void SpectrogramItem::appendRows(const QVariantList &rows) {
-    QMutexLocker lock(&m_stateMutex);
-    if (rows.isEmpty()) {
-        return;
-    }
-
-    const int w = std::max(1, static_cast<int>(std::floor(width())));
-    const int h = std::max(1, static_cast<int>(std::floor(height())));
-    ensureCanvas(w, h);
-    if (!m_canvas.isNull() && m_canvasDirty) {
-        rebuildCanvasFromColumns();
-    }
-
-    int rowsAdded = 0;
-    for (const QVariant &rowVar : rows) {
-        const QVariantList row = rowVar.toList();
-        if (row.isEmpty()) {
-            continue;
-        }
-        std::vector<quint8> mapped = rowToIntensity(row);
-        if (mapped.empty()) {
-            continue;
-        }
-        if (m_binsPerColumn <= 0) {
-            m_binsPerColumn = static_cast<int>(mapped.size());
-            invalidateMapping();
-        }
-        if (static_cast<int>(mapped.size()) != m_binsPerColumn) {
-            continue;
-        }
-        m_columns.emplace_back(std::move(mapped));
-        while (static_cast<int>(m_columns.size()) > m_maxColumns) {
-            m_columns.pop_front();
-        }
-        if (!m_canvas.isNull()) {
-            drawColumnAt(m_canvasWriteX, m_columns.back());
-            m_canvasWriteX = (m_canvasWriteX + 1) % m_canvas.width();
-            m_canvasFilledCols = std::min(m_canvas.width(), m_canvasFilledCols + 1);
-        }
-        rowsAdded++;
-    }
-
-    if (rowsAdded <= 0) {
-        return;
-    }
-    m_seedHistoryOnNextAppend = false;
-    lock.unlock();
     update();
 }
 
@@ -2189,7 +2098,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const qint64 validCount = std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq);
                 FERROUS_SPECTROGRAM_TRACE_LOGF(
                     stderr,
-                    "[Qt-paint@%p] usePre=%d ready=%d bins=%d totalEst=%d pos=%.2f sr=%d hop=%d ringValid=%lld/%d streaming=%d\n",
+                    "[Qt-paint@%p] usePre=%d ready=%d bins=%d totalEst=%d pos=%.2f sr=%d hop=%d ringValid=%lld/%d\n",
                     static_cast<const void *>(this),
                     usePrecomputed ? 1 : 0,
                     m_precomputedReady ? 1 : 0,
@@ -2199,8 +2108,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     m_precomputedSampleRateHz,
                     m_precomputedHopSize,
                     static_cast<long long>(validCount),
-                    m_ringCapacity,
-                    static_cast<int>(m_columns.size()));
+                    m_ringCapacity);
             }
         }
 #endif
@@ -2394,11 +2302,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
 
             if (rollingMode) {
-                const int filledDrawPixels = gpuDrawWidthForSourceColumnsLocked(
-                    w, displayLeft, displayRight, effectiveZoom);
                 drawPixels = w;
                 drawX = -columnPhase * effectiveZoom;
-                m_canvasFilledCols = filledDrawPixels;
             } else {
                 const qint64 decodedRightEdge =
                     m_precomputedMaxColumnIndex >= 0
@@ -2424,7 +2329,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
                 drawPixels = gpuDrawWidthForSourceColumnsLocked(
                     w, displayLeft, displayRight, effectiveZoom);
-                m_canvasFilledCols = drawPixels;
             }
 
             const bool needsSourceCache =
@@ -2655,11 +2559,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
                 showCrosshairOverlay = !m_crosshairImage.isNull();
             }
-        } else if (!m_columns.empty() && m_binsPerColumn > 0) {
-            ensureCanvas(w, h);
-            if (!m_canvas.isNull() && m_canvasDirty) {
-                rebuildCanvasFromColumns();
-            }
         }
 
         showOverlay = m_showFpsOverlay && m_fpsValue > 0;
@@ -2682,8 +2581,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         profilePendingColumns = 0;
-        profileColumnCount = m_columns.size();
-        profileBinsPerColumn = m_binsPerColumn;
+        profileColumnCount = static_cast<size_t>(std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq));
+        profileBinsPerColumn = m_precomputedBinsPerColumn;
 #endif
     }
 
@@ -3093,7 +2992,7 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
     if (newGeometry.size() != oldGeometry.size()) {
         QMutexLocker lock(&m_stateMutex);
         invalidateMapping();
-        invalidateCanvas();
+        invalidateRenderCachesLocked();
         m_freqGridDirty = true;
         m_timeGridDirty = true;
         m_crosshairDirty = true;
@@ -3848,16 +3747,12 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenDisplayGeneration = 0;
 }
 
-void SpectrogramItem::invalidateCanvas() {
+void SpectrogramItem::invalidateRenderCachesLocked() {
     const bool hadGpuImages =
         !m_gpuSourceImage.isNull()
         || !m_gpuDisplayImage.isNull()
         || !m_gpuDbRemapImage.isNull()
         || !m_gpuPaletteImage.isNull();
-    m_canvas = QImage();
-    m_canvasDirty = true;
-    m_canvasWriteX = 0;
-    m_canvasFilledCols = 0;
     m_precomputedCanvasDisplayLeft = 0;
     m_precomputedCanvasDisplayRight = -1;
     m_precomputedCanvasRolling = false;
@@ -3968,126 +3863,6 @@ void SpectrogramItem::ensureMapping(int height) {
     }
 
     m_mappingHeight = height;
-}
-
-void SpectrogramItem::ensureCanvas(int width, int height) {
-    if (width <= 0 || height <= 0 || m_binsPerColumn <= 0) {
-        return;
-    }
-
-    const int cols = std::max(1, std::min(width, m_maxColumns));
-    ensureMapping(height);
-    if (m_canvas.width() != cols || m_canvas.height() != height || m_canvas.format() != QImage::Format_RGB32) {
-        m_canvas = QImage(cols, height, QImage::Format_RGB32);
-        m_canvas.fill(Qt::black);
-        m_canvasDirty = true;
-    }
-    if (m_canvasDirty) {
-        rebuildCanvasFromColumns();
-    }
-}
-
-void SpectrogramItem::rebuildCanvasFromColumns() {
-    if (m_canvas.isNull()) {
-        return;
-    }
-    m_canvas.fill(Qt::black);
-    m_canvasWriteX = 0;
-    m_canvasFilledCols = 0;
-    const int cols = m_canvas.width();
-    if (m_columns.empty() || cols <= 0) {
-        m_canvasDirty = false;
-        return;
-    }
-    const int available = static_cast<int>(m_columns.size());
-    const int drawCols = std::min(cols, available);
-    const int start = available - drawCols;
-    for (int i = 0; i < drawCols; ++i) {
-        drawColumnAt(m_canvasWriteX, m_columns[static_cast<size_t>(start + i)]);
-        m_canvasWriteX = (m_canvasWriteX + 1) % cols;
-        m_canvasFilledCols = std::min(cols, m_canvasFilledCols + 1);
-    }
-    m_canvasDirty = false;
-}
-
-void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
-    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width() || col.empty()) {
-        return;
-    }
-
-    const int height = m_canvas.height();
-    const int srcBins = std::max(1, m_binsPerColumn);
-    const int maxBin = srcBins - 1;
-    auto mappedBinAtRow = [this, height, maxBin](int row) -> int {
-        const int clampedRow = std::clamp(row, 0, std::max(0, height - 1));
-        if (static_cast<int>(m_iToBin.size()) == height) {
-            return std::clamp(m_iToBin[static_cast<size_t>(clampedRow)], 0, maxBin);
-        }
-        if (height <= 1) {
-            return maxBin;
-        }
-        const double fraction =
-            static_cast<double>(clampedRow)
-            / static_cast<double>(height - 1);
-        return std::clamp(
-            static_cast<int>(std::floor(fraction * static_cast<double>(maxBin))),
-            0,
-            maxBin);
-    };
-
-    for (int y = 0; y < height; ++y) {
-        const int i = height - 1 - y;
-
-        const int bin0 = mappedBinAtRow(i - 1);
-        const int bin1 = mappedBinAtRow(i);
-        const int bin2 = mappedBinAtRow(i + 1);
-
-        int index0 = bin0 + static_cast<int>(std::lround(static_cast<double>(bin1 - bin0) / 2.0));
-        if (index0 == bin0) {
-            index0 = bin1;
-        }
-        int index1 = bin1 + static_cast<int>(std::lround(static_cast<double>(bin2 - bin1) / 2.0));
-        if (index1 == bin2) {
-            index1 = bin1;
-        }
-        index0 = std::clamp(index0, 0, maxBin);
-        index1 = std::clamp(index1, 0, maxBin);
-
-        double intensity = static_cast<double>(spectrogramGetValue(col, index0, index1));
-
-        if (m_logScale && static_cast<int>(m_iToBin.size()) == height && i <= m_lowResEnd) {
-            const int target = m_iToBin[static_cast<size_t>(i)];
-            int j = 0;
-            while (i + j < height && m_iToBin[static_cast<size_t>(i + j)] == target) {
-                ++j;
-            }
-
-            const int nextI = std::min(i + j, height - 1);
-            const int nextBin = std::clamp(m_iToBin[static_cast<size_t>(nextI)], 0, maxBin);
-            const double v0 = intensity;
-            const double v1 = static_cast<double>(col[static_cast<size_t>(nextBin)]);
-
-            int k = 0;
-            int span = j;
-            while (i + k >= 0 && m_iToBin[static_cast<size_t>(i + k)] == target) {
-                ++span;
-                --k;
-            }
-
-            if (span > 1) {
-                const double mu = (1.0 / static_cast<double>(span - 1))
-                    * static_cast<double>((-k) - 1);
-                intensity = linearInterpolate(v0, v1, std::clamp(mu, 0.0, 1.0));
-            }
-        }
-
-        int paletteIndex = kGradientTableSize
-            - static_cast<int>(std::lround((static_cast<double>(kGradientTableSize) / 255.0) * intensity));
-        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
-        const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
-        auto *line = reinterpret_cast<QRgb *>(m_canvas.scanLine(y));
-        line[x] = palette[static_cast<size_t>(paletteIndex)];
-    }
 }
 
 std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
@@ -4468,8 +4243,6 @@ void SpectrogramItem::syncPrecomputedGpuImagesLocked(
     m_precomputedCanvasRolling = rollingMode;
     m_precomputedCanvasZoomLevel = effectiveZoom;
     m_precomputedCanvasDirty = false;
-    m_canvasFilledCols = gpuDrawWidthForSourceColumnsLocked(
-        width, displayLeft, displayRight, effectiveZoom);
 }
 
 void SpectrogramItem::paintPrecomputedDisplayColumnsLocked(
@@ -4699,7 +4472,6 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         drawPixels,
         static_cast<int>(std::ceil(
             static_cast<double>(displayRight - displayLeft + 1) * effectiveZoom)));
-    m_canvasFilledCols = filledPixels;
 
     const bool displayConfigDirty =
         m_gpuDisplayImage.isNull()
@@ -5008,34 +4780,6 @@ void SpectrogramItem::updateOverlayImageLocked() {
     m_overlayDirty = false;
 }
 
-std::vector<quint8> SpectrogramItem::rowToIntensity(const QVariantList &row) const {
-    std::vector<quint8> out;
-    out.reserve(static_cast<size_t>(row.size()));
-
-    const double dbRange = std::clamp(m_dbRange, 50.0, 150.0);
-    const double dbScale = 10.0 / std::log(10.0);
-    // BH4 peak power normalisation: 20·log₁₀(N·a₀/2).
-    const int fftSize = (m_binsPerColumn > 1) ? (m_binsPerColumn - 1) * 2 : 2048;
-    const double peakDb = 20.0
-        * std::log10(std::max(1.0,
-            static_cast<double>(fftSize) * 0.35875 / 2.0));
-
-    for (const QVariant &value : row) {
-        const double v = value.toDouble();
-        int idx = 0;
-        if (v >= 0.0 && v <= 255.0 && std::floor(v) == v) {
-            idx = static_cast<int>(v);
-        } else {
-            const double db = v > 0.0 ? (dbScale * std::log(v)) : -200.0;
-            const double xdb = std::clamp(db + dbRange - peakDb, 0.0, dbRange);
-            idx = static_cast<int>(std::lround((xdb / dbRange) * 255.0));
-        }
-        out.push_back(static_cast<quint8>(std::clamp(idx, 0, 255)));
-    }
-
-    return out;
-}
-
 void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     if (m_animationTickConnection) {
         disconnect(m_animationTickConnection);
@@ -5282,9 +5026,11 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
         m_smoothnessProfile.inStallCluster = false;
     }
 
-    const int canvasWidth = m_canvas.width() > 0 ? m_canvas.width()
+    const int canvasWidth = m_gpuDisplayWidth > 0 ? m_gpuDisplayWidth
         : std::max(1, static_cast<int>(std::floor(width())));
-    const double headUnits = static_cast<double>(m_canvasWriteX);
+    const double headUnits = static_cast<double>(
+        std::max<qint64>(0, m_precomputedCanvasDisplayRight + 1))
+        + (m_precomputedCanvasRolling ? m_gpuDisplaySubpixelOffset : 0.0);
     double unwrappedHeadUnits = headUnits;
     if (m_smoothnessProfile.lastHeadValid && canvasWidth > 1) {
         if ((m_smoothnessProfile.lastHeadUnits - unwrappedHeadUnits)
@@ -5588,8 +5334,11 @@ void SpectrogramItem::noteSeekProfileFrameLocked(
         m_seekProfile.inStallCluster = false;
     }
 
-    const int canvasWidth = m_canvas.width() > 0 ? m_canvas.width() : std::max(1, static_cast<int>(std::floor(width())));
-    const double headUnits = static_cast<double>(m_canvasWriteX);
+    const int canvasWidth = m_gpuDisplayWidth > 0 ? m_gpuDisplayWidth
+        : std::max(1, static_cast<int>(std::floor(width())));
+    const double headUnits = static_cast<double>(
+        std::max<qint64>(0, m_precomputedCanvasDisplayRight + 1))
+        + (m_precomputedCanvasRolling ? m_gpuDisplaySubpixelOffset : 0.0);
     double unwrappedHeadUnits = headUnits;
     if (m_seekProfile.lastHeadValid && canvasWidth > 1) {
         if ((m_seekProfile.lastHeadUnits - unwrappedHeadUnits) > (static_cast<double>(canvasWidth) * 0.5)) {

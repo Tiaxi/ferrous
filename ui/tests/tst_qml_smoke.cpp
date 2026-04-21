@@ -29,7 +29,7 @@
 
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
-#include "../src/SpectrogramGpuRenderer.h"
+#include "../src/SpectrogramRenderUtils.h"
 #include "../src/SpectrogramSeekTrace.h"
 #define protected public
 #define private public
@@ -2838,7 +2838,8 @@ void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_profileEnabled = true;
-        item.m_canvasWriteX = 96;
+        item.m_precomputedCanvasDisplayRight = 96;
+        item.m_gpuDisplayWidth = 320;
 
         const qint64 startedAtMs = SpectrogramSeekTrace::startedAtMs();
         QVERIFY(startedAtMs > 0);
@@ -2875,7 +2876,8 @@ void QmlSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_profileEnabled = true;
-        item.m_canvasWriteX = 48;
+        item.m_precomputedCanvasDisplayRight = 48;
+        item.m_gpuDisplayWidth = 320;
         item.m_lastIncomingRowsAtMs = QDateTime::currentMSecsSinceEpoch();
         item.maybeStartSmoothnessProfileLocked(item.m_lastIncomingRowsAtMs);
         QVERIFY(item.m_smoothnessProfile.active);

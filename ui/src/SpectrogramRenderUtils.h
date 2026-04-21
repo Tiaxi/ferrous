@@ -3,7 +3,6 @@
 #pragma once
 
 #include <QByteArrayView>
-#include <QByteArrayView>
 
 namespace SpectrogramGpu {
 

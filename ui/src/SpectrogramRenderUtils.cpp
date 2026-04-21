@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "SpectrogramGpuRenderer.h"
+#include "SpectrogramRenderUtils.h"
 
 #include <QByteArray>
 
