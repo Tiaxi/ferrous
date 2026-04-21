@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
@@ -5224,7 +5225,13 @@ void QmlSmokeTest::spectrogramDoesNotCreatePrivateRhiChild() {
 }
 
 void QmlSmokeTest::spectrogramUpdatePaintNodeStillUsesPublicTextureBody() {
+    QQuickWindow window;
+    window.resize(200, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
     SpectrogramItem item;
+    item.setParentItem(window.contentItem());
     item.setWidth(200);
     item.setHeight(100);
     item.setDisplayMode(1);
@@ -5239,8 +5246,16 @@ void QmlSmokeTest::spectrogramUpdatePaintNodeStillUsesPublicTextureBody() {
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    QVERIFY(node->childCount() >= 2);
-    QCOMPARE(node->childAtIndex(1)->type(), QSGNode::GeometryNodeType);
+    QCOMPARE(item.findChild<QQuickItem *>(QString(), Qt::FindDirectChildrenOnly), nullptr);
+    auto *background = static_cast<QSGSimpleRectNode *>(node->childAtIndex(0));
+    QVERIFY(background != nullptr);
+    QCOMPARE(background->color(), QColor(0, 0, 0, 255));
+
+    auto *spectrogramTexture = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    QVERIFY(spectrogramTexture != nullptr);
+    QVERIFY(spectrogramTexture->texture() != nullptr);
+    QVERIFY(spectrogramTexture->rect().width() > 0.0);
+    QVERIFY(spectrogramTexture->rect().height() > 0.0);
     delete node;
 }
 
