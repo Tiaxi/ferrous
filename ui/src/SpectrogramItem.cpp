@@ -4615,7 +4615,6 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         const int oldWidth = m_gpuDisplayImage.width();
         const int overlapPixels = oldWidth - shiftPixels;
         QImage transitionedImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);
-        transitionedImage.fill(Qt::black);
         for (int y = 0; y < height; ++y) {
             const auto *oldLine =
                 reinterpret_cast<const QRgb *>(m_gpuDisplayImage.constScanLine(y));
@@ -4644,7 +4643,6 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         const int oldWidth = m_gpuDisplayImage.width();
         const int growthPixels = drawPixels - oldWidth;
         QImage grownImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);
-        grownImage.fill(Qt::black);
         for (int y = 0; y < height; ++y) {
             const auto *oldLine =
                 reinterpret_cast<const QRgb *>(m_gpuDisplayImage.constScanLine(y));
@@ -4676,10 +4674,6 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
                 line,
                 line + shiftPixels,
                 static_cast<size_t>(drawPixels - shiftPixels) * sizeof(QRgb));
-            std::fill(
-                line + (drawPixels - shiftPixels),
-                line + drawPixels,
-                qRgb(0, 0, 0));
         }
         paintPrecomputedDisplayColumnsLocked(
             m_gpuDisplayImage,
@@ -4697,7 +4691,6 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         m_gpuDisplayLastUpdatedColumns = shiftPixels;
     } else {
         m_gpuDisplayImage = QImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);
-        m_gpuDisplayImage.fill(Qt::black);
         paintPrecomputedDisplayColumnsLocked(
             m_gpuDisplayImage,
             0,
