@@ -4556,6 +4556,33 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
     const double requestedShiftPixels =
         static_cast<double>(advanceColumns) * effectiveZoom;
     const int shiftPixels = static_cast<int>(std::lround(requestedShiftPixels));
+    const bool displayConfigDirtyBeyondWidth =
+        m_gpuDisplayImage.isNull()
+        || m_gpuDisplayHeight != height
+        || m_gpuDisplaySampleRateHz != m_sampleRateHz
+        || m_gpuDisplayBins != m_precomputedBinsPerColumn
+        || std::abs(m_gpuDisplayDbRange - m_dbRange) > 0.001
+        || m_gpuDisplayMuted != m_channelMuted
+        || m_gpuDisplayLogScale != m_logScale;
+    const double requestedGrowthPixels =
+        static_cast<double>(drawPixels - m_gpuDisplayWidth);
+    const bool canIncrementallyGrowRollingDisplay =
+        contentDirty
+        && rollingMode
+        && !displayConfigDirtyBeyondWidth
+        && m_gpuDisplayRolling == rollingMode
+        && m_gpuDisplayTrackToken == m_precomputedTrackToken
+        && displayLeft == m_gpuDisplayDisplayLeft
+        && displayRight > m_gpuDisplayDisplayRight
+        && drawPixels > m_gpuDisplayWidth
+        && std::abs(effectiveZoom - m_gpuDisplayEffectiveZoom) < 0.001
+        && advanceColumns == 0
+        && advanceRight > 0
+        && std::abs(
+               requestedGrowthPixels
+               - static_cast<double>(std::lround(
+                   static_cast<double>(advanceRight) * effectiveZoom)))
+               < 0.001;
     const bool canIncrementallyAdvanceDisplay =
         contentDirty
         && !displayConfigDirty
@@ -4569,7 +4596,36 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         && displayLeft >= m_gpuDisplayDisplayLeft
         && displayRight >= m_gpuDisplayDisplayRight;
 
-    if (canIncrementallyAdvanceDisplay) {
+    if (canIncrementallyGrowRollingDisplay) {
+        const int oldWidth = m_gpuDisplayImage.width();
+        const int growthPixels = drawPixels - oldWidth;
+        QImage grownImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);
+        grownImage.fill(Qt::black);
+        for (int y = 0; y < height; ++y) {
+            const auto *oldLine =
+                reinterpret_cast<const QRgb *>(m_gpuDisplayImage.constScanLine(y));
+            auto *newLine = reinterpret_cast<QRgb *>(grownImage.scanLine(y));
+            std::memcpy(
+                newLine,
+                oldLine,
+                static_cast<size_t>(oldWidth) * sizeof(QRgb));
+        }
+        m_gpuDisplayImage = std::move(grownImage);
+        paintPrecomputedDisplayColumnsLocked(
+            m_gpuDisplayImage,
+            oldWidth,
+            drawPixels - 1,
+            drawPixels,
+            height,
+            displayLeft,
+            displayRight,
+            rollingMode,
+            dbRemap,
+            palette.data());
+        m_gpuDisplayLastUpdateWasIncremental = true;
+        m_gpuDisplayLastShiftPixels = 0;
+        m_gpuDisplayLastUpdatedColumns = growthPixels;
+    } else if (canIncrementallyAdvanceDisplay) {
         for (int y = 0; y < height; ++y) {
             auto *line = reinterpret_cast<QRgb *>(m_gpuDisplayImage.scanLine(y));
             std::memmove(

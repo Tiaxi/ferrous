@@ -627,6 +627,7 @@ private slots:
     void spectrogramResizeForcesFreshBodyTextureUpload();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
+    void spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInitialFill();
     void spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth();
     void spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth();
     void spectrogramRollingGpuDisplayCacheAdvancesIncrementally();
@@ -5841,6 +5842,57 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
         "rolling GPU updates should reuse the same scene-graph texture object");
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInitialFill() {
+    SpectrogramItem item;
+    item.setWidth(20);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 4;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(20 + column * 10 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.syncPrecomputedDisplayImageLocked(8, 6, 0, 3, true, 2.0);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_gpuDisplayImage.width(), 8);
+        QCOMPARE(item.m_gpuDisplayLastUpdateWasIncremental, false);
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(80 + bin));
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 4, 1,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const QColor preservedBefore = item.m_gpuDisplayImage.pixelColor(1, 3);
+        item.syncPrecomputedDisplayImageLocked(10, 6, 0, 4, true, 2.0);
+        QVERIFY(item.m_gpuDisplayLastUpdateWasIncremental);
+        QCOMPARE(item.m_gpuDisplayLastShiftPixels, 0);
+        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 2);
+        QCOMPARE(item.m_gpuDisplayImage.width(), 10);
+        const QColor preservedAfter = item.m_gpuDisplayImage.pixelColor(1, 3);
+        QCOMPARE(preservedAfter, preservedBefore);
+    }
 }
 
 void QmlSmokeTest::spectrogramRollingGpuSourceCacheAdvancesIncrementally() {
