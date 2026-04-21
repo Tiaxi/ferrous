@@ -2092,6 +2092,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QImage spectrogramNodeImage;
     bool spectrogramRollingIncrementalScroll = false;
     int spectrogramRollingShiftPixels = 0;
+    double spectrogramSubpixelOffset = 0.0;
     bool showPlayhead = false;
     QRectF playheadRect;
     QVector<QLineF> freqGridLines;
@@ -2497,6 +2498,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     && m_gpuDisplayLastUpdatedColumns == m_gpuDisplayLastShiftPixels
                     && m_gpuDisplayImage.width() == drawPixels;
                 spectrogramRollingShiftPixels = m_gpuDisplayLastShiftPixels;
+                spectrogramSubpixelOffset =
+                    (gpuDebugMode == SpectrogramGpu::DebugMode::Full && rollingMode)
+                        ? m_gpuDisplaySubpixelOffset
+                        : 0.0;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 const double gpuEffectiveZoom =
                     static_cast<double>(drawPixels)
@@ -2894,6 +2899,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     }
     if (showSpectrogram && node->spectrogramTextureResource != nullptr && !spectrogramSourceRect.isEmpty()) {
         QRectF baseTargetRect = spectrogramTargetRect;
+        baseTargetRect.translate(-spectrogramSubpixelOffset, 0.0);
         QRect baseSourceRect = spectrogramSourceRect;
         const int scrollPixels = std::clamp(
             node->spectrogramTextureScrollPixels,
@@ -2922,7 +2928,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             QRect(),
             node->placeholderTexture);
     }
-    double segmentX = spectrogramTargetRect.x()
+    double segmentX = spectrogramTargetRect.x() - spectrogramSubpixelOffset
         + std::max(
             0.0,
             static_cast<double>(node->spectrogramTextureWidth - node->spectrogramTextureScrollPixels));
@@ -3887,6 +3893,7 @@ void SpectrogramItem::invalidateCanvas() {
     m_gpuDisplayLastUpdateWasIncremental = false;
     m_gpuDisplayLastShiftPixels = 0;
     m_gpuDisplayLastUpdatedColumns = 0;
+    m_gpuDisplaySubpixelOffset = 0.0;
     m_gpuSourceDisplayLeft = 0;
     m_gpuSourceDisplayRight = -1;
     m_gpuSourceRolling = false;
@@ -4679,6 +4686,7 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         m_gpuDisplayLastUpdateWasIncremental = false;
         m_gpuDisplayLastShiftPixels = 0;
         m_gpuDisplayLastUpdatedColumns = 0;
+        m_gpuDisplaySubpixelOffset = 0.0;
         return;
     }
 
@@ -4735,7 +4743,16 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
             : 0;
     const double requestedShiftPixels =
         static_cast<double>(advanceColumns) * effectiveZoom;
-    const int shiftPixels = static_cast<int>(std::lround(requestedShiftPixels));
+    const double totalShiftPixels =
+        m_gpuDisplaySubpixelOffset + requestedShiftPixels;
+    const int shiftPixels = std::max(
+        0,
+        static_cast<int>(std::floor(totalShiftPixels + 1e-9)));
+    const double nextSubpixelOffset =
+        std::clamp(
+            totalShiftPixels - static_cast<double>(shiftPixels),
+            0.0,
+            0.999999);
     const bool displayConfigDirtyBeyondWidth =
         m_gpuDisplayImage.isNull()
         || m_gpuDisplayHeight != height
@@ -4770,13 +4787,14 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         && advanceColumns == advanceRight
         && filledPixels == drawPixels
         && m_gpuDisplayFilledWidth == drawPixels
-        && shiftPixels > 0
         && shiftPixels < drawPixels
-        && std::abs(requestedShiftPixels - static_cast<double>(shiftPixels)) < 0.001
+        && totalShiftPixels > 0.0
         && std::abs(effectiveZoom - m_gpuDisplayEffectiveZoom) < 0.001
         && m_gpuDisplayRolling == rollingMode
         && displayLeft >= m_gpuDisplayDisplayLeft
         && displayRight >= m_gpuDisplayDisplayRight;
+
+    bool imagePixelsChanged = false;
 
     if (canIncrementallyGrowRollingDisplay) {
         const int growthPixels = filledPixels - m_gpuDisplayFilledWidth;
@@ -4804,29 +4822,35 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         m_gpuDisplayLastUpdateWasIncremental = true;
         m_gpuDisplayLastShiftPixels = growthPixels;
         m_gpuDisplayLastUpdatedColumns = growthPixels;
+        m_gpuDisplaySubpixelOffset = 0.0;
+        imagePixelsChanged = true;
     } else if (canIncrementallyAdvanceDisplay) {
-        for (int y = 0; y < height; ++y) {
-            auto *line = reinterpret_cast<QRgb *>(m_gpuDisplayImage.scanLine(y));
-            std::memmove(
-                line,
-                line + shiftPixels,
-                static_cast<size_t>(drawPixels - shiftPixels) * sizeof(QRgb));
+        if (shiftPixels > 0) {
+            for (int y = 0; y < height; ++y) {
+                auto *line = reinterpret_cast<QRgb *>(m_gpuDisplayImage.scanLine(y));
+                std::memmove(
+                    line,
+                    line + shiftPixels,
+                    static_cast<size_t>(drawPixels - shiftPixels) * sizeof(QRgb));
+            }
+            paintPrecomputedDisplayColumnsLocked(
+                m_gpuDisplayImage,
+                drawPixels - shiftPixels,
+                drawPixels - 1,
+                drawPixels,
+                filledPixels,
+                height,
+                displayLeft,
+                displayRight,
+                rollingMode,
+                dbRemap,
+                palette.data());
+            imagePixelsChanged = true;
         }
-        paintPrecomputedDisplayColumnsLocked(
-            m_gpuDisplayImage,
-            drawPixels - shiftPixels,
-            drawPixels - 1,
-            drawPixels,
-            filledPixels,
-            height,
-            displayLeft,
-            displayRight,
-            rollingMode,
-            dbRemap,
-            palette.data());
         m_gpuDisplayLastUpdateWasIncremental = true;
         m_gpuDisplayLastShiftPixels = shiftPixels;
         m_gpuDisplayLastUpdatedColumns = shiftPixels;
+        m_gpuDisplaySubpixelOffset = nextSubpixelOffset;
     } else {
         m_gpuDisplayImage = QImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);
         m_gpuDisplayImage.fill(Qt::black);
@@ -4842,10 +4866,14 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
             rollingMode,
             dbRemap,
             palette.data());
+        m_gpuDisplaySubpixelOffset = 0.0;
+        imagePixelsChanged = true;
     }
 
     m_gpuDisplaySourceGeneration = m_gpuSourceGeneration;
-    m_gpuDisplayGeneration += 1;
+    if (imagePixelsChanged) {
+        m_gpuDisplayGeneration += 1;
+    }
     m_gpuDisplayWidth = drawPixels;
     m_gpuDisplayFilledWidth = filledPixels;
     m_gpuDisplayHeight = height;

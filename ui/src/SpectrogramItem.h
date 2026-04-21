@@ -393,6 +393,7 @@ private:
     bool m_gpuDisplayLastUpdateWasIncremental{false};
     int m_gpuDisplayLastShiftPixels{0};
     int m_gpuDisplayLastUpdatedColumns{0};
+    double m_gpuDisplaySubpixelOffset{0.0};
     qint64 m_gpuSourceDisplayLeft{0};
     qint64 m_gpuSourceDisplayRight{-1};
     bool m_gpuSourceRolling{false};
