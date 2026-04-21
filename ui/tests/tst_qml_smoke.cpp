@@ -456,6 +456,7 @@ private slots:
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
+    void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
     void spectrogramZoomOutProducesDistinctHop();
     void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
     void spectrogramMinZoomAdaptsToWidthChange();
@@ -4999,6 +5000,54 @@ void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
         true, 1, false);
 
     QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int initialColumns = 2000;
+    QByteArray initialChunk(binsPerColumn * initialColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, initialColumns,
+        0, initialColumns, 48000, 1024, true,
+        true, 1, false);
+    item.setPositionSeconds(10.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(item.m_precomputedCanvasDisplayLeft > 0);
+    const qint64 initialDisplayLeft = item.m_precomputedCanvasDisplayLeft;
+    item.setZoomLevel(0.1);
+    item.m_zoomDebounceTimer->stop();
+    QVERIFY(item.m_awaitingZoomData);
+
+    constexpr int zoomedOutTotalColumns = 200;
+    constexpr int zoomedOutDecodedColumns = 32;
+    QByteArray zoomedOutChunk(binsPerColumn * zoomedOutDecodedColumns, '\x60');
+    item.feedPrecomputedChunk(
+        zoomedOutChunk, binsPerColumn, 0, zoomedOutDecodedColumns,
+        0, zoomedOutTotalColumns, 48000, 10240, false,
+        true, 1, false);
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    QVERIFY2(!item.m_zoomFillActive,
+             "zoom-out should not freeze on the old centered cache while the coarser restart fills");
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
+    QVERIFY(item.m_precomputedCanvasDisplayLeft < initialDisplayLeft);
+    QCOMPARE(item.m_gpuDisplayDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_gpuDisplayDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
+    QVERIFY(!item.m_gpuDisplayImage.isNull());
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+
+    delete updatedNode;
 }
 
 void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
