@@ -27,7 +27,7 @@ QtObject {
     property real interpolationAnchorMs: 0
     property bool interpolationActive: false
     readonly property real interpolationSnapThresholdSeconds: 0.75
-    readonly property real profileHeartbeatLogThresholdSeconds: 0.02
+    readonly property real profileHeartbeatLogThresholdSeconds: 0.1
 
     // Timer drives local interpolation at ~60 fps.
     property Timer interpolationTimer: Timer {
