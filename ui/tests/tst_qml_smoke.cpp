@@ -673,6 +673,7 @@ private slots:
     void spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutCollapsingToSingleNode();
     void spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutCollapsingToSingleNode();
     void spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScroll();
+    void spectrogramRollingTextureKeepsBoundedVisibleNodeCountAfterLongScroll();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingPreFillUsesFullViewportWidthCache();
     void spectrogramRollingPreFillHandsOffToSteadyScrollIncrementally();
@@ -6273,6 +6274,79 @@ void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScrol
     QVERIFY2(
         changedRightPixels >= changedLeftPixels / 4,
         "right-edge updates should not collapse into a tiny left-edge-only strip after long segmented scroll");
+}
+
+void QmlSmokeTest::spectrogramRollingTextureKeepsBoundedVisibleNodeCountAfterLongScroll() {
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 80);
+
+    SpectrogramItem item;
+    item.setParentItem(window.contentItem());
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+
+    constexpr int bins = 8;
+    constexpr int initialColumns = 240;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>((column * 7 + bin * 19) % 256));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 8192, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    for (int step = 0; step < 320; ++step) {
+        QByteArray nextChunk(bins, '\0');
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[bin] = static_cast<char>(
+                static_cast<unsigned char>((160 + step * 13 + bin * 11) % 256));
+        }
+        item.feedPrecomputedChunk(
+            nextChunk, bins, 0, 1,
+            initialColumns + step, 8192, 48000, 1024, false, false, 1, false);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto now = std::chrono::steady_clock::now();
+            item.m_positionSeconds =
+                ((static_cast<double>(initialColumns + step) + 0.25) * 1024.0) / 48000.0;
+            item.m_positionAnchorSeconds = item.m_positionSeconds;
+            item.m_positionAnchorUpdatedAt = now;
+            item.m_positionAnchorInitialized = true;
+        }
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(node != nullptr);
+    }
+
+    QVERIFY2(
+        visibleTextureNodeCount(node) <= 2,
+        "rolling spectrogram body should stay bounded to one base texture plus one tail texture after long scroll");
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramRollingPreFillUsesFullViewportWidthCache() {
