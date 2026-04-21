@@ -201,6 +201,7 @@ private:
         int xBegin,
         int xEnd,
         int drawPixels,
+        int filledPixels,
         int height,
         qint64 displayLeft,
         qint64 displayRight,
@@ -374,6 +375,7 @@ private:
     quint64 m_gpuPaletteGeneration{0};
     quint64 m_gpuDisplaySourceGeneration{0};
     int m_gpuDisplayWidth{0};
+    int m_gpuDisplayFilledWidth{0};
     int m_gpuDisplayHeight{0};
     int m_gpuDisplaySampleRateHz{0};
     int m_gpuDisplayBins{0};

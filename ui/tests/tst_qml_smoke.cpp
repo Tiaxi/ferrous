@@ -627,8 +627,8 @@ private slots:
     void spectrogramResizeForcesFreshBodyTextureUpload();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
-    void spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInitialFill();
-    void spectrogramRollingGpuDisplayCacheTransitionsFromGrowthToShiftIncrementally();
+    void spectrogramRollingPreFillUsesFullViewportWidthCache();
+    void spectrogramRollingPreFillHandsOffToSteadyScrollIncrementally();
     void spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth();
     void spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth();
     void spectrogramRollingGpuDisplayCacheAdvancesIncrementally();
@@ -5846,12 +5846,14 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInitialFill() {
+void QmlSmokeTest::spectrogramRollingPreFillUsesFullViewportWidthCache() {
     SpectrogramItem item;
-    item.setWidth(20);
+    item.setWidth(12);
     item.setHeight(6);
     item.setDisplayMode(0); // Rolling
     item.setPlaying(false);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
 
     constexpr int bins = 4;
     constexpr int initialColumns = 4;
@@ -5869,10 +5871,27 @@ void QmlSmokeTest::spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInit
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        item.syncPrecomputedDisplayImageLocked(8, 6, 0, 3, true, 2.0);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_zoomLevel = 2.0;
+        item.m_renderZoomLevel = 2.0;
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QImage initialDisplay;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
         QVERIFY(!item.m_gpuDisplayImage.isNull());
-        QCOMPARE(item.m_gpuDisplayImage.width(), 8);
+        QCOMPARE(item.m_gpuDisplayImage.width(), 12);
+        QCOMPARE(item.m_gpuDisplayFilledWidth, 8);
         QCOMPARE(item.m_gpuDisplayLastUpdateWasIncremental, false);
+        initialDisplay = item.m_gpuDisplayImage.copy();
     }
 
     QByteArray appendChunk(bins, '\0');
@@ -5881,31 +5900,53 @@ void QmlSmokeTest::spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInit
             static_cast<unsigned char>(80 + bin));
     }
     item.feedPrecomputedChunk(
-        appendChunk, bins, 4, 1,
-        0, 64, 48000, 1024, false, true, 1, false);
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        const QColor preservedBefore = item.m_gpuDisplayImage.pixelColor(1, 3);
-        item.syncPrecomputedDisplayImageLocked(10, 6, 0, 4, true, 2.0);
-        QVERIFY(item.m_gpuDisplayLastUpdateWasIncremental);
-        QCOMPARE(item.m_gpuDisplayLastShiftPixels, 0);
-        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 2);
-        QCOMPARE(item.m_gpuDisplayImage.width(), 10);
-        const QColor preservedAfter = item.m_gpuDisplayImage.pixelColor(1, 3);
-        QCOMPARE(preservedAfter, preservedBefore);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
     }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_gpuDisplayImage.width(), 12);
+        QCOMPARE(item.m_gpuDisplayFilledWidth, 10);
+        QVERIFY(item.m_gpuDisplayLastUpdateWasIncremental);
+        QCOMPARE(item.m_gpuDisplayLastShiftPixels, 2);
+        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 2);
+        for (int y = 0; y < initialDisplay.height(); ++y) {
+            for (int x = 0; x < 8; ++x) {
+                QCOMPARE(
+                    item.m_gpuDisplayImage.pixelColor(x, y),
+                    initialDisplay.pixelColor(x + 2, y));
+            }
+        }
+    }
+
+    delete node;
 }
 
-void QmlSmokeTest::spectrogramRollingGpuDisplayCacheTransitionsFromGrowthToShiftIncrementally() {
+void QmlSmokeTest::spectrogramRollingPreFillHandsOffToSteadyScrollIncrementally() {
     SpectrogramItem item;
-    item.setWidth(20);
+    item.setWidth(12);
     item.setHeight(6);
     item.setDisplayMode(0); // Rolling
     item.setPlaying(false);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
 
     constexpr int bins = 4;
-    constexpr int initialColumns = 4;
+    constexpr int initialColumns = 6;
     QByteArray initialChunk(bins * initialColumns, '\0');
     for (int column = 0; column < initialColumns; ++column) {
         for (int bin = 0; bin < bins; ++bin) {
@@ -5920,32 +5961,58 @@ void QmlSmokeTest::spectrogramRollingGpuDisplayCacheTransitionsFromGrowthToShift
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        item.syncPrecomputedDisplayImageLocked(8, 6, 0, 3, true, 2.0);
-        QVERIFY(!item.m_gpuDisplayImage.isNull());
-        QCOMPARE(item.m_gpuDisplayImage.width(), 8);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_zoomLevel = 2.0;
+        item.m_renderZoomLevel = 2.0;
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
     }
 
-    QByteArray appendChunk(bins * 2, '\0');
-    for (int column = 0; column < 2; ++column) {
-        for (int bin = 0; bin < bins; ++bin) {
-            appendChunk[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(80 + column * 10 + bin));
-        }
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QImage initialDisplay;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_gpuDisplayImage.width(), 12);
+        QCOMPARE(item.m_gpuDisplayFilledWidth, 12);
+        initialDisplay = item.m_gpuDisplayImage.copy();
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(120 + bin));
     }
     item.feedPrecomputedChunk(
-        appendChunk, bins, 4, 2,
-        0, 64, 48000, 1024, false, true, 1, false);
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        const QImage initialDisplay = item.m_gpuDisplayImage.copy();
-        item.syncPrecomputedDisplayImageLocked(10, 6, 1, 5, true, 2.0);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
         QVERIFY2(
             item.m_gpuDisplayLastUpdateWasIncremental,
-            "rolling display cache should preserve overlap when growth turns into leftward motion");
+            "rolling cache should hand off from pre-fill to steady-state scroll without a full rebuild");
         QCOMPARE(item.m_gpuDisplayLastShiftPixels, 2);
-        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 4);
-        QCOMPARE(item.m_gpuDisplayImage.width(), 10);
+        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 2);
+        QCOMPARE(item.m_gpuDisplayImage.width(), 12);
         for (int y = 0; y < initialDisplay.height(); ++y) {
             for (int x = 0; x < initialDisplay.width() - 2; ++x) {
                 QCOMPARE(
@@ -5954,6 +6021,8 @@ void QmlSmokeTest::spectrogramRollingGpuDisplayCacheTransitionsFromGrowthToShift
             }
         }
     }
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramRollingGpuSourceCacheAdvancesIncrementally() {
