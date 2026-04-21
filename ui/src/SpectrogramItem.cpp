@@ -1110,10 +1110,12 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     // Early hop change detection: activate canvas freeze BEFORE any
     // reset processing that might call invalidateCanvas().  The freeze
-    // must be active when applyPrecomputedResetLocked runs so it can
-    // preserve the old canvas for updatePaintNode's canvasFreeze check.
+    // is only needed for finer-hop zoom-in restarts; on coarser-hop
+    // zoom-outs, preserving the old centered image makes the view look
+    // stuck at 1.0 until almost the full zoomed-out track has decoded.
     if (hopSize > 0
         && hopSize != m_precomputedHopSize
+        && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
         && m_displayMode == 1
         && (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())) {
         m_zoomFillActive = true;
