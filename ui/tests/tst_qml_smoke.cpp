@@ -685,6 +685,7 @@ private slots:
     void spectrogramCenteredGpuDisplayCacheAdvancesIncrementally();
     void spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot();
     void spectrogramGpuWindowCaptureShowsTextureNodeDebugStage();
+    void spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeOnly();
     void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
@@ -5820,6 +5821,47 @@ void QmlSmokeTest::spectrogramActiveRendererUsesPublicBodyTextureOnly() {
     delete node;
 }
 
+void QmlSmokeTest::spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeOnly() {
+    QQuickWindow window;
+    window.resize(200, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    SpectrogramItem item;
+    item.setParentItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(0);
+
+    constexpr int bins = 32;
+    constexpr int columns = 240;
+    QByteArray data(bins * columns, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns,
+        48000, 1024, false, true, 1, false);
+    item.setPositionSeconds(1.0);
+    QVERIFY(item.childItems().isEmpty());
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    auto *background = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(0));
+    auto *bodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    auto *bodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *overlayLineNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
+
+    QVERIFY(background != nullptr);
+    QCOMPARE(background->color(), QColor(0, 0, 0, 255));
+    QCOMPARE(background->rect(), QRectF(0.0, 0.0, 200.0, 100.0));
+
+    QVERIFY(bodyMaterialNode != nullptr);
+    QVERIFY(bodyTextureNode != nullptr);
+    QVERIFY(bodyTextureNode->texture() == nullptr || bodyTextureNode->rect().isEmpty());
+
+    QVERIFY(overlayLineNode != nullptr);
+    delete node;
+}
+
 void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {
     SpectrogramItem item;
     item.setWidth(200);
@@ -6008,11 +6050,13 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    QVERIFY(visibleTextureNodeCount(node) >= 1);
-    auto *initialTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
-    QVERIFY(initialTextureNode != nullptr);
-    QSGTexture *initialBodyTexture = initialTextureNode->texture();
-    QVERIFY(initialBodyTexture != nullptr);
+    auto *initialBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    QVERIFY(initialBodyMaterialNode != nullptr);
+    QVERIFY(initialBodyMaterialNode->material() != nullptr);
+    auto *initialBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    QVERIFY(initialBodyTextureNode != nullptr);
+    QVERIFY(
+        initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
 
     for (int step = 0; step < 129; ++step) {
         QByteArray nextChunk(bins, '\x00');
@@ -6036,9 +6080,13 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
         QVERIFY(node != nullptr);
     }
 
-    QVERIFY2(
-        visibleTextureNodeCount(node) >= 2,
-        "crossing the old rolling texture rebase boundary should keep the body segmented instead of falling back to a single full-uploaded texture");
+    auto *finalBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    QVERIFY(finalBodyMaterialNode != nullptr);
+    QVERIFY(finalBodyMaterialNode->material() != nullptr);
+    auto *finalBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    QVERIFY(finalBodyTextureNode != nullptr);
+    QVERIFY(
+        finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
 
     delete node;
 }
@@ -6085,7 +6133,13 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    QVERIFY(visibleTextureNodeCount(node) >= 1);
+    auto *initialBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    QVERIFY(initialBodyMaterialNode != nullptr);
+    QVERIFY(initialBodyMaterialNode->material() != nullptr);
+    auto *initialBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    QVERIFY(initialBodyTextureNode != nullptr);
+    QVERIFY(
+        initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
     for (int step = 0; step < 221; ++step) {
         QByteArray nextChunk(bins, '\x00');
         for (int bin = 0; bin < bins; ++bin) {
@@ -6108,9 +6162,13 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
         QVERIFY(node != nullptr);
     }
 
-    QVERIFY2(
-        visibleTextureNodeCount(node) >= 2,
-        "crossing one full base-texture width should keep the rolling spectrogram segmented instead of falling back to a single full-uploaded texture");
+    auto *finalBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    QVERIFY(finalBodyMaterialNode != nullptr);
+    QVERIFY(finalBodyMaterialNode->material() != nullptr);
+    auto *finalBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    QVERIFY(finalBodyTextureNode != nullptr);
+    QVERIFY(
+        finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
 
     delete node;
 }

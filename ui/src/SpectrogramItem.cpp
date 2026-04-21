@@ -2783,8 +2783,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
     }
     const bool useTextureNodeBody =
-        gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
-        || m_displayMode == 0;
+        gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
     if (useTextureNodeBody
         && showSpectrogram
         && node->spectrogramTextureResource != nullptr
