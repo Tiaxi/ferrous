@@ -362,6 +362,28 @@ int countVisiblePixelsInRect(const QImage &image, const QRect &rect, int thresho
     return visiblePixels;
 }
 
+int countChangedPixelsInRect(
+    const QImage &before,
+    const QImage &after,
+    const QRect &rect,
+    int threshold) {
+    int changedPixels = 0;
+    const QRect bounded =
+        rect.intersected(before.rect()).intersected(after.rect());
+    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
+        for (int x = bounded.left(); x <= bounded.right(); ++x) {
+            const QColor beforePixel = before.pixelColor(x, y);
+            const QColor afterPixel = after.pixelColor(x, y);
+            if (std::abs(beforePixel.red() - afterPixel.red()) > threshold
+                || std::abs(beforePixel.green() - afterPixel.green()) > threshold
+                || std::abs(beforePixel.blue() - afterPixel.blue()) > threshold) {
+                ++changedPixels;
+            }
+        }
+    }
+    return changedPixels;
+}
+
 QByteArray artistOnlyLazyBinary() {
     QVector<BinaryTreeRow> rows;
     rows.push_back(BinaryTreeRow{
@@ -609,6 +631,7 @@ private slots:
     void spectrogramPixelToFrequency();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
@@ -648,6 +671,7 @@ private slots:
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
     void spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutCollapsingToSingleNode();
     void spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutCollapsingToSingleNode();
+    void spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScroll();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingPreFillUsesFullViewportWidthCache();
     void spectrogramRollingPreFillHandsOffToSteadyScrollIncrementally();
@@ -4432,6 +4456,35 @@ void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
     QVERIFY(hasContent);
 }
 
+void QmlSmokeTest::spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setCrosshairEnabled(true);
+    item.setShowTimeLabels(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    const double cps = 48000.0 / 1024.0;
+    const uchar *firstBits = nullptr;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.0, false);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        firstBits = item.m_crosshairImage.constBits();
+        QVERIFY(firstBits != nullptr);
+        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.5, false);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        QCOMPARE(item.m_crosshairImage.constBits(), firstBits);
+    }
+}
+
 void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
@@ -6043,6 +6096,122 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
         "crossing one full base-texture width should keep the rolling spectrogram segmented instead of falling back to a single full-uploaded texture");
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScroll() {
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 80);
+
+    auto *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(window.width());
+    item->setHeight(window.height());
+    item->setDisplayMode(0); // Rolling
+    item->setPlaying(false);
+    item->setGridEnabled(false);
+    item->setCrosshairEnabled(false);
+    item->setShowFpsOverlay(false);
+
+    constexpr int bins = 8;
+    constexpr int initialColumns = 240;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>((column * 5 + bin * 17) % 256));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 8192, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item->m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item->m_positionAnchorSeconds = item->m_positionSeconds;
+        item->m_positionAnchorUpdatedAt = now;
+        item->m_positionAnchorInitialized = true;
+    }
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+
+    for (int step = 0; step < 260; ++step) {
+        QByteArray nextChunk(bins, '\0');
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[bin] = static_cast<char>(
+                static_cast<unsigned char>((96 + step * 11 + bin * 29) % 256));
+        }
+        item->feedPrecomputedChunk(
+            nextChunk, bins, 0, 1,
+            initialColumns + step, 8192, 48000, 1024, false, false, 1, false);
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            const auto now = std::chrono::steady_clock::now();
+            item->m_positionSeconds =
+                ((static_cast<double>(initialColumns + step) + 0.25) * 1024.0) / 48000.0;
+            item->m_positionAnchorSeconds = item->m_positionSeconds;
+            item->m_positionAnchorUpdatedAt = now;
+            item->m_positionAnchorInitialized = true;
+        }
+        QCoreApplication::processEvents();
+    }
+
+    QTest::qWait(30);
+    QCoreApplication::processEvents();
+    const QImage before = window.grabWindow();
+    QVERIFY(!before.isNull());
+
+    for (int step = 260; step < 280; ++step) {
+        QByteArray nextChunk(bins, '\0');
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[bin] = static_cast<char>(
+                static_cast<unsigned char>((192 + step * 13 + bin * 31) % 256));
+        }
+        item->feedPrecomputedChunk(
+            nextChunk, bins, 0, 1,
+            initialColumns + step, 8192, 48000, 1024, false, false, 1, false);
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            const auto now = std::chrono::steady_clock::now();
+            item->m_positionSeconds =
+                ((static_cast<double>(initialColumns + step) + 0.25) * 1024.0) / 48000.0;
+            item->m_positionAnchorSeconds = item->m_positionSeconds;
+            item->m_positionAnchorUpdatedAt = now;
+            item->m_positionAnchorInitialized = true;
+        }
+        QCoreApplication::processEvents();
+    }
+
+    QTest::qWait(30);
+    QCoreApplication::processEvents();
+    const QImage after = window.grabWindow();
+    QVERIFY(!after.isNull());
+
+    const QRect rightEdgeRect(
+        std::max(0, window.width() - 48),
+        0,
+        48,
+        window.height());
+    const QRect leftEdgeRect(0, 0, 48, window.height());
+
+    const int changedRightPixels =
+        countChangedPixelsInRect(before, after, rightEdgeRect, 8);
+    const int changedLeftPixels =
+        countChangedPixelsInRect(before, after, leftEdgeRect, 8);
+
+    QVERIFY2(
+        changedRightPixels > 150,
+        "rolling spectrogram should continue updating the right edge after long segmented scroll");
+    QVERIFY2(
+        changedRightPixels >= changedLeftPixels / 4,
+        "right-edge updates should not collapse into a tiny left-edge-only strip after long segmented scroll");
 }
 
 void QmlSmokeTest::spectrogramRollingPreFillUsesFullViewportWidthCache() {

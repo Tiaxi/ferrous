@@ -433,6 +433,8 @@ private:
     double m_crosshairCachedDrawX{0.0};
     bool m_crosshairCachedRollingMode{false};
     int m_crosshairCachedBinsPerColumn{0};
+    QRect m_crosshairFreqLabelRect;
+    QRect m_crosshairTimeLabelRect;
 
     // Grid overlay state — split into static frequency grid and dynamic time grid.
     bool m_gridEnabled{false};
