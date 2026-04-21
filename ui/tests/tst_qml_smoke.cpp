@@ -619,8 +619,7 @@ private slots:
     void spectrogramGpuImagesUseRgbaCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
     void spectrogramGpuCompressesOversizedSourceTexture();
-    void spectrogramDoesNotCreatePrivateRhiChild();
-    void spectrogramUpdatePaintNodeStillUsesPublicTextureBody();
+    void spectrogramActiveRendererUsesPublicBodyTextureOnly();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
@@ -629,7 +628,7 @@ private slots:
     void spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth();
     void spectrogramRollingGpuDisplayCacheAdvancesIncrementally();
     void spectrogramCenteredGpuDisplayCacheAdvancesIncrementally();
-    void spectrogramGpuWindowCaptureShowsVisiblePixels();
+    void spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot();
     void spectrogramGpuWindowCaptureShowsTextureNodeDebugStage();
     void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
@@ -5507,22 +5506,7 @@ void QmlSmokeTest::spectrogramGpuCompressesOversizedSourceTexture() {
     }
 }
 
-void QmlSmokeTest::spectrogramDoesNotCreatePrivateRhiChild() {
-    SpectrogramItem item;
-    item.setWidth(320);
-    item.setHeight(180);
-    item.setDisplayMode(1);
-
-    const bool hasPrivateRendererChild = std::any_of(
-        item.children().cbegin(),
-        item.children().cend(),
-        [](const QObject *child) {
-            return qstrcmp(child->metaObject()->className(), "SpectrogramRhiItem") == 0;
-        });
-    QVERIFY2(!hasPrivateRendererChild, "spectrogram should not create the private renderer boundary");
-}
-
-void QmlSmokeTest::spectrogramUpdatePaintNodeStillUsesPublicTextureBody() {
+void QmlSmokeTest::spectrogramActiveRendererUsesPublicBodyTextureOnly() {
     QQuickWindow window;
     window.resize(200, 100);
     window.show();
@@ -5541,41 +5525,25 @@ void QmlSmokeTest::spectrogramUpdatePaintNodeStillUsesPublicTextureBody() {
         data, bins, 0, columns, 0, columns,
         48000, 1024, false, true, 1, false);
     item.setPositionSeconds(1.0);
+    QVERIFY(item.childItems().isEmpty());
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    const bool hasPrivateRendererChild = std::any_of(
-        item.children().cbegin(),
-        item.children().cend(),
-        [](const QObject *child) {
-            return qstrcmp(child->metaObject()->className(), "SpectrogramRhiItem") == 0;
-        });
-    QVERIFY2(!hasPrivateRendererChild, "public-body path must not introduce the private renderer boundary");
 
-    QSGSimpleRectNode *background = nullptr;
-    QSGSimpleTextureNode *spectrogramTexture = nullptr;
-    for (QSGNode *child = node->firstChild(); child != nullptr; child = child->nextSibling()) {
-        if (background == nullptr) {
-            if (auto *rectNode = dynamic_cast<QSGSimpleRectNode *>(child); rectNode != nullptr) {
-                background = rectNode;
-                continue;
-            }
-        }
-        if (spectrogramTexture == nullptr) {
-            if (auto *textureNode = dynamic_cast<QSGSimpleTextureNode *>(child);
-                textureNode != nullptr && textureNode->texture() != nullptr
-                && !textureNode->rect().isEmpty()) {
-                spectrogramTexture = textureNode;
-            }
-        }
-    }
+    auto *background = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(0));
+    auto *bodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    auto *overlayLineNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(3));
 
     QVERIFY(background != nullptr);
     QCOMPARE(background->color(), QColor(0, 0, 0, 255));
     QCOMPARE(background->rect(), QRectF(0.0, 0.0, 200.0, 100.0));
-    QVERIFY(spectrogramTexture != nullptr);
-    QVERIFY(spectrogramTexture->texture() != nullptr);
-    QVERIFY(!spectrogramTexture->rect().isEmpty());
+
+    QVERIFY(bodyTextureNode != nullptr);
+    QVERIFY(bodyTextureNode->texture() != nullptr);
+    QVERIFY(bodyTextureNode->rect().width() > 0.0);
+    QVERIFY(bodyTextureNode->rect().height() > 0.0);
+
+    QVERIFY(overlayLineNode != nullptr);
     delete node;
 }
 
@@ -6115,7 +6083,7 @@ void QmlSmokeTest::spectrogramCenteredGpuDisplayCacheAdvancesIncrementally() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisiblePixels() {
+void QmlSmokeTest::spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot() {
     QQuickWindow window;
     window.resize(200, 100);
 
