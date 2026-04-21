@@ -51,6 +51,7 @@ private slots:
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
+    void spectrogramProfileSummaryLoggingStaysAvailableWithoutDetailedTrace();
     void diagnosticsWritesBatchOffHotPath();
     void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
@@ -240,6 +241,28 @@ void BridgeClientTest::spectrogramDetailedTraceLoggingRequiresExplicitOptIn() {
     qputenv("FERROUS_PROFILE_SPECTROGRAM_TRACE", "false");
     SpectrogramTraceLogging::refreshDetailedSettingForTests();
     QVERIFY(!SpectrogramTraceLogging::detailedEnabled());
+
+    qunsetenv("FERROUS_PROFILE_SPECTROGRAM_TRACE");
+    SpectrogramTraceLogging::refreshDetailedSettingForTests();
+}
+
+void BridgeClientTest::spectrogramProfileSummaryLoggingStaysAvailableWithoutDetailedTrace() {
+    qunsetenv("FERROUS_PROFILE_SPECTROGRAM_TRACE");
+    SpectrogramTraceLogging::refreshDetailedSettingForTests();
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QVERIFY(SpectrogramTraceLogging::profileSummaryEnabled());
+#else
+    QVERIFY(!SpectrogramTraceLogging::profileSummaryEnabled());
+#endif
+
+    qputenv("FERROUS_PROFILE_SPECTROGRAM_TRACE", "0");
+    SpectrogramTraceLogging::refreshDetailedSettingForTests();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QVERIFY(SpectrogramTraceLogging::profileSummaryEnabled());
+#else
+    QVERIFY(!SpectrogramTraceLogging::profileSummaryEnabled());
+#endif
 
     qunsetenv("FERROUS_PROFILE_SPECTROGRAM_TRACE");
     SpectrogramTraceLogging::refreshDetailedSettingForTests();

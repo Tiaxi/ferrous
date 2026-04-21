@@ -39,6 +39,14 @@ inline bool detailedEnabled() {
 #endif
 }
 
+inline bool profileSummaryEnabled() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    return true;
+#else
+    return false;
+#endif
+}
+
 inline void refreshDetailedSettingForTests() {
     detail::detailedSettingCache().store(-1, std::memory_order_release);
 }
