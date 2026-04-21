@@ -3,6 +3,7 @@
 #include "SpectrogramItem.h"
 
 #include "SpectrogramSeekTrace.h"
+#include "SpectrogramTraceLogging.h"
 
 #include <QFontMetrics>
 #include <QDateTime>
@@ -24,7 +25,12 @@
 #include <cstdio>
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-#define FERROUS_SPECTROGRAM_LOGF(...) std::fprintf(__VA_ARGS__)
+#define FERROUS_SPECTROGRAM_LOGF(...)               \
+    do {                                            \
+        if (SpectrogramTraceLogging::detailedEnabled()) { \
+            std::fprintf(__VA_ARGS__);              \
+        }                                           \
+    } while (false)
 #else
 #define FERROUS_SPECTROGRAM_LOGF(...) \
     do {                              \
