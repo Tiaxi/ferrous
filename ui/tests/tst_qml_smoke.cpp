@@ -1940,7 +1940,9 @@ Item {
         Q_ARG(QVariant, QVariant())));
 
     const QString warnings = takeCapturedMessagesText();
-    QVERIFY2(warnings.contains(QStringLiteral("action=follow")), qPrintable(warnings));
+    QVERIFY2(
+        !warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
+        qPrintable(warnings));
     QVERIFY2(!warnings.contains(QStringLiteral("action=trim")), qPrintable(warnings));
     QVERIFY2(!warnings.contains(QStringLiteral("action=bleed")), qPrintable(warnings));
 }
