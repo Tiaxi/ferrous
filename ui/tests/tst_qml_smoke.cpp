@@ -6114,27 +6114,24 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsTextureNodeDebugStage() {
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays() {
     QQuickWindow window;
-    window.resize(240, 140);
+    window.resize(200, 100);
 
     SpectrogramItem *item = new SpectrogramItem();
     item->setParentItem(window.contentItem());
-    item->setWidth(240);
-    item->setHeight(140);
+    item->setWidth(200);
+    item->setHeight(100);
     item->setDisplayMode(1); // Centered
     item->setGridEnabled(false);
     item->setCrosshairEnabled(false);
     item->setShowFpsOverlay(false);
-    item->setPlaying(false);
 
     constexpr int bins = 64;
-    constexpr int columns = 240;
+    constexpr int columns = 200;
     QByteArray data(bins * columns, '\x00');
-    for (int column = 0; column < columns; ++column) {
-        for (int bin = 0; bin < bins; ++bin) {
-            const int base = 96 + (column * 96) / std::max(1, columns - 1);
-            const int ripple = (bin * 48) / std::max(1, bins - 1);
+    for (int column = 90; column < 150; ++column) {
+        for (int bin = 20; bin < 44; ++bin) {
             data[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(std::min(255, base + ripple)));
+                static_cast<unsigned char>(0xF0));
         }
     }
 
@@ -6145,6 +6142,7 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverl
         data, bins, 0, columns, 0, columns, 48000, 1024,
         false, true, 1, false);
     item->setPositionSeconds(2.0);
+    item->setPlaying(false);
 
     QCoreApplication::processEvents();
     QTest::qWait(50);
@@ -6154,8 +6152,8 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverl
     QVERIFY(!frame.isNull());
 
     bool sawSpectrogramPixel = false;
-    for (int y = 20; y < frame.height() - 20 && !sawSpectrogramPixel; ++y) {
-        for (int x = 20; x < frame.width() - 20; ++x) {
+    for (int y = 0; y < frame.height() && !sawSpectrogramPixel; ++y) {
+        for (int x = 0; x < frame.width(); ++x) {
             const QColor pixel = frame.pixelColor(x, y);
             if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
                 sawSpectrogramPixel = true;
