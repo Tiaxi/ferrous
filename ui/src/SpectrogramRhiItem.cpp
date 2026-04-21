@@ -43,14 +43,14 @@ QShader loadShaderResource(const QString &resourcePath) {
     return QShader::fromSerialized(shaderFile.readAll());
 }
 
-QImage prepareSourceImage(const QImage &sourceImage) {
-    if (sourceImage.isNull()) {
+QImage prepareTextureImage(const QImage &image) {
+    if (image.isNull()) {
         return {};
     }
-    if (sourceImage.format() == QImage::Format_RGBA8888) {
-        return sourceImage;
+    if (image.format() == QImage::Format_RGBA8888) {
+        return image;
     }
-    return sourceImage.convertToFormat(QImage::Format_RGBA8888);
+    return image.convertToFormat(QImage::Format_RGBA8888);
 }
 
 std::array<SpectrogramRhiVertex, 4> buildQuadVertices(
@@ -310,35 +310,46 @@ private:
         return true;
     }
 
-    bool ensureSourceTexture(const QSize &textureSize) {
+    bool ensureTexture(
+        std::unique_ptr<QRhiTexture> *texture,
+        QSize *cachedSize,
+        quint64 *uploadedGeneration,
+        const QSize &textureSize) {
         if (rhi() == nullptr || !ensureStaticResources()) {
             return false;
         }
         if (textureSize.isEmpty()) {
             return false;
         }
-        if (m_sourceTexture && m_sourceTextureSize == textureSize) {
+        if (texture == nullptr || cachedSize == nullptr || uploadedGeneration == nullptr) {
+            return false;
+        }
+        if (*texture && *cachedSize == textureSize) {
             return true;
         }
 
         m_pipeline.reset();
         m_srb.reset();
-        m_sourceTexture.reset();
-        m_sourceTextureSize = QSize();
-        m_uploadedGeneration = std::numeric_limits<quint64>::max();
+        texture->reset();
+        *cachedSize = QSize();
+        *uploadedGeneration = std::numeric_limits<quint64>::max();
 
-        m_sourceTexture.reset(rhi()->newTexture(QRhiTexture::RGBA8, textureSize));
-        if (!m_sourceTexture || !m_sourceTexture->create()) {
-            m_sourceTexture.reset();
+        texture->reset(rhi()->newTexture(QRhiTexture::RGBA8, textureSize));
+        if (!*texture || !(*texture)->create()) {
+            texture->reset();
             return false;
         }
 
-        m_sourceTextureSize = textureSize;
+        *cachedSize = textureSize;
         return true;
     }
 
     bool ensureShaderResources() {
-        if (!m_uniformBuffer || !m_sourceTexture || !m_sampler) {
+        if (!m_uniformBuffer
+            || !m_sourceTexture
+            || !m_dbRemapTexture
+            || !m_paletteTexture
+            || !m_sampler) {
             return false;
         }
         if (m_srb) {
@@ -358,6 +369,16 @@ private:
                 1,
                 QRhiShaderResourceBinding::FragmentStage,
                 m_sourceTexture.get(),
+                m_sampler.get()),
+            QRhiShaderResourceBinding::sampledTexture(
+                2,
+                QRhiShaderResourceBinding::FragmentStage,
+                m_dbRemapTexture.get(),
+                m_sampler.get()),
+            QRhiShaderResourceBinding::sampledTexture(
+                3,
+                QRhiShaderResourceBinding::FragmentStage,
+                m_paletteTexture.get(),
                 m_sampler.get()),
         });
         if (!m_srb->create()) {
@@ -471,11 +492,30 @@ private:
             return false;
         }
 
-        const QImage sourceImage = prepareSourceImage(m_syncState.sourceImage);
-        if (sourceImage.isNull() || m_syncState.drawPixels <= 0) {
+        const QImage sourceImage = prepareTextureImage(m_syncState.sourceImage);
+        const QImage dbRemapImage = prepareTextureImage(m_syncState.dbRemapImage);
+        const QImage paletteImage = prepareTextureImage(m_syncState.paletteImage);
+        if (sourceImage.isNull()
+            || dbRemapImage.isNull()
+            || paletteImage.isNull()
+            || m_syncState.drawPixels <= 0) {
             return false;
         }
-        if (!ensureSourceTexture(sourceImage.size())) {
+        if (!ensureTexture(
+                &m_sourceTexture,
+                &m_sourceTextureSize,
+                &m_uploadedGeneration,
+                sourceImage.size())
+            || !ensureTexture(
+                &m_dbRemapTexture,
+                &m_dbRemapTextureSize,
+                &m_dbRemapUploadedGeneration,
+                dbRemapImage.size())
+            || !ensureTexture(
+                &m_paletteTexture,
+                &m_paletteTextureSize,
+                &m_paletteUploadedGeneration,
+                paletteImage.size())) {
             return false;
         }
         if (!ensurePipeline(renderTarget())) {
@@ -485,6 +525,14 @@ private:
         if (m_uploadedGeneration != m_syncState.sourceGeneration) {
             resourceUpdates->uploadTexture(m_sourceTexture.get(), sourceImage);
             m_uploadedGeneration = m_syncState.sourceGeneration;
+        }
+        if (m_dbRemapUploadedGeneration != m_syncState.dbRemapGeneration) {
+            resourceUpdates->uploadTexture(m_dbRemapTexture.get(), dbRemapImage);
+            m_dbRemapUploadedGeneration = m_syncState.dbRemapGeneration;
+        }
+        if (m_paletteUploadedGeneration != m_syncState.paletteGeneration) {
+            resourceUpdates->uploadTexture(m_paletteTexture.get(), paletteImage);
+            m_paletteUploadedGeneration = m_syncState.paletteGeneration;
         }
 
         const auto quadVertices = buildQuadVertices(m_syncState, targetSize);
@@ -538,6 +586,8 @@ private:
     QShader m_lineVertexShader;
     QShader m_lineFragmentShader;
     std::unique_ptr<QRhiTexture> m_sourceTexture;
+    std::unique_ptr<QRhiTexture> m_dbRemapTexture;
+    std::unique_ptr<QRhiTexture> m_paletteTexture;
     std::unique_ptr<QRhiSampler> m_sampler;
     std::unique_ptr<QRhiBuffer> m_vertexBuffer;
     std::unique_ptr<QRhiBuffer> m_lineVertexBuffer;
@@ -546,7 +596,11 @@ private:
     std::unique_ptr<QRhiGraphicsPipeline> m_pipeline;
     std::unique_ptr<QRhiGraphicsPipeline> m_linePipeline;
     QSize m_sourceTextureSize;
+    QSize m_dbRemapTextureSize;
+    QSize m_paletteTextureSize;
     quint64 m_uploadedGeneration{std::numeric_limits<quint64>::max()};
+    quint64 m_dbRemapUploadedGeneration{std::numeric_limits<quint64>::max()};
+    quint64 m_paletteUploadedGeneration{std::numeric_limits<quint64>::max()};
     int m_pipelineSampleCount{0};
     QRhiRenderPassDescriptor *m_pipelineRenderPass{nullptr};
     int m_linePipelineSampleCount{0};

@@ -21,6 +21,10 @@ struct SpectrogramRhiVertex {
 struct SpectrogramRhiSyncState {
     QImage sourceImage;
     quint64 sourceGeneration{0};
+    QImage dbRemapImage;
+    quint64 dbRemapGeneration{0};
+    QImage paletteImage;
+    quint64 paletteGeneration{0};
     int sourceColumns{0};
     int bins{0};
     qint64 displayLeft{0};

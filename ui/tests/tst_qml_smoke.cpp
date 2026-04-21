@@ -473,6 +473,7 @@ private slots:
     void spectrogramRhiQuadUsesDrawOffsetAndFlipsUv();
     void spectrogramRhiRendererTracksPlayheadLinePosition();
     void spectrogramRhiRendererTracksGridAndCrosshairLineState();
+    void spectrogramRhiRendererTracksPaletteAndDbRemapState();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
@@ -5376,6 +5377,64 @@ void QmlSmokeTest::spectrogramRhiRendererTracksGridAndCrosshairLineState() {
     QCOMPARE(qRound(state.crosshairHorizontalLine->y2()), 40);
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramRhiRendererTracksPaletteAndDbRemapState() {
+    SpectrogramItem item;
+    item.setWidth(240);
+    item.setHeight(120);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    item.setPositionSeconds(2.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
+    QVERIFY(rhiChild != nullptr);
+    const SpectrogramRhiSyncState initialState = rhiChild->debugLastSyncState();
+
+    QVERIFY(!initialState.dbRemapImage.isNull());
+    QCOMPARE(initialState.dbRemapImage.width(), 256);
+    QCOMPARE(initialState.dbRemapImage.height(), 1);
+    QVERIFY(initialState.dbRemapGeneration > 0);
+    const QColor initialDbMid = initialState.dbRemapImage.pixelColor(128, 0);
+
+    QVERIFY(!initialState.paletteImage.isNull());
+    QVERIFY(initialState.paletteImage.width() >= 256);
+    QCOMPARE(initialState.paletteImage.height(), 1);
+    QVERIFY(initialState.paletteGeneration > 0);
+    const QColor initialPaletteMid =
+        initialState.paletteImage.pixelColor(initialState.paletteImage.width() / 4, 0);
+    QVERIFY(initialPaletteMid.red() != initialPaletteMid.green()
+        || initialPaletteMid.green() != initialPaletteMid.blue());
+
+    item.setDbRange(90.0);
+    item.setChannelMuted(true);
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    const SpectrogramRhiSyncState updatedState = rhiChild->debugLastSyncState();
+
+    QVERIFY(updatedState.dbRemapGeneration > 0);
+    QVERIFY(updatedState.paletteGeneration > 0);
+
+    const QColor updatedDbMid = updatedState.dbRemapImage.pixelColor(128, 0);
+    QVERIFY(updatedDbMid != initialDbMid);
+
+    const QColor updatedPaletteMid =
+        updatedState.paletteImage.pixelColor(updatedState.paletteImage.width() / 4, 0);
+    QCOMPARE(updatedPaletteMid.red(), updatedPaletteMid.green());
+    QCOMPARE(updatedPaletteMid.green(), updatedPaletteMid.blue());
+
+    delete updatedNode;
 }
 
 void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {

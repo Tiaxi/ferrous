@@ -2265,6 +2265,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 rhiSyncState = SpectrogramRhiSyncState{
                     .sourceImage = QImage(),
                     .sourceGeneration = 0,
+                    .dbRemapImage = QImage(),
+                    .dbRemapGeneration = 0,
+                    .paletteImage = QImage(),
+                    .paletteGeneration = 0,
                     .sourceColumns = static_cast<int>(displayRight - displayLeft + 1),
                     .bins = m_precomputedBinsPerColumn,
                     .displayLeft = displayLeft,
@@ -2296,6 +2300,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         w, h, displayLeft, displayRight, rollingMode, effectiveZoom, maxTextureColumns);
                     rhiSyncState.sourceImage = m_gpuSourceImage;
                     rhiSyncState.sourceGeneration = m_gpuSourceGeneration;
+                }
+                if (shouldSyncRhiOverlayLines) {
+                    syncPrecomputedGpuLookupImagesLocked();
+                    rhiSyncState.dbRemapImage = m_gpuDbRemapImage;
+                    rhiSyncState.dbRemapGeneration = m_gpuDbRemapGeneration;
+                    rhiSyncState.paletteImage = m_gpuPaletteImage;
+                    rhiSyncState.paletteGeneration = m_gpuPaletteGeneration;
                 }
                 syncPrecomputedDisplayImageLocked(
                     drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
@@ -3603,8 +3614,12 @@ void SpectrogramItem::invalidateCanvas() {
     m_precomputedCanvasDirty = true;
     m_gpuSourceImage = QImage();
     m_gpuDisplayImage = QImage();
+    m_gpuDbRemapImage = QImage();
+    m_gpuPaletteImage = QImage();
     m_gpuSourceGeneration = 0;
     m_gpuDisplayGeneration = 0;
+    m_gpuDbRemapGeneration = 0;
+    m_gpuPaletteGeneration = 0;
     m_gpuDisplaySourceGeneration = 0;
     m_gpuDisplayWidth = 0;
     m_gpuDisplayHeight = 0;
@@ -3635,6 +3650,9 @@ void SpectrogramItem::invalidateCanvas() {
     m_gpuSourceLastUpdateWasIncremental = false;
     m_gpuSourceLastShiftColumns = 0;
     m_gpuSourceLastUpdatedColumns = 0;
+    m_gpuDbRemapBins = 0;
+    m_gpuDbRemapDbRange = 132.0;
+    m_gpuPaletteMuted = false;
 }
 
 int SpectrogramItem::gpuMaxTextureColumns(QQuickWindow *window) const {
@@ -3842,6 +3860,47 @@ std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
             255));
     }
     return dbRemap;
+}
+
+QImage SpectrogramItem::buildPrecomputedDbRemapImageLocked() const {
+    const auto dbRemap = buildPrecomputedDbRemapLocked();
+    QImage image(256, 1, QImage::Format_RGBA8888);
+    for (int x = 0; x < image.width(); ++x) {
+        const quint8 value = dbRemap[static_cast<size_t>(x)];
+        image.setPixelColor(x, 0, QColor(value, value, value, 255));
+    }
+    return image;
+}
+
+QImage SpectrogramItem::buildPrecomputedPaletteImageLocked() const {
+    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
+    QImage image(kGradientTableSize, 1, QImage::Format_RGBA8888);
+    for (int x = 0; x < image.width(); ++x) {
+        image.setPixelColor(x, 0, QColor::fromRgb(palette[static_cast<size_t>(x)]));
+    }
+    return image;
+}
+
+void SpectrogramItem::syncPrecomputedGpuLookupImagesLocked() {
+    const bool dbRemapDirty =
+        m_gpuDbRemapImage.isNull()
+        || m_gpuDbRemapBins != m_precomputedBinsPerColumn
+        || std::abs(m_gpuDbRemapDbRange - m_dbRange) > 0.001;
+    if (dbRemapDirty) {
+        m_gpuDbRemapImage = buildPrecomputedDbRemapImageLocked();
+        m_gpuDbRemapBins = m_precomputedBinsPerColumn;
+        m_gpuDbRemapDbRange = m_dbRange;
+        m_gpuDbRemapGeneration += 1;
+    }
+
+    const bool paletteDirty =
+        m_gpuPaletteImage.isNull()
+        || m_gpuPaletteMuted != m_channelMuted;
+    if (paletteDirty) {
+        m_gpuPaletteImage = buildPrecomputedPaletteImageLocked();
+        m_gpuPaletteMuted = m_channelMuted;
+        m_gpuPaletteGeneration += 1;
+    }
 }
 
 int SpectrogramItem::gpuDrawWidthForSourceColumnsLocked(

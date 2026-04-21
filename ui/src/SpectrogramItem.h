@@ -168,6 +168,9 @@ private:
         qint64 displayIndex,
         bool rollingMode) const;
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
+    QImage buildPrecomputedDbRemapImageLocked() const;
+    QImage buildPrecomputedPaletteImageLocked() const;
+    void syncPrecomputedGpuLookupImagesLocked();
     void paintPrecomputedGpuSourceColumnsLocked(
         QImage &image,
         int xBegin,
@@ -356,8 +359,12 @@ private:
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     QImage m_gpuSourceImage;
     QImage m_gpuDisplayImage;
+    QImage m_gpuDbRemapImage;
+    QImage m_gpuPaletteImage;
     quint64 m_gpuSourceGeneration{0};
     quint64 m_gpuDisplayGeneration{0};
+    quint64 m_gpuDbRemapGeneration{0};
+    quint64 m_gpuPaletteGeneration{0};
     quint64 m_gpuDisplaySourceGeneration{0};
     int m_gpuDisplayWidth{0};
     int m_gpuDisplayHeight{0};
@@ -388,6 +395,9 @@ private:
     bool m_gpuSourceLastUpdateWasIncremental{false};
     int m_gpuSourceLastShiftColumns{0};
     int m_gpuSourceLastUpdatedColumns{0};
+    int m_gpuDbRemapBins{0};
+    double m_gpuDbRemapDbRange{132.0};
+    bool m_gpuPaletteMuted{false};
     int m_gpuMaxTextureColumns{std::numeric_limits<int>::max()};
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};
