@@ -439,6 +439,7 @@ private slots:
     void spectrogramPixelToFrequency();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
@@ -4339,6 +4340,35 @@ void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
         }
     }
     QVERIFY(hasContent);
+}
+
+void QmlSmokeTest::spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setCrosshairEnabled(true);
+    item.setShowTimeLabels(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    const double cps = 48000.0 / 1024.0;
+    const uchar *firstBits = nullptr;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.0);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        firstBits = item.m_crosshairImage.constBits();
+        QVERIFY(firstBits != nullptr);
+        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.5);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        QCOMPARE(item.m_crosshairImage.constBits(), firstBits);
+    }
 }
 
 void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {

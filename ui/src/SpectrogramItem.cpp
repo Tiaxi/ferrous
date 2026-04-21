@@ -2976,6 +2976,10 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     if (!m_crosshairEnabled || (!localHover && !hasSharedX)
         || width <= 0 || height <= 0) {
         m_crosshairImage = QImage();
+        m_crosshairVerticalLineRect = QRect();
+        m_crosshairHorizontalLineRect = QRect();
+        m_crosshairFreqLabelRect = QRect();
+        m_crosshairTimeLabelRect = QRect();
         m_crosshairDirty = false;
         m_crosshairCachedDisplayLeft = displayLeft;
         m_crosshairCachedDrawX = drawX;
@@ -2988,48 +2992,134 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
         ? std::clamp(static_cast<int>(m_hoverPosition.x()), 0, width - 1)
         : std::clamp(static_cast<int>(m_crosshairSharedX), 0, width - 1);
 
-    m_crosshairImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
-    m_crosshairImage.fill(Qt::transparent);
+    const bool drawLinePrimitives = localHover || hasSharedX;
+    const bool drawFreqLabel = localHover;
+    const bool drawTimeLabel = m_showTimeLabels;
+    if (!drawLinePrimitives && !drawFreqLabel && !drawTimeLabel) {
+        m_crosshairImage = QImage();
+        m_crosshairVerticalLineRect = QRect();
+        m_crosshairHorizontalLineRect = QRect();
+        m_crosshairFreqLabelRect = QRect();
+        m_crosshairTimeLabelRect = QRect();
+        m_crosshairDirty = false;
+        m_crosshairCachedDisplayLeft = displayLeft;
+        m_crosshairCachedDrawX = drawX;
+        m_crosshairCachedRollingMode = rollingMode;
+        m_crosshairCachedBinsPerColumn = m_binsPerColumn;
+        return;
+    }
 
-    QPainter painter(&m_crosshairImage);
-    painter.setRenderHint(QPainter::Antialiasing, false);
+    QRect nextFreqLabelRect;
+    QRect nextTimeLabelRect;
+    QRect nextVerticalLineRect;
+    QRect nextHorizontalLineRect;
+    QString freqText;
+    QString timeText;
+    QFont labelFont;
+    labelFont.setPixelSize(10);
+    const QFontMetrics fm(labelFont);
+    constexpr int pad = 3;
 
-    const QColor lineColor(255, 255, 255, 140);
-    QPen dotPen(lineColor);
-    dotPen.setStyle(Qt::DotLine);
-    dotPen.setWidthF(1.0);
-    painter.setPen(dotPen);
+    if (drawLinePrimitives) {
+        nextVerticalLineRect = QRect(effectiveX, 0, 1, height);
+        if (localHover) {
+            const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
+            nextHorizontalLineRect = QRect(0, mouseY, width, 1);
+        }
+    }
 
-    // Vertical line: full height on all panes (spans across panes visually).
-    painter.drawLine(effectiveX, 0, effectiveX, height - 1);
-
-    if (localHover) {
+    if (drawFreqLabel) {
         const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
-        // Horizontal line: full width on the hovered pane.
-        painter.drawLine(0, mouseY, width - 1, mouseY);
-
-        // Frequency label at RIGHT edge, aligned to cursor Y.
-        QFont font;
-        font.setPixelSize(10);
-        painter.setFont(font);
-        const QFontMetrics fm(font);
-
-        const QColor labelBg(0, 0, 10, 160);
-        const QColor labelFg(255, 255, 255, 220);
-        constexpr int pad = 3;
-
         const double freqHz = pixelToFrequencyHzLocked(mouseY, height);
         if (freqHz >= 0.0) {
-            const QString freqText = formatFrequencyLabelPrecise(freqHz);
+            freqText = formatFrequencyLabelPrecise(freqHz);
             const int textW = fm.horizontalAdvance(freqText);
             const int textH = fm.height();
             const int labelY = std::clamp(mouseY - textH / 2, 0, height - textH - 2 * pad);
             const int labelX = width - textW - 2 * pad - 2;
+            nextFreqLabelRect = QRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad);
+        }
+    }
+
+    if (drawTimeLabel) {
+        const double continuousTime = pixelToTimeSeconds(
+            static_cast<double>(effectiveX), displayLeft, rollingMode,
+            m_rollingEpoch, columnsPerSecond, drawX, effectiveZoomLocked());
+        const double trackTime = continuousTime - m_gaplessPositionOffset;
+        if (trackTime >= 0.0) {
+            timeText = formatTimeLabelPrecise(trackTime);
+            const int textW = fm.horizontalAdvance(timeText);
+            const int textH = fm.height();
+            const int labelX = std::clamp(effectiveX - textW / 2, 0, width - textW - 2 * pad);
+            nextTimeLabelRect = QRect(
+                labelX,
+                height - textH - 2 * pad - 2,
+                textW + 2 * pad,
+                textH + 2 * pad);
+        }
+    }
+
+    const bool reuseImageBuffer =
+        !m_crosshairImage.isNull()
+        && m_crosshairImage.width() == width
+        && m_crosshairImage.height() == height;
+    if (!reuseImageBuffer) {
+        m_crosshairImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+        m_crosshairImage.fill(Qt::transparent);
+    }
+
+    QPainter painter(&m_crosshairImage);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+
+    if (reuseImageBuffer) {
+        QRect clearRect = m_crosshairVerticalLineRect.adjusted(-1, -1, 1, 1)
+            .united(m_crosshairHorizontalLineRect.adjusted(-1, -1, 1, 1))
+            .united(m_crosshairFreqLabelRect.adjusted(-1, -1, 1, 1))
+            .united(m_crosshairTimeLabelRect.adjusted(-1, -1, 1, 1))
+            .united(nextVerticalLineRect.adjusted(-1, -1, 1, 1))
+            .united(nextHorizontalLineRect.adjusted(-1, -1, 1, 1))
+            .united(nextFreqLabelRect.adjusted(-1, -1, 1, 1))
+            .united(nextTimeLabelRect.adjusted(-1, -1, 1, 1))
+            .intersected(QRect(0, 0, width, height));
+        if (!clearRect.isEmpty()) {
+            painter.setCompositionMode(QPainter::CompositionMode_Source);
+            painter.fillRect(clearRect, Qt::transparent);
+            painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        }
+    }
+
+    if (drawLinePrimitives) {
+        const QColor lineColor(255, 255, 255, 140);
+        QPen dotPen(lineColor);
+        dotPen.setStyle(Qt::DotLine);
+        dotPen.setWidthF(1.0);
+        painter.setPen(dotPen);
+
+        // Vertical line: full height on all panes (spans across panes visually).
+        painter.drawLine(effectiveX, 0, effectiveX, height - 1);
+
+        if (localHover) {
+            const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
+            // Horizontal line: full width on the hovered pane.
+            painter.drawLine(0, mouseY, width - 1, mouseY);
+        }
+    }
+
+    if (localHover) {
+        // Frequency label at RIGHT edge, aligned to cursor Y.
+        painter.setFont(labelFont);
+
+        const QColor labelBg(0, 0, 10, 160);
+        const QColor labelFg(255, 255, 255, 220);
+        if (!nextFreqLabelRect.isEmpty()) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(labelBg);
-            painter.drawRoundedRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad, 3, 3);
+            painter.drawRoundedRect(nextFreqLabelRect, 3, 3);
             painter.setPen(labelFg);
-            painter.drawText(labelX + pad, labelY + pad + fm.ascent(), freqText);
+            painter.drawText(
+                nextFreqLabelRect.x() + pad,
+                nextFreqLabelRect.y() + pad + fm.ascent(),
+                freqText);
         }
     }
 
@@ -3037,34 +3127,26 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     // shown whenever any pane is hovered (via shared X).
     // Subtract gapless offset to show per-track time.
     if (m_showTimeLabels) {
-        const double continuousTime = pixelToTimeSeconds(
-            static_cast<double>(effectiveX), displayLeft, rollingMode,
-            m_rollingEpoch, columnsPerSecond, drawX, effectiveZoomLocked());
-        const double trackTime = continuousTime - m_gaplessPositionOffset;
-        if (trackTime >= 0.0) {
-            QFont font;
-            font.setPixelSize(10);
-            painter.setFont(font);
-            const QFontMetrics fm(font);
-
+        if (!nextTimeLabelRect.isEmpty()) {
+            painter.setFont(labelFont);
             const QColor labelBg(0, 0, 10, 160);
             const QColor labelFg(255, 255, 255, 220);
-            constexpr int pad = 3;
-
-            const QString timeText = formatTimeLabelPrecise(trackTime);
-            const int textW = fm.horizontalAdvance(timeText);
-            const int textH = fm.height();
-            const int labelX = std::clamp(effectiveX - textW / 2, 0, width - textW - 2 * pad);
             painter.setPen(Qt::NoPen);
             painter.setBrush(labelBg);
-            painter.drawRoundedRect(labelX, height - textH - 2 * pad - 2,
-                                     textW + 2 * pad, textH + 2 * pad, 3, 3);
+            painter.drawRoundedRect(nextTimeLabelRect, 3, 3);
             painter.setPen(labelFg);
-            painter.drawText(labelX + pad, height - pad - 2 - fm.descent(), timeText);
+            painter.drawText(
+                nextTimeLabelRect.x() + pad,
+                nextTimeLabelRect.bottom() - pad - fm.descent(),
+                timeText);
         }
     }
 
     painter.end();
+    m_crosshairVerticalLineRect = nextVerticalLineRect;
+    m_crosshairHorizontalLineRect = nextHorizontalLineRect;
+    m_crosshairFreqLabelRect = nextFreqLabelRect;
+    m_crosshairTimeLabelRect = nextTimeLabelRect;
     m_crosshairDirty = false;
     m_crosshairCachedDisplayLeft = displayLeft;
     m_crosshairCachedDrawX = drawX;
