@@ -480,6 +480,7 @@ private:
     void parsePrecomputedSpectrogramFrame(const QByteArray &raw);
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
+    void logProfileDiagnostic(const QString &category, const QString &message) const;
     void logDiagnostic(const QString &category, const QString &message);
     void appendDiagnosticLine(const QString &line);
     void flushPendingDiagnosticDiskLines();
