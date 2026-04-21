@@ -4793,6 +4793,27 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         && m_gpuDisplayRolling == rollingMode
         && displayLeft >= m_gpuDisplayDisplayLeft
         && displayRight >= m_gpuDisplayDisplayRight;
+    const int oldContentOffset =
+        rollingMode ? std::max(0, drawPixels - m_gpuDisplayFilledWidth) : 0;
+    const int mixedShiftPixels = std::max(
+        0,
+        oldContentOffset + shiftPixels);
+    const bool canIncrementallyCompleteAndAdvanceRollingDisplay =
+        contentDirty
+        && rollingMode
+        && !displayConfigDirtyBeyondWidth
+        && m_gpuDisplayRolling == rollingMode
+        && m_gpuDisplayTrackToken == m_precomputedTrackToken
+        && m_gpuDisplayFilledWidth > 0
+        && m_gpuDisplayFilledWidth < drawPixels
+        && filledPixels == drawPixels
+        && advanceColumns > 0
+        && advanceRight > advanceColumns
+        && mixedShiftPixels > 0
+        && mixedShiftPixels < drawPixels
+        && std::abs(effectiveZoom - m_gpuDisplayEffectiveZoom) < 0.001
+        && displayLeft >= m_gpuDisplayDisplayLeft
+        && displayRight >= m_gpuDisplayDisplayRight;
 
     bool imagePixelsChanged = false;
 
@@ -4823,6 +4844,31 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         m_gpuDisplayLastShiftPixels = growthPixels;
         m_gpuDisplayLastUpdatedColumns = growthPixels;
         m_gpuDisplaySubpixelOffset = 0.0;
+        imagePixelsChanged = true;
+    } else if (canIncrementallyCompleteAndAdvanceRollingDisplay) {
+        for (int y = 0; y < height; ++y) {
+            auto *line = reinterpret_cast<QRgb *>(m_gpuDisplayImage.scanLine(y));
+            std::memmove(
+                line,
+                line + mixedShiftPixels,
+                static_cast<size_t>(drawPixels - mixedShiftPixels) * sizeof(QRgb));
+        }
+        paintPrecomputedDisplayColumnsLocked(
+            m_gpuDisplayImage,
+            drawPixels - mixedShiftPixels,
+            drawPixels - 1,
+            drawPixels,
+            filledPixels,
+            height,
+            displayLeft,
+            displayRight,
+            rollingMode,
+            dbRemap,
+            palette.data());
+        m_gpuDisplayLastUpdateWasIncremental = true;
+        m_gpuDisplayLastShiftPixels = mixedShiftPixels;
+        m_gpuDisplayLastUpdatedColumns = mixedShiftPixels;
+        m_gpuDisplaySubpixelOffset = nextSubpixelOffset;
         imagePixelsChanged = true;
     } else if (canIncrementallyAdvanceDisplay) {
         if (shiftPixels > 0) {
