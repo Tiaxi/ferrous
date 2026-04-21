@@ -464,6 +464,7 @@ private slots:
     void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
+    void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramSyntheticClearPreservesCanvasDuringSeek();
@@ -5300,6 +5301,33 @@ void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
     // Ring capacity should NOT be 100000 (full track).
     // It should be bounded to ~3 screen widths + lookahead.
     QVERIFY(item.m_ringCapacity < 20000);
+}
+
+void QmlSmokeTest::spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead() {
+    SpectrogramItem item;
+    item.setWidth(3440);
+    item.setHeight(80);
+    item.setDisplayMode(0); // Rolling
+    item.setZoomLevel(1.0);
+
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 100;
+    constexpr int sampleRate = 48000;
+    constexpr int hopSize = 1024;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, 100000, sampleRate, hopSize, false,
+        true, 1, false);
+
+    const double colsPerSecond =
+        static_cast<double>(sampleRate) / static_cast<double>(hopSize);
+    const int lookaheadCols = static_cast<int>(10.0 * colsPerSecond);
+    const int zoomAdjustedWidth = 3440;
+
+    QVERIFY2(
+        item.m_ringCapacity >= zoomAdjustedWidth * 2 + lookaheadCols,
+        "rolling mode should reserve at least one extra viewport width of ring headroom beyond the decode lookahead");
 }
 
 void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
