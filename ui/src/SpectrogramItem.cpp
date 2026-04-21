@@ -2300,8 +2300,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 w,
                 static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
 
-            const bool freezeUsesSource =
-                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
+            const bool freezeUsesSource = true;
             const bool haveFreezeCache =
                 freezeUsesSource
                     ? !m_zoomFillFrozenSourceImage.isNull()
@@ -2341,8 +2340,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     w, displayLeft, displayRight, effectiveZoom);
             }
 
-            const bool needsSourceCache =
-                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
+            const bool needsSourceCache = true;
 
             if (visibleCols > 0) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -2367,12 +2365,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             const bool haveSelectedSpectrogramImage =
                 rendererFreeze
-                    ? (freezeUsesSource
-                        ? !m_zoomFillFrozenSourceImage.isNull()
-                        : !m_zoomFillFrozenDisplayImage.isNull())
-                    : ((gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode)
-                        ? !m_gpuSourceImage.isNull()
-                        : !m_gpuDisplayImage.isNull());
+                    ? !m_zoomFillFrozenSourceImage.isNull()
+                    : !m_gpuSourceImage.isNull();
 
             if (haveSelectedSpectrogramImage && drawPixels > 0) {
                 if (m_gpuDisplayImage.isNull()) {
@@ -2386,19 +2380,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     static_cast<double>(drawPixels),
                     static_cast<double>(h));
                 if (rendererFreeze) {
-                    spectrogramNodeImage = freezeUsesSource
-                        ? m_zoomFillFrozenSourceImage
-                        : m_zoomFillFrozenDisplayImage;
-                    spectrogramImageGeneration = freezeUsesSource
-                        ? m_zoomFillFrozenSourceGeneration
-                        : m_zoomFillFrozenDisplayGeneration;
+                    spectrogramNodeImage = m_zoomFillFrozenSourceImage;
+                    spectrogramImageGeneration = m_zoomFillFrozenSourceGeneration;
                 } else {
-                    spectrogramNodeImage = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
-                        ? m_gpuSourceImage
-                        : m_gpuDisplayImage;
-                    spectrogramImageGeneration = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
-                        ? m_gpuSourceGeneration
-                        : m_gpuDisplayGeneration;
+                    spectrogramNodeImage = m_gpuSourceImage;
+                    spectrogramImageGeneration = m_gpuSourceGeneration;
                 }
                 spectrogramImageDebugMode = gpuDebugMode;
                 spectrogramSourceRect = QRect(
@@ -2408,14 +2394,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     spectrogramNodeImage.height());
                 spectrogramRollingIncrementalScroll =
                     !rendererFreeze
-                    &&
-                    gpuDebugMode == SpectrogramGpu::DebugMode::Full
+                    && gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
                     && rollingMode
-                    && m_gpuDisplayLastUpdateWasIncremental
-                    && m_gpuDisplayLastShiftPixels > 0
-                    && m_gpuDisplayLastUpdatedColumns == m_gpuDisplayLastShiftPixels
-                    && m_gpuDisplayImage.width() == drawPixels;
-                spectrogramRollingShiftPixels = m_gpuDisplayLastShiftPixels;
+                    && m_gpuSourceLastUpdateWasIncremental
+                    && m_gpuSourceLastShiftColumns > 0
+                    && m_gpuSourceLastUpdatedColumns == m_gpuSourceLastShiftColumns
+                    && m_gpuSourceImage.width() == spectrogramNodeImage.width();
+                spectrogramRollingShiftPixels = m_gpuSourceLastShiftColumns;
                 spectrogramSubpixelOffset =
                     (gpuDebugMode == SpectrogramGpu::DebugMode::Full && rollingMode)
                         ? m_gpuDisplaySubpixelOffset
@@ -2620,8 +2605,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         if (canAdvanceRollingTexture) {
             clearTailSegments(node);
             node->spectrogramTextureScrollPixels = nextScrollPixels;
-            const auto uploadSegmentTexture =
-                [&](const QImage &image) -> QSGTexture * {
+                const auto uploadSegmentTexture =
+                    [&](const QImage &image) -> QSGTexture * {
                     if (currentWindow == nullptr || image.isNull()) {
                         return nullptr;
                     }
@@ -2692,6 +2677,16 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
                 node->spectrogramTextureResource =
                     currentWindow->createTextureFromImage(spectrogramNodeImage);
+                if (spectrogramImageDebugMode == SpectrogramGpu::DebugMode::Full
+                    && node->spectrogramTextureResource != nullptr
+                    && node->spectrogramTextureResource->isAtlasTexture()) {
+                    QSGTexture *standaloneTexture =
+                        node->spectrogramTextureResource->removedFromAtlas();
+                    if (standaloneTexture != node->spectrogramTextureResource) {
+                        staleSpectrogramTextures.push_back(node->spectrogramTextureResource);
+                        node->spectrogramTextureResource = standaloneTexture;
+                    }
+                }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 profileSpectrogramTextureUploadMs += std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - uploadStart).count();
@@ -2820,7 +2815,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     }
 
     SpectrogramBodyMaterial::State bodyState;
-    bodyState.sourceTexture = node->spectrogramTextureResource;
+    bodyState.sourceTexture = useTextureNodeBody ? nullptr : node->spectrogramTextureResource;
     bodyState.dbRemapTexture = nullptr;
     bodyState.paletteTexture = nullptr;
     bodyState.sourceSize = spectrogramSourceRect.size();

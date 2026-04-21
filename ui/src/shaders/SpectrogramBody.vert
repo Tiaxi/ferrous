@@ -1,6 +1,6 @@
 #version 440
 
-layout(location = 0) in vec4 qt_Vertex;
+layout(location = 0) in vec2 qt_Vertex;
 layout(location = 1) in vec2 qt_TexCoord0;
 
 layout(location = 0) out vec2 vTexCoord;
@@ -12,5 +12,5 @@ layout(std140, binding = 0) uniform buf {
 
 void main() {
     vTexCoord = qt_TexCoord0;
-    gl_Position = qt_Matrix * qt_Vertex;
+    gl_Position = qt_Matrix * vec4(qt_Vertex, 0.0, 1.0);
 }

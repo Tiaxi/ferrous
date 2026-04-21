@@ -7,6 +7,7 @@
 #include <QSGGeometryNode>
 #include <QSGMaterial>
 #include <QSGTexture>
+#include <QSize>
 
 class SpectrogramBodyMaterial final : public QSGMaterial {
 public:
@@ -29,9 +30,6 @@ public:
     int compare(const QSGMaterial *other) const override;
 
     State state;
-
-private:
-    QSGMaterialType m_type;
 };
 
 QSGGeometryNode *createSpectrogramBodyMaterialNode();

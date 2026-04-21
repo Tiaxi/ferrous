@@ -40,6 +40,50 @@ function(ferrous_enable_strict_warnings target_name)
     endif()
 endfunction()
 
+find_program(FERROUS_QSB_EXECUTABLE NAMES qsb-qt6 qsb PATHS /usr/lib64/qt6/bin REQUIRED)
+
+set(FERROUS_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/shaders")
+set(FERROUS_SPECTROGRAM_BODY_VERTEX_QSB "${FERROUS_SHADER_OUTPUT_DIR}/SpectrogramBody.vert.qsb")
+set(FERROUS_SPECTROGRAM_BODY_FRAGMENT_QSB "${FERROUS_SHADER_OUTPUT_DIR}/SpectrogramBody.frag.qsb")
+
+add_custom_command(
+    OUTPUT "${FERROUS_SPECTROGRAM_BODY_VERTEX_QSB}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${FERROUS_SHADER_OUTPUT_DIR}"
+    COMMAND ${FERROUS_QSB_EXECUTABLE} --qt6 --batchable -o "${FERROUS_SPECTROGRAM_BODY_VERTEX_QSB}" "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramBody.vert"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramBody.vert"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${FERROUS_SPECTROGRAM_BODY_FRAGMENT_QSB}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${FERROUS_SHADER_OUTPUT_DIR}"
+    COMMAND ${FERROUS_QSB_EXECUTABLE} --qt6 -o "${FERROUS_SPECTROGRAM_BODY_FRAGMENT_QSB}" "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramBody.frag"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramBody.frag"
+    VERBATIM
+)
+
+add_custom_target(ferrous_spectrogram_body_shaders
+    DEPENDS
+        "${FERROUS_SPECTROGRAM_BODY_VERTEX_QSB}"
+        "${FERROUS_SPECTROGRAM_BODY_FRAGMENT_QSB}"
+)
+
+function(ferrous_add_spectrogram_body_shader_resources target_name resource_name)
+    add_dependencies(${target_name} ferrous_spectrogram_body_shaders)
+    set_source_files_properties(
+        "${FERROUS_SPECTROGRAM_BODY_VERTEX_QSB}"
+        "${FERROUS_SPECTROGRAM_BODY_FRAGMENT_QSB}"
+        PROPERTIES GENERATED TRUE
+    )
+    qt_add_resources(${target_name} ${resource_name}
+        PREFIX "/shaders"
+        BASE "${FERROUS_SHADER_OUTPUT_DIR}"
+        FILES
+            "${FERROUS_SPECTROGRAM_BODY_VERTEX_QSB}"
+            "${FERROUS_SPECTROGRAM_BODY_FRAGMENT_QSB}"
+    )
+endfunction()
+
 set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
 
@@ -89,6 +133,7 @@ qt_add_resources(ferrous ferrous_app_resources
     FILES
         assets/ferrous.svg
 )
+ferrous_add_spectrogram_body_shader_resources(ferrous ferrous_body_shader_resources)
 
 qt_add_qml_module(ferrous
     URI FerrousUi
@@ -228,6 +273,7 @@ if(BUILD_TESTING)
         pthread
     )
     ferrous_enable_strict_warnings(ferrous_qml_smoke_tests)
+    ferrous_add_spectrogram_body_shader_resources(ferrous_qml_smoke_tests ferrous_qml_smoke_body_shader_resources)
     if(FERROUS_ENABLE_PROFILE_LOGS)
         target_sources(ferrous_qml_smoke_tests PRIVATE src/SpectrogramSeekTrace.cpp)
         target_compile_definitions(ferrous_qml_smoke_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
@@ -296,6 +342,7 @@ if(BUILD_TESTING)
         pthread
     )
     ferrous_enable_strict_warnings(ferrous_bridge_client_tests)
+    ferrous_add_spectrogram_body_shader_resources(ferrous_bridge_client_tests ferrous_bridge_body_shader_resources)
     if(FERROUS_ENABLE_PROFILE_LOGS)
         target_sources(ferrous_bridge_client_tests PRIVATE src/SpectrogramSeekTrace.cpp)
         target_compile_definitions(ferrous_bridge_client_tests PRIVATE
