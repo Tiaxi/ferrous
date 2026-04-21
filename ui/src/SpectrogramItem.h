@@ -213,12 +213,22 @@ private:
     void updateCrosshairOverlayLocked(
         int width, int height,
         qint64 displayLeft, bool rollingMode,
-        double columnsPerSecond, double drawX);
-    void updateFreqGridOverlayLocked(int width, int height);
+        double columnsPerSecond, double drawX, bool drawLinePrimitives);
+    void updateFreqGridOverlayLocked(int width, int height, bool drawLinePrimitives);
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
         qint64 displayLeft,
-        bool rollingMode, double columnsPerSecond, double drawX);
+        bool rollingMode, double columnsPerSecond, double drawX, bool drawLinePrimitives);
+    QVector<QLineF> buildFreqGridLinesLocked(int width, int height) const;
+    QVector<QLineF> buildTimeGridLinesLocked(
+        int width,
+        int height,
+        qint64 displayLeft,
+        bool rollingMode,
+        double columnsPerSecond,
+        double drawX) const;
+    std::optional<QLineF> buildCrosshairVerticalLineLocked(int width, int height) const;
+    std::optional<QLineF> buildCrosshairHorizontalLineLocked(int width, int height) const;
     double effectiveZoomLocked() const;
     double minimumZoomLevelLocked() const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;

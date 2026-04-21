@@ -84,6 +84,8 @@ find_program(FERROUS_QSB_EXECUTABLE qsb HINTS /usr/lib64/qt6/bin REQUIRED)
 set(FERROUS_RHI_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/rhi_shaders")
 set(FERROUS_RHI_VERTEX_QSB "${FERROUS_RHI_SHADER_DIR}/SpectrogramRhi.vert.qsb")
 set(FERROUS_RHI_FRAGMENT_QSB "${FERROUS_RHI_SHADER_DIR}/SpectrogramRhi.frag.qsb")
+set(FERROUS_RHI_LINE_VERTEX_QSB "${FERROUS_RHI_SHADER_DIR}/SpectrogramRhiLine.vert.qsb")
+set(FERROUS_RHI_LINE_FRAGMENT_QSB "${FERROUS_RHI_SHADER_DIR}/SpectrogramRhiLine.frag.qsb")
 
 add_custom_command(
     OUTPUT "${FERROUS_RHI_VERTEX_QSB}"
@@ -105,10 +107,32 @@ add_custom_command(
     VERBATIM
 )
 
+add_custom_command(
+    OUTPUT "${FERROUS_RHI_LINE_VERTEX_QSB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FERROUS_RHI_SHADER_DIR}"
+    COMMAND "${FERROUS_QSB_EXECUTABLE}" --qt6
+            -o "${FERROUS_RHI_LINE_VERTEX_QSB}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhiLine.vert"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhiLine.vert"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${FERROUS_RHI_LINE_FRAGMENT_QSB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FERROUS_RHI_SHADER_DIR}"
+    COMMAND "${FERROUS_QSB_EXECUTABLE}" --qt6
+            -o "${FERROUS_RHI_LINE_FRAGMENT_QSB}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhiLine.frag"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/SpectrogramRhiLine.frag"
+    VERBATIM
+)
+
 add_custom_target(ferrous_rhi_shaders
     DEPENDS
         "${FERROUS_RHI_VERTEX_QSB}"
         "${FERROUS_RHI_FRAGMENT_QSB}"
+        "${FERROUS_RHI_LINE_VERTEX_QSB}"
+        "${FERROUS_RHI_LINE_FRAGMENT_QSB}"
 )
 
 qt_add_resources(ferrous ferrous_rhi_shader_resources
@@ -117,6 +141,8 @@ qt_add_resources(ferrous ferrous_rhi_shader_resources
     FILES
         "${FERROUS_RHI_VERTEX_QSB}"
         "${FERROUS_RHI_FRAGMENT_QSB}"
+        "${FERROUS_RHI_LINE_VERTEX_QSB}"
+        "${FERROUS_RHI_LINE_FRAGMENT_QSB}"
 )
 
 target_include_directories(ferrous PRIVATE src)
@@ -253,6 +279,8 @@ if(BUILD_TESTING)
         FILES
             "${FERROUS_RHI_VERTEX_QSB}"
             "${FERROUS_RHI_FRAGMENT_QSB}"
+            "${FERROUS_RHI_LINE_VERTEX_QSB}"
+            "${FERROUS_RHI_LINE_FRAGMENT_QSB}"
     )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
     add_dependencies(ferrous_qml_smoke_tests ferrous_rust_bridge)
@@ -332,6 +360,8 @@ if(BUILD_TESTING)
         FILES
             "${FERROUS_RHI_VERTEX_QSB}"
             "${FERROUS_RHI_FRAGMENT_QSB}"
+            "${FERROUS_RHI_LINE_VERTEX_QSB}"
+            "${FERROUS_RHI_LINE_FRAGMENT_QSB}"
     )
     target_include_directories(ferrous_bridge_client_tests PRIVATE src)
     add_dependencies(ferrous_bridge_client_tests ferrous_rust_bridge)

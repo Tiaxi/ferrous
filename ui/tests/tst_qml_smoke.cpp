@@ -471,6 +471,8 @@ private slots:
     void spectrogramCreatesRhiChildForActiveRenderer();
     void spectrogramRhiRendererConsumesViewSyncState();
     void spectrogramRhiQuadUsesDrawOffsetAndFlipsUv();
+    void spectrogramRhiRendererTracksPlayheadLinePosition();
+    void spectrogramRhiRendererTracksGridAndCrosshairLineState();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
@@ -4236,7 +4238,7 @@ void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
         item.m_crosshairDirty = true;
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0, true);
     }
 
     QVERIFY(!item.m_crosshairImage.isNull());
@@ -4272,8 +4274,8 @@ void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
         item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateFreqGridOverlayLocked(200, 100);
-        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+        item.updateFreqGridOverlayLocked(200, 100, true);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0, true);
     }
 
     QVERIFY(!item.m_freqGridImage.isNull());
@@ -4309,7 +4311,7 @@ void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
         item.m_hoverPosition = QPointF(50.0, 40.0);
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0, true);
     }
     QVERIFY(item.m_crosshairImage.isNull());
 
@@ -4318,8 +4320,8 @@ void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
         QMutexLocker lock(&item.m_stateMutex);
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateFreqGridOverlayLocked(200, 100);
-        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+        item.updateFreqGridOverlayLocked(200, 100, true);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0, true);
     }
     QVERIFY(item.m_freqGridImage.isNull());
 }
@@ -4342,9 +4344,9 @@ void QmlSmokeTest::spectrogramOverlayDirtiedByGeometryChange() {
         item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
-        item.updateFreqGridOverlayLocked(200, 100);
-        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0, true);
+        item.updateFreqGridOverlayLocked(200, 100, true);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0, true);
     }
     QVERIFY(!item.m_crosshairDirty);
     QVERIFY(!item.m_freqGridDirty);
@@ -4374,9 +4376,9 @@ void QmlSmokeTest::spectrogramOverlayDirtiedByLogScaleChange() {
         item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
-        item.updateFreqGridOverlayLocked(200, 100);
-        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0, true);
+        item.updateFreqGridOverlayLocked(200, 100, true);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0, true);
     }
     QVERIFY(!item.m_crosshairDirty);
     QVERIFY(!item.m_freqGridDirty);
@@ -4406,9 +4408,9 @@ void QmlSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
         item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
-        item.updateFreqGridOverlayLocked(200, 100);
-        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0, true);
+        item.updateFreqGridOverlayLocked(200, 100, true);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0, true);
     }
 
     {
@@ -4494,9 +4496,9 @@ void QmlSmokeTest::spectrogramOverlayStalenessDetectsDisplayRangeChange() {
         item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
-        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
-        item.updateFreqGridOverlayLocked(200, 100);
-        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0, true);
+        item.updateFreqGridOverlayLocked(200, 100, true);
+        item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0, true);
     }
 
     QCOMPARE(item.m_crosshairCachedDisplayLeft, static_cast<qint64>(0));
@@ -5289,6 +5291,91 @@ void QmlSmokeTest::spectrogramRhiQuadUsesDrawOffsetAndFlipsUv() {
     QCOMPARE(vertices[3].y, 1.0f);
     QCOMPARE(vertices[3].u, 1.0f);
     QCOMPARE(vertices[3].v, 0.0f);
+}
+
+void QmlSmokeTest::spectrogramRhiRendererTracksPlayheadLinePosition() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int bins = 8;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    item.setPositionSeconds(1.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
+    QVERIFY(rhiChild != nullptr);
+    const SpectrogramRhiSyncState state = rhiChild->debugLastSyncState();
+    QVERIFY(state.playheadLine.has_value());
+    QCOMPARE(qRound(state.playheadLine->x1()), 46);
+    QCOMPARE(qRound(state.playheadLine->x2()), 46);
+    QCOMPARE(qRound(state.playheadLine->y1()), 0);
+    QCOMPARE(qRound(state.playheadLine->y2()), 99);
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRhiRendererTracksGridAndCrosshairLineState() {
+    SpectrogramItem item;
+    item.setWidth(240);
+    item.setHeight(120);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setGridEnabled(true);
+    item.setCrosshairEnabled(true);
+    item.setShowTimeLabels(true);
+    item.m_hoverActive = true;
+    item.m_hoverPosition = QPointF(60.0, 40.0);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    item.setPositionSeconds(2.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
+    QVERIFY(rhiChild != nullptr);
+    const SpectrogramRhiSyncState state = rhiChild->debugLastSyncState();
+
+    QVERIFY(!state.freqGridLines.isEmpty());
+    QVERIFY(!state.timeGridLines.isEmpty());
+    for (const QLineF &line : state.freqGridLines) {
+        QVERIFY(line.y1() >= 0.0);
+        QVERIFY(line.y1() <= 119.0);
+        QCOMPARE(line.y1(), line.y2());
+    }
+    for (const QLineF &line : state.timeGridLines) {
+        QVERIFY(line.x1() >= 0.0);
+        QVERIFY(line.x1() <= 239.0);
+        QCOMPARE(line.x1(), line.x2());
+    }
+
+    QVERIFY(state.crosshairVerticalLine.has_value());
+    QCOMPARE(qRound(state.crosshairVerticalLine->x1()), 60);
+    QCOMPARE(qRound(state.crosshairVerticalLine->x2()), 60);
+    QCOMPARE(qRound(state.crosshairVerticalLine->y1()), 0);
+    QCOMPARE(qRound(state.crosshairVerticalLine->y2()), 119);
+
+    QVERIFY(state.crosshairHorizontalLine.has_value());
+    QCOMPARE(qRound(state.crosshairHorizontalLine->x1()), 0);
+    QCOMPARE(qRound(state.crosshairHorizontalLine->x2()), 239);
+    QCOMPARE(qRound(state.crosshairHorizontalLine->y1()), 40);
+    QCOMPARE(qRound(state.crosshairHorizontalLine->y2()), 40);
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {

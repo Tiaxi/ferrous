@@ -13,14 +13,26 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <vector>
 
 namespace {
 
 constexpr auto kVertexShaderResource = ":/rhi/SpectrogramRhi.vert.qsb";
 constexpr auto kFragmentShaderResource = ":/rhi/SpectrogramRhi.frag.qsb";
+constexpr auto kLineVertexShaderResource = ":/rhi/SpectrogramRhiLine.vert.qsb";
+constexpr auto kLineFragmentShaderResource = ":/rhi/SpectrogramRhiLine.frag.qsb";
 
 struct SpectrogramRhiUniforms {
     float clipMatrix[16];
+};
+
+struct SpectrogramRhiLineVertex {
+    float x{0.0f};
+    float y{0.0f};
+    float r{0.0f};
+    float g{0.0f};
+    float b{0.0f};
+    float a{0.0f};
 };
 
 QShader loadShaderResource(const QString &resourcePath) {
@@ -86,6 +98,78 @@ bool copyClipMatrix(SpectrogramRhiUniforms *uniforms, const QMatrix4x4 &matrix) 
     return true;
 }
 
+float pixelToClipX(double x, const QSize &targetSize) {
+    return static_cast<float>(
+        (2.0 * x / static_cast<double>(std::max(1, targetSize.width()))) - 1.0);
+}
+
+float pixelToClipY(double y, const QSize &targetSize) {
+    return static_cast<float>(
+        1.0 - (2.0 * y / static_cast<double>(std::max(1, targetSize.height()))));
+}
+
+void appendLineVertices(
+    std::vector<SpectrogramRhiLineVertex> *vertices,
+    const QLineF &line,
+    const QSize &targetSize,
+    float r,
+    float g,
+    float b,
+    float a) {
+    if (vertices == nullptr) {
+        return;
+    }
+    vertices->push_back(SpectrogramRhiLineVertex{
+        .x = pixelToClipX(line.x1(), targetSize),
+        .y = pixelToClipY(line.y1(), targetSize),
+        .r = r,
+        .g = g,
+        .b = b,
+        .a = a,
+    });
+    vertices->push_back(SpectrogramRhiLineVertex{
+        .x = pixelToClipX(line.x2(), targetSize),
+        .y = pixelToClipY(line.y2(), targetSize),
+        .r = r,
+        .g = g,
+        .b = b,
+        .a = a,
+    });
+}
+
+std::vector<SpectrogramRhiLineVertex> buildLineVertices(
+    const SpectrogramRhiSyncState &state,
+    const QSize &targetSize) {
+    std::vector<SpectrogramRhiLineVertex> vertices;
+    vertices.reserve(
+        (state.freqGridLines.size() + state.timeGridLines.size()
+            + (state.playheadLine.has_value() ? 1 : 0)
+            + (state.crosshairVerticalLine.has_value() ? 1 : 0)
+            + (state.crosshairHorizontalLine.has_value() ? 1 : 0))
+        * 2);
+
+    for (const QLineF &line : state.freqGridLines) {
+        appendLineVertices(&vertices, line, targetSize, 1.0f, 1.0f, 1.0f, 50.0f / 255.0f);
+    }
+    for (const QLineF &line : state.timeGridLines) {
+        appendLineVertices(&vertices, line, targetSize, 1.0f, 1.0f, 1.0f, 50.0f / 255.0f);
+    }
+    if (state.playheadLine.has_value()) {
+        appendLineVertices(
+            &vertices, *state.playheadLine, targetSize, 1.0f, 1.0f, 1.0f, 128.0f / 255.0f);
+    }
+    if (state.crosshairVerticalLine.has_value()) {
+        appendLineVertices(
+            &vertices, *state.crosshairVerticalLine, targetSize, 1.0f, 1.0f, 1.0f, 140.0f / 255.0f);
+    }
+    if (state.crosshairHorizontalLine.has_value()) {
+        appendLineVertices(
+            &vertices, *state.crosshairHorizontalLine, targetSize, 1.0f, 1.0f, 1.0f, 140.0f / 255.0f);
+    }
+
+    return vertices;
+}
+
 class SpectrogramRhiRenderer final : public QQuickRhiItemRenderer {
 public:
     void initialize(QRhiCommandBuffer *cb) override {
@@ -105,6 +189,7 @@ public:
 
         QRhiResourceUpdateBatch *resourceUpdates = rhi()->nextResourceUpdateBatch();
         const bool canDrawSpectrogram = prepareDrawResources(resourceUpdates, target->pixelSize());
+        const bool canDrawLines = prepareLineResources(resourceUpdates, target->pixelSize());
 
         cb->beginPass(target, Qt::black, QRhiDepthStencilClearValue(), resourceUpdates);
         if (canDrawSpectrogram && m_pipeline && m_srb && m_vertexBuffer) {
@@ -121,6 +206,19 @@ public:
             cb->setShaderResources(m_srb.get());
             cb->draw(4);
         }
+        if (canDrawLines && m_linePipeline && m_lineVertexBuffer && m_lineVertexCount > 0) {
+            cb->setGraphicsPipeline(m_linePipeline.get());
+            cb->setViewport(QRhiViewport(
+                0.0f,
+                0.0f,
+                static_cast<float>(target->pixelSize().width()),
+                static_cast<float>(target->pixelSize().height())));
+            const QRhiCommandBuffer::VertexInput lineVertexBindings[] = {
+                {m_lineVertexBuffer.get(), 0},
+            };
+            cb->setVertexInput(0, 1, lineVertexBindings);
+            cb->draw(m_lineVertexCount);
+        }
         cb->endPass();
     }
 
@@ -136,7 +234,16 @@ private:
         if (!m_fragmentShader.isValid()) {
             m_fragmentShader = loadShaderResource(QString::fromUtf8(kFragmentShaderResource));
         }
-        if (!m_vertexShader.isValid() || !m_fragmentShader.isValid()) {
+        if (!m_lineVertexShader.isValid()) {
+            m_lineVertexShader = loadShaderResource(QString::fromUtf8(kLineVertexShaderResource));
+        }
+        if (!m_lineFragmentShader.isValid()) {
+            m_lineFragmentShader = loadShaderResource(QString::fromUtf8(kLineFragmentShaderResource));
+        }
+        if (!m_vertexShader.isValid()
+            || !m_fragmentShader.isValid()
+            || !m_lineVertexShader.isValid()
+            || !m_lineFragmentShader.isValid()) {
             return false;
         }
 
@@ -175,6 +282,31 @@ private:
             }
         }
 
+        return true;
+    }
+
+    bool ensureLineVertexBuffer(int vertexCount) {
+        if (rhi() == nullptr || vertexCount <= 0) {
+            return false;
+        }
+        if (m_lineVertexBuffer && m_lineVertexCapacity >= vertexCount) {
+            return true;
+        }
+
+        m_lineVertexBuffer.reset();
+        m_lineVertexCapacity = 0;
+
+        const int capacity = std::max(vertexCount, 16);
+        m_lineVertexBuffer.reset(rhi()->newBuffer(
+            QRhiBuffer::Dynamic,
+            QRhiBuffer::VertexBuffer,
+            static_cast<quint32>(sizeof(SpectrogramRhiLineVertex) * capacity)));
+        if (!m_lineVertexBuffer || !m_lineVertexBuffer->create()) {
+            m_lineVertexBuffer.reset();
+            return false;
+        }
+
+        m_lineVertexCapacity = capacity;
         return true;
     }
 
@@ -281,6 +413,59 @@ private:
         return true;
     }
 
+    bool ensureLinePipeline(QRhiRenderTarget *target) {
+        if (target == nullptr || !ensureStaticResources()) {
+            return false;
+        }
+
+        const int targetSampleCount = target->sampleCount();
+        QRhiRenderPassDescriptor *renderPass = target->renderPassDescriptor();
+        if (m_linePipeline
+            && m_linePipelineSampleCount == targetSampleCount
+            && m_linePipelineRenderPass == renderPass) {
+            return true;
+        }
+
+        QRhiVertexInputLayout inputLayout;
+        inputLayout.setBindings({
+            QRhiVertexInputBinding(sizeof(SpectrogramRhiLineVertex)),
+        });
+        inputLayout.setAttributes({
+            QRhiVertexInputAttribute(0, 0, QRhiVertexInputAttribute::Float2, 0),
+            QRhiVertexInputAttribute(0, 1, QRhiVertexInputAttribute::Float4, sizeof(float) * 2),
+        });
+
+        m_linePipeline.reset(rhi()->newGraphicsPipeline());
+        if (!m_linePipeline) {
+            return false;
+        }
+
+        QRhiGraphicsPipeline::TargetBlend blendState;
+        blendState.enable = true;
+        blendState.srcColor = QRhiGraphicsPipeline::SrcAlpha;
+        blendState.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+        blendState.srcAlpha = QRhiGraphicsPipeline::One;
+        blendState.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+
+        m_linePipeline->setTopology(QRhiGraphicsPipeline::Lines);
+        m_linePipeline->setSampleCount(targetSampleCount);
+        m_linePipeline->setTargetBlends({blendState});
+        m_linePipeline->setShaderStages({
+            QRhiShaderStage(QRhiShaderStage::Vertex, m_lineVertexShader),
+            QRhiShaderStage(QRhiShaderStage::Fragment, m_lineFragmentShader),
+        });
+        m_linePipeline->setVertexInputLayout(inputLayout);
+        m_linePipeline->setRenderPassDescriptor(renderPass);
+        if (!m_linePipeline->create()) {
+            m_linePipeline.reset();
+            return false;
+        }
+
+        m_linePipelineSampleCount = targetSampleCount;
+        m_linePipelineRenderPass = renderPass;
+        return true;
+    }
+
     bool prepareDrawResources(QRhiResourceUpdateBatch *resourceUpdates, const QSize &targetSize) {
         if (resourceUpdates == nullptr || targetSize.isEmpty()) {
             return false;
@@ -320,19 +505,54 @@ private:
         return true;
     }
 
+    bool prepareLineResources(QRhiResourceUpdateBatch *resourceUpdates, const QSize &targetSize) {
+        if (resourceUpdates == nullptr || targetSize.isEmpty()) {
+            return false;
+        }
+
+        const std::vector<SpectrogramRhiLineVertex> lineVertices =
+            buildLineVertices(m_syncState, targetSize);
+        if (lineVertices.empty()) {
+            m_lineVertexCount = 0;
+            return false;
+        }
+        if (!ensureLineVertexBuffer(static_cast<int>(lineVertices.size()))) {
+            return false;
+        }
+        if (!ensureLinePipeline(renderTarget())) {
+            return false;
+        }
+
+        resourceUpdates->updateDynamicBuffer(
+            m_lineVertexBuffer.get(),
+            0,
+            static_cast<quint32>(sizeof(SpectrogramRhiLineVertex) * lineVertices.size()),
+            lineVertices.data());
+        m_lineVertexCount = static_cast<quint32>(lineVertices.size());
+        return true;
+    }
+
     SpectrogramRhiSyncState m_syncState;
     QShader m_vertexShader;
     QShader m_fragmentShader;
+    QShader m_lineVertexShader;
+    QShader m_lineFragmentShader;
     std::unique_ptr<QRhiTexture> m_sourceTexture;
     std::unique_ptr<QRhiSampler> m_sampler;
     std::unique_ptr<QRhiBuffer> m_vertexBuffer;
+    std::unique_ptr<QRhiBuffer> m_lineVertexBuffer;
     std::unique_ptr<QRhiBuffer> m_uniformBuffer;
     std::unique_ptr<QRhiShaderResourceBindings> m_srb;
     std::unique_ptr<QRhiGraphicsPipeline> m_pipeline;
+    std::unique_ptr<QRhiGraphicsPipeline> m_linePipeline;
     QSize m_sourceTextureSize;
     quint64 m_uploadedGeneration{std::numeric_limits<quint64>::max()};
     int m_pipelineSampleCount{0};
     QRhiRenderPassDescriptor *m_pipelineRenderPass{nullptr};
+    int m_linePipelineSampleCount{0};
+    QRhiRenderPassDescriptor *m_linePipelineRenderPass{nullptr};
+    int m_lineVertexCapacity{0};
+    quint32 m_lineVertexCount{0};
 };
 
 } // namespace

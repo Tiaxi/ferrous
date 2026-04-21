@@ -3,10 +3,13 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 #include <QImage>
+#include <QLineF>
 #include <QQuickRhiItem>
 #include <QSize>
+#include <QVector>
 
 struct SpectrogramRhiVertex {
     float x{0.0f};
@@ -26,6 +29,11 @@ struct SpectrogramRhiSyncState {
     int drawPixels{0};
     double effectiveZoom{1.0};
     bool rollingMode{false};
+    QVector<QLineF> freqGridLines;
+    QVector<QLineF> timeGridLines;
+    std::optional<QLineF> playheadLine;
+    std::optional<QLineF> crosshairVerticalLine;
+    std::optional<QLineF> crosshairHorizontalLine;
 };
 
 class SpectrogramRhiItem final : public QQuickRhiItem {
