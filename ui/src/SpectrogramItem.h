@@ -5,6 +5,7 @@
 #include <QByteArray>
 #include <QHash>
 #include <QImage>
+#include <QLineF>
 #include <QMetaObject>
 #include <QMutex>
 #include <QQuickItem>
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <deque>
 #include <limits>
+#include <optional>
 #include <vector>
 
 class QQuickWindow;
@@ -229,6 +231,7 @@ private:
         bool rollingMode,
         double columnsPerSecond,
         double drawX) const;
+    std::optional<QLineF> buildPlayheadVerticalLineLocked(int pixelX, int height) const;
     std::optional<QLineF> buildCrosshairVerticalLineLocked(int width, int height) const;
     std::optional<QLineF> buildCrosshairHorizontalLineLocked(int width, int height) const;
     double effectiveZoomLocked() const;

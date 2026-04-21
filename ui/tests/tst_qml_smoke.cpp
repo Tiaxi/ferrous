@@ -8,6 +8,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QSGGeometry>
+#include <QSGGeometryNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QQmlComponent>
@@ -192,6 +194,83 @@ QByteArray artistWithManyAlbumsBinary(int albumCount) {
     }
 
     return encodeRows(rows);
+}
+
+struct OverlayLineSample {
+    QLineF line;
+    QColor color;
+};
+
+QVector<OverlayLineSample> overlayLineSamples(QSGNode *root) {
+    QVector<OverlayLineSample> samples;
+    if (root == nullptr || root->childCount() <= 3) {
+        return samples;
+    }
+
+    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(root->childAtIndex(3));
+    if (overlayNode == nullptr || overlayNode->geometry() == nullptr) {
+        return samples;
+    }
+
+    const QSGGeometry *geometry = overlayNode->geometry();
+    const int vertexCount = geometry->vertexCount();
+    if (vertexCount < 2) {
+        return samples;
+    }
+
+    samples.reserve(vertexCount / 2);
+    const auto *vertices = geometry->vertexDataAsColoredPoint2D();
+    for (int i = 0; i + 1 < vertexCount; i += 2) {
+        const auto &a = vertices[i];
+        const auto &b = vertices[i + 1];
+        samples.push_back(OverlayLineSample{
+            QLineF(
+                static_cast<double>(a.x),
+                static_cast<double>(a.y),
+                static_cast<double>(b.x),
+                static_cast<double>(b.y)),
+            QColor(a.r, a.g, a.b, a.a),
+        });
+    }
+
+    return samples;
+}
+
+std::optional<QLineF> findUniqueLine(
+    const QVector<OverlayLineSample> &samples,
+    int alpha,
+    bool vertical) {
+    std::optional<QLineF> match;
+    for (const OverlayLineSample &sample : samples) {
+        if (sample.color.alpha() != alpha) {
+            continue;
+        }
+        const bool sampleVertical = qFuzzyCompare(sample.line.x1() + 1.0, sample.line.x2() + 1.0);
+        if (sampleVertical != vertical) {
+            continue;
+        }
+        if (match.has_value()) {
+            return std::nullopt;
+        }
+        match = sample.line;
+    }
+    return match;
+}
+
+QString gridLineSignature(const QVector<OverlayLineSample> &samples) {
+    QStringList encoded;
+    for (const OverlayLineSample &sample : samples) {
+        if (sample.color.alpha() != 50) {
+            continue;
+        }
+        encoded.push_back(QStringLiteral("%1,%2,%3,%4")
+                              .arg(qRound(sample.line.x1()))
+                              .arg(qRound(sample.line.y1()))
+                              .arg(qRound(sample.line.x2()))
+                              .arg(qRound(sample.line.y2())));
+    }
+    encoded.sort();
+    return encoded.join(QLatin1Char(';'));
 }
 
 QByteArray artistOnlyLazyBinary() {
@@ -445,6 +524,8 @@ private slots:
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
     void spectrogramOverlayDirtiedByLogScaleChange();
+    void spectrogramPublicOverlayLineNodeTracksPlayhead();
+    void spectrogramPublicOverlayLineNodeTracksGridAndCrosshair();
     void spectrogramOverlayStalenessDetectsBinChange();
     void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
     void spectrogramOverlayStalenessDetectsDisplayRangeChange();
@@ -4384,6 +4465,116 @@ void QmlSmokeTest::spectrogramOverlayDirtiedByLogScaleChange() {
     QVERIFY(item.m_freqGridDirty || item.m_timeGridDirty);
 }
 
+void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksPlayhead() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int bins = 16;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+
+    item.setPositionSeconds(0.10);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(node->childCount() >= 5);
+
+    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(3));
+    QVERIFY2(overlayNode != nullptr, "precomputed path should publish overlay lines as a geometry node");
+
+    auto *playheadRect = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(4));
+    QVERIFY(playheadRect != nullptr);
+    QVERIFY2(playheadRect->rect().isEmpty(),
+             "CPU playhead rect must be suppressed when geometry overlay lines are active");
+
+    const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
+    QVERIFY(!firstSamples.isEmpty());
+    const auto firstPlayhead = findUniqueLine(firstSamples, 128, true);
+    QVERIFY2(firstPlayhead.has_value(), "expected a unique playhead geometry line");
+
+    item.setPositionSeconds(2.0);
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    const QVector<OverlayLineSample> secondSamples = overlayLineSamples(updatedNode);
+    const auto secondPlayhead = findUniqueLine(secondSamples, 128, true);
+    QVERIFY2(secondPlayhead.has_value(), "expected a unique moved playhead geometry line");
+    QVERIFY(qRound(firstPlayhead->x1()) != qRound(secondPlayhead->x1()));
+
+    delete updatedNode;
+}
+
+void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
+    SpectrogramItem item;
+    item.setWidth(240);
+    item.setHeight(120);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setGridEnabled(true);
+    item.setCrosshairEnabled(true);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 320;
+    QByteArray chunk(bins * totalColumns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, true, true, 1, false);
+    item.setPositionSeconds(2.0);
+
+    QHoverEvent hoverEnter(
+        QEvent::HoverEnter,
+        QPointF(60.0, 40.0),
+        QPointF(60.0, 40.0),
+        QPointF());
+    item.hoverEnterEvent(&hoverEnter);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(3));
+    QVERIFY2(overlayNode != nullptr, "overlay lines should be rendered through a public geometry node");
+
+    const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
+    const auto firstCrosshairVertical = findUniqueLine(firstSamples, 140, true);
+    const auto firstCrosshairHorizontal = findUniqueLine(firstSamples, 140, false);
+    QVERIFY(firstCrosshairVertical.has_value());
+    QVERIFY(firstCrosshairHorizontal.has_value());
+    QCOMPARE(qRound(firstCrosshairVertical->x1()), 60);
+    QCOMPARE(qRound(firstCrosshairHorizontal->y1()), 40);
+    const QString firstGridSignature = gridLineSignature(firstSamples);
+    QVERIFY2(!firstGridSignature.isEmpty(), "expected geometry grid lines in the overlay node");
+
+    item.setWidth(320);
+    item.setHeight(180);
+    QHoverEvent hoverMove(
+        QEvent::HoverMove,
+        QPointF(110.0, 70.0),
+        QPointF(110.0, 70.0),
+        QPointF(60.0, 40.0));
+    item.hoverMoveEvent(&hoverMove);
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    const QVector<OverlayLineSample> secondSamples = overlayLineSamples(updatedNode);
+    const auto secondCrosshairVertical = findUniqueLine(secondSamples, 140, true);
+    const auto secondCrosshairHorizontal = findUniqueLine(secondSamples, 140, false);
+    QVERIFY(secondCrosshairVertical.has_value());
+    QVERIFY(secondCrosshairHorizontal.has_value());
+    QCOMPARE(qRound(secondCrosshairVertical->x1()), 110);
+    QCOMPARE(qRound(secondCrosshairHorizontal->y1()), 70);
+    QVERIFY(qRound(firstCrosshairVertical->x1()) != qRound(secondCrosshairVertical->x1()));
+    QVERIFY(qRound(firstCrosshairHorizontal->y1()) != qRound(secondCrosshairHorizontal->y1()));
+    QVERIFY(firstGridSignature != gridLineSignature(secondSamples));
+
+    delete updatedNode;
+}
+
 void QmlSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
@@ -5938,10 +6129,12 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverl
     constexpr int bins = 64;
     constexpr int columns = 240;
     QByteArray data(bins * columns, '\x00');
-    for (int column = 90; column < 150; ++column) {
-        for (int bin = 20; bin < 44; ++bin) {
+    for (int column = 0; column < columns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            const int base = 96 + (column * 96) / std::max(1, columns - 1);
+            const int ripple = (bin * 48) / std::max(1, bins - 1);
             data[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(0xF0));
+                static_cast<unsigned char>(std::min(255, base + ripple)));
         }
     }
 

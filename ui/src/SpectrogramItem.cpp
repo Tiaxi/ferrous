@@ -9,6 +9,7 @@
 #include <QFontMetrics>
 #include <QDateTime>
 #include <QHoverEvent>
+#include <QLineF>
 #include <QMouseEvent>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
@@ -16,11 +17,14 @@
 #include <QMutexLocker>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QSGGeometry>
+#include <QSGGeometryNode>
 #include <QSGRendererInterface>
 #include <QSGNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGTexture>
+#include <QSGVertexColorMaterial>
 #include <QString>
 #include <QStandardPaths>
 
@@ -165,6 +169,7 @@ struct SpectrogramSceneNode final : public QSGNode {
         background = new QSGSimpleRectNode();
         spectrogramTexture = new QSGSimpleTextureNode();
         spectrogramTailTexture = new QSGSimpleTextureNode();
+        overlayLines = new QSGGeometryNode();
         playhead = new QSGSimpleRectNode();
         freqGridOverlay = new QSGSimpleTextureNode();
         timeGridOverlay = new QSGSimpleTextureNode();
@@ -173,11 +178,23 @@ struct SpectrogramSceneNode final : public QSGNode {
         appendChildNode(background);
         appendChildNode(spectrogramTexture);
         appendChildNode(spectrogramTailTexture);
+        appendChildNode(overlayLines);
         appendChildNode(playhead);
         appendChildNode(freqGridOverlay);
         appendChildNode(timeGridOverlay);
         appendChildNode(crosshairOverlay);
         appendChildNode(overlay);
+
+        auto *lineGeometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
+        lineGeometry->setDrawingMode(QSGGeometry::DrawLines);
+        lineGeometry->setVertexDataPattern(QSGGeometry::DynamicPattern);
+        overlayLines->setGeometry(lineGeometry);
+        overlayLines->setFlag(QSGNode::OwnsGeometry);
+
+        auto *lineMaterial = new QSGVertexColorMaterial();
+        lineMaterial->setFlag(QSGMaterial::Blending, true);
+        overlayLines->setMaterial(lineMaterial);
+        overlayLines->setFlag(QSGNode::OwnsMaterial);
     }
 
     ~SpectrogramSceneNode() override {
@@ -193,6 +210,7 @@ struct SpectrogramSceneNode final : public QSGNode {
     QSGSimpleRectNode *background{nullptr};
     QSGSimpleTextureNode *spectrogramTexture{nullptr};
     QSGSimpleTextureNode *spectrogramTailTexture{nullptr};
+    QSGGeometryNode *overlayLines{nullptr};
     QSGSimpleRectNode *playhead{nullptr};
     QSGSimpleTextureNode *freqGridOverlay{nullptr};
     QSGSimpleTextureNode *timeGridOverlay{nullptr};
@@ -242,6 +260,80 @@ void configureTextureNode(
     node->setFiltering(QSGTexture::Nearest);
     node->setRect(target);
     node->setSourceRect(QRectF(source));
+}
+
+void configureLineNode(
+    QSGGeometryNode *node,
+    const QVector<QLineF> &freqLines,
+    const QVector<QLineF> &timeLines,
+    const std::optional<QLineF> &playheadLine,
+    const std::optional<QLineF> &crosshairVerticalLine,
+    const std::optional<QLineF> &crosshairHorizontalLine) {
+    if (node == nullptr || node->geometry() == nullptr) {
+        return;
+    }
+
+    struct LineSample {
+        QLineF line;
+        QColor color;
+    };
+
+    QVector<LineSample> lines;
+    lines.reserve(
+        freqLines.size()
+        + timeLines.size()
+        + (playheadLine.has_value() ? 1 : 0)
+        + (crosshairVerticalLine.has_value() ? 1 : 0)
+        + (crosshairHorizontalLine.has_value() ? 1 : 0));
+
+    const QColor gridColor(255, 255, 255, 50);
+    const QColor playheadColor(255, 255, 255, 128);
+    const QColor crosshairColor(255, 255, 255, 140);
+
+    for (const QLineF &line : freqLines) {
+        lines.push_back(LineSample{line, gridColor});
+    }
+    for (const QLineF &line : timeLines) {
+        lines.push_back(LineSample{line, gridColor});
+    }
+    if (playheadLine.has_value()) {
+        lines.push_back(LineSample{*playheadLine, playheadColor});
+    }
+    if (crosshairVerticalLine.has_value()) {
+        lines.push_back(LineSample{*crosshairVerticalLine, crosshairColor});
+    }
+    if (crosshairHorizontalLine.has_value()) {
+        lines.push_back(LineSample{*crosshairHorizontalLine, crosshairColor});
+    }
+
+    auto *geometry = node->geometry();
+    geometry->allocate(static_cast<int>(lines.size()) * 2);
+    geometry->setDrawingMode(QSGGeometry::DrawLines);
+    geometry->setVertexDataPattern(QSGGeometry::DynamicPattern);
+    geometry->setLineWidth(1.0f);
+
+    auto *vertices = geometry->vertexDataAsColoredPoint2D();
+    int index = 0;
+    for (const LineSample &sample : lines) {
+        const QColor &color = sample.color;
+        vertices[index++].set(
+            static_cast<float>(sample.line.x1()),
+            static_cast<float>(sample.line.y1()),
+            static_cast<uchar>(color.red()),
+            static_cast<uchar>(color.green()),
+            static_cast<uchar>(color.blue()),
+            static_cast<uchar>(color.alpha()));
+        vertices[index++].set(
+            static_cast<float>(sample.line.x2()),
+            static_cast<float>(sample.line.y2()),
+            static_cast<uchar>(color.red()),
+            static_cast<uchar>(color.green()),
+            static_cast<uchar>(color.blue()),
+            static_cast<uchar>(color.alpha()));
+    }
+
+    geometry->markVertexDataDirty();
+    node->markDirty(QSGNode::DirtyGeometry);
 }
 
 QString formatFrequencyLabel(double hz) {
@@ -1924,6 +2016,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     int spectrogramRollingShiftPixels = 0;
     bool showPlayhead = false;
     QRectF playheadRect;
+    QVector<QLineF> freqGridLines;
+    QVector<QLineF> timeGridLines;
+    std::optional<QLineF> playheadLine;
+    std::optional<QLineF> crosshairVerticalLine;
+    std::optional<QLineF> crosshairHorizontalLine;
     bool showOverlay = false;
     bool overlayChanged = false;
     QImage overlayImage;
@@ -2331,11 +2428,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     0.0,
                     1.0,
                     static_cast<double>(h));
+                playheadLine =
+                    buildPlayheadVerticalLineLocked(std::clamp(playheadPixel, 0, w - 1), h);
             }
 
             // Frequency grid — only depends on static parameters.
             // Never rebuilt during normal playback.
             if (m_gridEnabled && m_binsPerColumn > 1) {
+                freqGridLines = buildFreqGridLinesLocked(w, h);
                 const bool freqStale = m_freqGridDirty
                     || m_freqGridImage.isNull()
                     || m_freqGridImage.width() != w
@@ -2347,7 +2447,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     const auto overlayStart = std::chrono::steady_clock::now();
 #endif
-                    updateFreqGridOverlayLocked(w, h, true);
+                    updateFreqGridOverlayLocked(w, h, false);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - overlayStart).count();
@@ -2367,6 +2467,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // displayLeft + drawX delta — a free coordinate change.
             // Only rebuilt when the shift exhausts the padding.
             if (m_gridEnabled && m_binsPerColumn > 1) {
+                timeGridLines =
+                    buildTimeGridLinesLocked(w, h, displayLeft, rollingMode, columnsPerSecond, drawX);
                 constexpr int kTimeGridPadding = 400;
                 // The pixel shift accounts for both displayLeft advancement
                 // and drawX changes (critical in rolling mode where drawX
@@ -2390,7 +2492,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
                     updateTimeGridOverlayLocked(
                         w, h, kTimeGridPadding, displayLeft, rollingMode, cps, drawX,
-                        true);
+                        false);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - overlayStart).count();
@@ -2409,6 +2511,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // Renders on the hovered pane (full crosshair) and on non-hovered
             // panes when crosshairSharedX >= 0 (vertical line + bottom time label).
             if (m_crosshairEnabled && (m_hoverActive || m_crosshairSharedX >= 0.0)) {
+                crosshairVerticalLine = buildCrosshairVerticalLineLocked(w, h);
+                crosshairHorizontalLine = buildCrosshairHorizontalLineLocked(w, h);
                 bool crosshairTimeStale = false;
                 if (m_showTimeLabels) {
                     crosshairTimeStale =
@@ -2431,7 +2535,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const auto overlayStart = std::chrono::steady_clock::now();
 #endif
                     updateCrosshairOverlayLocked(
-                        w, h, displayLeft, rollingMode, cps, drawX, true);
+                        w, h, displayLeft, rollingMode, cps, drawX, false);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - overlayStart).count();
@@ -2686,7 +2790,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->placeholderTexture);
     }
 
-    if (showPlayhead) {
+    const bool overlayLinesActive =
+        !freqGridLines.isEmpty()
+        || !timeGridLines.isEmpty()
+        || playheadLine.has_value()
+        || crosshairVerticalLine.has_value()
+        || crosshairHorizontalLine.has_value();
+    configureLineNode(
+        node->overlayLines,
+        freqGridLines,
+        timeGridLines,
+        playheadLine,
+        crosshairVerticalLine,
+        crosshairHorizontalLine);
+
+    if (showPlayhead && !overlayLinesActive) {
         node->playhead->setRect(playheadRect);
         node->playhead->setColor(QColor(255, 255, 255, 128));
     } else {
@@ -3137,6 +3255,15 @@ QVector<QLineF> SpectrogramItem::buildTimeGridLinesLocked(
     }
 
     return lines;
+}
+
+std::optional<QLineF> SpectrogramItem::buildPlayheadVerticalLineLocked(int pixelX, int height) const {
+    if (pixelX < 0 || height <= 0) {
+        return std::nullopt;
+    }
+
+    const double x = static_cast<double>(pixelX);
+    return QLineF(x, 0.0, x, static_cast<double>(height - 1));
 }
 
 void SpectrogramItem::updateCrosshairOverlayLocked(
