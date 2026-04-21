@@ -53,7 +53,7 @@
 #define FERROUS_PROFILE_LOG_DIAGNOSTIC(category, message) \
     do {                                                  \
         if (m_profileUiEnabled) {                         \
-            logDiagnostic(category, message);             \
+            logProfileDiagnostic(category, message);      \
         }                                                 \
     } while (false)
 #define FERROUS_SPECTROGRAM_LOGF(...)               \
@@ -3648,6 +3648,15 @@ void BridgeClient::logDiagnostic(const QString &category, const QString &message
     if (!m_diagnosticsFlushTimer.isActive()) {
         m_diagnosticsFlushTimer.start();
     }
+}
+
+void BridgeClient::logProfileDiagnostic(const QString &category, const QString &message) const {
+    QString msg = message;
+    msg.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+    msg.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
+    const QString cat = category.trimmed().isEmpty() ? QStringLiteral("ui-prof") : category.trimmed();
+    const QByteArray line = QStringLiteral("[%1] %2").arg(cat, msg).toUtf8();
+    std::fprintf(stderr, "%s\n", line.constData());
 }
 
 void BridgeClient::appendDiagnosticLine(const QString &line) {

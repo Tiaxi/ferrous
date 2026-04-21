@@ -102,6 +102,7 @@ private slots:
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
     void diagnosticsWritesBatchOffHotPath();
+    void profileDiagnosticsBypassUiThreadDiskQueue();
     void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void seekPublishesOptimisticPositionAndExtendsPendingWindow();
@@ -400,6 +401,20 @@ void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
     const QString contents = QString::fromUtf8(file.readAll());
     QVERIFY(contents.contains(QStringLiteral("[ui] first line")));
     QVERIFY(contents.contains(QStringLiteral("[ui] second line")));
+}
+
+void BridgeClientTest::profileDiagnosticsBypassUiThreadDiskQueue() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_profileUiEnabled = true;
+    client.m_pendingDiagnosticsDiskLines.clear();
+
+    client.logProfileDiagnostic(
+        QStringLiteral("ui-prof"),
+        QStringLiteral("event_loop_stall ms=42 timer_ms=8 connected=1 snapshot_pending=0"));
+
+    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 0);
 }
 
 void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {
