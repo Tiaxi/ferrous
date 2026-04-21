@@ -27,6 +27,7 @@ QtObject {
     property real interpolationAnchorMs: 0
     property bool interpolationActive: false
     readonly property real interpolationSnapThresholdSeconds: 0.75
+    readonly property real profileHeartbeatLogThresholdSeconds: 0.02
 
     // Timer drives local interpolation at ~60 fps.
     property Timer interpolationTimer: Timer {
@@ -105,7 +106,7 @@ QtObject {
         root.applyInterpolatedPosition(clampedPosition)
         root.resetInterpolationState(clampedPosition, nowMs)
         root.interpolationActive = true
-        if (Math.abs(error) >= 0.001 || action !== "follow") {
+        if (action !== "follow" || Math.abs(error) >= root.profileHeartbeatLogThresholdSeconds) {
             root.logPlaybackProfile(
                 "heartbeat",
                 "incoming=" + incomingPosition.toFixed(3)
