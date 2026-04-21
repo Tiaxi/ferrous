@@ -639,6 +639,7 @@ private slots:
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
     void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
 };
@@ -6662,6 +6663,61 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     QCOMPARE(item.m_zoomFillActive, false);
     // Dirty flag set so the next paint rebuilds the canvas cleanly.
     QVERIFY(item.m_precomputedCanvasDirty);
+}
+
+void QmlSmokeTest::spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame() {
+    SpectrogramItem item;
+    item.setWidth(20);
+    item.setHeight(6);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 128;
+    QByteArray baseline(20 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 20,
+        0, totalColumns, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds = (9.0 * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    quint64 initialDisplayGeneration = 0;
+    QImage initialDisplayImage;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        initialDisplayGeneration = item.m_gpuDisplayGeneration;
+        initialDisplayImage = item.m_gpuDisplayImage.copy();
+    }
+
+    QByteArray restarted(8 * bins, '\x55');
+    item.feedPrecomputedChunk(
+        restarted, bins, 0, 8,
+        0, totalColumns, 48000, 512, false, true, 1, false);
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY(!item.m_zoomFillFrozenDisplayImage.isNull());
+        QCOMPARE(item.m_zoomFillFrozenDisplayImage, initialDisplayImage);
+        QVERIFY2(
+            item.m_gpuDisplayGeneration > initialDisplayGeneration,
+            "the new display cache should warm behind the frozen zoom-fill frame");
+    }
+
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramSyntheticClearPreservesGpuCacheDuringSeek() {

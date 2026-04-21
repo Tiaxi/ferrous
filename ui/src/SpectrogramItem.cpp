@@ -1122,6 +1122,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
         && m_displayMode == 1
         && (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())) {
+        captureZoomFillFrozenCacheLocked();
         m_zoomFillActive = true;
     }
 
@@ -1173,6 +1174,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             // Canvas, m_precomputedReady, and the stored display range
             // all stay as-is so the paint keeps rendering the old
             // image through canvasFreeze.
+            captureZoomFillFrozenCacheLocked();
             m_zoomFillActive = true;
         } else {
             m_precomputedReady = false;
@@ -1617,6 +1619,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         if ((ringHasEnoughColumns && ringCoversDisplayRight)
             || decodeReachedEnd) {
             m_zoomFillActive = false;
+            clearZoomFillFrozenCacheLocked();
             // Don't invalidateCanvas() here — the canvas must stay
             // non-null so the NEXT zoom transition can activate its
             // freeze.  Just mark dirty; the rebuild replaces all
@@ -1656,6 +1659,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_renderZoomLevel = 1.0;
         m_awaitingZoomData = false;
         m_zoomFillActive = false;
+        clearZoomFillFrozenCacheLocked();
         // Cancel any pending debounced setZoomLevel that would
         // otherwise overwrite this reset 150 ms later.  Scenario: the
         // QML zoomLevel binding pushes the SpectrogramSurface's
@@ -1737,6 +1741,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedTrackToken = 0;
     m_awaitingZoomData = false;
     m_zoomFillActive = false;
+    clearZoomFillFrozenCacheLocked();
     m_renderZoomLevel = m_zoomLevel;
     m_gaplessPositionOffset = 0.0;
     m_positionJumpHoldActive = false;
@@ -2333,10 +2338,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 w,
                 static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
 
+            const bool freezeUsesSource =
+                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
             const bool haveFreezeCache =
-                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
-                    ? !m_gpuSourceImage.isNull()
-                    : (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull());
+                freezeUsesSource
+                    ? !m_zoomFillFrozenSourceImage.isNull()
+                    : !m_zoomFillFrozenDisplayImage.isNull();
             const bool rendererFreeze =
                 m_zoomFillActive
                 && haveFreezeCache
@@ -2376,7 +2383,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             const bool needsSourceCache =
                 gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
 
-            if (visibleCols > 0 && !rendererFreeze) {
+            if (visibleCols > 0) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 const auto syncStart = std::chrono::steady_clock::now();
 #endif
@@ -2398,9 +2405,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
 
             const bool haveSelectedSpectrogramImage =
-                (gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode)
-                    ? !m_gpuSourceImage.isNull()
-                    : !m_gpuDisplayImage.isNull();
+                rendererFreeze
+                    ? (freezeUsesSource
+                        ? !m_zoomFillFrozenSourceImage.isNull()
+                        : !m_zoomFillFrozenDisplayImage.isNull())
+                    : ((gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode)
+                        ? !m_gpuSourceImage.isNull()
+                        : !m_gpuDisplayImage.isNull());
 
             if (haveSelectedSpectrogramImage && drawPixels > 0) {
                 if (m_gpuDisplayImage.isNull()) {
@@ -2413,12 +2424,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     0.0,
                     static_cast<double>(drawPixels),
                     static_cast<double>(h));
-                spectrogramNodeImage = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
-                    ? m_gpuSourceImage
-                    : m_gpuDisplayImage;
-                spectrogramImageGeneration = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
-                    ? m_gpuSourceGeneration
-                    : m_gpuDisplayGeneration;
+                if (rendererFreeze) {
+                    spectrogramNodeImage = freezeUsesSource
+                        ? m_zoomFillFrozenSourceImage
+                        : m_zoomFillFrozenDisplayImage;
+                    spectrogramImageGeneration = freezeUsesSource
+                        ? m_zoomFillFrozenSourceGeneration
+                        : m_zoomFillFrozenDisplayGeneration;
+                } else {
+                    spectrogramNodeImage = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                        ? m_gpuSourceImage
+                        : m_gpuDisplayImage;
+                    spectrogramImageGeneration = gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                        ? m_gpuSourceGeneration
+                        : m_gpuDisplayGeneration;
+                }
                 spectrogramImageDebugMode = gpuDebugMode;
                 spectrogramSourceRect = QRect(
                     0,
@@ -2426,6 +2446,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     spectrogramNodeImage.width(),
                     spectrogramNodeImage.height());
                 spectrogramRollingIncrementalScroll =
+                    !rendererFreeze
+                    &&
                     gpuDebugMode == SpectrogramGpu::DebugMode::Full
                     && rollingMode
                     && m_gpuDisplayLastUpdateWasIncremental
@@ -3682,6 +3704,20 @@ void SpectrogramItem::invalidateMapping() {
     m_lowResEnd = 0;
 }
 
+void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
+    m_zoomFillFrozenSourceImage = m_gpuSourceImage;
+    m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
+    m_zoomFillFrozenSourceGeneration = m_gpuSourceGeneration;
+    m_zoomFillFrozenDisplayGeneration = m_gpuDisplayGeneration;
+}
+
+void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
+    m_zoomFillFrozenSourceImage = QImage();
+    m_zoomFillFrozenDisplayImage = QImage();
+    m_zoomFillFrozenSourceGeneration = 0;
+    m_zoomFillFrozenDisplayGeneration = 0;
+}
+
 void SpectrogramItem::invalidateCanvas() {
     const bool hadGpuImages =
         !m_gpuSourceImage.isNull()
@@ -3698,6 +3734,7 @@ void SpectrogramItem::invalidateCanvas() {
     m_precomputedCanvasDirty = true;
     m_gpuSourceImage = QImage();
     m_gpuDisplayImage = QImage();
+    clearZoomFillFrozenCacheLocked();
     m_gpuDbRemapImage = QImage();
     m_gpuPaletteImage = QImage();
     if (hadGpuImages) {

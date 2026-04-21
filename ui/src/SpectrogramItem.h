@@ -151,6 +151,8 @@ private:
     void rebuildPalette();
     void invalidateMapping();
     void ensureMapping(int height);
+    void captureZoomFillFrozenCacheLocked();
+    void clearZoomFillFrozenCacheLocked();
     void invalidateCanvas();
     void ensureCanvas(int width, int height);
     bool reanchorRollingEpochForCurrentDataLocked(
@@ -360,10 +362,14 @@ private:
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     QImage m_gpuSourceImage;
     QImage m_gpuDisplayImage;
+    QImage m_zoomFillFrozenSourceImage;
+    QImage m_zoomFillFrozenDisplayImage;
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     quint64 m_gpuSourceGeneration{0};
     quint64 m_gpuDisplayGeneration{0};
+    quint64 m_zoomFillFrozenSourceGeneration{0};
+    quint64 m_zoomFillFrozenDisplayGeneration{0};
     quint64 m_gpuDbRemapGeneration{0};
     quint64 m_gpuPaletteGeneration{0};
     quint64 m_gpuDisplaySourceGeneration{0};
