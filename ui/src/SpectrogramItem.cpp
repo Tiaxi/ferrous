@@ -4583,6 +4583,21 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
                - static_cast<double>(std::lround(
                    static_cast<double>(advanceRight) * effectiveZoom)))
                < 0.001;
+    const bool canIncrementallyAdvanceAndGrowRollingDisplay =
+        contentDirty
+        && rollingMode
+        && !displayConfigDirtyBeyondWidth
+        && m_gpuDisplayRolling == rollingMode
+        && m_gpuDisplayTrackToken == m_precomputedTrackToken
+        && drawPixels > m_gpuDisplayWidth
+        && advanceColumns > 0
+        && advanceRight > advanceColumns
+        && shiftPixels > 0
+        && shiftPixels < m_gpuDisplayWidth
+        && std::abs(requestedShiftPixels - static_cast<double>(shiftPixels)) < 0.001
+        && std::abs(effectiveZoom - m_gpuDisplayEffectiveZoom) < 0.001
+        && displayLeft >= m_gpuDisplayDisplayLeft
+        && displayRight >= m_gpuDisplayDisplayRight;
     const bool canIncrementallyAdvanceDisplay =
         contentDirty
         && !displayConfigDirty
@@ -4596,7 +4611,36 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         && displayLeft >= m_gpuDisplayDisplayLeft
         && displayRight >= m_gpuDisplayDisplayRight;
 
-    if (canIncrementallyGrowRollingDisplay) {
+    if (canIncrementallyAdvanceAndGrowRollingDisplay) {
+        const int oldWidth = m_gpuDisplayImage.width();
+        const int overlapPixels = oldWidth - shiftPixels;
+        QImage transitionedImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);
+        transitionedImage.fill(Qt::black);
+        for (int y = 0; y < height; ++y) {
+            const auto *oldLine =
+                reinterpret_cast<const QRgb *>(m_gpuDisplayImage.constScanLine(y));
+            auto *newLine = reinterpret_cast<QRgb *>(transitionedImage.scanLine(y));
+            std::memcpy(
+                newLine,
+                oldLine + shiftPixels,
+                static_cast<size_t>(overlapPixels) * sizeof(QRgb));
+        }
+        m_gpuDisplayImage = std::move(transitionedImage);
+        paintPrecomputedDisplayColumnsLocked(
+            m_gpuDisplayImage,
+            overlapPixels,
+            drawPixels - 1,
+            drawPixels,
+            height,
+            displayLeft,
+            displayRight,
+            rollingMode,
+            dbRemap,
+            palette.data());
+        m_gpuDisplayLastUpdateWasIncremental = true;
+        m_gpuDisplayLastShiftPixels = shiftPixels;
+        m_gpuDisplayLastUpdatedColumns = drawPixels - overlapPixels;
+    } else if (canIncrementallyGrowRollingDisplay) {
         const int oldWidth = m_gpuDisplayImage.width();
         const int growthPixels = drawPixels - oldWidth;
         QImage grownImage(drawPixels, height, QImage::Format_ARGB32_Premultiplied);

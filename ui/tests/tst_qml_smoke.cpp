@@ -628,6 +628,7 @@ private slots:
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInitialFill();
+    void spectrogramRollingGpuDisplayCacheTransitionsFromGrowthToShiftIncrementally();
     void spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth();
     void spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth();
     void spectrogramRollingGpuDisplayCacheAdvancesIncrementally();
@@ -5892,6 +5893,65 @@ void QmlSmokeTest::spectrogramRollingGpuDisplayCacheGrowsIncrementallyDuringInit
         QCOMPARE(item.m_gpuDisplayImage.width(), 10);
         const QColor preservedAfter = item.m_gpuDisplayImage.pixelColor(1, 3);
         QCOMPARE(preservedAfter, preservedBefore);
+    }
+}
+
+void QmlSmokeTest::spectrogramRollingGpuDisplayCacheTransitionsFromGrowthToShiftIncrementally() {
+    SpectrogramItem item;
+    item.setWidth(20);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 4;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(20 + column * 10 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.syncPrecomputedDisplayImageLocked(8, 6, 0, 3, true, 2.0);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_gpuDisplayImage.width(), 8);
+    }
+
+    QByteArray appendChunk(bins * 2, '\0');
+    for (int column = 0; column < 2; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            appendChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(80 + column * 10 + bin));
+        }
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 4, 2,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const QImage initialDisplay = item.m_gpuDisplayImage.copy();
+        item.syncPrecomputedDisplayImageLocked(10, 6, 1, 5, true, 2.0);
+        QVERIFY2(
+            item.m_gpuDisplayLastUpdateWasIncremental,
+            "rolling display cache should preserve overlap when growth turns into leftward motion");
+        QCOMPARE(item.m_gpuDisplayLastShiftPixels, 2);
+        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 4);
+        QCOMPARE(item.m_gpuDisplayImage.width(), 10);
+        for (int y = 0; y < initialDisplay.height(); ++y) {
+            for (int x = 0; x < initialDisplay.width() - 2; ++x) {
+                QCOMPARE(
+                    item.m_gpuDisplayImage.pixelColor(x, y),
+                    initialDisplay.pixelColor(x + 2, y));
+            }
+        }
     }
 }
 
