@@ -3442,26 +3442,29 @@ void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
     const int height = m_canvas.height();
     const int srcBins = std::max(1, m_binsPerColumn);
     const int maxBin = srcBins - 1;
-    const int ratio = std::clamp(
-        static_cast<int>(std::lround(static_cast<double>(srcBins) / static_cast<double>(std::max(1, height)))),
-        0,
-        1023);
+    auto mappedBinAtRow = [this, height, maxBin](int row) -> int {
+        const int clampedRow = std::clamp(row, 0, std::max(0, height - 1));
+        if (static_cast<int>(m_iToBin.size()) == height) {
+            return std::clamp(m_iToBin[static_cast<size_t>(clampedRow)], 0, maxBin);
+        }
+        if (height <= 1) {
+            return maxBin;
+        }
+        const double fraction =
+            static_cast<double>(clampedRow)
+            / static_cast<double>(height - 1);
+        return std::clamp(
+            static_cast<int>(std::floor(fraction * static_cast<double>(maxBin))),
+            0,
+            maxBin);
+    };
 
     for (int y = 0; y < height; ++y) {
         const int i = height - 1 - y;
 
-        int bin0 = 0;
-        int bin1 = 0;
-        int bin2 = 0;
-        if (m_logScale && static_cast<int>(m_iToBin.size()) == height) {
-            bin0 = m_iToBin[static_cast<size_t>(std::clamp(i - 1, 0, height - 1))];
-            bin1 = m_iToBin[static_cast<size_t>(i)];
-            bin2 = m_iToBin[static_cast<size_t>(std::clamp(i + 1, 0, height - 1))];
-        } else {
-            bin0 = (i - 1) * ratio;
-            bin1 = i * ratio;
-            bin2 = (i + 1) * ratio;
-        }
+        const int bin0 = mappedBinAtRow(i - 1);
+        const int bin1 = mappedBinAtRow(i);
+        const int bin2 = mappedBinAtRow(i + 1);
 
         int index0 = bin0 + static_cast<int>(std::lround(static_cast<double>(bin1 - bin0) / 2.0));
         if (index0 == bin0) {

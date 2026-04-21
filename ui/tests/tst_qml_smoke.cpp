@@ -457,6 +457,7 @@ private slots:
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
+    void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
     void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
     void spectrogramMinZoomAdaptsToWidthChange();
@@ -5042,10 +5043,60 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
     QVERIFY(item.m_precomputedCanvasDisplayLeft < initialDisplayLeft);
-    QCOMPARE(item.m_gpuDisplayDisplayLeft, static_cast<qint64>(0));
-    QCOMPARE(item.m_gpuDisplayDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
-    QVERIFY(!item.m_gpuDisplayImage.isNull());
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_canvasFilledCols, zoomedOutDecodedColumns);
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+
+    delete updatedNode;
+}
+
+void QmlSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
+    SpectrogramItem item;
+    item.setWidth(240);
+    item.setHeight(159);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setLogScale(false);
+
+    constexpr int binsPerColumn = 1025;
+    constexpr int columns = 400;
+    QByteArray chunk(binsPerColumn * columns, '\0');
+    for (int column = 0; column < columns; ++column) {
+        for (int bin = binsPerColumn - 12; bin < binsPerColumn; ++bin) {
+            chunk[column * binsPerColumn + bin] = static_cast<char>(
+                static_cast<unsigned char>(0xFF));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(!item.m_canvas.isNull());
+
+    auto topRowLuma = [&item]() -> int {
+        const int sampleX = std::clamp(item.m_canvas.width() / 2, 0,
+                                       std::max(0, item.m_canvas.width() - 1));
+        const QColor topPixel = item.m_canvas.pixelColor(sampleX, 0);
+        const QColor midPixel = item.m_canvas.pixelColor(
+            sampleX,
+            std::clamp(item.m_canvas.height() / 2, 0,
+                       std::max(0, item.m_canvas.height() - 1)));
+        return qGray(topPixel.rgb()) - qGray(midPixel.rgb());
+    };
+
+    QVERIFY2(topRowLuma() > 20,
+             "default-height linear spectrogram should show highest-bin energy on the top row");
+
+    item.setHeight(318);
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    QVERIFY(!item.m_canvas.isNull());
+    QVERIFY2(topRowLuma() > 20,
+             "taller linear spectrogram should still show highest-bin energy on the top row");
 
     delete updatedNode;
 }
