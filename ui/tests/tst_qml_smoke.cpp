@@ -623,6 +623,7 @@ private slots:
     void spectrogramActiveRendererUsesPublicBodyTextureOnly();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
+    void spectrogramResizeForcesFreshBodyTextureUpload();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth();
@@ -5663,6 +5664,59 @@ void QmlSmokeTest::spectrogramGpuTextureUploadSkipsRedundantRecreation() {
     QVERIFY(updatedTextureNode->texture() == initialTexture);
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
+    QQuickWindow window;
+    window.resize(240, 120);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    auto *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(240);
+    item->setHeight(80);
+    item->setDisplayMode(1); // Centered
+    item->setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int columns = 320;
+    QByteArray data(bins * columns, '\x20');
+    for (int column = 96; column < 160; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(64 + column - 96 + bin));
+        }
+    }
+
+    item->feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns,
+        48000, 1024, false, true, 1, false);
+    item->setPositionSeconds(1.0);
+
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(node->childCount() >= 2);
+    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    QVERIFY(textureNode != nullptr);
+    QSGTexture *initialTexture = textureNode->texture();
+    QVERIFY(initialTexture != nullptr);
+    QCOMPARE(initialTexture->textureSize().height(), 80);
+    const quint64 initialGeneration = item->m_gpuDisplayGeneration;
+
+    item->setHeight(140);
+
+    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    auto *updatedTextureNode =
+        static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
+    QVERIFY(updatedTextureNode != nullptr);
+    QSGTexture *updatedTexture = updatedTextureNode->texture();
+    QVERIFY(updatedTexture != nullptr);
+    QCOMPARE(updatedTexture->textureSize().height(), 140);
+    QVERIFY(item->m_gpuDisplayGeneration > initialGeneration);
+
+    delete updatedNode;
 }
 
 void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {

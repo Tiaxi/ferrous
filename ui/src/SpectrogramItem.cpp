@@ -164,6 +164,10 @@ bool smoothnessLooksIncident(
 }
 #endif
 
+void bumpImageGeneration(quint64 &generation) {
+    generation += 1;
+}
+
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
@@ -3679,6 +3683,11 @@ void SpectrogramItem::invalidateMapping() {
 }
 
 void SpectrogramItem::invalidateCanvas() {
+    const bool hadGpuImages =
+        !m_gpuSourceImage.isNull()
+        || !m_gpuDisplayImage.isNull()
+        || !m_gpuDbRemapImage.isNull()
+        || !m_gpuPaletteImage.isNull();
     m_canvas = QImage();
     m_canvasDirty = true;
     m_canvasWriteX = 0;
@@ -3691,10 +3700,12 @@ void SpectrogramItem::invalidateCanvas() {
     m_gpuDisplayImage = QImage();
     m_gpuDbRemapImage = QImage();
     m_gpuPaletteImage = QImage();
-    m_gpuSourceGeneration = 0;
-    m_gpuDisplayGeneration = 0;
-    m_gpuDbRemapGeneration = 0;
-    m_gpuPaletteGeneration = 0;
+    if (hadGpuImages) {
+        bumpImageGeneration(m_gpuSourceGeneration);
+        bumpImageGeneration(m_gpuDisplayGeneration);
+        bumpImageGeneration(m_gpuDbRemapGeneration);
+        bumpImageGeneration(m_gpuPaletteGeneration);
+    }
     m_gpuDisplaySourceGeneration = 0;
     m_gpuDisplayWidth = 0;
     m_gpuDisplayHeight = 0;
@@ -4109,9 +4120,13 @@ void SpectrogramItem::syncPrecomputedGpuImagesLocked(
     double effectiveZoom,
     int maxTextureColumns) {
     if (width <= 0 || height <= 0 || displayRight < displayLeft || m_precomputedBinsPerColumn <= 0) {
+        const bool hadGpuImages = !m_gpuSourceImage.isNull() || !m_gpuDisplayImage.isNull();
         m_gpuSourceImage = QImage();
         m_gpuDisplayImage = QImage();
-        m_gpuDisplayGeneration = 0;
+        if (hadGpuImages) {
+            bumpImageGeneration(m_gpuSourceGeneration);
+            bumpImageGeneration(m_gpuDisplayGeneration);
+        }
         m_gpuDisplaySourceGeneration = 0;
         m_gpuDisplayWidth = 0;
         m_gpuDisplayHeight = 0;
@@ -4466,8 +4481,11 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         || height <= 0
         || displayRight < displayLeft
         || m_precomputedBinsPerColumn <= 0) {
+        const bool hadGpuDisplayImage = !m_gpuDisplayImage.isNull();
         m_gpuDisplayImage = QImage();
-        m_gpuDisplayGeneration = 0;
+        if (hadGpuDisplayImage) {
+            bumpImageGeneration(m_gpuDisplayGeneration);
+        }
         m_gpuDisplaySourceGeneration = 0;
         m_gpuDisplayWidth = 0;
         m_gpuDisplayHeight = 0;
