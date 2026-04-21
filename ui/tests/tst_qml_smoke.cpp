@@ -8,7 +8,6 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
-#include <QQuickRhiItem>
 #include <QSGSimpleTextureNode>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
@@ -28,7 +27,6 @@
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/SpectrogramGpuRenderer.h"
-#include "../src/SpectrogramRhiItem.h"
 #include "../src/SpectrogramSeekTrace.h"
 #define protected public
 #define private public
@@ -468,17 +466,11 @@ private slots:
     void spectrogramGpuImagesUseRgbaCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
     void spectrogramGpuCompressesOversizedSourceTexture();
-    void spectrogramCreatesRhiChildForActiveRenderer();
-    void spectrogramRhiRendererConsumesViewSyncState();
-    void spectrogramRhiQuadUsesDrawOffsetAndFlipsUv();
-    void spectrogramRhiRendererTracksPlayheadLinePosition();
-    void spectrogramRhiRendererTracksGridAndCrosshairLineState();
-    void spectrogramRhiRendererTracksPaletteAndDbRemapState();
+    void spectrogramDoesNotCreatePrivateRhiChild();
+    void spectrogramUpdatePaintNodeStillUsesPublicTextureBody();
     void spectrogramUpdatePaintNodeUsesGpuSpectrogramNode();
     void spectrogramGpuTextureUploadSkipsRedundantRecreation();
     void spectrogramRollingGpuTextureUpdateKeepsTextureObject();
-    void spectrogramRollingFullModeKeepsRhiSourceCacheInSync();
-    void spectrogramCenteredFullModeKeepsRhiSourceCacheInSync();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingDisplayCacheIgnoresOffscreenWriteHeadGrowth();
     void spectrogramCenteredDisplayCacheIgnoresOffscreenDecodeGrowth();
@@ -5222,219 +5214,34 @@ void QmlSmokeTest::spectrogramGpuCompressesOversizedSourceTexture() {
     }
 }
 
-void QmlSmokeTest::spectrogramCreatesRhiChildForActiveRenderer() {
+void QmlSmokeTest::spectrogramDoesNotCreatePrivateRhiChild() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
     item.setDisplayMode(1);
 
-    auto *rhiChild = item.findChild<QQuickRhiItem *>();
-    QVERIFY2(rhiChild != nullptr, "active spectrogram path should create a QQuickRhiItem child");
-    QCOMPARE(rhiChild->parent(), &item);
+    QCOMPARE(item.findChild<QQuickItem *>(QString(), Qt::FindDirectChildrenOnly), nullptr);
 }
 
-void QmlSmokeTest::spectrogramRhiRendererConsumesViewSyncState() {
-    SpectrogramItem item;
-    item.setWidth(240);
-    item.setHeight(120);
-    item.setDisplayMode(1);
-    item.setPlaying(false);
-
-    constexpr int bins = 8;
-    constexpr int totalColumns = 240;
-    QByteArray chunk(bins * totalColumns, '\x40');
-    item.feedPrecomputedChunk(
-        chunk, bins, 0, totalColumns,
-        0, totalColumns, 48000, 1024, true, true, 1, false);
-    item.setPositionSeconds(1.0);
-
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
-    QVERIFY(node != nullptr);
-
-    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
-    QVERIFY(rhiChild != nullptr);
-    const SpectrogramRhiSyncState state = rhiChild->debugLastSyncState();
-    QVERIFY(!state.sourceImage.isNull());
-    QVERIFY(state.sourceGeneration > 0);
-    QVERIFY(state.sourceColumns > 0);
-    QCOMPARE(state.bins, bins);
-    QVERIFY(state.displayRight >= state.displayLeft);
-    QVERIFY(state.drawPixels > 0);
-    QVERIFY(state.effectiveZoom > 0.0);
-
-    delete node;
-}
-
-void QmlSmokeTest::spectrogramRhiQuadUsesDrawOffsetAndFlipsUv() {
-    SpectrogramRhiSyncState state;
-    state.drawX = 40.0;
-    state.drawPixels = 120;
-
-    const auto vertices =
-        SpectrogramRhiItem::debugBuildQuadVertices(state, QSize(200, 100));
-
-    QCOMPARE(vertices[0].x, -0.6f);
-    QCOMPARE(vertices[0].y, -1.0f);
-    QCOMPARE(vertices[0].u, 0.0f);
-    QCOMPARE(vertices[0].v, 1.0f);
-
-    QCOMPARE(vertices[1].x, 0.6f);
-    QCOMPARE(vertices[1].y, -1.0f);
-    QCOMPARE(vertices[1].u, 1.0f);
-    QCOMPARE(vertices[1].v, 1.0f);
-
-    QCOMPARE(vertices[2].x, -0.6f);
-    QCOMPARE(vertices[2].y, 1.0f);
-    QCOMPARE(vertices[2].u, 0.0f);
-    QCOMPARE(vertices[2].v, 0.0f);
-
-    QCOMPARE(vertices[3].x, 0.6f);
-    QCOMPARE(vertices[3].y, 1.0f);
-    QCOMPARE(vertices[3].u, 1.0f);
-    QCOMPARE(vertices[3].v, 0.0f);
-}
-
-void QmlSmokeTest::spectrogramRhiRendererTracksPlayheadLinePosition() {
+void QmlSmokeTest::spectrogramUpdatePaintNodeStillUsesPublicTextureBody() {
     SpectrogramItem item;
     item.setWidth(200);
     item.setHeight(100);
     item.setDisplayMode(1);
-    item.setPlaying(false);
 
-    constexpr int bins = 8;
-    constexpr int totalColumns = 240;
-    QByteArray chunk(bins * totalColumns, '\x40');
+    constexpr int bins = 32;
+    constexpr int columns = 240;
+    QByteArray data(bins * columns, '\x40');
     item.feedPrecomputedChunk(
-        chunk, bins, 0, totalColumns,
-        0, totalColumns, 48000, 1024, true, true, 1, false);
+        data, bins, 0, columns, 0, columns,
+        48000, 1024, false, true, 1, false);
     item.setPositionSeconds(1.0);
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-
-    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
-    QVERIFY(rhiChild != nullptr);
-    const SpectrogramRhiSyncState state = rhiChild->debugLastSyncState();
-    QVERIFY(state.playheadLine.has_value());
-    QCOMPARE(qRound(state.playheadLine->x1()), 46);
-    QCOMPARE(qRound(state.playheadLine->x2()), 46);
-    QCOMPARE(qRound(state.playheadLine->y1()), 0);
-    QCOMPARE(qRound(state.playheadLine->y2()), 99);
-
+    QVERIFY(node->childCount() >= 2);
+    QCOMPARE(node->childAtIndex(1)->type(), QSGNode::GeometryNodeType);
     delete node;
-}
-
-void QmlSmokeTest::spectrogramRhiRendererTracksGridAndCrosshairLineState() {
-    SpectrogramItem item;
-    item.setWidth(240);
-    item.setHeight(120);
-    item.setDisplayMode(1);
-    item.setPlaying(false);
-    item.setGridEnabled(true);
-    item.setCrosshairEnabled(true);
-    item.setShowTimeLabels(true);
-    item.m_hoverActive = true;
-    item.m_hoverPosition = QPointF(60.0, 40.0);
-
-    constexpr int bins = 64;
-    constexpr int totalColumns = 240;
-    QByteArray chunk(bins * totalColumns, '\x40');
-    item.feedPrecomputedChunk(
-        chunk, bins, 0, totalColumns,
-        0, totalColumns, 48000, 1024, true, true, 1, false);
-    item.setPositionSeconds(2.0);
-
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
-    QVERIFY(node != nullptr);
-
-    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
-    QVERIFY(rhiChild != nullptr);
-    const SpectrogramRhiSyncState state = rhiChild->debugLastSyncState();
-
-    QVERIFY(!state.freqGridLines.isEmpty());
-    QVERIFY(!state.timeGridLines.isEmpty());
-    for (const QLineF &line : state.freqGridLines) {
-        QVERIFY(line.y1() >= 0.0);
-        QVERIFY(line.y1() <= 119.0);
-        QCOMPARE(line.y1(), line.y2());
-    }
-    for (const QLineF &line : state.timeGridLines) {
-        QVERIFY(line.x1() >= 0.0);
-        QVERIFY(line.x1() <= 239.0);
-        QCOMPARE(line.x1(), line.x2());
-    }
-
-    QVERIFY(state.crosshairVerticalLine.has_value());
-    QCOMPARE(qRound(state.crosshairVerticalLine->x1()), 60);
-    QCOMPARE(qRound(state.crosshairVerticalLine->x2()), 60);
-    QCOMPARE(qRound(state.crosshairVerticalLine->y1()), 0);
-    QCOMPARE(qRound(state.crosshairVerticalLine->y2()), 119);
-
-    QVERIFY(state.crosshairHorizontalLine.has_value());
-    QCOMPARE(qRound(state.crosshairHorizontalLine->x1()), 0);
-    QCOMPARE(qRound(state.crosshairHorizontalLine->x2()), 239);
-    QCOMPARE(qRound(state.crosshairHorizontalLine->y1()), 40);
-    QCOMPARE(qRound(state.crosshairHorizontalLine->y2()), 40);
-
-    delete node;
-}
-
-void QmlSmokeTest::spectrogramRhiRendererTracksPaletteAndDbRemapState() {
-    SpectrogramItem item;
-    item.setWidth(240);
-    item.setHeight(120);
-    item.setDisplayMode(1);
-    item.setPlaying(false);
-
-    constexpr int bins = 64;
-    constexpr int totalColumns = 240;
-    QByteArray chunk(bins * totalColumns, '\x40');
-    item.feedPrecomputedChunk(
-        chunk, bins, 0, totalColumns,
-        0, totalColumns, 48000, 1024, true, true, 1, false);
-    item.setPositionSeconds(2.0);
-
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
-    QVERIFY(node != nullptr);
-
-    auto *rhiChild = item.findChild<SpectrogramRhiItem *>();
-    QVERIFY(rhiChild != nullptr);
-    const SpectrogramRhiSyncState initialState = rhiChild->debugLastSyncState();
-
-    QVERIFY(!initialState.dbRemapImage.isNull());
-    QCOMPARE(initialState.dbRemapImage.width(), 256);
-    QCOMPARE(initialState.dbRemapImage.height(), 1);
-    QVERIFY(initialState.dbRemapGeneration > 0);
-    const QColor initialDbMid = initialState.dbRemapImage.pixelColor(128, 0);
-
-    QVERIFY(!initialState.paletteImage.isNull());
-    QVERIFY(initialState.paletteImage.width() >= 256);
-    QCOMPARE(initialState.paletteImage.height(), 1);
-    QVERIFY(initialState.paletteGeneration > 0);
-    const QColor initialPaletteMid =
-        initialState.paletteImage.pixelColor(initialState.paletteImage.width() / 4, 0);
-    QVERIFY(initialPaletteMid.red() != initialPaletteMid.green()
-        || initialPaletteMid.green() != initialPaletteMid.blue());
-
-    item.setDbRange(90.0);
-    item.setChannelMuted(true);
-
-    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
-    QVERIFY(updatedNode == node);
-    const SpectrogramRhiSyncState updatedState = rhiChild->debugLastSyncState();
-
-    QVERIFY(updatedState.dbRemapGeneration > 0);
-    QVERIFY(updatedState.paletteGeneration > 0);
-
-    const QColor updatedDbMid = updatedState.dbRemapImage.pixelColor(128, 0);
-    QVERIFY(updatedDbMid != initialDbMid);
-
-    const QColor updatedPaletteMid =
-        updatedState.paletteImage.pixelColor(updatedState.paletteImage.width() / 4, 0);
-    QCOMPARE(updatedPaletteMid.red(), updatedPaletteMid.green());
-    QCOMPARE(updatedPaletteMid.green(), updatedPaletteMid.blue());
-
-    delete updatedNode;
 }
 
 void QmlSmokeTest::spectrogramUpdatePaintNodeUsesGpuSpectrogramNode() {
@@ -5574,145 +5381,6 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
     QVERIFY2(
         updatedTextureNode->texture() == initialTexture,
         "rolling GPU updates should reuse the same scene-graph texture object");
-
-    delete node;
-}
-
-void QmlSmokeTest::spectrogramRollingFullModeKeepsRhiSourceCacheInSync() {
-    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
-
-    SpectrogramItem item;
-    item.setWidth(8);
-    item.setHeight(6);
-    item.setDisplayMode(0); // Rolling
-    item.setPlaying(false);
-
-    constexpr int bins = 4;
-    constexpr int initialColumns = 12;
-    QByteArray initialChunk(bins * initialColumns, '\x00');
-    for (int column = 0; column < initialColumns; ++column) {
-        for (int bin = 0; bin < bins; ++bin) {
-            initialChunk[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(16 + column * 8 + bin));
-        }
-    }
-
-    item.feedPrecomputedChunk(
-        initialChunk, bins, 0, initialColumns,
-        0, 64, 48000, 1024, false, true, 1, false);
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        const auto now = std::chrono::steady_clock::now();
-        item.m_positionSeconds =
-            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
-        item.m_positionAnchorSeconds = item.m_positionSeconds;
-        item.m_positionAnchorUpdatedAt = now;
-        item.m_positionAnchorInitialized = true;
-    }
-
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
-    QVERIFY(node != nullptr);
-
-    quint64 initialSourceGeneration = 0;
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        initialSourceGeneration = item.m_gpuSourceGeneration;
-    }
-
-    QByteArray nextChunk(bins, '\x00');
-    for (int bin = 0; bin < bins; ++bin) {
-        nextChunk[bin] = static_cast<char>(static_cast<unsigned char>(220 + bin));
-    }
-
-    item.feedPrecomputedChunk(
-        nextChunk, bins, 0, 1,
-        initialColumns, 64, 48000, 1024, false, false, 1, false);
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        const auto now = std::chrono::steady_clock::now();
-        item.m_positionSeconds =
-            ((static_cast<double>(initialColumns) + 0.25) * 1024.0) / 48000.0;
-        item.m_positionAnchorSeconds = item.m_positionSeconds;
-        item.m_positionAnchorUpdatedAt = now;
-        item.m_positionAnchorInitialized = true;
-    }
-
-    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
-    QVERIFY(updatedNode == node);
-
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(item.m_gpuSourceGeneration > initialSourceGeneration);
-        QVERIFY(!item.m_gpuSourceImage.isNull());
-        QVERIFY2(
-            item.m_gpuDisplayLastUpdateWasIncremental,
-            "full renderer should still advance the display cache incrementally while keeping the RHI source cache current");
-    }
-
-    delete node;
-    qunsetenv("FERROUS_GPU_DEBUG_MODE");
-}
-
-void QmlSmokeTest::spectrogramCenteredFullModeKeepsRhiSourceCacheInSync() {
-    qunsetenv("FERROUS_GPU_DEBUG_MODE");
-
-    SpectrogramItem item;
-    item.setWidth(8);
-    item.setHeight(6);
-    item.setDisplayMode(1); // Centered
-    item.setPlaying(false);
-
-    constexpr int bins = 4;
-    constexpr int totalColumns = 64;
-    QByteArray chunk(bins * totalColumns, '\x00');
-    for (int column = 0; column < totalColumns; ++column) {
-        for (int bin = 0; bin < bins; ++bin) {
-            chunk[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(16 + column * 3 + bin));
-        }
-    }
-
-    item.feedPrecomputedChunk(
-        chunk, bins, 0, totalColumns,
-        0, totalColumns, 48000, 1024, true, true, 1, false);
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        const auto now = std::chrono::steady_clock::now();
-        item.m_positionSeconds = (10.25 * 1024.0) / 48000.0;
-        item.m_positionAnchorSeconds = item.m_positionSeconds;
-        item.m_positionAnchorUpdatedAt = now;
-        item.m_positionAnchorInitialized = true;
-    }
-
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
-    QVERIFY(node != nullptr);
-
-    quint64 initialSourceGeneration = 0;
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        initialSourceGeneration = item.m_gpuSourceGeneration;
-    }
-
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        const auto now = std::chrono::steady_clock::now();
-        item.m_positionSeconds = (11.25 * 1024.0) / 48000.0;
-        item.m_positionAnchorSeconds = item.m_positionSeconds;
-        item.m_positionAnchorUpdatedAt = now;
-        item.m_positionAnchorInitialized = true;
-    }
-
-    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
-    QVERIFY(updatedNode == node);
-
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(item.m_gpuSourceGeneration > initialSourceGeneration);
-        QVERIFY(!item.m_gpuSourceImage.isNull());
-        QVERIFY2(
-            item.m_gpuDisplayLastUpdateWasIncremental,
-            "centered full mode should keep the RHI source cache current while advancing the display cache incrementally");
-    }
 
     delete node;
 }

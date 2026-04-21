@@ -21,7 +21,6 @@
 class QQuickWindow;
 class QSGNode;
 class QWheelEvent;
-class SpectrogramRhiItem;
 
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
@@ -238,7 +237,6 @@ private:
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
-    void syncRhiChildAttachment(QQuickWindow *window);
     void handleWindowAfterAnimating();
     void maybeDumpGpuDebugFrame();
     void updateFpsEstimateLocked();
@@ -411,7 +409,6 @@ private:
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};
     bool m_awaitingZoomData{false};
-    SpectrogramRhiItem *m_rhiItem{nullptr};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

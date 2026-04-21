@@ -3,7 +3,6 @@
 #include "SpectrogramItem.h"
 
 #include "SpectrogramGpuRenderer.h"
-#include "SpectrogramRhiItem.h"
 #include "SpectrogramSeekTrace.h"
 
 #include <QDir>
@@ -402,20 +401,13 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
 #endif
     rebuildPalette();
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
-    connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::syncRhiChildAttachment);
     bindWindowFpsTracking(window());
-    syncRhiChildAttachment(window());
     m_zoomDebounceTimer = new QTimer(this);
     m_zoomDebounceTimer->setSingleShot(true);
     m_zoomDebounceTimer->setInterval(150);
     connect(m_zoomDebounceTimer, &QTimer::timeout, this, [this]() {
         emit backendZoomRequested(m_pendingBackendZoom);
     });
-    m_rhiItem = new SpectrogramRhiItem(this);
-    m_rhiItem->setPosition(QPointF(0.0, 0.0));
-    m_rhiItem->setSize(QSizeF(width(), height()));
-    m_rhiItem->setZ(-1.0);
-    m_rhiItem->setVisible(false);
 }
 
 double SpectrogramItem::dbRange() const {
@@ -1912,17 +1904,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
     const SpectrogramGpu::DebugMode gpuDebugMode = SpectrogramGpu::currentDebugMode();
-    const bool shouldSyncRhiOverlayLines =
-        gpuDebugMode == SpectrogramGpu::DebugMode::Full
-        && m_rhiItem != nullptr;
-    const bool useRhiSpectrogramBody =
-        gpuDebugMode == SpectrogramGpu::DebugMode::Full
-        && m_rhiItem != nullptr
-        && m_rhiItem->parentItem() == this
-        && m_rhiItem->isVisible();
-    const bool useRhiOverlayLines = useRhiSpectrogramBody;
     node->background->setRect(0.0, 0.0, static_cast<double>(w), static_cast<double>(h));
-    node->background->setColor(useRhiSpectrogramBody ? QColor(0, 0, 0, 0) : kBackgroundColor);
+    node->background->setColor(kBackgroundColor);
     // Force the opaque underlay to repaint on every sync. Transparent overlay
     // textures and the moving playhead rely on a fresh background in retained
     // scene-graph backends; otherwise old pixels can survive as smear trails.
@@ -1931,14 +1914,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     double drawX = 0.0;
     int drawPixels = 0;
     bool showSpectrogram = false;
-    bool haveRhiSyncState = false;
     bool spectrogramTextureChanged = false;
     quint64 spectrogramImageGeneration = 0;
     SpectrogramGpu::DebugMode spectrogramImageDebugMode = gpuDebugMode;
     QRectF spectrogramTargetRect;
     QRect spectrogramSourceRect;
     QImage spectrogramNodeImage;
-    SpectrogramRhiSyncState rhiSyncState;
     bool spectrogramRollingIncrementalScroll = false;
     int spectrogramRollingShiftPixels = 0;
     bool showPlayhead = false;
@@ -2261,34 +2242,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     w, displayLeft, displayRight, effectiveZoom);
             }
 
-            if (visibleCols > 0) {
-                rhiSyncState = SpectrogramRhiSyncState{
-                    .sourceImage = QImage(),
-                    .sourceGeneration = 0,
-                    .dbRemapImage = QImage(),
-                    .dbRemapGeneration = 0,
-                    .paletteImage = QImage(),
-                    .paletteGeneration = 0,
-                    .sourceColumns = static_cast<int>(displayRight - displayLeft + 1),
-                    .bins = m_precomputedBinsPerColumn,
-                    .displayLeft = displayLeft,
-                    .displayRight = displayRight,
-                    .drawX = drawX,
-                    .drawPixels = drawPixels,
-                    .effectiveZoom = effectiveZoom,
-                    .rollingMode = rollingMode,
-                    .freqGridLines = {},
-                    .timeGridLines = {},
-                    .playheadLine = std::nullopt,
-                    .crosshairVerticalLine = std::nullopt,
-                    .crosshairHorizontalLine = std::nullopt,
-                };
-                haveRhiSyncState = true;
-            }
-
             const bool needsSourceCache =
-                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
-                || m_rhiItem != nullptr;
+                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
 
             if (visibleCols > 0 && !rendererFreeze) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -2298,15 +2253,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const int maxTextureColumns = gpuMaxTextureColumns(currentWindow);
                     syncPrecomputedGpuImagesLocked(
                         w, h, displayLeft, displayRight, rollingMode, effectiveZoom, maxTextureColumns);
-                    rhiSyncState.sourceImage = m_gpuSourceImage;
-                    rhiSyncState.sourceGeneration = m_gpuSourceGeneration;
-                }
-                if (shouldSyncRhiOverlayLines) {
-                    syncPrecomputedGpuLookupImagesLocked();
-                    rhiSyncState.dbRemapImage = m_gpuDbRemapImage;
-                    rhiSyncState.dbRemapGeneration = m_gpuDbRemapGeneration;
-                    rhiSyncState.paletteImage = m_gpuPaletteImage;
-                    rhiSyncState.paletteGeneration = m_gpuPaletteGeneration;
                 }
                 syncPrecomputedDisplayImageLocked(
                     drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
@@ -2325,7 +2271,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     ? !m_gpuSourceImage.isNull()
                     : !m_gpuDisplayImage.isNull();
 
-            if (!useRhiSpectrogramBody && haveSelectedSpectrogramImage && drawPixels > 0) {
+            if (haveSelectedSpectrogramImage && drawPixels > 0) {
                 if (m_gpuDisplayImage.isNull()) {
                     syncPrecomputedDisplayImageLocked(
                         drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
@@ -2378,15 +2324,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
             }
 
-            if (shouldSyncRhiOverlayLines && !rollingMode && playheadPixel >= 0) {
-                rhiSyncState.playheadLine = QLineF(
-                    static_cast<double>(std::clamp(playheadPixel, 0, w - 1)),
-                    0.0,
-                    static_cast<double>(std::clamp(playheadPixel, 0, w - 1)),
-                    static_cast<double>(h - 1));
-            }
-
-            if (!useRhiOverlayLines && !rollingMode && playheadPixel >= 0) {
+            if (!rollingMode && playheadPixel >= 0) {
                 showPlayhead = true;
                 playheadRect = QRectF(
                     static_cast<double>(std::clamp(playheadPixel, 0, w - 1)),
@@ -2398,9 +2336,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // Frequency grid — only depends on static parameters.
             // Never rebuilt during normal playback.
             if (m_gridEnabled && m_binsPerColumn > 1) {
-                if (shouldSyncRhiOverlayLines) {
-                    rhiSyncState.freqGridLines = buildFreqGridLinesLocked(w, h);
-                }
                 const bool freqStale = m_freqGridDirty
                     || m_freqGridImage.isNull()
                     || m_freqGridImage.width() != w
@@ -2412,7 +2347,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     const auto overlayStart = std::chrono::steady_clock::now();
 #endif
-                    updateFreqGridOverlayLocked(w, h, !useRhiOverlayLines);
+                    updateFreqGridOverlayLocked(w, h, true);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - overlayStart).count();
@@ -2432,10 +2367,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // displayLeft + drawX delta — a free coordinate change.
             // Only rebuilt when the shift exhausts the padding.
             if (m_gridEnabled && m_binsPerColumn > 1) {
-                if (shouldSyncRhiOverlayLines) {
-                    rhiSyncState.timeGridLines = buildTimeGridLinesLocked(
-                        w, h, displayLeft, rollingMode, columnsPerSecond, drawX);
-                }
                 constexpr int kTimeGridPadding = 400;
                 // The pixel shift accounts for both displayLeft advancement
                 // and drawX changes (critical in rolling mode where drawX
@@ -2459,7 +2390,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
                     updateTimeGridOverlayLocked(
                         w, h, kTimeGridPadding, displayLeft, rollingMode, cps, drawX,
-                        !useRhiOverlayLines);
+                        true);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - overlayStart).count();
@@ -2478,11 +2409,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // Renders on the hovered pane (full crosshair) and on non-hovered
             // panes when crosshairSharedX >= 0 (vertical line + bottom time label).
             if (m_crosshairEnabled && (m_hoverActive || m_crosshairSharedX >= 0.0)) {
-                if (shouldSyncRhiOverlayLines) {
-                    rhiSyncState.crosshairVerticalLine = buildCrosshairVerticalLineLocked(w, h);
-                    rhiSyncState.crosshairHorizontalLine =
-                        buildCrosshairHorizontalLineLocked(w, h);
-                }
                 bool crosshairTimeStale = false;
                 if (m_showTimeLabels) {
                     crosshairTimeStale =
@@ -2505,7 +2431,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const auto overlayStart = std::chrono::steady_clock::now();
 #endif
                     updateCrosshairOverlayLocked(
-                        w, h, displayLeft, rollingMode, cps, drawX, !useRhiOverlayLines);
+                        w, h, displayLeft, rollingMode, cps, drawX, true);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileOverlayBuildMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - overlayStart).count();
@@ -2548,10 +2474,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         profileColumnCount = m_columns.size();
         profileBinsPerColumn = m_binsPerColumn;
 #endif
-    }
-
-    if (haveRhiSyncState && m_rhiItem != nullptr) {
-        m_rhiItem->setSyncState(rhiSyncState);
     }
 
     QSGTexture *oldSpectrogramTexture = nullptr;
@@ -2910,10 +2832,6 @@ void SpectrogramItem::releaseResources() {
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
-    if (m_rhiItem != nullptr && m_rhiItem->parentItem() == this) {
-        m_rhiItem->setPosition(QPointF(0.0, 0.0));
-        m_rhiItem->setSize(newGeometry.size());
-    }
     if (newGeometry.size() != oldGeometry.size()) {
         QMutexLocker lock(&m_stateMutex);
         invalidateMapping();
@@ -4683,36 +4601,6 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
         },
         Qt::QueuedConnection);
     update();
-}
-
-void SpectrogramItem::syncRhiChildAttachment(QQuickWindow *window) {
-    if (m_rhiItem == nullptr) {
-        return;
-    }
-
-    bool canAttach = false;
-    if (window != nullptr) {
-        if (QSGRendererInterface *renderer = window->rendererInterface(); renderer != nullptr) {
-            const auto api = renderer->graphicsApi();
-            canAttach = api != QSGRendererInterface::Unknown
-                && api != QSGRendererInterface::Software;
-        }
-    }
-
-    if (canAttach) {
-        if (m_rhiItem->parentItem() != this) {
-            m_rhiItem->setParentItem(this);
-        }
-        m_rhiItem->setPosition(QPointF(0.0, 0.0));
-        m_rhiItem->setSize(QSizeF(width(), height()));
-        m_rhiItem->setVisible(true);
-        return;
-    }
-
-    m_rhiItem->setVisible(false);
-    if (m_rhiItem->parentItem() != nullptr) {
-        m_rhiItem->setParentItem(nullptr);
-    }
 }
 
 void SpectrogramItem::handleWindowAfterAnimating() {
