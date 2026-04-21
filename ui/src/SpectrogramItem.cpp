@@ -1459,11 +1459,13 @@ void SpectrogramItem::feedPrecomputedChunk(
             neededCapacity = screenWidth * 3
                 + static_cast<int>(extraSeconds * colsPerSecond);
         } else {
-            // Rolling: need screen width / effectiveZoom of history + lookahead.
+            // Rolling: need one visible viewport of history, the decoder
+            // lookahead, and one extra viewport of slack so eviction never
+            // intrudes into the live window when the decoder runs ahead.
             const double ez = effectiveZoomLocked();
             const int zoomAdjustedWidth = static_cast<int>(
                 static_cast<double>(screenWidth) / std::max(0.05, ez));
-            neededCapacity = zoomAdjustedWidth
+            neededCapacity = zoomAdjustedWidth * 2
                 + static_cast<int>(extraSeconds * colsPerSecond);
         }
         // Add some margin.
@@ -2704,8 +2706,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             && node->spectrogramTextureUploaded
             && node->spectrogramTextureResource != nullptr
             && node->spectrogramTextureDebugMode == SpectrogramGpu::DebugMode::Full
-            && nextScrollPixels > 0
-            && nextScrollPixels < spectrogramNodeImage.width();
+            && nextScrollPixels > 0;
         if (canAdvanceRollingTexture) {
             node->spectrogramTextureScrollPixels = nextScrollPixels;
             const auto uploadSegmentTexture =
