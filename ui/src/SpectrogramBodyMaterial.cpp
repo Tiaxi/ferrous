@@ -23,8 +23,8 @@ static_assert(sizeof(UniformData) == 68, "Qt Quick shader UBO must match the bak
 class SpectrogramBodyMaterialShader final : public QSGMaterialShader {
 public:
     SpectrogramBodyMaterialShader() {
-        setShaderFileName(VertexStage, QStringLiteral(":/shaders/SpectrogramBody.vert.qsb"));
-        setShaderFileName(FragmentStage, QStringLiteral(":/shaders/SpectrogramBody.frag.qsb"));
+        setShaderFileName(VertexStage, SpectrogramBodyMaterial::vertexShaderResourcePath());
+        setShaderFileName(FragmentStage, SpectrogramBodyMaterial::fragmentShaderResourcePath());
     }
 
     bool updateUniformData(
@@ -85,6 +85,14 @@ QSGGeometry *createBodyGeometry() {
 SpectrogramBodyMaterial::SpectrogramBodyMaterial() {
     setFlag(Blending, true);
     setFlag(RequiresFullMatrix, true);
+}
+
+QString SpectrogramBodyMaterial::vertexShaderResourcePath() {
+    return QStringLiteral(":/shaders/SpectrogramBody.vert.qsb");
+}
+
+QString SpectrogramBodyMaterial::fragmentShaderResourcePath() {
+    return QStringLiteral(":/shaders/SpectrogramBody.frag.qsb");
 }
 
 QSGMaterialType *SpectrogramBodyMaterial::type() const {

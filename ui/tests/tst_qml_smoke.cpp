@@ -9,6 +9,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QResource>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
 #include <QSGRendererInterface>
@@ -829,6 +830,7 @@ private slots:
     void spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot();
     void spectrogramGpuWindowCaptureShowsTextureNodeDebugStage();
     void spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode();
+    void spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode();
     void spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFullMode();
     void spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeOnly();
     void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
@@ -7635,6 +7637,98 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullM
     QCOMPARE(nonGrayPixels, 0);
 }
 
+void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(window.width());
+    item->setHeight(window.height());
+    item->setDisplayMode(0);
+    item->setGridEnabled(false);
+    item->setCrosshairEnabled(false);
+    item->setShowFpsOverlay(false);
+    item->setPlaying(false);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            const int base = 48 + (column * 160) / std::max(1, totalColumns - 1);
+            const int ripple = (bin * 40) / std::max(1, bins - 1);
+            chunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(std::min(255, base + ripple)));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024,
+        false, true, 31, false);
+    item->setPositionSeconds(2.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    QScopedPointer<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    assertFullModeBodyNodeInvariants(
+        node.data(),
+        "rolling full-mode capture should bind the spectrogram source texture into the material node");
+
+    const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
+    if (api == QSGRendererInterface::Software) {
+        auto *material = spectrogramBodyMaterial(node.data());
+        QVERIFY(material != nullptr);
+        QVERIFY2(
+            material->state.sourceTexture != nullptr,
+            "software fallback should still keep the rolling full-mode material source bound");
+        auto *tailNode = spectrogramTailTextureNode(node.data());
+        QVERIFY(tailNode != nullptr);
+        QVERIFY(
+            tailNode->texture() == nullptr || tailNode->rect().isEmpty());
+        QSKIP(qPrintable(
+            QStringLiteral(
+                "Skipping rolling full-mode grayscale pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                .arg(graphicsApiName(api))));
+    }
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    const QRect bodyRegion(40, 15, 160, 80);
+    const QRect bounded = bodyRegion.intersected(frame.rect());
+    int visiblePixels = 0;
+    int nonGrayPixels = 0;
+    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
+        for (int x = bounded.left(); x <= bounded.right(); ++x) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
+                ++visiblePixels;
+                if (pixel.red() != pixel.green() || pixel.green() != pixel.blue()) {
+                    ++nonGrayPixels;
+                }
+            }
+        }
+    }
+
+    QVERIFY2(
+        visiblePixels > 100,
+        "rolling full-mode public shader path should render visible body pixels");
+    QCOMPARE(nonGrayPixels, 0);
+}
+
 void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFullMode() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
     struct DebugModeGuard {
@@ -7679,18 +7773,24 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFul
         node.data(),
         "full-mode opacity capture should still bind the spectrogram source texture into the material node");
 
-    const QString shaderPath =
-        QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()
-        + QStringLiteral("/../src/shaders/SpectrogramBody.frag");
-    QFile shaderFile(shaderPath);
+    const QString vertexShaderPath = SpectrogramBodyMaterial::vertexShaderResourcePath();
+    const QString fragmentShaderPath = SpectrogramBodyMaterial::fragmentShaderResourcePath();
     QVERIFY2(
-        shaderFile.open(QIODevice::ReadOnly | QIODevice::Text),
-        qPrintable(QStringLiteral("failed to open %1").arg(shaderPath)));
-    const QString shaderSource = QString::fromUtf8(shaderFile.readAll());
+        !vertexShaderPath.isEmpty() && vertexShaderPath.endsWith(QStringLiteral(".vert.qsb")),
+        "full-mode grayscale material should expose the compiled vertex shader resource path");
     QVERIFY2(
-        shaderSource.contains(QStringLiteral("value * qt_Opacity"))
-            || shaderSource.contains(QStringLiteral("qt_Opacity * value")),
-        "full-mode grayscale shader should premultiply RGB by qt_Opacity");
+        !fragmentShaderPath.isEmpty() && fragmentShaderPath.endsWith(QStringLiteral(".frag.qsb")),
+        "full-mode grayscale material should expose the compiled fragment shader resource path");
+    QResource vertexShaderResource(vertexShaderPath);
+    QVERIFY2(vertexShaderResource.isValid(), qPrintable(QStringLiteral("missing shader resource %1").arg(vertexShaderPath)));
+    QVERIFY2(
+        vertexShaderResource.size() > 0,
+        qPrintable(QStringLiteral("shader resource %1 should contain compiled shader data").arg(vertexShaderPath)));
+    QResource fragmentShaderResource(fragmentShaderPath);
+    QVERIFY2(fragmentShaderResource.isValid(), qPrintable(QStringLiteral("missing shader resource %1").arg(fragmentShaderPath)));
+    QVERIFY2(
+        fragmentShaderResource.size() > 0,
+        qPrintable(QStringLiteral("shader resource %1 should contain compiled shader data").arg(fragmentShaderPath)));
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {

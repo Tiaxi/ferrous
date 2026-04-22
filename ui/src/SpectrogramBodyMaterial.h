@@ -26,6 +26,9 @@ public:
 
     SpectrogramBodyMaterial();
 
+    static QString vertexShaderResourcePath();
+    static QString fragmentShaderResourcePath();
+
     QSGMaterialType *type() const override;
     QSGMaterialShader *createShader(QSGRendererInterface::RenderMode renderMode) const override;
     int compare(const QSGMaterial *other) const override;
