@@ -1172,7 +1172,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && hopSize != m_precomputedHopSize
         && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
         && m_displayMode == 1
-        && (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())) {
+        && !m_gpuSourceImage.isNull()) {
         captureZoomFillFrozenCacheLocked();
         m_zoomFillActive = true;
     }
@@ -1202,7 +1202,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         // the brief interval; readiness clears once the new session
         // has produced enough columns to cover the new display range.
         const bool preserveCanvasForSeek =
-            (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())
+            !m_gpuSourceImage.isNull()
             && m_displayMode == 1
             && m_precomputedCanvasDisplayRight
                 >= m_precomputedCanvasDisplayLeft
@@ -1866,7 +1866,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_timeGridDirty = true;
     // During a zoom fill, preserve the old canvas so updatePaintNode
     // can keep showing it while the ring refills at the new hop.
-    if (m_zoomFillActive && (!m_gpuDisplayImage.isNull() || !m_gpuSourceImage.isNull())) {
+    if (m_zoomFillActive && !m_gpuSourceImage.isNull()) {
         // Keep the last GPU cache alive while the ring refills. The
         // next paint freezes against this cached image until the new
         // session covers the visible display.
@@ -2383,6 +2383,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
 
             const bool needsSourceCache = true;
+            const bool maintainCpuDisplayImage =
+                gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                || currentWindow == nullptr;
 
             if (visibleCols > 0) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -2394,7 +2397,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         w, h, displayLeft, displayRight, rollingMode, effectiveZoom, maxTextureColumns);
                 }
                 syncPrecomputedDisplayImageLocked(
-                    drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
+                    drawPixels,
+                    h,
+                    displayLeft,
+                    displayRight,
+                    rollingMode,
+                    effectiveZoom,
+                    maintainCpuDisplayImage);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 profileCacheSyncMs += std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - syncStart).count();
@@ -2411,9 +2420,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     : !m_gpuSourceImage.isNull();
 
             if (haveSelectedSpectrogramImage && drawPixels > 0) {
-                if (m_gpuDisplayImage.isNull()) {
+                if (maintainCpuDisplayImage && m_gpuDisplayImage.isNull()) {
                     syncPrecomputedDisplayImageLocked(
-                        drawPixels, h, displayLeft, displayRight, rollingMode, effectiveZoom);
+                        drawPixels,
+                        h,
+                        displayLeft,
+                        displayRight,
+                        rollingMode,
+                        effectiveZoom,
+                        true);
                 }
                 syncPrecomputedGpuLookupImagesLocked();
                 showSpectrogram = true;
@@ -4576,7 +4591,8 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
     qint64 displayLeft,
     qint64 displayRight,
     bool rollingMode,
-    double effectiveZoom) {
+    double effectiveZoom,
+    bool maintainImagePixels) {
     if (drawPixels <= 0
         || height <= 0
         || displayRight < displayLeft
@@ -4614,7 +4630,7 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
             static_cast<double>(displayRight - displayLeft + 1) * effectiveZoom)));
 
     const bool displayConfigDirty =
-        m_gpuDisplayImage.isNull()
+        (maintainImagePixels && m_gpuDisplayImage.isNull())
         || m_gpuDisplayWidth != drawPixels
         || m_gpuDisplayHeight != height
         || m_gpuDisplaySampleRateHz != m_sampleRateHz
@@ -4636,6 +4652,10 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         ? displayWindowChanged
         : (displayWindowChanged || centeredVisibleGrowthDirty);
     if (!displayConfigDirty && !contentDirty) {
+        if (!maintainImagePixels && !m_gpuDisplayImage.isNull()) {
+            m_gpuDisplayImage = QImage();
+            bumpImageGeneration(m_gpuDisplayGeneration);
+        }
         return;
     }
 
@@ -4666,7 +4686,7 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
             0.0,
             0.999999);
     const bool displayConfigDirtyBeyondWidth =
-        m_gpuDisplayImage.isNull()
+        (maintainImagePixels && m_gpuDisplayImage.isNull())
         || m_gpuDisplayHeight != height
         || m_gpuDisplaySampleRateHz != m_sampleRateHz
         || m_gpuDisplayBins != m_precomputedBinsPerColumn
@@ -4728,6 +4748,51 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         && displayRight >= m_gpuDisplayDisplayRight;
 
     bool imagePixelsChanged = false;
+    if (!maintainImagePixels) {
+        if (!m_gpuDisplayImage.isNull()) {
+            m_gpuDisplayImage = QImage();
+            bumpImageGeneration(m_gpuDisplayGeneration);
+        }
+
+        if (canIncrementallyGrowRollingDisplay) {
+            const int growthPixels = filledPixels - m_gpuDisplayFilledWidth;
+            m_gpuDisplayLastUpdateWasIncremental = true;
+            m_gpuDisplayLastShiftPixels = growthPixels;
+            m_gpuDisplayLastUpdatedColumns = growthPixels;
+            m_gpuDisplaySubpixelOffset = 0.0;
+        } else if (canIncrementallyCompleteAndAdvanceRollingDisplay) {
+            m_gpuDisplayLastUpdateWasIncremental = true;
+            m_gpuDisplayLastShiftPixels = mixedShiftPixels;
+            m_gpuDisplayLastUpdatedColumns = mixedShiftPixels;
+            m_gpuDisplaySubpixelOffset = nextSubpixelOffset;
+        } else if (canIncrementallyAdvanceDisplay) {
+            m_gpuDisplayLastUpdateWasIncremental = true;
+            m_gpuDisplayLastShiftPixels = shiftPixels;
+            m_gpuDisplayLastUpdatedColumns = shiftPixels;
+            m_gpuDisplaySubpixelOffset = nextSubpixelOffset;
+        } else {
+            m_gpuDisplaySubpixelOffset = 0.0;
+        }
+
+        m_gpuDisplaySourceGeneration = m_gpuSourceGeneration;
+        m_gpuDisplayWidth = drawPixels;
+        m_gpuDisplayFilledWidth = filledPixels;
+        m_gpuDisplayHeight = height;
+        m_gpuDisplaySampleRateHz = m_sampleRateHz;
+        m_gpuDisplayBins = m_precomputedBinsPerColumn;
+        m_gpuDisplayDbRange = m_dbRange;
+        m_gpuDisplayMuted = m_channelMuted;
+        m_gpuDisplayLogScale = m_logScale;
+        m_gpuDisplayDisplayLeft = displayLeft;
+        m_gpuDisplayDisplayRight = displayRight;
+        m_gpuDisplayRolling = rollingMode;
+        m_gpuDisplayRingWriteSeq = m_ringWriteSeq;
+        m_gpuDisplayRingOldestSeq = m_ringOldestSeq;
+        m_gpuDisplayMaxColumnIndex = m_precomputedMaxColumnIndex;
+        m_gpuDisplayTrackToken = m_precomputedTrackToken;
+        m_gpuDisplayEffectiveZoom = effectiveZoom;
+        return;
+    }
 
     if (canIncrementallyGrowRollingDisplay) {
         const int growthPixels = filledPixels - m_gpuDisplayFilledWidth;

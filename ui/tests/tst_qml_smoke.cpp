@@ -975,6 +975,7 @@ private slots:
     void spectrogramGpuWindowCaptureMatchesCpuPaletteDirectionInFullMode();
     void spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPixelsInFullMode();
     void spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullMode();
+    void spectrogramGpuWindowCaptureStaysVisibleAfterClearingCpuDisplayImageInFullMode();
     void spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeOnly();
     void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
@@ -7858,15 +7859,15 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureMatchesCpuPaletteDirectionInFullMo
     QTest::qWait(50);
     QCoreApplication::processEvents();
 
-    QScopedPointer<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
-    QVERIFY(!node.isNull());
+    std::unique_ptr<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
     assertFullModeBodyNodeInvariants(
-        node.data(),
+        node.get(),
         "full-mode color capture should keep the material-backed body node active");
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.data());
+        auto *material = spectrogramBodyMaterial(node.get());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.dbRemapTexture != nullptr,
@@ -8145,10 +8146,10 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullM
     QTest::qWait(50);
     QCoreApplication::processEvents();
 
-    QScopedPointer<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
-    QVERIFY(!node.isNull());
+    std::unique_ptr<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
     assertFullModeBodyNodeInvariants(
-        node.data(),
+        node.get(),
         "full-mode opacity capture should still bind the spectrogram source texture into the material node");
 
     const QString vertexShaderPath = SpectrogramBodyMaterial::vertexShaderResourcePath();
@@ -8172,7 +8173,7 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullM
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.data());
+        auto *material = spectrogramBodyMaterial(node.get());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.dbRemapTexture != nullptr,
@@ -8228,6 +8229,100 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullM
     QVERIFY2(
         maxChannel < 110,
         "full-mode palette output should not keep full-bright RGB when the material opacity is reduced");
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCaptureStaysVisibleAfterClearingCpuDisplayImageInFullMode() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(window.width());
+    item->setHeight(window.height());
+    item->setDisplayMode(1);
+    item->setGridEnabled(false);
+    item->setCrosshairEnabled(false);
+    item->setShowFpsOverlay(false);
+    item->setPlaying(false);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            const int base = 48 + (column * 160) / std::max(1, totalColumns - 1);
+            const int ripple = (bin * 40) / std::max(1, bins - 1);
+            chunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(std::min(255, base + ripple)));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024,
+        false, true, 31, false);
+    item->setPositionSeconds(2.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    std::unique_ptr<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        QVERIFY2(!item->m_gpuSourceImage.isNull(), "full mode should prepare the source texture image before the CPU display image is cleared");
+        QVERIFY2(!item->m_gpuDbRemapImage.isNull(), "full mode should prepare the dB remap lookup before the CPU display image is cleared");
+        QVERIFY2(!item->m_gpuPaletteImage.isNull(), "full mode should prepare the palette lookup before the CPU display image is cleared");
+        item->m_gpuDisplayImage = QImage();
+    }
+
+    QCoreApplication::processEvents();
+    node.reset(item->updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+    assertFullModeBodyNodeInvariants(
+        node.get(),
+        "full-mode material rendering should stay active after the CPU display image is cleared");
+
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        QVERIFY2(
+            item->m_gpuDisplayImage.isNull(),
+            "normal full mode should not rebuild the CPU display image once the material source/remap/palette inputs are ready");
+    }
+
+    const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
+    if (api == QSGRendererInterface::Software) {
+        auto *material = spectrogramBodyMaterial(node.get());
+        QVERIFY(material != nullptr);
+        QVERIFY2(
+            material->state.dbRemapTexture != nullptr,
+            "software fallback should still bind the dB remap lookup texture after the CPU display image is cleared");
+        QVERIFY2(
+            material->state.paletteTexture != nullptr,
+            "software fallback should still bind the palette lookup texture after the CPU display image is cleared");
+        QSKIP(qPrintable(
+            QStringLiteral(
+                "Skipping full-mode post-clear pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                .arg(graphicsApiName(api))));
+    }
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    const QRect bodyRegion(40, 15, 160, 80);
+    const int visiblePixels = countVisiblePixelsInRect(frame, bodyRegion, 8);
+    QVERIFY2(
+        visiblePixels > 100,
+        "full-mode material rendering should still show visible body pixels after the CPU display image is cleared");
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {

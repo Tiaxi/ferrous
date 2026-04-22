@@ -185,7 +185,8 @@ private:
         qint64 displayLeft,
         qint64 displayRight,
         bool rollingMode,
-        double effectiveZoom);
+        double effectiveZoom,
+        bool maintainImagePixels = true);
     void paintPrecomputedDisplayColumnsLocked(
         QImage &image,
         int xBegin,
