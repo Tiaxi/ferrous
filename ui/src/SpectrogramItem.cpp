@@ -2907,12 +2907,30 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->placeholderTexture);
     }
 
+    const bool bodyMaterialTexturesReady =
+        !useTextureNodeBody
+        && node->spectrogramTextureResource != nullptr
+        && node->spectrogramDbRemapTextureResource != nullptr
+        && node->spectrogramPaletteTextureResource != nullptr;
     SpectrogramBodyMaterial::State bodyState;
-    bodyState.sourceTexture = useTextureNodeBody ? nullptr : node->spectrogramTextureResource;
+    bodyState.sourceTexture =
+        useTextureNodeBody
+            ? node->placeholderTexture
+            : (node->spectrogramTextureResource != nullptr
+                   ? node->spectrogramTextureResource
+                   : node->placeholderTexture);
     bodyState.dbRemapTexture =
-        useTextureNodeBody ? nullptr : node->spectrogramDbRemapTextureResource;
+        useTextureNodeBody
+            ? node->placeholderTexture
+            : (node->spectrogramDbRemapTextureResource != nullptr
+                   ? node->spectrogramDbRemapTextureResource
+                   : node->placeholderTexture);
     bodyState.paletteTexture =
-        useTextureNodeBody ? nullptr : node->spectrogramPaletteTextureResource;
+        useTextureNodeBody
+            ? node->placeholderTexture
+            : (node->spectrogramPaletteTextureResource != nullptr
+                   ? node->spectrogramPaletteTextureResource
+                   : node->placeholderTexture);
     bodyState.sourceSize = spectrogramSourceRect.size();
     bodyState.targetSize = spectrogramTargetRect.size().toSize();
     if (node->spectrogramTextureWidth > 0 && spectrogramSourceRect.height() > 0) {
@@ -2928,17 +2946,34 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     bodyState.debugStage = static_cast<int>(gpuDebugMode);
     syncSpectrogramBodyMaterialNode(
         node->spectrogramMaterialNode,
-        showSpectrogram ? baseTargetRect : QRectF(),
+        showSpectrogram && bodyMaterialTexturesReady ? baseTargetRect : QRectF(),
         bodyState);
 
     double segmentX = baseTargetRect.x() + baseTargetRect.width();
+    const bool tailMaterialTexturesReady =
+        !useTextureNodeBody
+        && node->spectrogramTailTextureResource != nullptr
+        && node->spectrogramDbRemapTextureResource != nullptr
+        && node->spectrogramPaletteTextureResource != nullptr;
     SpectrogramBodyMaterial::State tailBodyState;
     tailBodyState.sourceTexture =
-        useTextureNodeBody ? nullptr : node->spectrogramTailTextureResource;
+        useTextureNodeBody
+            ? node->placeholderTexture
+            : (node->spectrogramTailTextureResource != nullptr
+                   ? node->spectrogramTailTextureResource
+                   : node->placeholderTexture);
     tailBodyState.dbRemapTexture =
-        useTextureNodeBody ? nullptr : node->spectrogramDbRemapTextureResource;
+        useTextureNodeBody
+            ? node->placeholderTexture
+            : (node->spectrogramDbRemapTextureResource != nullptr
+                   ? node->spectrogramDbRemapTextureResource
+                   : node->placeholderTexture);
     tailBodyState.paletteTexture =
-        useTextureNodeBody ? nullptr : node->spectrogramPaletteTextureResource;
+        useTextureNodeBody
+            ? node->placeholderTexture
+            : (node->spectrogramPaletteTextureResource != nullptr
+                   ? node->spectrogramPaletteTextureResource
+                   : node->placeholderTexture);
     tailBodyState.sourceSize = QSize(
         node->spectrogramTailTextureWidth,
         spectrogramSourceRect.height());
@@ -2980,7 +3015,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     }
     syncSpectrogramBodyMaterialNode(
         node->spectrogramTailMaterialNode,
-        showSpectrogram ? tailTargetRect : QRectF(),
+        showSpectrogram && tailMaterialTexturesReady ? tailTargetRect : QRectF(),
         tailBodyState);
 
     const bool overlayLinesActive =

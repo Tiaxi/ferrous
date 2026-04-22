@@ -609,7 +609,8 @@ void assertTextureNodeDebugBodyInvariants(QSGNode *root, const char *context) {
 
     auto *material = spectrogramBodyMaterial(root);
     QVERIFY2(material != nullptr, context);
-    QVERIFY2(material->state.sourceTexture == nullptr, context);
+    QVERIFY2(material->state.sourceTexture != nullptr, context);
+    QVERIFY2(!geometryHasVisibleArea(materialNode), context);
 
     auto *bodyTextureNode = spectrogramBodyTextureNode(root);
     QVERIFY2(bodyTextureNode != nullptr, context);
@@ -8356,6 +8357,28 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {
     assertFullModeBodyNodeInvariants(
         node.data(),
         "normal full mode should use a material-backed body node and leave the old texture-node body empty");
+
+    if (windowGraphicsApi(window) == QSGRendererInterface::Software) {
+        auto *tailMaterialNode = spectrogramTailMaterialNode(node.data());
+        QVERIFY2(
+            tailMaterialNode != nullptr,
+            "software fallback should keep a dedicated tail material node even before rolling tail growth begins");
+        auto *tailMaterial =
+            dynamic_cast<SpectrogramBodyMaterial *>(tailMaterialNode->material());
+        QVERIFY(tailMaterial != nullptr);
+        QVERIFY2(
+            tailMaterial->state.sourceTexture != nullptr,
+            "inactive tail material should keep a non-null source sampler binding instead of exposing a null QSGTexture");
+        QVERIFY2(
+            tailMaterial->state.dbRemapTexture != nullptr,
+            "inactive tail material should keep a non-null dB remap sampler binding instead of exposing a null QSGTexture");
+        QVERIFY2(
+            tailMaterial->state.paletteTexture != nullptr,
+            "inactive tail material should keep a non-null palette sampler binding instead of exposing a null QSGTexture");
+        QVERIFY2(
+            !geometryHasVisibleArea(tailMaterialNode),
+            "inactive tail material should stay hidden until a rolling tail segment exists");
+    }
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays() {
