@@ -2777,6 +2777,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
         }
     }
+    const double sourceTargetScale =
+        spectrogramSourceRect.width() > 0
+            ? (spectrogramTargetRect.width()
+               / static_cast<double>(spectrogramSourceRect.width()))
+            : 0.0;
+    const auto viewportWidthForSourceColumns = [&](int sourceColumns) {
+        return std::max(0.0, static_cast<double>(sourceColumns) * sourceTargetScale);
+    };
+
     QRectF baseTargetRect = spectrogramTargetRect;
     baseTargetRect.translate(-spectrogramSubpixelOffset, 0.0);
     QRect baseSourceRect = spectrogramSourceRect;
@@ -2786,7 +2795,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         std::max(0, node->spectrogramTextureWidth - 1));
     if (scrollPixels > 0) {
         baseTargetRect.setWidth(
-            std::max(0.0, static_cast<double>(node->spectrogramTextureWidth - scrollPixels)));
+            viewportWidthForSourceColumns(node->spectrogramTextureWidth - scrollPixels));
         baseSourceRect = QRect(
             scrollPixels,
             0,
@@ -2837,10 +2846,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         showSpectrogram ? baseTargetRect : QRectF(),
         bodyState);
 
-    double segmentX = spectrogramTargetRect.x() - spectrogramSubpixelOffset
-        + std::max(
-            0.0,
-            static_cast<double>(node->spectrogramTextureWidth - node->spectrogramTextureScrollPixels));
+    double segmentX = baseTargetRect.x() + baseTargetRect.width();
     if (showSpectrogram && node->spectrogramTailTextureResource != nullptr) {
         configureTextureNode(
             node->spectrogramTailTexture,
@@ -2848,11 +2854,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             QRectF(
                 segmentX,
                 spectrogramTargetRect.y(),
-                static_cast<double>(node->spectrogramTailTextureWidth),
+                viewportWidthForSourceColumns(node->spectrogramTailTextureWidth),
                 spectrogramTargetRect.height()),
             QRect(0, 0, node->spectrogramTailTextureWidth, spectrogramSourceRect.height()),
             node->placeholderTexture);
-        segmentX += static_cast<double>(node->spectrogramTailTextureWidth);
+        segmentX += viewportWidthForSourceColumns(node->spectrogramTailTextureWidth);
     } else {
         configureTextureNode(
             node->spectrogramTailTexture,

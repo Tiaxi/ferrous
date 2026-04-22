@@ -6511,7 +6511,9 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
     item.setShowFpsOverlay(false);
 
     constexpr int bins = 8;
-    constexpr int initialColumns = 240;
+    constexpr double expectedEffectiveZoom = 0.5;
+    constexpr int initialColumns = 480;
+    constexpr int advanceSteps = 12;
     QByteArray initialChunk(bins * initialColumns, '\0');
     for (int column = 0; column < initialColumns; ++column) {
         for (int bin = 0; bin < bins; ++bin) {
@@ -6529,6 +6531,8 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
     {
         QMutexLocker lock(&item.m_stateMutex);
         const auto now = std::chrono::steady_clock::now();
+        item.m_zoomLevel = expectedEffectiveZoom;
+        item.m_renderZoomLevel = expectedEffectiveZoom;
         item.m_positionSeconds =
             ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
         item.m_positionAnchorSeconds = item.m_positionSeconds;
@@ -6539,7 +6543,12 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
     std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
     QVERIFY(node != nullptr);
 
-    for (int step = 0; step < 12; ++step) {
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(std::abs(item.effectiveZoomLocked() - expectedEffectiveZoom) < 0.001);
+    }
+
+    for (int step = 0; step < advanceSteps; ++step) {
         QByteArray nextChunk(bins, '\0');
         for (int bin = 0; bin < bins; ++bin) {
             nextChunk[bin] = static_cast<char>(
@@ -6575,6 +6584,11 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
         tailNode->texture() != nullptr && !tailNode->rect().isEmpty(),
         "incremental full mode should expose a visible tail segment");
 
+    const double expectedTailWidth =
+        static_cast<double>(advanceSteps) * expectedEffectiveZoom;
+    const double expectedSeamX =
+        static_cast<double>(window.width()) - expectedTailWidth;
+
     const auto *vertices = materialNode->geometry()->vertexDataAsTexturedPoint2D();
     float maxX = vertices[0].x;
     float minU = vertices[0].tx;
@@ -6589,8 +6603,20 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
         minU > 0.0F,
         "incremental full mode should crop the material body away from the stale left edge of the base texture");
     QVERIFY2(
+        std::abs(tailNode->rect().width() - expectedTailWidth) <= 1.0,
+        "incremental full mode should size the tail segment in viewport pixels at non-unit zoom");
+    QVERIFY2(
+        std::abs(tailNode->rect().x() - expectedSeamX) <= 1.0,
+        "incremental full mode should place the tail seam in viewport pixels at non-unit zoom");
+    QVERIFY2(
+        std::abs(static_cast<double>(maxX) - expectedSeamX) <= 1.0,
+        "incremental full mode should stop the material body at the viewport-pixel seam");
+    QVERIFY2(
         std::abs(static_cast<double>(maxX) - tailNode->rect().x()) <= 1.0,
-        "incremental full mode should stop the material body where the tail segment begins");
+        "incremental full mode should keep the material body aligned with the tail segment");
+    QVERIFY2(
+        tailNode->rect().x() < static_cast<double>(window.width()),
+        "incremental full mode should keep the tail seam inside the viewport");
     QVERIFY2(
         maxU > minU,
         "incremental full mode should keep a non-empty scrolled source interval for the material body");
