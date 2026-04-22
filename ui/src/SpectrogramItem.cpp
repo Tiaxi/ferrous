@@ -2394,7 +2394,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     spectrogramNodeImage.height());
                 spectrogramRollingIncrementalScroll =
                     !rendererFreeze
-                    && gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                    && gpuDebugMode == SpectrogramGpu::DebugMode::Full
                     && rollingMode
                     && m_gpuSourceLastUpdateWasIncremental
                     && m_gpuSourceLastShiftColumns > 0

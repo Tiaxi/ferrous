@@ -458,6 +458,10 @@ QSGSimpleTextureNode *spectrogramBodyTextureNode(QSGNode *root) {
     return findTopLevelTextureChild(root, 0);
 }
 
+QSGSimpleTextureNode *spectrogramTailTextureNode(QSGNode *root) {
+    return findTopLevelTextureChild(root, 1);
+}
+
 SpectrogramBodyMaterial *spectrogramBodyMaterial(QSGNode *root) {
     auto *materialNode = spectrogramBodyMaterialNode(root);
     if (materialNode == nullptr) {
@@ -6377,6 +6381,15 @@ void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScrol
     assertFullModeBodyNodeInvariants(
         node.get(),
         "rolling full mode should keep the material node bound after long segmented scroll");
+    auto *beforeMaterial = spectrogramBodyMaterial(node.get());
+    QVERIFY(beforeMaterial != nullptr);
+    QSGTexture *beforeBaseTexture = beforeMaterial->state.sourceTexture;
+    QVERIFY(beforeBaseTexture != nullptr);
+    const qint64 beforeBaseTextureKey = beforeBaseTexture->comparisonKey();
+    auto *beforeTailTextureNode = spectrogramTailTextureNode(node.get());
+    QVERIFY(beforeTailTextureNode != nullptr);
+    QVERIFY(
+        beforeTailTextureNode->texture() == nullptr || beforeTailTextureNode->rect().isEmpty());
 
     QImage beforeSource;
     {
@@ -6421,6 +6434,15 @@ void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScrol
     assertFullModeBodyNodeInvariants(
         node.get(),
         "rolling full mode should keep the material node bound after additional right-edge updates");
+    auto *afterMaterial = spectrogramBodyMaterial(node.get());
+    QVERIFY(afterMaterial != nullptr);
+    QVERIFY(afterMaterial->state.sourceTexture != nullptr);
+    QCOMPARE(afterMaterial->state.sourceTexture->comparisonKey(), beforeBaseTextureKey);
+    auto *afterTailTextureNode = spectrogramTailTextureNode(node.get());
+    QVERIFY(afterTailTextureNode != nullptr);
+    QVERIFY2(
+        afterTailTextureNode->texture() != nullptr && !afterTailTextureNode->rect().isEmpty(),
+        "rolling full mode should advance via a visible tail texture instead of reuploading the whole body texture");
 
     QTest::qWait(30);
     QCoreApplication::processEvents();
