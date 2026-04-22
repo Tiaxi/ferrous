@@ -15,6 +15,6 @@ layout(std140, binding = 0) uniform buf {
 void main() {
     float value = texture(sourceTex, vTexCoord).r;
     float mapped = texture(dbRemapTex, vec2(value, 0.5)).r;
-    vec4 paletteColor = texture(paletteTex, vec2(mapped, 0.5));
+    vec4 paletteColor = texture(paletteTex, vec2(1.0 - mapped, 0.5));
     fragColor = vec4(paletteColor.rgb * qt_Opacity, paletteColor.a * qt_Opacity);
 }

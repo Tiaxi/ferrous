@@ -9,6 +9,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QResource>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
@@ -367,6 +368,40 @@ int countVisiblePixelsInRect(const QImage &image, const QRect &rect, int thresho
     return visiblePixels;
 }
 
+QColor averageVisibleColorInRect(
+    const QImage &image,
+    const QRect &rect,
+    int threshold,
+    int *visiblePixelsOut = nullptr) {
+    qint64 sumRed = 0;
+    qint64 sumGreen = 0;
+    qint64 sumBlue = 0;
+    int visiblePixels = 0;
+    const QRect bounded = rect.intersected(image.rect());
+    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
+        for (int x = bounded.left(); x <= bounded.right(); ++x) {
+            const QColor pixel = image.pixelColor(x, y);
+            if (pixel.red() > threshold || pixel.green() > threshold || pixel.blue() > threshold) {
+                sumRed += pixel.red();
+                sumGreen += pixel.green();
+                sumBlue += pixel.blue();
+                ++visiblePixels;
+            }
+        }
+    }
+
+    if (visiblePixelsOut != nullptr) {
+        *visiblePixelsOut = visiblePixels;
+    }
+    if (visiblePixels == 0) {
+        return QColor();
+    }
+    return QColor(
+        static_cast<int>(sumRed / visiblePixels),
+        static_cast<int>(sumGreen / visiblePixels),
+        static_cast<int>(sumBlue / visiblePixels));
+}
+
 int countChangedPixelsInRect(
     const QImage &before,
     const QImage &after,
@@ -643,6 +678,58 @@ void captureQtMessage(QtMsgType type, const QMessageLogContext &context, const Q
     }
 }
 
+int manhattanColorDistance(const QColor &lhs, const QColor &rhs) {
+    return std::abs(lhs.red() - rhs.red())
+        + std::abs(lhs.green() - rhs.green())
+        + std::abs(lhs.blue() - rhs.blue());
+}
+
+QColor expectedPaletteColorForIntensity(const SpectrogramItem &item, int intensity) {
+    const auto dbRemap = item.buildPrecomputedDbRemapLocked();
+    const int remappedIndex =
+        dbRemap[static_cast<size_t>(std::clamp(intensity, 0, 255))];
+    const int paletteIndex = SpectrogramItem::kGradientTableSize - 1
+        - static_cast<int>(std::lround(
+            (static_cast<double>(SpectrogramItem::kGradientTableSize - 1) / 255.0)
+            * static_cast<double>(remappedIndex)));
+    const auto &palette = item.m_channelMuted ? item.m_palette32Gray : item.m_palette32;
+    return QColor::fromRgb(palette[static_cast<size_t>(std::clamp(
+        paletteIndex,
+        0,
+        SpectrogramItem::kGradientTableSize - 1))]);
+}
+
+void assertUploadedPaletteOrdering(const SpectrogramItem &item) {
+    QVERIFY2(!item.m_gpuPaletteImage.isNull(), "palette lookup image should be generated for full-mode material");
+    QCOMPARE(item.m_gpuPaletteImage.width(), SpectrogramItem::kGradientTableSize);
+    QCOMPARE(item.m_gpuPaletteImage.height(), 1);
+
+    const QColor firstColor = item.m_gpuPaletteImage.pixelColor(0, 0);
+    const QColor lastColor = item.m_gpuPaletteImage.pixelColor(item.m_gpuPaletteImage.width() - 1, 0);
+    QCOMPARE(firstColor, QColor::fromRgb(item.m_palette32[0]));
+    QCOMPARE(
+        lastColor,
+        QColor::fromRgb(item.m_palette32[SpectrogramItem::kGradientTableSize - 1]));
+    QVERIFY2(
+        qGray(firstColor.rgb()) > qGray(lastColor.rgb()),
+        "uploaded palette texture should keep bright palette entries at the low-index end used by the CPU renderer");
+}
+
+void assertFragmentShaderInvertsPaletteLookup() {
+    const QString shaderPath = QFileInfo(QString::fromUtf8(__FILE__))
+        .dir()
+        .absoluteFilePath(QStringLiteral("../src/shaders/SpectrogramBody.frag"));
+    QFile shaderFile(shaderPath);
+    QVERIFY2(
+        shaderFile.open(QIODevice::ReadOnly | QIODevice::Text),
+        qPrintable(QStringLiteral("failed to open fragment shader source %1").arg(shaderPath)));
+    QString shaderSource = QString::fromUtf8(shaderFile.readAll());
+    shaderSource.remove(QRegularExpression(QStringLiteral("\\s+")));
+    QVERIFY2(
+        shaderSource.contains(QStringLiteral("texture(paletteTex,vec2(1.0-mapped,0.5))")),
+        "full-mode fragment shader should invert the remapped palette lookup to match the CPU renderer");
+}
+
 void clearCapturedMessages() {
     QMutexLocker locker(&capturedMessageMutex());
     capturedMessages().clear();
@@ -829,10 +916,10 @@ private slots:
     void spectrogramCenteredGpuDisplayCacheAdvancesIncrementally();
     void spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot();
     void spectrogramGpuWindowCaptureShowsTextureNodeDebugStage();
-    void spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode();
-    void spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode();
-    void spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode();
-    void spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFullMode();
+    void spectrogramGpuWindowCaptureShowsVisiblePaletteMappedPixelsInFullMode();
+    void spectrogramGpuWindowCaptureMatchesCpuPaletteDirectionInFullMode();
+    void spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPixelsInFullMode();
+    void spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullMode();
     void spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeOnly();
     void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
@@ -7557,7 +7644,7 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsTextureNodeDebugStage() {
     qunsetenv("FERROUS_GPU_DEBUG_MODE");
 }
 
-void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode() {
+void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisiblePaletteMappedPixelsInFullMode() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -7609,9 +7696,21 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullM
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
+        auto *material = spectrogramBodyMaterial(node.data());
+        QVERIFY(material != nullptr);
+        QVERIFY2(
+            material->state.dbRemapTexture != nullptr,
+            "software fallback should still bind the dB remap lookup texture into the material state");
+        QVERIFY2(
+            material->state.paletteTexture != nullptr,
+            "software fallback should still bind the palette lookup texture into the material state");
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            assertUploadedPaletteOrdering(*item);
+        }
         QSKIP(qPrintable(
             QStringLiteral(
-                "Skipping full-mode grayscale pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                "Skipping full-mode palette pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
                 .arg(graphicsApiName(api))));
     }
 
@@ -7635,10 +7734,12 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullM
     }
 
     QVERIFY2(visiblePixels > 100, "full-mode public shader path should render visible body pixels");
-    QCOMPARE(nonGrayPixels, 0);
+    QVERIFY2(
+        nonGrayPixels > 100,
+        "full-mode public shader path should render palette-mapped non-gray pixels");
 }
 
-void QmlSmokeTest::spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode() {
+void QmlSmokeTest::spectrogramGpuWindowCaptureMatchesCpuPaletteDirectionInFullMode() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -7661,13 +7762,14 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode
 
     constexpr int bins = 64;
     constexpr int totalColumns = 240;
+    constexpr int quietValue = 32;
+    constexpr int loudValue = 224;
     QByteArray chunk(bins * totalColumns, '\x00');
     for (int column = 0; column < totalColumns; ++column) {
+        const int value = column < totalColumns / 2 ? quietValue : loudValue;
         for (int bin = 0; bin < bins; ++bin) {
-            const int base = 48 + (column * 160) / std::max(1, totalColumns - 1);
-            const int ripple = (bin * 40) / std::max(1, bins - 1);
             chunk[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(std::min(255, base + ripple)));
+                static_cast<unsigned char>(value));
         }
     }
 
@@ -7678,6 +7780,14 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode
         chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024,
         false, true, 31, false);
     item->setPositionSeconds(2.0);
+
+    QColor expectedQuietColor;
+    QColor expectedLoudColor;
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        expectedQuietColor = expectedPaletteColorForIntensity(*item, quietValue);
+        expectedLoudColor = expectedPaletteColorForIntensity(*item, loudValue);
+    }
 
     QCoreApplication::processEvents();
     QTest::qWait(50);
@@ -7699,9 +7809,14 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode
         QVERIFY2(
             material->state.paletteTexture != nullptr,
             "software fallback should still bind the palette lookup texture into the material state");
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            assertUploadedPaletteOrdering(*item);
+        }
+        assertFragmentShaderInvertsPaletteLookup();
         QSKIP(qPrintable(
             QStringLiteral(
-                "Skipping full-mode color pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                "Skipping full-mode palette-direction pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
                 .arg(graphicsApiName(api))));
     }
 
@@ -7710,29 +7825,38 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode
 
     const QRect bodyRegion(40, 15, 160, 80);
     const QRect bounded = bodyRegion.intersected(frame.rect());
-    int visiblePixels = 0;
-    int nonGrayPixels = 0;
-    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
-        for (int x = bounded.left(); x <= bounded.right(); ++x) {
-            const QColor pixel = frame.pixelColor(x, y);
-            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
-                ++visiblePixels;
-                if (pixel.red() != pixel.green() || pixel.green() != pixel.blue()) {
-                    ++nonGrayPixels;
-                }
-            }
-        }
-    }
+    const QRect quietRegion(
+        bounded.left() + 8,
+        bounded.top() + 6,
+        std::max(12, bounded.width() / 4),
+        std::max(20, bounded.height() - 12));
+    const QRect loudRegion(
+        bounded.right() - std::max(12, bounded.width() / 4) - 7,
+        bounded.top() + 6,
+        std::max(12, bounded.width() / 4),
+        std::max(20, bounded.height() - 12));
+    int quietVisiblePixels = 0;
+    int loudVisiblePixels = 0;
+    const QColor quietAverage = averageVisibleColorInRect(frame, quietRegion, 8, &quietVisiblePixels);
+    const QColor loudAverage = averageVisibleColorInRect(frame, loudRegion, 8, &loudVisiblePixels);
 
     QVERIFY2(
-        visiblePixels > 100,
-        "full-mode public shader path should render visible body pixels after palette lookup");
+        quietVisiblePixels > 100,
+        "full-mode palette-direction capture should render visible quiet-side pixels");
     QVERIFY2(
-        nonGrayPixels > 100,
-        "full-mode public shader path should render non-gray body pixels after remap and palette lookup");
+        loudVisiblePixels > 100,
+        "full-mode palette-direction capture should render visible loud-side pixels");
+    QVERIFY2(
+        manhattanColorDistance(quietAverage, expectedQuietColor)
+            < manhattanColorDistance(quietAverage, expectedLoudColor),
+        "quiet-side capture should stay closer to the CPU renderer's quiet palette color than the loud color");
+    QVERIFY2(
+        manhattanColorDistance(loudAverage, expectedLoudColor)
+            < manhattanColorDistance(loudAverage, expectedQuietColor),
+        "loud-side capture should stay closer to the CPU renderer's loud palette color than the quiet color");
 }
 
-void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode() {
+void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPixelsInFullMode() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -7789,13 +7913,23 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixels
         QVERIFY2(
             material->state.sourceTexture != nullptr,
             "software fallback should still keep the rolling full-mode material source bound");
+        QVERIFY2(
+            material->state.dbRemapTexture != nullptr,
+            "software fallback should still bind the rolling full-mode dB remap lookup texture");
+        QVERIFY2(
+            material->state.paletteTexture != nullptr,
+            "software fallback should still bind the rolling full-mode palette lookup texture");
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            assertUploadedPaletteOrdering(*item);
+        }
         auto *tailNode = spectrogramTailTextureNode(node.data());
         QVERIFY(tailNode != nullptr);
         QVERIFY(
             tailNode->texture() == nullptr || tailNode->rect().isEmpty());
         QSKIP(qPrintable(
             QStringLiteral(
-                "Skipping rolling full-mode grayscale pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                "Skipping rolling full-mode palette pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
                 .arg(graphicsApiName(api))));
     }
 
@@ -7821,10 +7955,12 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixels
     QVERIFY2(
         visiblePixels > 100,
         "rolling full-mode public shader path should render visible body pixels");
-    QCOMPARE(nonGrayPixels, 0);
+    QVERIFY2(
+        nonGrayPixels > 100,
+        "rolling full-mode public shader path should render palette-mapped non-gray pixels");
 }
 
-void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFullMode() {
+void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullMode() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -7872,10 +8008,10 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFul
     const QString fragmentShaderPath = SpectrogramBodyMaterial::fragmentShaderResourcePath();
     QVERIFY2(
         !vertexShaderPath.isEmpty() && vertexShaderPath.endsWith(QStringLiteral(".vert.qsb")),
-        "full-mode grayscale material should expose the compiled vertex shader resource path");
+        "full-mode palette material should expose the compiled vertex shader resource path");
     QVERIFY2(
         !fragmentShaderPath.isEmpty() && fragmentShaderPath.endsWith(QStringLiteral(".frag.qsb")),
-        "full-mode grayscale material should expose the compiled fragment shader resource path");
+        "full-mode palette material should expose the compiled fragment shader resource path");
     QResource vertexShaderResource(vertexShaderPath);
     QVERIFY2(vertexShaderResource.isValid(), qPrintable(QStringLiteral("missing shader resource %1").arg(vertexShaderPath)));
     QVERIFY2(
@@ -7889,9 +8025,21 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFul
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
+        auto *material = spectrogramBodyMaterial(node.data());
+        QVERIFY(material != nullptr);
+        QVERIFY2(
+            material->state.dbRemapTexture != nullptr,
+            "software fallback should still bind the opacity test dB remap lookup texture");
+        QVERIFY2(
+            material->state.paletteTexture != nullptr,
+            "software fallback should still bind the opacity test palette lookup texture");
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            assertUploadedPaletteOrdering(*item);
+        }
         QSKIP(qPrintable(
             QStringLiteral(
-                "Skipping full-mode grayscale opacity assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                "Skipping full-mode palette opacity assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
                 .arg(graphicsApiName(api))));
     }
 
@@ -7901,17 +8049,20 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFul
     const QRect bodyRegion(40, 15, 160, 80);
     const QRect bounded = bodyRegion.intersected(frame.rect());
     int visiblePixels = 0;
-    int sumRed = 0;
-    int maxRed = 0;
+    int nonGrayPixels = 0;
+    int sumMaxChannel = 0;
+    int maxChannel = 0;
     for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
         for (int x = bounded.left(); x <= bounded.right(); ++x) {
             const QColor pixel = frame.pixelColor(x, y);
             if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
                 ++visiblePixels;
-                sumRed += pixel.red();
-                maxRed = std::max(maxRed, pixel.red());
-                QCOMPARE(pixel.red(), pixel.green());
-                QCOMPARE(pixel.green(), pixel.blue());
+                if (pixel.red() != pixel.green() || pixel.green() != pixel.blue()) {
+                    ++nonGrayPixels;
+                }
+                const int pixelMax = std::max({pixel.red(), pixel.green(), pixel.blue()});
+                sumMaxChannel += pixelMax;
+                maxChannel = std::max(maxChannel, pixelMax);
             }
         }
     }
@@ -7919,14 +8070,17 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFul
     QVERIFY2(
         visiblePixels > 100,
         "full-mode public shader path should still render visible pixels under partial item opacity");
-    const double averageRed =
-        visiblePixels > 0 ? static_cast<double>(sumRed) / static_cast<double>(visiblePixels) : 0.0;
     QVERIFY2(
-        averageRed < 90.0,
-        "full-mode grayscale output should be premultiplied by the item opacity instead of staying at full brightness");
+        nonGrayPixels > 100,
+        "full-mode opacity capture should preserve palette-mapped non-gray output");
+    const double averageMaxChannel =
+        visiblePixels > 0 ? static_cast<double>(sumMaxChannel) / static_cast<double>(visiblePixels) : 0.0;
     QVERIFY2(
-        maxRed < 110,
-        "full-mode grayscale output should not keep full-bright RGB when the material opacity is reduced");
+        averageMaxChannel < 90.0,
+        "full-mode palette output should be premultiplied by the item opacity instead of staying at full brightness");
+    QVERIFY2(
+        maxChannel < 110,
+        "full-mode palette output should not keep full-bright RGB when the material opacity is reduced");
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {
