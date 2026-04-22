@@ -830,6 +830,7 @@ private slots:
     void spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot();
     void spectrogramGpuWindowCaptureShowsTextureNodeDebugStage();
     void spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode();
+    void spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode();
     void spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode();
     void spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFullMode();
     void spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeOnly();
@@ -7635,6 +7636,100 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullM
 
     QVERIFY2(visiblePixels > 100, "full-mode public shader path should render visible body pixels");
     QCOMPARE(nonGrayPixels, 0);
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCaptureAppliesDbRemapAndPaletteInFullMode() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(window.width());
+    item->setHeight(window.height());
+    item->setDisplayMode(1);
+    item->setGridEnabled(false);
+    item->setCrosshairEnabled(false);
+    item->setShowFpsOverlay(false);
+    item->setPlaying(false);
+    item->setDbRange(96.0);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            const int base = 48 + (column * 160) / std::max(1, totalColumns - 1);
+            const int ripple = (bin * 40) / std::max(1, bins - 1);
+            chunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(std::min(255, base + ripple)));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024,
+        false, true, 31, false);
+    item->setPositionSeconds(2.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    QScopedPointer<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    assertFullModeBodyNodeInvariants(
+        node.data(),
+        "full-mode color capture should keep the material-backed body node active");
+
+    const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
+    if (api == QSGRendererInterface::Software) {
+        auto *material = spectrogramBodyMaterial(node.data());
+        QVERIFY(material != nullptr);
+        QVERIFY2(
+            material->state.dbRemapTexture != nullptr,
+            "software fallback should still bind the dB remap lookup texture into the material state");
+        QVERIFY2(
+            material->state.paletteTexture != nullptr,
+            "software fallback should still bind the palette lookup texture into the material state");
+        QSKIP(qPrintable(
+            QStringLiteral(
+                "Skipping full-mode color pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                .arg(graphicsApiName(api))));
+    }
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    const QRect bodyRegion(40, 15, 160, 80);
+    const QRect bounded = bodyRegion.intersected(frame.rect());
+    int visiblePixels = 0;
+    int nonGrayPixels = 0;
+    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
+        for (int x = bounded.left(); x <= bounded.right(); ++x) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
+                ++visiblePixels;
+                if (pixel.red() != pixel.green() || pixel.green() != pixel.blue()) {
+                    ++nonGrayPixels;
+                }
+            }
+        }
+    }
+
+    QVERIFY2(
+        visiblePixels > 100,
+        "full-mode public shader path should render visible body pixels after palette lookup");
+    QVERIFY2(
+        nonGrayPixels > 100,
+        "full-mode public shader path should render non-gray body pixels after remap and palette lookup");
 }
 
 void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode() {

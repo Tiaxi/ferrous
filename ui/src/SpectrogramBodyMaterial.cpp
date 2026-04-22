@@ -64,12 +64,28 @@ public:
         QSGTexture **texture,
         QSGMaterial *newMaterial,
         QSGMaterial *) override {
-        if (binding != 1 || texture == nullptr || newMaterial == nullptr) {
+        if (texture == nullptr || newMaterial == nullptr) {
+            if (texture != nullptr) {
+                *texture = nullptr;
+            }
             return;
         }
 
         const auto *material = static_cast<SpectrogramBodyMaterial *>(newMaterial);
-        *texture = material->state.sourceTexture;
+        switch (binding) {
+        case 1:
+            *texture = material->state.sourceTexture;
+            break;
+        case 2:
+            *texture = material->state.dbRemapTexture;
+            break;
+        case 3:
+            *texture = material->state.paletteTexture;
+            break;
+        default:
+            *texture = nullptr;
+            break;
+        }
     }
 };
 
@@ -105,6 +121,10 @@ QSGMaterialShader *SpectrogramBodyMaterial::createShader(QSGRendererInterface::R
 }
 
 int SpectrogramBodyMaterial::compare(const QSGMaterial *other) const {
+    const auto textureKey = [](QSGTexture *texture) -> qint64 {
+        return texture != nullptr ? texture->comparisonKey() : 0;
+    };
+
     if (other == nullptr || other->type() != type()) {
         return 1;
     }
@@ -113,14 +133,20 @@ int SpectrogramBodyMaterial::compare(const QSGMaterial *other) const {
         return state.debugStage - otherMaterial->state.debugStage;
     }
 
-    const qint64 sourceKey =
-        state.sourceTexture != nullptr ? state.sourceTexture->comparisonKey() : 0;
-    const qint64 otherSourceKey =
-        otherMaterial->state.sourceTexture != nullptr
-            ? otherMaterial->state.sourceTexture->comparisonKey()
-            : 0;
-    if (sourceKey != otherSourceKey) {
-        return sourceKey < otherSourceKey ? -1 : 1;
+    const std::array<qint64, 3> keys{
+        textureKey(state.sourceTexture),
+        textureKey(state.dbRemapTexture),
+        textureKey(state.paletteTexture),
+    };
+    const std::array<qint64, 3> otherKeys{
+        textureKey(otherMaterial->state.sourceTexture),
+        textureKey(otherMaterial->state.dbRemapTexture),
+        textureKey(otherMaterial->state.paletteTexture),
+    };
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i] != otherKeys[i]) {
+            return keys[i] < otherKeys[i] ? -1 : 1;
+        }
     }
     return 0;
 }
