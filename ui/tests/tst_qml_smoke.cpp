@@ -207,13 +207,50 @@ struct OverlayLineSample {
     QColor color;
 };
 
+QSGGeometryNode *overlayLineNode(QSGNode *root) {
+    if (root == nullptr) {
+        return nullptr;
+    }
+
+    for (QSGNode *child = root->firstChild(); child != nullptr; child = child->nextSibling()) {
+        auto *geometryNode = dynamic_cast<QSGGeometryNode *>(child);
+        if (geometryNode == nullptr) {
+            continue;
+        }
+        if (geometryNode->geometry() != nullptr
+            && geometryNode->geometry()->drawingMode() == QSGGeometry::DrawLines) {
+            return geometryNode;
+        }
+    }
+    return nullptr;
+}
+
+QSGSimpleRectNode *playheadRectNode(QSGNode *root) {
+    if (root == nullptr) {
+        return nullptr;
+    }
+
+    int seen = 0;
+    for (QSGNode *child = root->firstChild(); child != nullptr; child = child->nextSibling()) {
+        auto *rectNode = dynamic_cast<QSGSimpleRectNode *>(child);
+        if (rectNode == nullptr) {
+            continue;
+        }
+        if (seen == 1) {
+            return rectNode;
+        }
+        ++seen;
+    }
+    return nullptr;
+}
+
 QVector<OverlayLineSample> overlayLineSamples(QSGNode *root) {
     QVector<OverlayLineSample> samples;
-    if (root == nullptr || root->childCount() <= 4) {
+    if (root == nullptr) {
         return samples;
     }
 
-    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(root->childAtIndex(4));
+    auto *overlayNode = overlayLineNode(root);
     if (overlayNode == nullptr || overlayNode->geometry() == nullptr) {
         return samples;
     }
@@ -474,21 +511,30 @@ QSGSimpleTextureNode *findTopLevelTextureChild(QSGNode *root, int ordinal) {
     return nullptr;
 }
 
-QSGGeometryNode *spectrogramBodyMaterialNode(QSGNode *root) {
+QSGGeometryNode *spectrogramBodyMaterialNode(QSGNode *root, int ordinal = 0) {
     if (root == nullptr) {
         return nullptr;
     }
 
+    int seen = 0;
     for (QSGNode *child = root->firstChild(); child != nullptr; child = child->nextSibling()) {
         auto *geometryNode = dynamic_cast<QSGGeometryNode *>(child);
         if (geometryNode == nullptr) {
             continue;
         }
-        if (dynamic_cast<SpectrogramBodyMaterial *>(geometryNode->material()) != nullptr) {
+        if (dynamic_cast<SpectrogramBodyMaterial *>(geometryNode->material()) == nullptr) {
+            continue;
+        }
+        if (seen == ordinal) {
             return geometryNode;
         }
+        ++seen;
     }
     return nullptr;
+}
+
+QSGGeometryNode *spectrogramTailMaterialNode(QSGNode *root) {
+    return spectrogramBodyMaterialNode(root, 1);
 }
 
 QSGSimpleTextureNode *spectrogramBodyTextureNode(QSGNode *root) {
@@ -500,21 +546,21 @@ QSGSimpleTextureNode *spectrogramTailTextureNode(QSGNode *root) {
 }
 
 SpectrogramBodyMaterial *spectrogramBodyMaterial(QSGNode *root) {
-    auto *materialNode = spectrogramBodyMaterialNode(root);
+    auto *materialNode = spectrogramBodyMaterialNode(root, 0);
     if (materialNode == nullptr) {
         return nullptr;
     }
     return dynamic_cast<SpectrogramBodyMaterial *>(materialNode->material());
 }
 
-bool geometryHasVisibleArea(QSGGeometryNode *node) {
+QRectF geometryBounds(QSGGeometryNode *node) {
     if (node == nullptr || node->geometry() == nullptr) {
-        return false;
+        return QRectF();
     }
 
     const QSGGeometry *geometry = node->geometry();
     if (geometry->vertexCount() < 4) {
-        return false;
+        return QRectF();
     }
 
     const auto *vertices = geometry->vertexDataAsTexturedPoint2D();
@@ -528,7 +574,16 @@ bool geometryHasVisibleArea(QSGGeometryNode *node) {
         minY = std::min(minY, vertices[i].y);
         maxY = std::max(maxY, vertices[i].y);
     }
-    return maxX > minX && maxY > minY;
+    return QRectF(
+        static_cast<double>(minX),
+        static_cast<double>(minY),
+        static_cast<double>(maxX - minX),
+        static_cast<double>(maxY - minY));
+}
+
+bool geometryHasVisibleArea(QSGGeometryNode *node) {
+    const QRectF bounds = geometryBounds(node);
+    return bounds.width() > 0.0 && bounds.height() > 0.0;
 }
 
 void assertFullModeBodyNodeInvariants(QSGNode *root, const char *context) {
@@ -4937,10 +4992,10 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksPlayhead() {
     QVERIFY(node != nullptr);
     QVERIFY(node->childCount() >= 6);
 
-    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
+    auto *overlayNode = overlayLineNode(node);
     QVERIFY2(overlayNode != nullptr, "precomputed path should publish overlay lines as a geometry node");
 
-    auto *playheadRect = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(5));
+    auto *playheadRect = playheadRectNode(node);
     QVERIFY(playheadRect != nullptr);
     QVERIFY2(playheadRect->rect().isEmpty(),
              "CPU playhead rect must be suppressed when geometry overlay lines are active");
@@ -4989,7 +5044,7 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
 
-    auto *overlayNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
+    auto *overlayNode = overlayLineNode(node);
     QVERIFY2(overlayNode != nullptr, "overlay lines should be rendered through a public geometry node");
 
     const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
@@ -6040,7 +6095,7 @@ void QmlSmokeTest::spectrogramActiveRendererUsesPublicBodyTextureOnly() {
     QVERIFY(node != nullptr);
 
     auto *background = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(0));
-    auto *overlayLineNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
+    auto *overlayNode = overlayLineNode(node);
 
     QVERIFY(background != nullptr);
     QCOMPARE(background->color(), QColor(0, 0, 0, 255));
@@ -6050,7 +6105,7 @@ void QmlSmokeTest::spectrogramActiveRendererUsesPublicBodyTextureOnly() {
         node,
         "centered full mode should keep the material node active and the legacy body texture node empty");
 
-    QVERIFY(overlayLineNode != nullptr);
+    QVERIFY(overlayNode != nullptr);
     delete node;
 }
 
@@ -6079,7 +6134,7 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeO
     QVERIFY(node != nullptr);
 
     auto *background = dynamic_cast<QSGSimpleRectNode *>(node->childAtIndex(0));
-    auto *overlayLineNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(4));
+    auto *overlayNode = overlayLineNode(node);
 
     QVERIFY(background != nullptr);
     QCOMPARE(background->color(), QColor(0, 0, 0, 255));
@@ -6089,7 +6144,7 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeO
         node,
         "rolling full mode should keep the material node active and the legacy body texture node empty");
 
-    QVERIFY(overlayLineNode != nullptr);
+    QVERIFY(overlayNode != nullptr);
     delete node;
 }
 
@@ -6153,14 +6208,14 @@ void QmlSmokeTest::spectrogramGpuTextureUploadSkipsRedundantRecreation() {
     QSGNode *node = item->updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(node->childCount() >= 2);
-    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(1));
+    auto *textureNode = spectrogramBodyTextureNode(node);
     QVERIFY(textureNode != nullptr);
     QSGTexture *initialTexture = textureNode->texture();
     QVERIFY(initialTexture != nullptr);
 
     QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
-    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(1));
+    auto *updatedTextureNode = spectrogramBodyTextureNode(updatedNode);
     QVERIFY(updatedTextureNode != nullptr);
     QVERIFY(updatedTextureNode->texture() == initialTexture);
 
@@ -6205,7 +6260,7 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
 
     QSGNode *node = item->updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    auto *textureNode = static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *textureNode = spectrogramBodyTextureNode(node);
     QVERIFY(textureNode != nullptr);
     QSGTexture *initialTexture = textureNode->texture();
     QVERIFY(initialTexture != nullptr);
@@ -6230,7 +6285,7 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
 
     QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
-    auto *updatedTextureNode = static_cast<QSGSimpleTextureNode *>(updatedNode->childAtIndex(2));
+    auto *updatedTextureNode = spectrogramBodyTextureNode(updatedNode);
     QVERIFY(updatedTextureNode != nullptr);
     QVERIFY2(
         updatedTextureNode->texture() == initialTexture,
@@ -6281,10 +6336,10 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    auto *initialBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    auto *initialBodyMaterialNode = spectrogramBodyMaterialNode(node);
     QVERIFY(initialBodyMaterialNode != nullptr);
     QVERIFY(initialBodyMaterialNode->material() != nullptr);
-    auto *initialBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *initialBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(initialBodyTextureNode != nullptr);
     QVERIFY(
         initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
@@ -6311,10 +6366,10 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
         QVERIFY(node != nullptr);
     }
 
-    auto *finalBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    auto *finalBodyMaterialNode = spectrogramBodyMaterialNode(node);
     QVERIFY(finalBodyMaterialNode != nullptr);
     QVERIFY(finalBodyMaterialNode->material() != nullptr);
-    auto *finalBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *finalBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(finalBodyTextureNode != nullptr);
     QVERIFY(
         finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
@@ -6364,10 +6419,10 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    auto *initialBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    auto *initialBodyMaterialNode = spectrogramBodyMaterialNode(node);
     QVERIFY(initialBodyMaterialNode != nullptr);
     QVERIFY(initialBodyMaterialNode->material() != nullptr);
-    auto *initialBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *initialBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(initialBodyTextureNode != nullptr);
     QVERIFY(
         initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
@@ -6393,10 +6448,10 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
         QVERIFY(node != nullptr);
     }
 
-    auto *finalBodyMaterialNode = dynamic_cast<QSGGeometryNode *>(node->childAtIndex(1));
+    auto *finalBodyMaterialNode = spectrogramBodyMaterialNode(node);
     QVERIFY(finalBodyMaterialNode != nullptr);
     QVERIFY(finalBodyMaterialNode->material() != nullptr);
-    auto *finalBodyTextureNode = dynamic_cast<QSGSimpleTextureNode *>(node->childAtIndex(2));
+    auto *finalBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(finalBodyTextureNode != nullptr);
     QVERIFY(
         finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
@@ -6531,11 +6586,16 @@ void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScrol
     QVERIFY(afterMaterial != nullptr);
     QVERIFY(afterMaterial->state.sourceTexture != nullptr);
     QCOMPARE(afterMaterial->state.sourceTexture->comparisonKey(), beforeBaseTextureKey);
+    auto *afterTailMaterialNode = spectrogramTailMaterialNode(node.get());
+    QVERIFY(afterTailMaterialNode != nullptr);
+    QVERIFY2(
+        geometryHasVisibleArea(afterTailMaterialNode),
+        "rolling full mode should render the incremental right-edge tail through a material-backed node");
     auto *afterTailTextureNode = spectrogramTailTextureNode(node.get());
     QVERIFY(afterTailTextureNode != nullptr);
     QVERIFY2(
-        afterTailTextureNode->texture() != nullptr && !afterTailTextureNode->rect().isEmpty(),
-        "rolling full mode should advance via a visible tail texture instead of reuploading the whole body texture");
+        afterTailTextureNode->texture() == nullptr || afterTailTextureNode->rect().isEmpty(),
+        "rolling full mode should keep the legacy tail texture node empty once the tail is rendered through the material path");
 
     QTest::qWait(30);
     QCoreApplication::processEvents();
@@ -6668,16 +6728,21 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
     QVERIFY(materialNode != nullptr);
     QVERIFY(materialNode->geometry() != nullptr);
 
+    auto *tailMaterialNode = spectrogramTailMaterialNode(node.get());
+    QVERIFY(tailMaterialNode != nullptr);
+    QVERIFY(tailMaterialNode->geometry() != nullptr);
+
     auto *tailNode = spectrogramTailTextureNode(node.get());
     QVERIFY(tailNode != nullptr);
     QVERIFY2(
-        tailNode->texture() != nullptr && !tailNode->rect().isEmpty(),
-        "incremental full mode should expose a visible tail segment");
+        tailNode->texture() == nullptr || tailNode->rect().isEmpty(),
+        "incremental full mode should keep the raw tail texture node hidden in full mode");
 
     const double expectedTailWidth =
         static_cast<double>(advanceSteps) * expectedEffectiveZoom;
     const double expectedSeamX =
         static_cast<double>(window.width()) - expectedTailWidth;
+    const QRectF tailBounds = geometryBounds(tailMaterialNode);
 
     const auto *vertices = materialNode->geometry()->vertexDataAsTexturedPoint2D();
     float maxX = vertices[0].x;
@@ -6693,19 +6758,19 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
         minU > 0.0F,
         "incremental full mode should crop the material body away from the stale left edge of the base texture");
     QVERIFY2(
-        std::abs(tailNode->rect().width() - expectedTailWidth) <= 1.0,
+        std::abs(tailBounds.width() - expectedTailWidth) <= 1.0,
         "incremental full mode should size the tail segment in viewport pixels at non-unit zoom");
     QVERIFY2(
-        std::abs(tailNode->rect().x() - expectedSeamX) <= 1.0,
+        std::abs(tailBounds.x() - expectedSeamX) <= 1.0,
         "incremental full mode should place the tail seam in viewport pixels at non-unit zoom");
     QVERIFY2(
         std::abs(static_cast<double>(maxX) - expectedSeamX) <= 1.0,
         "incremental full mode should stop the material body at the viewport-pixel seam");
     QVERIFY2(
-        std::abs(static_cast<double>(maxX) - tailNode->rect().x()) <= 1.0,
+        std::abs(static_cast<double>(maxX) - tailBounds.x()) <= 1.0,
         "incremental full mode should keep the material body aligned with the tail segment");
     QVERIFY2(
-        tailNode->rect().x() < static_cast<double>(window.width()),
+        tailBounds.x() < static_cast<double>(window.width()),
         "incremental full mode should keep the tail seam inside the viewport");
     QVERIFY2(
         maxU > minU,
@@ -7875,16 +7940,19 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
     item->setCrosshairEnabled(false);
     item->setShowFpsOverlay(false);
     item->setPlaying(false);
+    item->setDbRange(96.0);
 
     constexpr int bins = 64;
-    constexpr int totalColumns = 240;
-    QByteArray chunk(bins * totalColumns, '\x00');
-    for (int column = 0; column < totalColumns; ++column) {
+    constexpr double expectedEffectiveZoom = 0.5;
+    constexpr int initialColumns = 480;
+    constexpr int quietValue = 32;
+    constexpr int loudValue = 224;
+    constexpr int advanceSteps = 24;
+    QByteArray initialChunk(bins * initialColumns, '\x00');
+    for (int column = 0; column < initialColumns; ++column) {
         for (int bin = 0; bin < bins; ++bin) {
-            const int base = 48 + (column * 160) / std::max(1, totalColumns - 1);
-            const int ripple = (bin * 40) / std::max(1, bins - 1);
-            chunk[column * bins + bin] = static_cast<char>(
-                static_cast<unsigned char>(std::min(255, base + ripple)));
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(quietValue));
         }
     }
 
@@ -7892,23 +7960,77 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
     QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
 
     item->feedPrecomputedChunk(
-        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024,
+        initialChunk, bins, 0, initialColumns, 0, initialColumns, 48000, 1024,
         false, true, 31, false);
-    item->setPositionSeconds(2.0);
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item->m_zoomLevel = expectedEffectiveZoom;
+        item->m_renderZoomLevel = expectedEffectiveZoom;
+        item->m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item->m_positionAnchorSeconds = item->m_positionSeconds;
+        item->m_positionAnchorUpdatedAt = now;
+        item->m_positionAnchorInitialized = true;
+    }
 
     QCoreApplication::processEvents();
     QTest::qWait(50);
     QCoreApplication::processEvents();
 
-    QScopedPointer<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
-    QVERIFY(!node.isNull());
+    std::unique_ptr<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
     assertFullModeBodyNodeInvariants(
-        node.data(),
+        node.get(),
         "rolling full-mode capture should bind the spectrogram source texture into the material node");
+
+    QColor expectedQuietColor;
+    QColor expectedTailColor;
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        expectedQuietColor = expectedPaletteColorForIntensity(*item, quietValue);
+        expectedTailColor = expectedPaletteColorForIntensity(*item, loudValue);
+    }
+
+    for (int step = 0; step < advanceSteps; ++step) {
+        QByteArray nextChunk(bins, '\0');
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[bin] = static_cast<char>(
+                static_cast<unsigned char>(loudValue));
+        }
+        item->feedPrecomputedChunk(
+            nextChunk, bins, 0, 1,
+            initialColumns + step, 8192, 48000, 1024, false, false, 31, false);
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            const auto now = std::chrono::steady_clock::now();
+            item->m_positionSeconds =
+                ((static_cast<double>(initialColumns + step) + 0.25) * 1024.0) / 48000.0;
+            item->m_positionAnchorSeconds = item->m_positionSeconds;
+            item->m_positionAnchorUpdatedAt = now;
+            item->m_positionAnchorInitialized = true;
+        }
+        QCoreApplication::processEvents();
+        node.reset(item->updatePaintNode(node.release(), nullptr));
+        QVERIFY(node != nullptr);
+    }
+
+    QTest::qWait(30);
+    QCoreApplication::processEvents();
+
+    assertFullModeBodyNodeInvariants(
+        node.get(),
+        "rolling full-mode incremental capture should keep the material-backed base body active");
+
+    auto *tailNode = spectrogramTailTextureNode(node.get());
+    QVERIFY(tailNode != nullptr);
+    QVERIFY2(
+        tailNode->texture() == nullptr || tailNode->rect().isEmpty(),
+        "rolling full-mode should not expose the incremental right-edge tail through the raw texture node");
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.data());
+        auto *material = spectrogramBodyMaterial(node.get());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.sourceTexture != nullptr,
@@ -7919,14 +8041,33 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
         QVERIFY2(
             material->state.paletteTexture != nullptr,
             "software fallback should still bind the rolling full-mode palette lookup texture");
+        auto *tailMaterialNode = spectrogramTailMaterialNode(node.get());
+        QVERIFY2(
+            tailMaterialNode != nullptr,
+            "software fallback should still keep a dedicated material-backed tail node in rolling full mode");
+        QVERIFY2(
+            geometryHasVisibleArea(tailMaterialNode),
+            "software fallback should keep the rolling tail material node visible once incremental advance is active");
+        auto *tailMaterial =
+            dynamic_cast<SpectrogramBodyMaterial *>(tailMaterialNode->material());
+        QVERIFY(tailMaterial != nullptr);
+        QVERIFY2(
+            tailMaterial->state.sourceTexture != nullptr,
+            "software fallback should bind the incremental right-edge tail source texture into the tail material");
+        QVERIFY2(
+            tailMaterial->state.dbRemapTexture != nullptr,
+            "software fallback should bind the dB remap lookup into the tail material");
+        QVERIFY2(
+            tailMaterial->state.paletteTexture != nullptr,
+            "software fallback should bind the palette lookup into the tail material");
+        QVERIFY2(
+            tailMaterial->state.sourceSize.width() > 0
+                && tailMaterial->state.sourceSize.width() < material->state.sourceSize.width(),
+            "software fallback should keep the tail material bound to a narrower uploaded tail segment than the base body source");
         {
             QMutexLocker lock(&item->m_stateMutex);
             assertUploadedPaletteOrdering(*item);
         }
-        auto *tailNode = spectrogramTailTextureNode(node.data());
-        QVERIFY(tailNode != nullptr);
-        QVERIFY(
-            tailNode->texture() == nullptr || tailNode->rect().isEmpty());
         QSKIP(qPrintable(
             QStringLiteral(
                 "Skipping rolling full-mode palette pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
@@ -7936,28 +8077,34 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
     const QImage frame = window.grabWindow();
     QVERIFY(!frame.isNull());
 
-    const QRect bodyRegion(40, 15, 160, 80);
-    const QRect bounded = bodyRegion.intersected(frame.rect());
-    int visiblePixels = 0;
-    int nonGrayPixels = 0;
-    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
-        for (int x = bounded.left(); x <= bounded.right(); ++x) {
-            const QColor pixel = frame.pixelColor(x, y);
-            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
-                ++visiblePixels;
-                if (pixel.red() != pixel.green() || pixel.green() != pixel.blue()) {
-                    ++nonGrayPixels;
-                }
-            }
-        }
-    }
+    const int tailWidth = static_cast<int>(std::lround(
+        static_cast<double>(advanceSteps) * expectedEffectiveZoom));
+    const QRect tailRegion(window.width() - tailWidth + 2, 16, tailWidth - 4, 88);
+    const QRect quietRegion(20, 16, 24, 88);
+    int tailVisiblePixels = 0;
+    int quietVisiblePixels = 0;
+    const QColor tailAverage = averageVisibleColorInRect(frame, tailRegion, 8, &tailVisiblePixels);
+    const QColor quietAverage = averageVisibleColorInRect(frame, quietRegion, 8, &quietVisiblePixels);
+    const QColor rawTailColor(loudValue, loudValue, loudValue);
 
     QVERIFY2(
-        visiblePixels > 100,
-        "rolling full-mode public shader path should render visible body pixels");
+        tailVisiblePixels > 100,
+        "rolling full-mode public shader path should render visible right-edge tail pixels");
     QVERIFY2(
-        nonGrayPixels > 100,
-        "rolling full-mode public shader path should render palette-mapped non-gray pixels");
+        quietVisiblePixels > 100,
+        "rolling full-mode public shader path should keep visible base-body pixels after incremental advance");
+    QVERIFY2(
+        manhattanColorDistance(tailAverage, expectedTailColor)
+            < manhattanColorDistance(tailAverage, rawTailColor),
+        "rolling full-mode right-edge tail should stay closer to the palette-mapped loud color than to the raw grayscale source");
+    QVERIFY2(
+        manhattanColorDistance(tailAverage, expectedTailColor)
+            < manhattanColorDistance(tailAverage, expectedQuietColor),
+        "rolling full-mode right-edge tail should reflect the advanced loud columns, not the quiet base body");
+    QVERIFY2(
+        manhattanColorDistance(quietAverage, expectedQuietColor)
+            < manhattanColorDistance(quietAverage, expectedTailColor),
+        "rolling full-mode base body should keep the quiet palette-mapped color after the incremental tail advance");
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullMode() {

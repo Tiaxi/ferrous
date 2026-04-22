@@ -177,6 +177,7 @@ struct SpectrogramSceneNode final : public QSGNode {
         spectrogramTextureDebugMode = SpectrogramGpu::currentDebugMode();
         background = new QSGSimpleRectNode();
         spectrogramMaterialNode = createSpectrogramBodyMaterialNode();
+        spectrogramTailMaterialNode = createSpectrogramBodyMaterialNode();
         spectrogramTexture = new QSGSimpleTextureNode();
         spectrogramTailTexture = new QSGSimpleTextureNode();
         overlayLines = new QSGGeometryNode();
@@ -188,12 +189,15 @@ struct SpectrogramSceneNode final : public QSGNode {
         appendChildNode(background);
         if (spectrogramTextureDebugMode == SpectrogramGpu::DebugMode::TextureNode) {
             appendChildNode(spectrogramTexture);
+            appendChildNode(spectrogramTailTexture);
             appendChildNode(spectrogramMaterialNode);
+            appendChildNode(spectrogramTailMaterialNode);
         } else {
             appendChildNode(spectrogramMaterialNode);
+            appendChildNode(spectrogramTailMaterialNode);
             appendChildNode(spectrogramTexture);
+            appendChildNode(spectrogramTailTexture);
         }
-        appendChildNode(spectrogramTailTexture);
         appendChildNode(overlayLines);
         appendChildNode(playhead);
         appendChildNode(freqGridOverlay);
@@ -230,6 +234,7 @@ struct SpectrogramSceneNode final : public QSGNode {
 
     QSGSimpleRectNode *background{nullptr};
     QSGGeometryNode *spectrogramMaterialNode{nullptr};
+    QSGGeometryNode *spectrogramTailMaterialNode{nullptr};
     QSGSimpleTextureNode *spectrogramTexture{nullptr};
     QSGSimpleTextureNode *spectrogramTailTexture{nullptr};
     QSGGeometryNode *overlayLines{nullptr};
@@ -2912,18 +2917,44 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         bodyState);
 
     double segmentX = baseTargetRect.x() + baseTargetRect.width();
+    SpectrogramBodyMaterial::State tailBodyState;
+    tailBodyState.sourceTexture =
+        useTextureNodeBody ? nullptr : node->spectrogramTailTextureResource;
+    tailBodyState.dbRemapTexture =
+        useTextureNodeBody ? nullptr : node->spectrogramDbRemapTextureResource;
+    tailBodyState.paletteTexture =
+        useTextureNodeBody ? nullptr : node->spectrogramPaletteTextureResource;
+    tailBodyState.sourceSize = QSize(
+        node->spectrogramTailTextureWidth,
+        spectrogramSourceRect.height());
+    tailBodyState.targetSize = spectrogramTargetRect.size().toSize();
+    tailBodyState.sourceSubRect = QRectF(0.0, 0.0, 1.0, 1.0);
+    tailBodyState.drawOffset = QPointF();
+    tailBodyState.effectiveZoom = effectiveZoomLocked();
+    tailBodyState.subpixelOffset = spectrogramSubpixelOffset;
+    tailBodyState.debugStage = static_cast<int>(gpuDebugMode);
+    QRectF tailTargetRect;
     if (showSpectrogram && node->spectrogramTailTextureResource != nullptr) {
-        configureTextureNode(
-            node->spectrogramTailTexture,
-            node->spectrogramTailTextureResource,
-            QRectF(
-                segmentX,
-                spectrogramTargetRect.y(),
-                viewportWidthForSourceColumns(node->spectrogramTailTextureWidth),
-                spectrogramTargetRect.height()),
-            QRect(0, 0, node->spectrogramTailTextureWidth, spectrogramSourceRect.height()),
-            node->placeholderTexture);
-        segmentX += viewportWidthForSourceColumns(node->spectrogramTailTextureWidth);
+        tailTargetRect = QRectF(
+            segmentX,
+            spectrogramTargetRect.y(),
+            viewportWidthForSourceColumns(node->spectrogramTailTextureWidth),
+            spectrogramTargetRect.height());
+        if (useTextureNodeBody) {
+            configureTextureNode(
+                node->spectrogramTailTexture,
+                node->spectrogramTailTextureResource,
+                tailTargetRect,
+                QRect(0, 0, node->spectrogramTailTextureWidth, spectrogramSourceRect.height()),
+                node->placeholderTexture);
+        } else {
+            configureTextureNode(
+                node->spectrogramTailTexture,
+                nullptr,
+                QRectF(),
+                QRect(),
+                node->placeholderTexture);
+        }
     } else {
         configureTextureNode(
             node->spectrogramTailTexture,
@@ -2932,6 +2963,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             QRect(),
             node->placeholderTexture);
     }
+    syncSpectrogramBodyMaterialNode(
+        node->spectrogramTailMaterialNode,
+        showSpectrogram ? tailTargetRect : QRectF(),
+        tailBodyState);
 
     const bool overlayLinesActive =
         !freqGridLines.isEmpty()
