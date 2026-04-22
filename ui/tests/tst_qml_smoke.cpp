@@ -16,6 +16,7 @@
 #include <QSGRendererInterface>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
+#include <QSGTextureMaterial>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -511,7 +512,7 @@ QSGSimpleTextureNode *findTopLevelTextureChild(QSGNode *root, int ordinal) {
     return nullptr;
 }
 
-QSGGeometryNode *spectrogramBodyMaterialNode(QSGNode *root, int ordinal = 0) {
+QSGGeometryNode *spectrogramBodySampleMaterialNode(QSGNode *root, int ordinal = 0) {
     if (root == nullptr) {
         return nullptr;
     }
@@ -522,7 +523,7 @@ QSGGeometryNode *spectrogramBodyMaterialNode(QSGNode *root, int ordinal = 0) {
         if (geometryNode == nullptr) {
             continue;
         }
-        if (dynamic_cast<SpectrogramBodyMaterial *>(geometryNode->material()) == nullptr) {
+        if (dynamic_cast<SpectrogramBodySampleMaterial *>(geometryNode->material()) == nullptr) {
             continue;
         }
         if (seen == ordinal) {
@@ -533,8 +534,52 @@ QSGGeometryNode *spectrogramBodyMaterialNode(QSGNode *root, int ordinal = 0) {
     return nullptr;
 }
 
-QSGGeometryNode *spectrogramTailMaterialNode(QSGNode *root) {
-    return spectrogramBodyMaterialNode(root, 1);
+QSGGeometryNode *spectrogramTailSampleMaterialNode(QSGNode *root) {
+    return spectrogramBodySampleMaterialNode(root, 1);
+}
+
+QSGGeometryNode *spectrogramStockMaterialNode(QSGNode *root, int ordinal = 0) {
+    if (root == nullptr) {
+        return nullptr;
+    }
+
+    int seen = 0;
+    for (QSGNode *child = root->firstChild(); child != nullptr; child = child->nextSibling()) {
+        auto *geometryNode = dynamic_cast<QSGGeometryNode *>(child);
+        if (geometryNode == nullptr) {
+            continue;
+        }
+        if (dynamic_cast<QSGTextureMaterial *>(geometryNode->material()) == nullptr) {
+            continue;
+        }
+        if (seen == ordinal) {
+            return geometryNode;
+        }
+        ++seen;
+    }
+    return nullptr;
+}
+
+QSGGeometryNode *spectrogramSourceSampleMaterialNode(QSGNode *root, int ordinal = 0) {
+    if (root == nullptr) {
+        return nullptr;
+    }
+
+    int seen = 0;
+    for (QSGNode *child = root->firstChild(); child != nullptr; child = child->nextSibling()) {
+        auto *geometryNode = dynamic_cast<QSGGeometryNode *>(child);
+        if (geometryNode == nullptr) {
+            continue;
+        }
+        if (dynamic_cast<SpectrogramSourceSampleMaterial *>(geometryNode->material()) == nullptr) {
+            continue;
+        }
+        if (seen == ordinal) {
+            return geometryNode;
+        }
+        ++seen;
+    }
+    return nullptr;
 }
 
 QSGSimpleTextureNode *spectrogramBodyTextureNode(QSGNode *root) {
@@ -543,14 +588,6 @@ QSGSimpleTextureNode *spectrogramBodyTextureNode(QSGNode *root) {
 
 QSGSimpleTextureNode *spectrogramTailTextureNode(QSGNode *root) {
     return findTopLevelTextureChild(root, 1);
-}
-
-SpectrogramBodyMaterial *spectrogramBodyMaterial(QSGNode *root) {
-    auto *materialNode = spectrogramBodyMaterialNode(root, 0);
-    if (materialNode == nullptr) {
-        return nullptr;
-    }
-    return dynamic_cast<SpectrogramBodyMaterial *>(materialNode->material());
 }
 
 QRectF geometryBounds(QSGGeometryNode *node) {
@@ -587,30 +624,27 @@ bool geometryHasVisibleArea(QSGGeometryNode *node) {
 }
 
 void assertFullModeBodyNodeInvariants(QSGNode *root, const char *context) {
-    auto *materialNode = spectrogramBodyMaterialNode(root);
-    QVERIFY2(materialNode != nullptr, context);
-
-    auto *material = spectrogramBodyMaterial(root);
-    QVERIFY2(material != nullptr, context);
-    QVERIFY2(material->state.sourceTexture != nullptr, context);
+    auto *sampleNode = spectrogramBodySampleMaterialNode(root);
+    QVERIFY2(sampleNode != nullptr, context);
+    QVERIFY2(geometryHasVisibleArea(sampleNode), context);
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY2(sampleMaterial != nullptr, context);
+    QVERIFY2(sampleMaterial->state.sourceTexture != nullptr, context);
+    QVERIFY2(sampleMaterial->state.dbRemapTexture != nullptr, context);
+    QVERIFY2(sampleMaterial->state.paletteTexture != nullptr, context);
 
     auto *bodyTextureNode = spectrogramBodyTextureNode(root);
     QVERIFY2(bodyTextureNode != nullptr, context);
     QVERIFY2(
         bodyTextureNode->texture() == nullptr || bodyTextureNode->rect().isEmpty(),
         context);
-
-    QVERIFY2(geometryHasVisibleArea(materialNode), context);
 }
 
 void assertTextureNodeDebugBodyInvariants(QSGNode *root, const char *context) {
-    auto *materialNode = spectrogramBodyMaterialNode(root);
-    QVERIFY2(materialNode != nullptr, context);
-
-    auto *material = spectrogramBodyMaterial(root);
-    QVERIFY2(material != nullptr, context);
-    QVERIFY2(material->state.sourceTexture != nullptr, context);
-    QVERIFY2(!geometryHasVisibleArea(materialNode), context);
+    auto *sampleNode = spectrogramBodySampleMaterialNode(root);
+    QVERIFY2(sampleNode != nullptr, context);
+    QVERIFY2(!geometryHasVisibleArea(sampleNode), context);
 
     auto *bodyTextureNode = spectrogramBodyTextureNode(root);
     QVERIFY2(bodyTextureNode != nullptr, context);
@@ -774,7 +808,7 @@ void assertUploadedPaletteOrdering(const SpectrogramItem &item) {
 void assertFragmentShaderInvertsPaletteLookup() {
     const QString shaderPath = QFileInfo(QString::fromUtf8(__FILE__))
         .dir()
-        .absoluteFilePath(QStringLiteral("../src/shaders/SpectrogramBody.frag"));
+        .absoluteFilePath(QStringLiteral("../src/shaders/SpectrogramBodySample.frag"));
     QFile shaderFile(shaderPath);
     QVERIFY2(
         shaderFile.open(QIODevice::ReadOnly | QIODevice::Text),
@@ -859,6 +893,13 @@ private slots:
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void testMutedChannelRendersGrayscale();
     void spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode();
+    void spectrogramGpuSourceOnlySampleDebugModeUsesSampleMaterialNode();
+    void spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode();
+    void spectrogramGpuFullModeUsesSampleBodyMaterialNode();
+    void spectrogramGpuSampleMaterialsBindSourceTextureAtZero();
+    void spectrogramGpuSampledTexturesCommitPendingUploads();
+    void spectrogramGpuSampleMaterialNodesFlipVerticalTextureCoords();
+    void spectrogramGpuSamplerLoggingIgnoresPlaceholderTextureSize();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
@@ -5995,9 +6036,19 @@ void QmlSmokeTest::spectrogramGpuImagesUseRgbaCompatibleFormats() {
         const QColor brightSample = item.m_gpuSourceImage.pixelColor(50, 0);
         const QColor darkSample = item.m_gpuSourceImage.pixelColor(0, 0);
         QVERIFY(brightSample.red() > darkSample.red());
+        QCOMPARE(brightSample.red(), brightSample.green());
+        QCOMPARE(brightSample.green(), brightSample.blue());
+        QCOMPARE(darkSample.red(), darkSample.green());
+        QCOMPARE(darkSample.green(), darkSample.blue());
         QCOMPARE(brightSample.alpha(), 255);
         QVERIFY(!item.m_gpuDisplayImage.isNull());
         QCOMPARE(item.m_gpuDisplayImage.format(), QImage::Format_ARGB32_Premultiplied);
+
+        item.syncPrecomputedGpuLookupImagesLocked();
+        QVERIFY(!item.m_gpuDbRemapImage.isNull());
+        const QColor remapSample = item.m_gpuDbRemapImage.pixelColor(128, 0);
+        QCOMPARE(remapSample.red(), remapSample.green());
+        QCOMPARE(remapSample.green(), remapSample.blue());
     }
 }
 
@@ -6009,11 +6060,11 @@ void QmlSmokeTest::spectrogramGpuDebugModeParsesEnvironmentValues() {
         SpectrogramGpu::parseDebugModeForTests("texture-node"),
         SpectrogramGpu::DebugMode::TextureNode);
     QCOMPARE(
-        SpectrogramGpu::parseDebugModeForTests("shader-solid"),
-        SpectrogramGpu::DebugMode::Full);
+        SpectrogramGpu::parseDebugModeForTests("shader-source-only"),
+        SpectrogramGpu::DebugMode::ShaderSourceOnly);
     QCOMPARE(
-        SpectrogramGpu::parseDebugModeForTests("shader-source"),
-        SpectrogramGpu::DebugMode::Full);
+        SpectrogramGpu::parseDebugModeForTests("stock-material"),
+        SpectrogramGpu::DebugMode::StockMaterial);
     QCOMPARE(
         SpectrogramGpu::parseDebugModeForTests("geometry-solid"),
         SpectrogramGpu::DebugMode::Full);
@@ -6338,7 +6389,7 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    auto *initialBodyMaterialNode = spectrogramBodyMaterialNode(node);
+    auto *initialBodyMaterialNode = spectrogramBodySampleMaterialNode(node);
     QVERIFY(initialBodyMaterialNode != nullptr);
     QVERIFY(initialBodyMaterialNode->material() != nullptr);
     auto *initialBodyTextureNode = spectrogramBodyTextureNode(node);
@@ -6368,7 +6419,7 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
         QVERIFY(node != nullptr);
     }
 
-    auto *finalBodyMaterialNode = spectrogramBodyMaterialNode(node);
+    auto *finalBodyMaterialNode = spectrogramBodySampleMaterialNode(node);
     QVERIFY(finalBodyMaterialNode != nullptr);
     QVERIFY(finalBodyMaterialNode->material() != nullptr);
     auto *finalBodyTextureNode = spectrogramBodyTextureNode(node);
@@ -6421,7 +6472,7 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
-    auto *initialBodyMaterialNode = spectrogramBodyMaterialNode(node);
+    auto *initialBodyMaterialNode = spectrogramBodySampleMaterialNode(node);
     QVERIFY(initialBodyMaterialNode != nullptr);
     QVERIFY(initialBodyMaterialNode->material() != nullptr);
     auto *initialBodyTextureNode = spectrogramBodyTextureNode(node);
@@ -6450,7 +6501,7 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
         QVERIFY(node != nullptr);
     }
 
-    auto *finalBodyMaterialNode = spectrogramBodyMaterialNode(node);
+    auto *finalBodyMaterialNode = spectrogramBodySampleMaterialNode(node);
     QVERIFY(finalBodyMaterialNode != nullptr);
     QVERIFY(finalBodyMaterialNode->material() != nullptr);
     auto *finalBodyTextureNode = spectrogramBodyTextureNode(node);
@@ -6531,7 +6582,10 @@ void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScrol
     assertFullModeBodyNodeInvariants(
         node.get(),
         "rolling full mode should keep the material node bound after long segmented scroll");
-    auto *beforeMaterial = spectrogramBodyMaterial(node.get());
+    auto *beforeMaterialNode = spectrogramBodySampleMaterialNode(node.get());
+    QVERIFY(beforeMaterialNode != nullptr);
+    auto *beforeMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(beforeMaterialNode->material());
     QVERIFY(beforeMaterial != nullptr);
     QSGTexture *beforeBaseTexture = beforeMaterial->state.sourceTexture;
     QVERIFY(beforeBaseTexture != nullptr);
@@ -6584,11 +6638,14 @@ void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScrol
     assertFullModeBodyNodeInvariants(
         node.get(),
         "rolling full mode should keep the material node bound after additional right-edge updates");
-    auto *afterMaterial = spectrogramBodyMaterial(node.get());
+    auto *afterMaterialNode = spectrogramBodySampleMaterialNode(node.get());
+    QVERIFY(afterMaterialNode != nullptr);
+    auto *afterMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(afterMaterialNode->material());
     QVERIFY(afterMaterial != nullptr);
     QVERIFY(afterMaterial->state.sourceTexture != nullptr);
     QCOMPARE(afterMaterial->state.sourceTexture->comparisonKey(), beforeBaseTextureKey);
-    auto *afterTailMaterialNode = spectrogramTailMaterialNode(node.get());
+    auto *afterTailMaterialNode = spectrogramTailSampleMaterialNode(node.get());
     QVERIFY(afterTailMaterialNode != nullptr);
     QVERIFY2(
         geometryHasVisibleArea(afterTailMaterialNode),
@@ -6726,11 +6783,11 @@ void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegio
         node.get(),
         "rolling full mode should keep the material node active while advancing incrementally");
 
-    auto *materialNode = spectrogramBodyMaterialNode(node.get());
+    auto *materialNode = spectrogramBodySampleMaterialNode(node.get());
     QVERIFY(materialNode != nullptr);
     QVERIFY(materialNode->geometry() != nullptr);
 
-    auto *tailMaterialNode = spectrogramTailMaterialNode(node.get());
+    auto *tailMaterialNode = spectrogramTailSampleMaterialNode(node.get());
     QVERIFY(tailMaterialNode != nullptr);
     QVERIFY(tailMaterialNode->geometry() != nullptr);
 
@@ -7763,7 +7820,10 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisiblePaletteMappedPixelsInF
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.data());
+        auto *materialNode = spectrogramBodySampleMaterialNode(node.data());
+        QVERIFY(materialNode != nullptr);
+        auto *material =
+            dynamic_cast<SpectrogramBodySampleMaterial *>(materialNode->material());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.dbRemapTexture != nullptr,
@@ -7868,7 +7928,10 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureMatchesCpuPaletteDirectionInFullMo
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.get());
+        auto *materialNode = spectrogramBodySampleMaterialNode(node.get());
+        QVERIFY(materialNode != nullptr);
+        auto *material =
+            dynamic_cast<SpectrogramBodySampleMaterial *>(materialNode->material());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.dbRemapTexture != nullptr,
@@ -8032,7 +8095,10 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.get());
+        auto *materialNode = spectrogramBodySampleMaterialNode(node.get());
+        QVERIFY(materialNode != nullptr);
+        auto *material =
+            dynamic_cast<SpectrogramBodySampleMaterial *>(materialNode->material());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.sourceTexture != nullptr,
@@ -8043,7 +8109,7 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
         QVERIFY2(
             material->state.paletteTexture != nullptr,
             "software fallback should still bind the rolling full-mode palette lookup texture");
-        auto *tailMaterialNode = spectrogramTailMaterialNode(node.get());
+        auto *tailMaterialNode = spectrogramTailSampleMaterialNode(node.get());
         QVERIFY2(
             tailMaterialNode != nullptr,
             "software fallback should still keep a dedicated material-backed tail node in rolling full mode");
@@ -8051,7 +8117,7 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
             geometryHasVisibleArea(tailMaterialNode),
             "software fallback should keep the rolling tail material node visible once incremental advance is active");
         auto *tailMaterial =
-            dynamic_cast<SpectrogramBodyMaterial *>(tailMaterialNode->material());
+            dynamic_cast<SpectrogramBodySampleMaterial *>(tailMaterialNode->material());
         QVERIFY(tailMaterial != nullptr);
         QVERIFY2(
             tailMaterial->state.sourceTexture != nullptr,
@@ -8063,8 +8129,8 @@ void QmlSmokeTest::spectrogramRollingGpuWindowCaptureShowsVisiblePaletteMappedPi
             tailMaterial->state.paletteTexture != nullptr,
             "software fallback should bind the palette lookup into the tail material");
         QVERIFY2(
-            tailMaterial->state.sourceSize.width() > 0
-                && tailMaterial->state.sourceSize.width() < material->state.sourceSize.width(),
+            tailMaterial->state.sourceRect.width() > 0.0
+                && tailMaterial->state.sourceRect.width() < material->state.sourceRect.width(),
             "software fallback should keep the tail material bound to a narrower uploaded tail segment than the base body source");
         {
             QMutexLocker lock(&item->m_stateMutex);
@@ -8153,8 +8219,8 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullM
         node.get(),
         "full-mode opacity capture should still bind the spectrogram source texture into the material node");
 
-    const QString vertexShaderPath = SpectrogramBodyMaterial::vertexShaderResourcePath();
-    const QString fragmentShaderPath = SpectrogramBodyMaterial::fragmentShaderResourcePath();
+    const QString vertexShaderPath = SpectrogramBodySampleMaterial::vertexShaderResourcePath();
+    const QString fragmentShaderPath = SpectrogramBodySampleMaterial::fragmentShaderResourcePath();
     QVERIFY2(
         !vertexShaderPath.isEmpty() && vertexShaderPath.endsWith(QStringLiteral(".vert.qsb")),
         "full-mode palette material should expose the compiled vertex shader resource path");
@@ -8174,7 +8240,10 @@ void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesPaletteOpacityInFullM
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.get());
+        auto *sampleNode = spectrogramBodySampleMaterialNode(node.get());
+        QVERIFY(sampleNode != nullptr);
+        auto *material =
+            dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.dbRemapTexture != nullptr,
@@ -8302,7 +8371,10 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureStaysVisibleAfterClearingCpuDispla
 
     const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     if (api == QSGRendererInterface::Software) {
-        auto *material = spectrogramBodyMaterial(node.get());
+        auto *sampleNode = spectrogramBodySampleMaterialNode(node.get());
+        QVERIFY(sampleNode != nullptr);
+        auto *material =
+            dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
         QVERIFY(material != nullptr);
         QVERIFY2(
             material->state.dbRemapTexture != nullptr,
@@ -8359,12 +8431,12 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {
         "normal full mode should use a material-backed body node and leave the old texture-node body empty");
 
     if (windowGraphicsApi(window) == QSGRendererInterface::Software) {
-        auto *tailMaterialNode = spectrogramTailMaterialNode(node.data());
+        auto *tailMaterialNode = spectrogramTailSampleMaterialNode(node.data());
         QVERIFY2(
             tailMaterialNode != nullptr,
             "software fallback should keep a dedicated tail material node even before rolling tail growth begins");
         auto *tailMaterial =
-            dynamic_cast<SpectrogramBodyMaterial *>(tailMaterialNode->material());
+            dynamic_cast<SpectrogramBodySampleMaterial *>(tailMaterialNode->material());
         QVERIFY(tailMaterial != nullptr);
         QVERIFY2(
             tailMaterial->state.sourceTexture != nullptr,
@@ -8379,6 +8451,230 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {
             !geometryHasVisibleArea(tailMaterialNode),
             "inactive tail material should stay hidden until a rolling tail segment exists");
     }
+}
+
+void QmlSmokeTest::spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "stock-material");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>((column + bin) % 256);
+        }
+    }
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, false, true, 31);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node.data());
+    QVERIFY(sampleNode != nullptr);
+    QVERIFY(!geometryHasVisibleArea(sampleNode));
+    auto *stockMaterialNode = spectrogramStockMaterialNode(node.data());
+    QVERIFY(stockMaterialNode != nullptr);
+    QVERIFY(geometryHasVisibleArea(stockMaterialNode));
+    QVERIFY(dynamic_cast<QSGTextureMaterial *>(stockMaterialNode->material()) != nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuSourceOnlySampleDebugModeUsesSampleMaterialNode() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "shader-source-only");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>((column + bin) % 256);
+        }
+    }
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, false, true, 31);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    auto *sampleNode = spectrogramSourceSampleMaterialNode(node.data());
+    QVERIFY(sampleNode != nullptr);
+    QVERIFY(geometryHasVisibleArea(sampleNode));
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramSourceSampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuFullModeUsesSampleBodyMaterialNode() {
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>((column + bin) % 256);
+        }
+    }
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, false, true, 31);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node.data());
+    QVERIFY(sampleNode != nullptr);
+    QVERIFY(geometryHasVisibleArea(sampleNode));
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    auto *textureNode = spectrogramBodyTextureNode(node.data());
+    QVERIFY(textureNode != nullptr);
+    QVERIFY(textureNode->rect().isEmpty() || textureNode->texture() == nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuSampleMaterialsBindSourceTextureAtZero() {
+    SpectrogramSourceSampleMaterial::State sourceState;
+    sourceState.sourceTexture = reinterpret_cast<QSGTexture *>(quintptr{0x1});
+    QCOMPARE(spectrogramSourceSampleTextureForBinding(sourceState, 0), sourceState.sourceTexture);
+    QCOMPARE(spectrogramSourceSampleTextureForBinding(sourceState, 1), nullptr);
+
+    SpectrogramBodySampleMaterial::State bodyState;
+    bodyState.sourceTexture = reinterpret_cast<QSGTexture *>(quintptr{0x1});
+    bodyState.dbRemapTexture = reinterpret_cast<QSGTexture *>(quintptr{0x2});
+    bodyState.paletteTexture = reinterpret_cast<QSGTexture *>(quintptr{0x3});
+    QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 0), bodyState.sourceTexture);
+    QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 1), bodyState.dbRemapTexture);
+    QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 2), bodyState.paletteTexture);
+    QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 3), nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuSampledTexturesCommitPendingUploads() {
+    class TrackingTexture final : public QSGTexture {
+    public:
+        qint64 comparisonKey() const override { return 0x1234; }
+        QSize textureSize() const override { return QSize(2, 2); }
+        bool hasAlphaChannel() const override { return true; }
+        bool hasMipmaps() const override { return false; }
+        void commitTextureOperations(QRhi *rhi, QRhiResourceUpdateBatch *resourceUpdates) override {
+            ++commitCalls;
+            lastRhi = rhi;
+            lastBatch = resourceUpdates;
+        }
+
+        int commitCalls{0};
+        QRhi *lastRhi{reinterpret_cast<QRhi *>(quintptr{0x1})};
+        QRhiResourceUpdateBatch *lastBatch{reinterpret_cast<QRhiResourceUpdateBatch *>(quintptr{0x1})};
+    };
+
+    extern void spectrogramCommitTextureOperationsIfNeeded(
+        QSGTexture *texture,
+        QRhi *rhi,
+        QRhiResourceUpdateBatch *resourceUpdates);
+
+    TrackingTexture texture;
+
+    spectrogramCommitTextureOperationsIfNeeded(nullptr, nullptr, nullptr);
+    QCOMPARE(texture.commitCalls, 0);
+
+    spectrogramCommitTextureOperationsIfNeeded(&texture, nullptr, nullptr);
+    QCOMPARE(texture.commitCalls, 1);
+    QCOMPARE(texture.lastRhi, nullptr);
+    QCOMPARE(texture.lastBatch, nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuSampleMaterialNodesFlipVerticalTextureCoords() {
+    class StubTexture final : public QSGTexture {
+    public:
+        qint64 comparisonKey() const override { return 0x4242; }
+        QSize textureSize() const override { return QSize(10, 20); }
+        bool hasAlphaChannel() const override { return true; }
+        bool hasMipmaps() const override { return false; }
+    };
+
+    StubTexture texture;
+
+    QScopedPointer<QSGGeometryNode> sourceNode(createSpectrogramSourceSampleMaterialNode());
+    syncSpectrogramSourceSampleMaterialNode(
+        sourceNode.data(),
+        QRectF(0.0, 0.0, 10.0, 20.0),
+        &texture,
+        QRectF(0.0, 0.0, 10.0, 20.0),
+        &texture);
+    const auto *sourceVertices = sourceNode->geometry()->vertexDataAsTexturedPoint2D();
+    QCOMPARE(sourceVertices[0].ty, 1.0F);
+    QCOMPARE(sourceVertices[1].ty, 0.0F);
+    QCOMPARE(sourceVertices[2].ty, 1.0F);
+    QCOMPARE(sourceVertices[3].ty, 0.0F);
+
+    QScopedPointer<QSGGeometryNode> bodyNode(createSpectrogramBodySampleMaterialNode());
+    SpectrogramBodySampleMaterial::State state;
+    state.sourceTexture = &texture;
+    state.dbRemapTexture = &texture;
+    state.paletteTexture = &texture;
+    state.sourceRect = QRectF(0.0, 0.0, 10.0, 20.0);
+    syncSpectrogramBodySampleMaterialNode(
+        bodyNode.data(),
+        QRectF(0.0, 0.0, 10.0, 20.0),
+        state);
+    const auto *bodyVertices = bodyNode->geometry()->vertexDataAsTexturedPoint2D();
+    QCOMPARE(bodyVertices[0].ty, 1.0F);
+    QCOMPARE(bodyVertices[1].ty, 0.0F);
+    QCOMPARE(bodyVertices[2].ty, 1.0F);
+    QCOMPARE(bodyVertices[3].ty, 0.0F);
+}
+
+void QmlSmokeTest::spectrogramGpuSamplerLoggingIgnoresPlaceholderTextureSize() {
+    QVERIFY(!spectrogramShouldConsumeSampledImageLogBudget(QSize(1, 1)));
+    QVERIFY(!spectrogramShouldConsumeSampledImageLogBudget(QSize(1, 0)));
+    QVERIFY(!spectrogramShouldConsumeSampledImageLogBudget(QSize(0, 1)));
+    QVERIFY(spectrogramShouldConsumeSampledImageLogBudget(QSize(1, 2)));
+    QVERIFY(spectrogramShouldConsumeSampledImageLogBudget(QSize(2, 1)));
+    QVERIFY(spectrogramShouldConsumeSampledImageLogBudget(QSize(2, 2)));
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays() {

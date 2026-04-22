@@ -16,6 +16,12 @@ DebugMode parseDebugMode(QByteArrayView raw) {
     if (normalized == "texture-node" || normalized == "texture") {
         return DebugMode::TextureNode;
     }
+    if (normalized == "shader-source-only" || normalized == "material-source-only") {
+        return DebugMode::ShaderSourceOnly;
+    }
+    if (normalized == "stock-material" || normalized == "texture-material") {
+        return DebugMode::StockMaterial;
+    }
     return DebugMode::Full;
 }
 
@@ -35,6 +41,10 @@ const char *debugModeName(DebugMode mode) {
         return "full";
     case DebugMode::TextureNode:
         return "texture-node";
+    case DebugMode::ShaderSourceOnly:
+        return "shader-source-only";
+    case DebugMode::StockMaterial:
+        return "stock-material";
     }
     return "full";
 }

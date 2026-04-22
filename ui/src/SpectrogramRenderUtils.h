@@ -9,6 +9,8 @@ namespace SpectrogramGpu {
 enum class DebugMode {
     Full,
     TextureNode,
+    ShaderSourceOnly,
+    StockMaterial,
 };
 
 struct ColumnSpan {
