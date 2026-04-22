@@ -12,5 +12,6 @@ layout(std140, binding = 0) uniform buf {
 
 void main() {
     float value = texture(sourceTex, vTexCoord).r;
-    fragColor = vec4(value, value, value, qt_Opacity);
+    float premultiplied = value * qt_Opacity;
+    fragColor = vec4(premultiplied, premultiplied, premultiplied, qt_Opacity);
 }

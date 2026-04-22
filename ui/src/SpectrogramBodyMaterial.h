@@ -17,6 +17,7 @@ public:
         QSGTexture *paletteTexture{nullptr};
         QSize sourceSize;
         QSize targetSize;
+        QRectF sourceSubRect{0.0, 0.0, 1.0, 1.0};
         QPointF drawOffset;
         double effectiveZoom{1.0};
         double subpixelOffset{0.0};

@@ -157,10 +157,17 @@ void syncSpectrogramBodyMaterialNode(
         state.sourceTexture != nullptr
         ? state.sourceTexture->normalizedTextureSubRect()
         : QRectF(0.0, 0.0, 1.0, 1.0);
-    const float leftU = static_cast<float>(textureSubRect.left());
-    const float rightU = static_cast<float>(textureSubRect.left() + textureSubRect.width());
-    const float topV = static_cast<float>(textureSubRect.top());
-    const float bottomV = static_cast<float>(textureSubRect.top() + textureSubRect.height());
+    const QRectF sourceSubRect = state.sourceSubRect.normalized();
+    const float leftU = static_cast<float>(
+        textureSubRect.left() + (textureSubRect.width() * sourceSubRect.left()));
+    const float rightU = static_cast<float>(
+        textureSubRect.left()
+        + (textureSubRect.width() * (sourceSubRect.left() + sourceSubRect.width())));
+    const float topV = static_cast<float>(
+        textureSubRect.top() + (textureSubRect.height() * sourceSubRect.top()));
+    const float bottomV = static_cast<float>(
+        textureSubRect.top()
+        + (textureSubRect.height() * (sourceSubRect.top() + sourceSubRect.height())));
 
     vertices[0].set(static_cast<float>(topLeft.x()), static_cast<float>(topLeft.y()), leftU, topV);
     vertices[1].set(static_cast<float>(bottomLeft.x()), static_cast<float>(bottomLeft.y()), leftU, bottomV);

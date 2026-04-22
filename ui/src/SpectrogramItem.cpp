@@ -2777,28 +2777,29 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
         }
     }
+    QRectF baseTargetRect = spectrogramTargetRect;
+    baseTargetRect.translate(-spectrogramSubpixelOffset, 0.0);
+    QRect baseSourceRect = spectrogramSourceRect;
+    const int scrollPixels = std::clamp(
+        node->spectrogramTextureScrollPixels,
+        0,
+        std::max(0, node->spectrogramTextureWidth - 1));
+    if (scrollPixels > 0) {
+        baseTargetRect.setWidth(
+            std::max(0.0, static_cast<double>(node->spectrogramTextureWidth - scrollPixels)));
+        baseSourceRect = QRect(
+            scrollPixels,
+            0,
+            node->spectrogramTextureWidth - scrollPixels,
+            spectrogramSourceRect.height());
+    }
+
     const bool useTextureNodeBody =
         gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
     if (useTextureNodeBody
         && showSpectrogram
         && node->spectrogramTextureResource != nullptr
         && !spectrogramSourceRect.isEmpty()) {
-        QRectF baseTargetRect = spectrogramTargetRect;
-        baseTargetRect.translate(-spectrogramSubpixelOffset, 0.0);
-        QRect baseSourceRect = spectrogramSourceRect;
-        const int scrollPixels = std::clamp(
-            node->spectrogramTextureScrollPixels,
-            0,
-            std::max(0, node->spectrogramTextureWidth - 1));
-        if (scrollPixels > 0) {
-            baseTargetRect.setWidth(
-                std::max(0.0, static_cast<double>(node->spectrogramTextureWidth - scrollPixels)));
-            baseSourceRect = QRect(
-                scrollPixels,
-                0,
-                node->spectrogramTextureWidth - scrollPixels,
-                spectrogramSourceRect.height());
-        }
         configureTextureNode(
             node->spectrogramTexture,
             node->spectrogramTextureResource,
@@ -2820,13 +2821,20 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     bodyState.paletteTexture = nullptr;
     bodyState.sourceSize = spectrogramSourceRect.size();
     bodyState.targetSize = spectrogramTargetRect.size().toSize();
-    bodyState.drawOffset = QPointF(-spectrogramSubpixelOffset, 0.0);
+    if (node->spectrogramTextureWidth > 0 && spectrogramSourceRect.height() > 0) {
+        bodyState.sourceSubRect = QRectF(
+            static_cast<double>(baseSourceRect.x()) / static_cast<double>(node->spectrogramTextureWidth),
+            0.0,
+            static_cast<double>(baseSourceRect.width()) / static_cast<double>(node->spectrogramTextureWidth),
+            1.0);
+    }
+    bodyState.drawOffset = QPointF();
     bodyState.effectiveZoom = effectiveZoomLocked();
     bodyState.subpixelOffset = spectrogramSubpixelOffset;
     bodyState.debugStage = static_cast<int>(gpuDebugMode);
     syncSpectrogramBodyMaterialNode(
         node->spectrogramMaterialNode,
-        showSpectrogram ? spectrogramTargetRect : QRectF(),
+        showSpectrogram ? baseTargetRect : QRectF(),
         bodyState);
 
     double segmentX = spectrogramTargetRect.x() - spectrogramSubpixelOffset

@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QDateTime>
+#include <QFile>
 #include <QFileInfo>
 #include <QHoverEvent>
 #include <QImage>
@@ -815,6 +816,7 @@ private slots:
     void spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutCollapsingToSingleNode();
     void spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScroll();
     void spectrogramRollingTextureKeepsBoundedVisibleNodeCountAfterLongScroll();
+    void spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegionDuringIncrementalAdvance();
     void spectrogramRollingGpuSourceCacheAdvancesIncrementally();
     void spectrogramRollingPreFillUsesFullViewportWidthCache();
     void spectrogramRollingPreFillHandsOffToSteadyScrollIncrementally();
@@ -827,6 +829,7 @@ private slots:
     void spectrogramGpuWindowCaptureStillShowsVisiblePixelsAfterPublicPivot();
     void spectrogramGpuWindowCaptureShowsTextureNodeDebugStage();
     void spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullMode();
+    void spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFullMode();
     void spectrogramRollingGpuWindowCaptureUsesMaterialBackedBodyNodeOnly();
     void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
@@ -6492,6 +6495,107 @@ void QmlSmokeTest::spectrogramRollingTextureKeepsUpdatingRightEdgeAfterLongScrol
         "right-edge updates should not collapse into a tiny left-edge-only strip after long segmented scroll");
 }
 
+void QmlSmokeTest::spectrogramRollingFullModeMaterialBodyUsesScrolledSourceRegionDuringIncrementalAdvance() {
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 80);
+
+    SpectrogramItem item;
+    item.setParentItem(window.contentItem());
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(false);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+
+    constexpr int bins = 8;
+    constexpr int initialColumns = 240;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>((column * 7 + bin * 19) % 256));
+        }
+    }
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 8192, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds =
+            ((static_cast<double>(initialColumns - 1) + 0.25) * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+
+    for (int step = 0; step < 12; ++step) {
+        QByteArray nextChunk(bins, '\0');
+        for (int bin = 0; bin < bins; ++bin) {
+            nextChunk[bin] = static_cast<char>(
+                static_cast<unsigned char>((160 + step * 13 + bin * 11) % 256));
+        }
+        item.feedPrecomputedChunk(
+            nextChunk, bins, 0, 1,
+            initialColumns + step, 8192, 48000, 1024, false, false, 1, false);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto now = std::chrono::steady_clock::now();
+            item.m_positionSeconds =
+                ((static_cast<double>(initialColumns + step) + 0.25) * 1024.0) / 48000.0;
+            item.m_positionAnchorSeconds = item.m_positionSeconds;
+            item.m_positionAnchorUpdatedAt = now;
+            item.m_positionAnchorInitialized = true;
+        }
+        node.reset(item.updatePaintNode(node.release(), nullptr));
+        QVERIFY(node != nullptr);
+    }
+
+    assertFullModeBodyNodeInvariants(
+        node.get(),
+        "rolling full mode should keep the material node active while advancing incrementally");
+
+    auto *materialNode = spectrogramBodyMaterialNode(node.get());
+    QVERIFY(materialNode != nullptr);
+    QVERIFY(materialNode->geometry() != nullptr);
+
+    auto *tailNode = spectrogramTailTextureNode(node.get());
+    QVERIFY(tailNode != nullptr);
+    QVERIFY2(
+        tailNode->texture() != nullptr && !tailNode->rect().isEmpty(),
+        "incremental full mode should expose a visible tail segment");
+
+    const auto *vertices = materialNode->geometry()->vertexDataAsTexturedPoint2D();
+    float maxX = vertices[0].x;
+    float minU = vertices[0].tx;
+    float maxU = vertices[0].tx;
+    for (int i = 1; i < materialNode->geometry()->vertexCount(); ++i) {
+        maxX = std::max(maxX, vertices[i].x);
+        minU = std::min(minU, vertices[i].tx);
+        maxU = std::max(maxU, vertices[i].tx);
+    }
+
+    QVERIFY2(
+        minU > 0.0F,
+        "incremental full mode should crop the material body away from the stale left edge of the base texture");
+    QVERIFY2(
+        std::abs(static_cast<double>(maxX) - tailNode->rect().x()) <= 1.0,
+        "incremental full mode should stop the material body where the tail segment begins");
+    QVERIFY2(
+        maxU > minU,
+        "incremental full mode should keep a non-empty scrolled source interval for the material body");
+}
+
 void QmlSmokeTest::spectrogramRollingTextureKeepsBoundedVisibleNodeCountAfterLongScroll() {
     QQuickWindow window;
     window.setColor(Qt::black);
@@ -7503,6 +7607,105 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureShowsVisibleGrayscalePixelsInFullM
 
     QVERIFY2(visiblePixels > 100, "full-mode public shader path should render visible body pixels");
     QCOMPARE(nonGrayPixels, 0);
+}
+
+void QmlSmokeTest::spectrogramGpuWindowCapturePremultipliesGrayscaleOpacityInFullMode() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(window.width());
+    item->setHeight(window.height());
+    item->setDisplayMode(1);
+    item->setGridEnabled(false);
+    item->setCrosshairEnabled(false);
+    item->setShowFpsOverlay(false);
+    item->setPlaying(false);
+    item->setOpacity(0.25);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    chunk.fill(static_cast<char>(static_cast<unsigned char>(192)));
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024,
+        false, true, 31, false);
+    item->setPositionSeconds(2.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    QScopedPointer<QSGNode> node(item->updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    assertFullModeBodyNodeInvariants(
+        node.data(),
+        "full-mode opacity capture should still bind the spectrogram source texture into the material node");
+
+    const QString shaderPath =
+        QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()
+        + QStringLiteral("/../src/shaders/SpectrogramBody.frag");
+    QFile shaderFile(shaderPath);
+    QVERIFY2(
+        shaderFile.open(QIODevice::ReadOnly | QIODevice::Text),
+        qPrintable(QStringLiteral("failed to open %1").arg(shaderPath)));
+    const QString shaderSource = QString::fromUtf8(shaderFile.readAll());
+    QVERIFY2(
+        shaderSource.contains(QStringLiteral("value * qt_Opacity"))
+            || shaderSource.contains(QStringLiteral("qt_Opacity * value")),
+        "full-mode grayscale shader should premultiply RGB by qt_Opacity");
+
+    const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
+    if (api == QSGRendererInterface::Software) {
+        QSKIP(qPrintable(
+            QStringLiteral(
+                "Skipping full-mode grayscale opacity assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
+                .arg(graphicsApiName(api))));
+    }
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+
+    const QRect bodyRegion(40, 15, 160, 80);
+    const QRect bounded = bodyRegion.intersected(frame.rect());
+    int visiblePixels = 0;
+    int sumRed = 0;
+    int maxRed = 0;
+    for (int y = bounded.top(); y <= bounded.bottom(); ++y) {
+        for (int x = bounded.left(); x <= bounded.right(); ++x) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (pixel.red() > 8 || pixel.green() > 8 || pixel.blue() > 8) {
+                ++visiblePixels;
+                sumRed += pixel.red();
+                maxRed = std::max(maxRed, pixel.red());
+                QCOMPARE(pixel.red(), pixel.green());
+                QCOMPARE(pixel.green(), pixel.blue());
+            }
+        }
+    }
+
+    QVERIFY2(
+        visiblePixels > 100,
+        "full-mode public shader path should still render visible pixels under partial item opacity");
+    const double averageRed =
+        visiblePixels > 0 ? static_cast<double>(sumRed) / static_cast<double>(visiblePixels) : 0.0;
+    QVERIFY2(
+        averageRed < 90.0,
+        "full-mode grayscale output should be premultiplied by the item opacity instead of staying at full brightness");
+    QVERIFY2(
+        maxRed < 110,
+        "full-mode grayscale output should not keep full-bright RGB when the material opacity is reduced");
 }
 
 void QmlSmokeTest::spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode() {
