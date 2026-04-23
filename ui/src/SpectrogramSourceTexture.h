@@ -10,7 +10,9 @@
 #include <QSize>
 #include <QVector>
 
+#include <atomic>
 #include <algorithm>
+#include <memory>
 
 struct SpectrogramSourceUploadSpan {
     int xBegin{0};
@@ -94,6 +96,14 @@ public:
     void release();
 
 private:
+    [[nodiscard]] int pendingCleanupGenerationCount() const;
+    void scheduleDeferredCleanup(
+        QSGTexture *texture,
+        GLuint textureId,
+        QQuickWindow *ownerWindow,
+        QOpenGLContext *ownerContext,
+        QOpenGLContextGroup *shareGroup);
+
     GLuint m_textureId{0};
     QSize m_size;
     QSGTexture *m_texture{nullptr};
@@ -101,5 +111,5 @@ private:
     QPointer<QQuickWindow> m_ownerWindow;
     QPointer<QOpenGLContext> m_ownerContext;
     QPointer<QOpenGLContextGroup> m_shareGroup;
-    QPointer<QObject> m_pendingCleanupJob;
+    std::shared_ptr<std::atomic_int> m_pendingCleanupCount{std::make_shared<std::atomic_int>(0)};
 };

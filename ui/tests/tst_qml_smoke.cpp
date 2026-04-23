@@ -8,6 +8,7 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QOpenGLContext>
+#include <QOffscreenSurface>
 #include <QPainter>
 #include <QQuickWindow>
 #include <QRegularExpression>
@@ -25,6 +26,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QScopedPointer>
+#include <QSurfaceFormat>
 #include <QtEndian>
 #include <QtTest/QtTest>
 #include <qqml.h>
@@ -498,6 +500,79 @@ QSGRendererInterface::GraphicsApi windowGraphicsApi(const QQuickWindow &window) 
         return QSGRendererInterface::Unknown;
     }
     return window.rendererInterface()->graphicsApi();
+}
+
+class CountingTexture final : public QSGTexture {
+public:
+    CountingTexture(std::atomic_int *destructionCount, const QSize size)
+        : m_destructionCount(destructionCount)
+        , m_size(size) {
+    }
+
+    ~CountingTexture() override {
+        if (m_destructionCount != nullptr) {
+            m_destructionCount->fetch_add(1);
+        }
+    }
+
+    qint64 comparisonKey() const override {
+        return 0;
+    }
+
+    QSize textureSize() const override {
+        return m_size;
+    }
+
+    bool hasAlphaChannel() const override {
+        return true;
+    }
+
+    bool hasMipmaps() const override {
+        return false;
+    }
+
+private:
+    std::atomic_int *m_destructionCount{nullptr};
+    QSize m_size;
+};
+
+struct SharedOpenGlContexts {
+    std::unique_ptr<QOffscreenSurface> surface;
+    std::unique_ptr<QOpenGLContext> ownerContext;
+    std::unique_ptr<QOpenGLContext> sharedContext;
+
+    [[nodiscard]] bool isValid() const {
+        return surface != nullptr && ownerContext != nullptr && sharedContext != nullptr;
+    }
+};
+
+SharedOpenGlContexts createSharedOpenGlContexts() {
+    SharedOpenGlContexts contexts;
+
+    auto ownerContext = std::make_unique<QOpenGLContext>();
+    ownerContext->setFormat(QSurfaceFormat::defaultFormat());
+    if (!ownerContext->create()) {
+        return contexts;
+    }
+
+    auto sharedContext = std::make_unique<QOpenGLContext>();
+    sharedContext->setFormat(ownerContext->format());
+    sharedContext->setShareContext(ownerContext.get());
+    if (!sharedContext->create() || !QOpenGLContext::areSharing(ownerContext.get(), sharedContext.get())) {
+        return contexts;
+    }
+
+    auto surface = std::make_unique<QOffscreenSurface>();
+    surface->setFormat(ownerContext->format());
+    surface->create();
+    if (!surface->isValid()) {
+        return contexts;
+    }
+
+    contexts.surface = std::move(surface);
+    contexts.ownerContext = std::move(ownerContext);
+    contexts.sharedContext = std::move(sharedContext);
+    return contexts;
 }
 
 QSGSimpleTextureNode *findTopLevelTextureChild(QSGNode *root, int ordinal) {
@@ -1000,6 +1075,8 @@ private slots:
     void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
+    void spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwnerWrapperAlive();
+    void spectrogramRetainedSourceTextureRetiresMultiplePendingCleanupGenerations();
     void spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow();
     void spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext();
     void spectrogramRetainedSourceTextureUploadRejectsInvalidArguments();
@@ -1093,11 +1170,101 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCl
     QCOMPARE(texture.pendingUploadSpanCount(), 0);
     QCOMPARE(texture.m_textureId, 0U);
     QVERIFY(texture.m_ownerWindow == nullptr);
-    QVERIFY(texture.m_pendingCleanupJob != nullptr);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
 
     window.update();
     QVERIFY(!window.grabWindow().isNull());
-    QVERIFY(texture.m_pendingCleanupJob != nullptr);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwnerWrapperAlive() {
+    SharedOpenGlContexts contexts = createSharedOpenGlContexts();
+    if (!contexts.isValid()) {
+        QSKIP("shared OpenGL contexts are unavailable in this test environment");
+    }
+    if (!contexts.sharedContext->makeCurrent(contexts.surface.get())) {
+        QSKIP("failed to make the shared OpenGL context current");
+    }
+
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    QVERIFY(!window.grabWindow().isNull());
+    QVERIFY(window.isSceneGraphInitialized());
+
+    SpectrogramSourceTexture texture;
+    std::atomic_int wrapperDeletes{0};
+    texture.m_texture = new CountingTexture(&wrapperDeletes, QSize(8, 4));
+    texture.m_textureId = 73;
+    texture.m_size = QSize(8, 4);
+    texture.m_ownerWindow = &window;
+    texture.m_ownerContext = contexts.ownerContext.get();
+    texture.m_shareGroup = contexts.ownerContext->shareGroup();
+
+    texture.release();
+
+    QCOMPARE(wrapperDeletes.load(), 0);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
+    QCOMPARE(texture.texture(), nullptr);
+    QCOMPARE(texture.m_textureId, 0U);
+
+    contexts.sharedContext->doneCurrent();
+    contexts.ownerContext.reset();
+
+    window.update();
+    QVERIFY(!window.grabWindow().isNull());
+    QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureRetiresMultiplePendingCleanupGenerations() {
+    QQuickWindow firstWindow;
+    firstWindow.resize(64, 64);
+    firstWindow.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&firstWindow, 5000));
+    QVERIFY(!firstWindow.grabWindow().isNull());
+    QVERIFY(firstWindow.isSceneGraphInitialized());
+
+    QQuickWindow secondWindow;
+    secondWindow.resize(64, 64);
+    secondWindow.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&secondWindow, 5000));
+    QVERIFY(!secondWindow.grabWindow().isNull());
+    QVERIFY(secondWindow.isSceneGraphInitialized());
+
+    auto firstOwnerContext = std::make_unique<QOpenGLContext>();
+    auto secondOwnerContext = std::make_unique<QOpenGLContext>();
+    SpectrogramSourceTexture texture;
+    std::atomic_int firstWrapperDeletes{0};
+    std::atomic_int secondWrapperDeletes{0};
+
+    texture.m_texture = new CountingTexture(&firstWrapperDeletes, QSize(8, 4));
+    texture.m_textureId = 91;
+    texture.m_size = QSize(8, 4);
+    texture.m_ownerWindow = &firstWindow;
+    texture.m_ownerContext = firstOwnerContext.get();
+    texture.release();
+
+    QCOMPARE(firstWrapperDeletes.load(), 0);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
+
+    texture.m_texture = new CountingTexture(&secondWrapperDeletes, QSize(8, 4));
+    texture.m_textureId = 92;
+    texture.m_size = QSize(8, 4);
+    texture.m_ownerWindow = &secondWindow;
+    texture.m_ownerContext = secondOwnerContext.get();
+    texture.release();
+
+    QCOMPARE(secondWrapperDeletes.load(), 0);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 2);
+
+    firstOwnerContext.reset();
+    secondOwnerContext.reset();
+    firstWindow.update();
+    secondWindow.update();
+    QVERIFY(!firstWindow.grabWindow().isNull());
+    QVERIFY(!secondWindow.grabWindow().isNull());
+    QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow() {
@@ -1180,11 +1347,11 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiv
     texture.m_shareGroup = liveShareGroup;
     texture.release();
     QVERIFY(texture.texture() == nullptr);
-    QVERIFY(texture.m_pendingCleanupJob != nullptr);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
 
     secondWindow.update();
     QVERIFY(!secondWindow.grabWindow().isNull());
-    QTRY_VERIFY(texture.m_pendingCleanupJob == nullptr);
+    QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext() {
