@@ -2091,6 +2091,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QImage spectrogramNodeImage;
     QSGTexture *retainedSourceTexture{nullptr};
     std::array<RetainedTextureSegment, 2> retainedTextureSegments{};
+    bool useRetainedSourceTextureBodyForFrame = false;
     QImage spectrogramDbRemapImage;
     QImage spectrogramPaletteImage;
     bool spectrogramRollingIncrementalScroll = false;
@@ -2571,7 +2572,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
             }
 
-            const bool useRetainedSourceTextureBodyForFrame =
+            useRetainedSourceTextureBodyForFrame =
                 canUseRetainedSourceTextureBody
                 && retainedSourceTexture != nullptr
                 && !rendererFreeze;
@@ -2831,7 +2832,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         gpuDebugMode == SpectrogramGpu::DebugMode::Full;
     const bool useRetainedSourceTextureBody =
         (useTextureNodeBody || useSourceOnlySampleBody)
-        && retainedSourceTexture != nullptr;
+        && useRetainedSourceTextureBodyForFrame;
     if (useRetainedSourceTextureBody) {
         staleSpectrogramTextures.push_back(node->spectrogramTextureResource);
         staleSpectrogramTextures.push_back(node->spectrogramTailTextureResource);

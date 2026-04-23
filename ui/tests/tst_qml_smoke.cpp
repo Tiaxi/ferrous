@@ -1157,6 +1157,7 @@ private slots:
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedTextureNodeFallsBackToFrozenCpuSourceDuringZoomFill();
+    void spectrogramRetainedSourceOnlyFallsBackToFrozenCpuSourceDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
     void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
@@ -10021,8 +10022,10 @@ void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenCpuSourceDurin
 
     bodyTextureNode = spectrogramBodyTextureNode(node.get());
     QVERIFY(bodyTextureNode != nullptr);
+    QSGTexture *currentRetainedTexture = nullptr;
     {
         QMutexLocker lock(&item.m_stateMutex);
+        currentRetainedTexture = item.m_gpuSourceTexture.texture();
         QVERIFY(item.m_zoomFillActive);
         QVERIFY2(!item.m_zoomFillFrozenSourceImage.isNull(),
             "zoom-fill should preserve a frozen CPU source snapshot in retained texture-node mode");
@@ -10031,11 +10034,108 @@ void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenCpuSourceDurin
             "retained texture-node mode should keep warming the CPU source cache during zoom-fill");
     }
     QVERIFY2(
-        bodyTextureNode->texture() != retainedTexture,
+        bodyTextureNode->texture() != currentRetainedTexture,
         "zoom-fill frame should fall back from the retained texture-node route to the frozen CPU snapshot");
     QVERIFY2(!bodyTextureNode->rect().isEmpty(), "frozen CPU fallback should keep the texture-node body visible");
     QCOMPARE(
         bodyTextureNode->sourceRect(),
+        QRectF(
+            0.0,
+            0.0,
+            static_cast<double>(initialSourceImage.width()),
+            static_cast<double>(initialSourceImage.height())));
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceOnlyFallsBackToFrozenCpuSourceDuringZoomFill() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "shader-source-only");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+    item.setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int totalColumns = 256;
+    QByteArray baseline(128 * bins, '\x40');
+    QByteArray restarted(32 * bins, '\x55');
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained shader-source-only zoom-fill test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 128,
+        0, totalColumns, 48000, 1024, false, true, 1, false);
+    item.setPositionSeconds((64.0 * 1024.0) / 48000.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+
+    QSGTexture *retainedTexture = nullptr;
+    QImage initialSourceImage;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        retainedTexture = item.m_gpuSourceTexture.texture();
+        initialSourceImage = item.m_gpuSourceImage.copy();
+    }
+    QVERIFY2(retainedTexture != nullptr, "shader-source-only baseline should build the retained source texture");
+    QVERIFY2(!initialSourceImage.isNull(), "shader-source-only baseline should keep a CPU source snapshot for centered freeze");
+    auto *sourceNode = spectrogramSourceSampleMaterialNode(node.get());
+    QVERIFY(sourceNode != nullptr);
+    auto *sourceMaterial =
+        dynamic_cast<SpectrogramSourceSampleMaterial *>(sourceNode->material());
+    QVERIFY(sourceMaterial != nullptr);
+    QCOMPARE(sourceMaterial->state.sourceTexture, retainedTexture);
+
+    item.feedPrecomputedChunk(
+        restarted, bins, 0, 32,
+        0, totalColumns, 48000, 512, false, true, 1, false);
+
+    node.reset(item.updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+
+    sourceNode = spectrogramSourceSampleMaterialNode(node.get());
+    QVERIFY(sourceNode != nullptr);
+    sourceMaterial =
+        dynamic_cast<SpectrogramSourceSampleMaterial *>(sourceNode->material());
+    QVERIFY(sourceMaterial != nullptr);
+    QSGTexture *currentRetainedTexture = nullptr;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        currentRetainedTexture = item.m_gpuSourceTexture.texture();
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY2(!item.m_zoomFillFrozenSourceImage.isNull(),
+            "zoom-fill should preserve a frozen CPU source snapshot in retained shader-source-only mode");
+        QCOMPARE(item.m_zoomFillFrozenSourceImage, initialSourceImage);
+        QVERIFY2(!item.m_gpuSourceImage.isNull(),
+            "retained shader-source-only mode should keep warming the CPU source cache during zoom-fill");
+    }
+    QVERIFY2(
+        sourceMaterial->state.sourceTexture != currentRetainedTexture,
+        "zoom-fill frame should fall back from the retained shader-source-only route to the frozen CPU snapshot");
+    QVERIFY2(geometryHasVisibleArea(sourceNode), "frozen CPU fallback should keep the shader-source-only body visible");
+    QCOMPARE(
+        sourceMaterial->state.sourceRect,
         QRectF(
             0.0,
             0.0,
