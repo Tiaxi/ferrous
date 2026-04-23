@@ -1189,7 +1189,8 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsO
 
     SpectrogramSourceTexture texture;
     auto *ownerContext = new QOpenGLContext();
-    texture.m_texture = new CountingTexture(nullptr, QSize(8, 4));
+    std::atomic_int wrapperDeletes{0};
+    texture.m_texture = new CountingTexture(&wrapperDeletes, QSize(8, 4));
     texture.m_textureId = 88;
     texture.m_size = QSize(8, 4);
     texture.m_ownerWindow = &window;
@@ -1202,11 +1203,30 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsO
 
     const QString releaseWarnings = takeCapturedMessagesText();
     QVERIFY2(releaseWarnings.isEmpty(), qPrintable(releaseWarnings));
+    QCOMPARE(wrapperDeletes.load(), 0);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
+
+    std::atomic_bool handoffFlushed{false};
+    QMetaObject::invokeMethod(&window, [&handoffFlushed]() {
+        handoffFlushed.store(true);
+    }, Qt::QueuedConnection);
+    QTRY_VERIFY(handoffFlushed.load());
+
+    std::atomic_bool sentinelRenderRan{false};
+    window.scheduleRenderJob(
+        QRunnable::create([&sentinelRenderRan]() {
+            sentinelRenderRan.store(true);
+        }),
+        QQuickWindow::AfterSynchronizingStage);
+    window.update();
+    QVERIFY(!window.grabWindow().isNull());
+    QTRY_VERIFY(sentinelRenderRan.load());
+    QTRY_COMPARE(texture.pendingCleanupAttemptCount(), 1);
+    QCOMPARE(wrapperDeletes.load(), 0);
     QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
 
     delete ownerContext;
-    window.update();
-    QVERIFY(!window.grabWindow().isNull());
+    QTRY_COMPARE(wrapperDeletes.load(), 1);
     QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
 }
 
