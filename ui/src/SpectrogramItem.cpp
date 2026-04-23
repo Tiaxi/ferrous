@@ -130,6 +130,13 @@ bool effectiveHopMatchesZoom(int hopSize, double zoomLevel) {
     return std::abs(hopSize - expectedHop) <= 2;
 }
 
+double zoomLevelForEffectiveHop(int hopSize) {
+    if (hopSize <= 0) {
+        return 1.0;
+    }
+    return kReferenceHopSamples / static_cast<double>(hopSize);
+}
+
 double linearInterpolate(double y1, double y2, double mu) {
     return y1 * (1.0 - mu) + y2 * mu;
 }
@@ -1500,12 +1507,29 @@ void SpectrogramItem::feedPrecomputedChunk(
             if (m_precomputedHopSize > 0
                 && m_precomputedHopSize
                     != static_cast<int>(kReferenceHopSamples)) {
-                m_renderZoomLevel = kReferenceHopSamples
-                    / static_cast<double>(m_precomputedHopSize);
+                m_renderZoomLevel = zoomLevelForEffectiveHop(m_precomputedHopSize);
             } else {
                 m_renderZoomLevel = m_zoomLevel;
             }
             m_crosshairDirty = true;
+        } else if ((appliedReset || appliedImplicitReset)
+            && !isTrackChange
+            && !isGaplessTrackChange
+            && m_precomputedHopSize > 0
+            && effectiveHopMatchesZoom(m_precomputedHopSize, m_zoomLevel)) {
+            // Same-track resets are authoritative even if the explicit
+            // awaiting flag was already consumed by a prior restart.  Rapid
+            // zoom-out can produce a later coarse-hop reset after an earlier
+            // intermediate reset has cleared m_awaitingZoomData; rendering
+            // that coarse data with the stale 1.0 render zoom makes the view
+            // look stuck at default zoom.
+            const double backendZoom = zoomLevelForEffectiveHop(m_precomputedHopSize);
+            if (std::abs(m_renderZoomLevel - backendZoom) > 0.001) {
+                m_renderZoomLevel = backendZoom;
+                m_zoomLevel = backendZoom;
+                m_precomputedCanvasDirty = true;
+                m_crosshairDirty = true;
+            }
         }
         if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
             const double seekPositionSeconds =
@@ -5206,14 +5230,16 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         || m_gpuDisplayDisplayRight != displayRight
         || m_gpuDisplayRolling != rollingMode
         || m_gpuDisplayTrackToken != m_precomputedTrackToken;
+    const bool displayZoomChanged =
+        std::abs(effectiveZoom - m_gpuDisplayEffectiveZoom) > 0.001;
     const bool centeredVisibleCoverageIncomplete =
         !rollingMode && m_gpuDisplayMaxColumnIndex < displayRight;
     const bool centeredVisibleGrowthDirty =
         centeredVisibleCoverageIncomplete
         && m_gpuDisplayMaxColumnIndex != m_precomputedMaxColumnIndex;
     const bool contentDirty = rollingMode
-        ? displayWindowChanged
-        : (displayWindowChanged || centeredVisibleGrowthDirty);
+        ? (displayWindowChanged || displayZoomChanged)
+        : (displayWindowChanged || displayZoomChanged || centeredVisibleGrowthDirty);
     if (!displayConfigDirty && !contentDirty) {
         if (!maintainImagePixels && !m_gpuDisplayImage.isNull()) {
             m_gpuDisplayImage = QImage();

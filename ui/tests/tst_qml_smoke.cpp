@@ -1111,6 +1111,7 @@ private slots:
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramRapidZoomOutIgnoresIntermediateReset();
+    void spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaitingFlag();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
     void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
@@ -6519,6 +6520,45 @@ void QmlSmokeTest::spectrogramRapidZoomOutIgnoresIntermediateReset() {
              "matching final zoom reset should be allowed to reveal");
 
     delete updatedNode;
+}
+
+void QmlSmokeTest::spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaitingFlag() {
+    SpectrogramItem item;
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int referenceColumns = 4000;
+    QByteArray initialChunk(binsPerColumn * referenceColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, referenceColumns,
+        0, referenceColumns, 48000, 1024, false,
+        true, 1, false);
+
+    QCOMPARE(item.m_awaitingZoomData, false);
+    QVERIFY(std::abs(item.m_renderZoomLevel - 1.0) < 0.001);
+
+    // Regression: after rapid wheel input, an earlier restart can consume the
+    // awaiting flag before the final max-out reset arrives. The same-track
+    // reset's effective hop must still be authoritative for render zoom.
+    item.setZoomLevel(0.1);
+    item.m_zoomDebounceTimer->stop();
+    item.m_awaitingZoomData = false;
+    QVERIFY(std::abs(item.zoomLevel() - 0.1) < 0.001);
+
+    constexpr int coarseColumns = 400;
+    QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
+    item.feedPrecomputedChunk(
+        coarseChunk, binsPerColumn, 0, coarseColumns,
+        0, coarseColumns, 48000, 10240, false,
+        true, 1, false);
+
+    QCOMPARE(item.m_awaitingZoomData, false);
+    QVERIFY(std::abs(item.m_renderZoomLevel - 0.1) < 0.001);
+    QVERIFY(std::abs(item.zoomLevel() - 0.1) < 0.001);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
 }
 
 void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack() {
