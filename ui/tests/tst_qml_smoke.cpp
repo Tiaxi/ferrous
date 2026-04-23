@@ -6485,8 +6485,10 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
 
-    QVERIFY2(!item.m_zoomFillActive,
-             "zoom-out should not freeze on the old centered cache while the coarser restart fills");
+    QVERIFY2(item.m_zoomFillActive,
+             "zoom-out should keep the old centered cache visible while the coarser restart fills");
+    QVERIFY2(!item.m_zoomFillFrozenDisplayImage.isNull(),
+             "zoom-out freeze should preserve a stable display image until the coarser window is ready");
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
     QVERIFY(item.m_precomputedCanvasDisplayLeft < initialDisplayLeft);
@@ -6494,6 +6496,20 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     QCOMPARE(item.m_gpuDisplayDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
     QVERIFY(!item.m_gpuDisplayImage.isNull());
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+
+    constexpr int zoomedOutReadyColumns = 200;
+    QByteArray readyChunk(binsPerColumn * zoomedOutReadyColumns, '\x60');
+    item.feedPrecomputedChunk(
+        readyChunk, binsPerColumn, 0, zoomedOutReadyColumns,
+        0, zoomedOutTotalColumns, 48000, 10240, false,
+        true, 1, false);
+
+    updatedNode = item.updatePaintNode(updatedNode, nullptr);
+    QVERIFY(updatedNode == node);
+    QVERIFY2(!item.m_zoomFillActive,
+             "zoom-out freeze should clear once the coarser window can fill the viewport");
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(zoomedOutReadyColumns - 1));
 
     delete updatedNode;
 }
@@ -10760,11 +10776,19 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
         true, 1, false);
 
     QCOMPARE(item.m_precomputedMaxColumnIndex, decodedCols - 1);
-    // Must clear: decoder will produce no more columns, so freezing
-    // indefinitely would strand stale pixels at the right edge.
-    QCOMPARE(item.m_zoomFillActive, false);
+    // Decoder will produce no more columns, so the freeze is ready to
+    // reveal. Actual release happens in updatePaintNode so the old frame
+    // stays visible until a replacement render resource is selected.
+    QCOMPARE(item.m_zoomFillActive, true);
+    QCOMPARE(item.m_zoomFillDataReady, true);
     // Dirty flag set so the next paint rebuilds the canvas cleanly.
     QVERIFY(item.m_precomputedCanvasDirty);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_zoomFillActive, false);
+    QCOMPARE(item.m_zoomFillDataReady, false);
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame() {

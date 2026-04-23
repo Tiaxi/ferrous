@@ -1204,13 +1204,12 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     // Early hop change detection: activate the frozen-image path BEFORE any
-    // reset processing that might invalidate the render caches. The freeze
-    // is only needed for finer-hop zoom-in restarts; on coarser-hop
-    // zoom-outs, preserving the old centered image makes the view look
-    // stuck at 1.0 until almost the full zoomed-out track has decoded.
+    // reset processing that might invalidate the render caches. Both finer
+    // zoom-ins and coarser zoom-outs must keep the previous frame visible;
+    // otherwise the centered view exposes the worker's partial refill and
+    // appears to slide/speed up until the new window is fully decoded.
     if (hopSize > 0
         && hopSize != m_precomputedHopSize
-        && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
         && m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         captureZoomFillFrozenCacheLocked();
