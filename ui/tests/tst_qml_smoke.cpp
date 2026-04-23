@@ -1011,6 +1011,7 @@ private slots:
     void testMutedChannelRendersGrayscale();
     void spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode();
     void spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage();
+    void spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegments();
     void spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode();
     void spectrogramGpuFullModeUsesSampleBodyMaterialNode();
     void spectrogramGpuSampleMaterialsBindSourceTextureAtZero();
@@ -9338,6 +9339,121 @@ void QmlSmokeTest::spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage() {
         QMutexLocker lock(&item.m_stateMutex);
         QCOMPARE(sampleMaterial->state.sourceTexture, item.m_gpuSourceTexture.texture());
         QVERIFY(item.m_gpuSourceImage.isNull());
+    }
+}
+
+void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegments() {
+    struct DebugCase {
+        QByteArray envValue;
+        bool usesTextureNode;
+    };
+    const std::array<DebugCase, 2> cases{{
+        {QByteArrayLiteral("texture-node"), true},
+        {QByteArrayLiteral("shader-source-only"), false},
+    }};
+
+    constexpr int bins = 32;
+    constexpr int totalColumns = 12;
+    constexpr quint64 trackToken = 71;
+    constexpr double effectiveZoom = 10.0;
+
+    const auto makeChunk = [=](int columns) {
+        QByteArray chunk(columns * bins, '\x00');
+        for (int column = 0; column < columns; ++column) {
+            for (int bin = 4; bin < bins - 4; ++bin) {
+                chunk[column * bins + bin] = static_cast<char>(0xF0);
+            }
+        }
+        return chunk;
+    };
+
+    for (const DebugCase &debugCase : cases) {
+        qputenv("FERROUS_GPU_DEBUG_MODE", debugCase.envValue);
+        struct DebugModeGuard {
+            ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+        } debugModeGuard;
+
+        QQuickWindow window;
+        window.setColor(Qt::black);
+        window.resize(120, 80);
+
+        SpectrogramItem item;
+        item.setWidth(window.width());
+        item.setHeight(window.height());
+        item.setParentItem(window.contentItem());
+        item.setDisplayMode(1);
+        item.setGridEnabled(false);
+        item.setCrosshairEnabled(false);
+        item.setShowFpsOverlay(false);
+        item.setPlaying(false);
+
+        item.feedPrecomputedChunk(
+            makeChunk(2), bins, 0, 2, 0, totalColumns, 48000, 1024, false, true, trackToken);
+        item.feedPrecomputedChunk(
+            makeChunk(2), bins, 0, 2, 4, totalColumns, 48000, 1024, false, false, trackToken);
+        item.feedPrecomputedChunk(
+            makeChunk(2), bins, 0, 2, 8, totalColumns, 48000, 1024, true, false, trackToken);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_renderZoomLevel = effectiveZoom;
+            item.m_zoomLevel = effectiveZoom;
+        }
+        item.setPositionSeconds(0.10);
+
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QCoreApplication::processEvents();
+        QTest::qWait(50);
+        QCoreApplication::processEvents();
+
+        QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+        QVERIFY(!node.isNull());
+        QImage sourceImage;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            sourceImage = item.m_gpuSourceImage;
+        }
+        QVERIFY2(
+            !sourceImage.isNull(),
+            "sparse retained overflow should repopulate the CPU source image for the fallback frame");
+        QCOMPARE(sourceImage.width(), totalColumns);
+        QCOMPARE(sourceImage.height(), bins);
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(0, 4, 2, bins - 8), 8) > 30,
+            "first sparse run should remain visible in the CPU fallback image");
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(4, 4, 2, bins - 8), 8) > 30,
+            "second sparse run should remain visible in the CPU fallback image");
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(8, 4, 2, bins - 8), 8) > 30,
+            "third sparse run should remain visible in the CPU fallback image");
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(2, 4, 2, bins - 8), 8) < 4,
+            "gap between the first and second sparse runs should stay dark in the CPU fallback image");
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(6, 4, 2, bins - 8), 8) < 4,
+            "gap between the second and third sparse runs should stay dark in the CPU fallback image");
+        if (debugCase.usesTextureNode) {
+            assertTextureNodeDebugBodyInvariants(
+                node.data(),
+                "three visible sparse runs should fall back to the CPU texture-node body path");
+            auto *tailTextureNode = spectrogramTailTextureNode(node.data());
+            QVERIFY(tailTextureNode != nullptr);
+            QVERIFY2(
+                tailTextureNode->rect().isEmpty(),
+                "three visible sparse runs should disable retained tail texture routing");
+        } else {
+            auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.data());
+            QVERIFY(bodySourceNode != nullptr);
+            QVERIFY2(
+                geometryHasVisibleArea(bodySourceNode),
+                "shader-source-only fallback should keep the CPU-backed source sample visible");
+            auto *tailSourceNode = spectrogramSourceSampleMaterialNode(node.data(), 1);
+            QVERIFY(tailSourceNode != nullptr);
+            QVERIFY2(
+                !geometryHasVisibleArea(tailSourceNode),
+                "three visible sparse runs should disable retained tail source routing");
+        }
     }
 }
 

@@ -2472,6 +2472,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
 
             bool haveRetainedTextureSegments = false;
+            bool retainedTextureSegmentsOverflowed = false;
             if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
                 && currentWindow != nullptr) {
@@ -2486,8 +2487,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 int previousSlot = -2;
                 const auto flushRetainedSegment = [&]() {
                     if (runDisplayRight < runDisplayLeft
-                        || runSlotLeft < 0
-                        || segmentIndex >= static_cast<int>(retainedTextureSegments.size())) {
+                        || runSlotLeft < 0) {
+                        runDisplayRight = -1;
+                        runSlotLeft = -1;
+                        previousSlot = -2;
+                        return;
+                    }
+                    if (segmentIndex >= static_cast<int>(retainedTextureSegments.size())) {
+                        retainedTextureSegmentsOverflowed = true;
                         runDisplayRight = -1;
                         runSlotLeft = -1;
                         previousSlot = -2;
@@ -2531,6 +2538,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
                     flushRetainedSegment();
                     if (segmentIndex >= static_cast<int>(retainedTextureSegments.size())) {
+                        retainedTextureSegmentsOverflowed = true;
                         break;
                     }
                     runDisplayLeft = displayIndex;
@@ -2539,10 +2547,31 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     previousSlot = slot;
                 }
                 flushRetainedSegment();
+                if (retainedTextureSegmentsOverflowed) {
+                    // Sparse centered windows can contain more than two visible
+                    // runs when evicted columns leave holes inside the viewport.
+                    // The CPU source-image path preserves the full window, so
+                    // fall back for this frame instead of silently dropping a run.
+                    const int maxTextureColumns = gpuMaxTextureColumns(currentWindow);
+                    syncPrecomputedGpuImagesLocked(
+                        w,
+                        h,
+                        displayLeft,
+                        displayRight,
+                        rollingMode,
+                        effectiveZoom,
+                        maxTextureColumns);
+                    retainedTextureSegments = {};
+                    retainedSourceTexture = nullptr;
+                    haveRetainedTextureSegments = false;
+                }
             }
 
-            const bool haveSelectedSpectrogramContent =
+            const bool useRetainedSourceTextureBodyForFrame =
                 canUseRetainedSourceTextureBody
+                && retainedSourceTexture != nullptr;
+            const bool haveSelectedSpectrogramContent =
+                useRetainedSourceTextureBodyForFrame
                     ? haveRetainedTextureSegments
                     : (rendererFreeze
                            ? !m_zoomFillFrozenSourceImage.isNull()
@@ -2566,7 +2595,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     0.0,
                     static_cast<double>(drawPixels),
                     static_cast<double>(h));
-                if (canUseRetainedSourceTextureBody) {
+                if (useRetainedSourceTextureBodyForFrame) {
                     spectrogramSourceRect = retainedTextureSegments[0].sourceRect;
                 } else if (rendererFreeze) {
                     spectrogramNodeImage = m_zoomFillFrozenSourceImage;
