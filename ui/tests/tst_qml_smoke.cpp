@@ -750,6 +750,7 @@ void assertFullModeBodyNodeInvariants(QSGNode *root, const char *context) {
     QVERIFY2(sampleMaterial->state.sourceTexture != nullptr, context);
     QVERIFY2(sampleMaterial->state.dbRemapTexture != nullptr, context);
     QVERIFY2(sampleMaterial->state.paletteTexture != nullptr, context);
+    QVERIFY2(sampleMaterial->state.rowLutTexture != nullptr, context);
 
     auto *bodyTextureNode = spectrogramBodyTextureNode(root);
     QVERIFY2(bodyTextureNode != nullptr, context);
@@ -1011,6 +1012,8 @@ private slots:
     void testMutedChannelRendersGrayscale();
     void spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode();
     void spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage();
+    void spectrogramGpuFullModeRendersWithoutCpuSourceImage();
+    void spectrogramGpuFullModeKeepsTopBinVisibleWithRowLutSampling();
     void spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegments();
     void spectrogramGpuSparseCenteredWindowFallsBackWithoutRetainedSourceTexture();
     void spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode();
@@ -9124,9 +9127,9 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureStaysVisibleAfterClearingCpuDispla
     QVERIFY(node != nullptr);
     {
         QMutexLocker lock(&item->m_stateMutex);
-        QVERIFY2(!item->m_gpuSourceImage.isNull(), "full mode should prepare the source texture image before the CPU display image is cleared");
         QVERIFY2(!item->m_gpuDbRemapImage.isNull(), "full mode should prepare the dB remap lookup before the CPU display image is cleared");
         QVERIFY2(!item->m_gpuPaletteImage.isNull(), "full mode should prepare the palette lookup before the CPU display image is cleared");
+        QVERIFY2(!item->m_gpuRowLutImage.isNull(), "full mode should prepare the row lookup texture before the CPU display image is cleared");
         item->m_gpuDisplayImage = QImage();
     }
 
@@ -9157,6 +9160,9 @@ void QmlSmokeTest::spectrogramGpuWindowCaptureStaysVisibleAfterClearingCpuDispla
         QVERIFY2(
             material->state.paletteTexture != nullptr,
             "software fallback should still bind the palette lookup texture after the CPU display image is cleared");
+        QVERIFY2(
+            material->state.rowLutTexture != nullptr,
+            "software fallback should still bind the row lookup texture after the CPU display image is cleared");
         QSKIP(qPrintable(
             QStringLiteral(
                 "Skipping full-mode post-clear pixel assertion on %1 backend because offscreen software rendering does not render the custom material path into grabWindow(); structural material invariants were verified instead")
@@ -9343,6 +9349,150 @@ void QmlSmokeTest::spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage() {
         QCOMPARE(sampleMaterial->state.sourceTexture, item.m_gpuSourceTexture.texture());
         QVERIFY(!item.m_gpuSourceImage.isNull());
     }
+}
+
+void QmlSmokeTest::spectrogramGpuFullModeRendersWithoutCpuSourceImage() {
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+    item.setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = 8; bin < bins - 4; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>(0xE0);
+        }
+    }
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, true, true, 31);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained full-mode visibility test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    QSGTexture *retainedTexture = nullptr;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        retainedTexture = item.m_gpuSourceTexture.texture();
+        QVERIFY2(
+            retainedTexture != nullptr,
+            "full mode should prepare the retained source texture before the CPU source image is cleared");
+        item.m_gpuSourceImage = QImage();
+    }
+
+    item.update();
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+    QVERIFY2(
+        countVisiblePixelsInRect(frame, QRect(40, 15, 160, 80), 8) > 100,
+        "full mode should render from the retained source texture even when the old CPU source image is absent");
+
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    assertFullModeBodyNodeInvariants(
+        node.data(),
+        "full mode should keep the body material active after the CPU source image is cleared");
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node.data());
+    QVERIFY(sampleNode != nullptr);
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    QCOMPARE(sampleMaterial->state.sourceTexture, retainedTexture);
+}
+
+void QmlSmokeTest::spectrogramGpuFullModeKeepsTopBinVisibleWithRowLutSampling() {
+    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setLogScale(false);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+    item.setPlaying(false);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 240;
+    QByteArray chunk(bins * totalColumns, '\x00');
+    for (int column = 0; column < totalColumns; ++column) {
+        for (int bin = bins - 4; bin < bins; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>(0xFF);
+        }
+    }
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, true, true, 32);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("row-LUT full-mode visibility test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_gpuSourceTexture.texture() != nullptr);
+        item.m_gpuSourceImage = QImage();
+    }
+
+    item.update();
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+    QVERIFY2(
+        countVisiblePixelsInRect(frame, QRect(40, 0, 160, 8), 8) > 50,
+        "full mode should preserve top-bin visibility through the row-LUT shader path");
+
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node.data());
+    QVERIFY(sampleNode != nullptr);
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    QVERIFY2(
+        sampleMaterial->state.rowLutTexture != nullptr,
+        "full mode should bind a row lookup texture for retained-texture sampling");
 }
 
 void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegments() {
@@ -9684,6 +9834,7 @@ void QmlSmokeTest::spectrogramGpuFullModeUsesSampleBodyMaterialNode() {
     auto *sampleMaterial =
         dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
     QVERIFY(sampleMaterial != nullptr);
+    QVERIFY(sampleMaterial->state.rowLutTexture != nullptr);
     auto *textureNode = spectrogramBodyTextureNode(node.data());
     QVERIFY(textureNode != nullptr);
     QVERIFY(textureNode->rect().isEmpty() || textureNode->texture() == nullptr);
@@ -9699,10 +9850,12 @@ void QmlSmokeTest::spectrogramGpuSampleMaterialsBindSourceTextureAtZero() {
     bodyState.sourceTexture = reinterpret_cast<QSGTexture *>(quintptr{0x1});
     bodyState.dbRemapTexture = reinterpret_cast<QSGTexture *>(quintptr{0x2});
     bodyState.paletteTexture = reinterpret_cast<QSGTexture *>(quintptr{0x3});
+    bodyState.rowLutTexture = reinterpret_cast<QSGTexture *>(quintptr{0x4});
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 0), bodyState.sourceTexture);
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 1), bodyState.dbRemapTexture);
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 2), bodyState.paletteTexture);
-    QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 3), nullptr);
+    QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 3), bodyState.rowLutTexture);
+    QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 4), nullptr);
 }
 
 void QmlSmokeTest::spectrogramGpuSampledTexturesCommitPendingUploads() {
@@ -9768,6 +9921,7 @@ void QmlSmokeTest::spectrogramGpuSampleMaterialNodesFlipVerticalTextureCoords() 
     state.sourceTexture = &texture;
     state.dbRemapTexture = &texture;
     state.paletteTexture = &texture;
+    state.rowLutTexture = &texture;
     state.sourceRect = QRectF(0.0, 0.0, 10.0, 20.0);
     syncSpectrogramBodySampleMaterialNode(
         bodyNode.data(),

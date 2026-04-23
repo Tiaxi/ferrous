@@ -24,6 +24,8 @@ QSGTexture *spectrogramBodySampleTextureForBinding(
         return state.dbRemapTexture;
     case 2:
         return state.paletteTexture;
+    case 3:
+        return state.rowLutTexture;
     default:
         return nullptr;
     }
@@ -60,6 +62,16 @@ struct MatrixUniformData {
 
 static_assert(sizeof(MatrixUniformData) == 64, "Matrix-only Qt Quick shader UBO must match the baked Qt shader layout");
 
+struct SpectrogramBodySampleUniformData {
+    std::array<float, 16> matrix{};
+    std::array<float, 4> sourceTextureMetrics{};
+    std::array<float, 4> sourceRectMetrics{};
+};
+
+static_assert(
+    sizeof(SpectrogramBodySampleUniformData) == 96,
+    "Body sample Qt Quick shader UBO must match the baked Qt shader layout");
+
 class SpectrogramBodySampleMaterialShader final : public QSGMaterialShader {
 public:
     SpectrogramBodySampleMaterialShader() {
@@ -69,7 +81,7 @@ public:
 
     bool updateUniformData(
         RenderState &state,
-        QSGMaterial *,
+        QSGMaterial *newMaterial,
         QSGMaterial *oldMaterial) override {
         QByteArray *uniformData = state.uniformData();
         if (uniformData == nullptr) {
@@ -77,28 +89,60 @@ public:
         }
 
         bool changed = false;
-        if (uniformData->size() != static_cast<int>(sizeof(MatrixUniformData))) {
-            uniformData->resize(static_cast<int>(sizeof(MatrixUniformData)));
+        if (uniformData->size() != static_cast<int>(sizeof(SpectrogramBodySampleUniformData))) {
+            uniformData->resize(static_cast<int>(sizeof(SpectrogramBodySampleUniformData)));
             uniformData->fill('\0');
             changed = true;
         }
 
-        auto *buf = reinterpret_cast<MatrixUniformData *>(uniformData->data());
+        auto *buf = reinterpret_cast<SpectrogramBodySampleUniformData *>(uniformData->data());
         if (oldMaterial == nullptr || state.isMatrixDirty()) {
             const QMatrix4x4 matrix = state.combinedMatrix();
             std::memcpy(buf->matrix.data(), matrix.constData(), sizeof(float) * buf->matrix.size());
             changed = true;
         }
 
+        if (newMaterial != nullptr) {
+            const auto *material = static_cast<SpectrogramBodySampleMaterial *>(newMaterial);
+            const std::array<float, 4> nextMetrics{
+                static_cast<float>(std::max(1, material->state.sourceTextureSize.width())),
+                static_cast<float>(std::max(1, material->state.sourceTextureSize.height())),
+                std::max(material->state.effectiveZoom, 0.001F),
+                material->state.sourceColumnOffset,
+            };
+            const std::array<float, 4> nextSourceRectMetrics{
+                static_cast<float>(std::max(0.0, material->state.sourceRect.width())),
+                static_cast<float>(std::max(0.0, material->state.sourceRect.height())),
+                0.0F,
+                0.0F,
+            };
+            if (oldMaterial == nullptr || buf->sourceTextureMetrics != nextMetrics) {
+                buf->sourceTextureMetrics = nextMetrics;
+                changed = true;
+            }
+            if (oldMaterial == nullptr || buf->sourceRectMetrics != nextSourceRectMetrics) {
+                buf->sourceRectMetrics = nextSourceRectMetrics;
+                changed = true;
+            }
+        }
+
         const int remainingLogs = g_gpuSampleUniformLogBudget.fetch_sub(1);
         if (remainingLogs > 0) {
+            const auto *material =
+                newMaterial != nullptr
+                    ? static_cast<SpectrogramBodySampleMaterial *>(newMaterial)
+                    : nullptr;
             std::fprintf(
                 stderr,
-                "[Qt-gpu-sample-ubo] matrix_dirty=%d opacity=%.3f viewport=%dx%d\n",
+                "[Qt-gpu-sample-ubo] matrix_dirty=%d opacity=%.3f viewport=%dx%d tex=%dx%d zoom=%.4f offset=%.1f\n",
                 state.isMatrixDirty() ? 1 : 0,
                 state.opacity(),
                 state.viewportRect().width(),
-                state.viewportRect().height());
+                state.viewportRect().height(),
+                material != nullptr ? material->state.sourceTextureSize.width() : 0,
+                material != nullptr ? material->state.sourceTextureSize.height() : 0,
+                material != nullptr ? material->state.effectiveZoom : 0.0F,
+                material != nullptr ? material->state.sourceColumnOffset : 0.0F);
         }
 
         return changed;
@@ -308,15 +352,17 @@ int SpectrogramBodySampleMaterial::compare(const QSGMaterial *other) const {
         return 1;
     }
     const auto *otherMaterial = static_cast<const SpectrogramBodySampleMaterial *>(other);
-    const std::array<qint64, 3> keys{
+    const std::array<qint64, 4> keys{
         textureKey(state.sourceTexture),
         textureKey(state.dbRemapTexture),
         textureKey(state.paletteTexture),
+        textureKey(state.rowLutTexture),
     };
-    const std::array<qint64, 3> otherKeys{
+    const std::array<qint64, 4> otherKeys{
         textureKey(otherMaterial->state.sourceTexture),
         textureKey(otherMaterial->state.dbRemapTexture),
         textureKey(otherMaterial->state.paletteTexture),
+        textureKey(otherMaterial->state.rowLutTexture),
     };
     for (size_t i = 0; i < keys.size(); ++i) {
         if (keys[i] != otherKeys[i]) {

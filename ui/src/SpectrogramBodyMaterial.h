@@ -18,8 +18,12 @@ public:
         QSGTexture *sourceTexture{nullptr};
         QSGTexture *dbRemapTexture{nullptr};
         QSGTexture *paletteTexture{nullptr};
+        QSGTexture *rowLutTexture{nullptr};
         QRectF sourceRect;
         QPointF drawOffset;
+        QSize sourceTextureSize;
+        float effectiveZoom{1.0F};
+        float sourceColumnOffset{0.0F};
     };
 
     SpectrogramBodySampleMaterial();

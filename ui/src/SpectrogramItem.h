@@ -166,6 +166,7 @@ private:
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
     QImage buildPrecomputedDbRemapImageLocked() const;
     QImage buildPrecomputedPaletteImageLocked() const;
+    QImage buildRowLutImageLocked(int height) const;
     QVector<SpectrogramSourceUploadSpan> collectRetainedSourceUploadSpansLocked(
         qint64 displayLeft,
         qint64 displayRight,
@@ -180,6 +181,7 @@ private:
         qint64 displayRight,
         bool rollingMode);
     void syncPrecomputedGpuLookupImagesLocked();
+    void syncGpuRowLutImageLocked(int height);
     void paintPrecomputedGpuSourceColumnsLocked(
         QImage &image,
         int xBegin,
@@ -374,12 +376,14 @@ private:
     QImage m_zoomFillFrozenDisplayImage;
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
+    QImage m_gpuRowLutImage;
     quint64 m_gpuSourceGeneration{0};
     quint64 m_gpuDisplayGeneration{0};
     quint64 m_zoomFillFrozenSourceGeneration{0};
     quint64 m_zoomFillFrozenDisplayGeneration{0};
     quint64 m_gpuDbRemapGeneration{0};
     quint64 m_gpuPaletteGeneration{0};
+    quint64 m_gpuRowLutGeneration{0};
     quint64 m_gpuDisplaySourceGeneration{0};
     int m_gpuDisplayWidth{0};
     int m_gpuDisplayFilledWidth{0};
@@ -415,6 +419,8 @@ private:
     int m_gpuDbRemapBins{0};
     double m_gpuDbRemapDbRange{132.0};
     bool m_gpuPaletteMuted{false};
+    int m_gpuRowLutHeight{0};
+    int m_gpuRowLutBins{0};
     int m_gpuMaxTextureColumns{std::numeric_limits<int>::max()};
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};
