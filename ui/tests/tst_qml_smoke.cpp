@@ -1029,6 +1029,7 @@ private slots:
     void spectrogramGpuSamplerLoggingIgnoresPlaceholderTextureSize();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
+    void spectrogramCenteredSmallSeekSnapsWithoutServoSlide();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
@@ -3544,6 +3545,28 @@ void QmlSmokeTest::spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward() {
             "lagging playback heartbeat moved anchor backward from %1 to %2")
             .arg(anchoredPosition, 0, 'f', 3)
             .arg(item.positionSeconds(), 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramCenteredSmallSeekSnapsWithoutServoSlide() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    item.setPositionSeconds(10.0);
+    item.setPlaying(true);
+
+    QTest::qWait(30);
+    item.setPositionSeconds(10.08);
+
+    QVERIFY2(
+        std::abs(item.m_positionAnchorSeconds - 10.08) < 0.0001,
+        qPrintable(QStringLiteral(
+            "centered small seek should snap to target, got anchor %1")
+            .arg(item.m_positionAnchorSeconds, 0, 'f', 4)));
+    QVERIFY2(
+        std::abs(item.m_positionSeconds - 10.08) < 0.0001,
+        qPrintable(QStringLiteral(
+            "centered small seek should publish target, got position %1")
+            .arg(item.m_positionSeconds, 0, 'f', 4)));
 }
 
 void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
@@ -9735,7 +9758,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackToDisplayImageFrom
             item.m_renderZoomLevel = effectiveZoom;
             item.m_zoomLevel = effectiveZoom;
         }
-        item.setPositionSeconds(0.10);
+        item.setPositionSeconds(0.06);
 
         QCoreApplication::processEvents();
         QTest::qWait(50);
@@ -9936,7 +9959,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowUsesDisplayImageWithoutReta
             item.m_renderZoomLevel = effectiveZoom;
             item.m_zoomLevel = effectiveZoom;
         }
-        item.setPositionSeconds(0.10);
+        item.setPositionSeconds(0.06);
 
         QCoreApplication::processEvents();
         QTest::qWait(50);

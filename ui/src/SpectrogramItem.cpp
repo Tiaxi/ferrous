@@ -790,7 +790,8 @@ void SpectrogramItem::setPositionSeconds(double value) {
         const double error = clamped - currentPosition;
         constexpr double kServoAlpha = 0.25;
         constexpr double kServoMaxErrorSeconds = 0.15;
-        const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
+        const bool smallCorrection =
+            m_displayMode == 0 && std::abs(error) < kServoMaxErrorSeconds;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profileEnabled
             && m_smoothnessProfile.active
