@@ -6774,6 +6774,10 @@ void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResour
             "texture-node debug mode should create the retained source texture");
         QCOMPARE(bodyTextureNode->texture(), item.m_gpuSourceTexture.texture());
     }
+    QCOMPARE(
+        bodyTextureNode->textureCoordinatesTransform(),
+        QSGSimpleTextureNode::TextureCoordinatesTransformMode(
+            QSGSimpleTextureNode::MirrorVertically));
 }
 
 void QmlSmokeTest::spectrogramGpuLookupAndDisplayImagesUseCompatibleFormats() {

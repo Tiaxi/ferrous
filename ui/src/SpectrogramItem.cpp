@@ -315,7 +315,9 @@ void configureTextureNode(
     QSGTexture *texture,
     const QRectF &target,
     const QRect &source,
-    QSGTexture *placeholderTexture) {
+    QSGTexture *placeholderTexture,
+    QSGSimpleTextureNode::TextureCoordinatesTransformMode textureTransform =
+        QSGSimpleTextureNode::NoTransform) {
     if (node == nullptr) {
         return;
     }
@@ -325,6 +327,7 @@ void configureTextureNode(
         }
         node->setRect(QRectF());
         node->setSourceRect(QRectF(0.0, 0.0, 1.0, 1.0));
+        node->setTextureCoordinatesTransform(QSGSimpleTextureNode::NoTransform);
         return;
     }
 
@@ -332,6 +335,7 @@ void configureTextureNode(
     node->setFiltering(QSGTexture::Nearest);
     node->setRect(target);
     node->setSourceRect(QRectF(source));
+    node->setTextureCoordinatesTransform(textureTransform);
 }
 
 QSGTexture *createStandaloneWindowTexture(
@@ -3126,12 +3130,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         && showSpectrogram
         && baseBodyTexture != nullptr
         && !baseSourceRect.isEmpty()) {
+        const auto bodyTextureTransform =
+            useRetainedSourceTextureBody
+                ? QSGSimpleTextureNode::TextureCoordinatesTransformMode(
+                      QSGSimpleTextureNode::MirrorVertically)
+                : QSGSimpleTextureNode::TextureCoordinatesTransformMode(
+                      QSGSimpleTextureNode::NoTransform);
         configureTextureNode(
             node->spectrogramTexture,
             baseBodyTexture,
             baseTargetRect,
             baseSourceRect,
-            node->placeholderTexture);
+            node->placeholderTexture,
+            bodyTextureTransform);
     } else {
         configureTextureNode(
             node->spectrogramTexture,
@@ -3276,12 +3287,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     tailBodySampleState.sourceColumnOffset = static_cast<float>(tailSourceRect.x());
     if (showSpectrogram && tailBodyTexture != nullptr) {
         if (useTextureNodeBody) {
+            const auto tailTextureTransform =
+                useRetainedSourceTextureBody
+                    ? QSGSimpleTextureNode::TextureCoordinatesTransformMode(
+                          QSGSimpleTextureNode::MirrorVertically)
+                    : QSGSimpleTextureNode::TextureCoordinatesTransformMode(
+                          QSGSimpleTextureNode::NoTransform);
             configureTextureNode(
                 node->spectrogramTailTexture,
                 tailBodyTexture,
                 tailTargetRect,
                 tailSourceRect,
-                node->placeholderTexture);
+                node->placeholderTexture,
+                tailTextureTransform);
         } else {
             configureTextureNode(
                 node->spectrogramTailTexture,
