@@ -2388,10 +2388,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 w,
                 static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
 
-            const bool freezeUsesSource = false;
-            const bool haveFreezeCache = freezeUsesSource
-                ? false
-                : !m_zoomFillFrozenDisplayImage.isNull();
+            const bool haveFreezeCache = !m_zoomFillFrozenDisplayImage.isNull();
             const bool rendererFreeze =
                 m_zoomFillActive
                 && haveFreezeCache
@@ -2473,7 +2470,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             bool haveRetainedTextureSegments = false;
             bool retainedTextureSegmentsOverflowed = false;
-            bool useDisplayImageTextureFallback = rendererFreeze;
             if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
                 && currentWindow != nullptr) {
@@ -2552,7 +2548,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     // Sparse centered windows can contain more than two visible
                     // runs when evicted columns leave holes inside the viewport.
                     // Fall back to the warmed CPU display image for this frame.
-                    useDisplayImageTextureFallback = true;
                     retainedTextureSegments = {};
                     retainedSourceTexture = nullptr;
                     haveRetainedTextureSegments = false;
@@ -2601,7 +2596,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     spectrogramImageGeneration = m_gpuDisplayGeneration;
                 }
                 spectrogramImageDebugMode =
-                    (!useRetainedSourceTextureBodyForFrame && useDisplayImageTextureFallback)
+                    (!useRetainedSourceTextureBodyForFrame
+                     && debugModeRequestsRetainedSourceTextureBody)
                         ? SpectrogramGpu::DebugMode::TextureNode
                         : gpuDebugMode;
                 if (!useRetainedSourceTextureBodyForFrame) {

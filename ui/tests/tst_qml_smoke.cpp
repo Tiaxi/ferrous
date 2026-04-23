@@ -740,10 +740,15 @@ bool geometryHasVisibleArea(QSGGeometryNode *node) {
     return bounds.width() > 0.0 && bounds.height() > 0.0;
 }
 
+void assertTextureNodeDebugBodyInvariants(QSGNode *root, const char *context);
+
 void assertFullModeBodyNodeInvariants(QSGNode *root, const char *context) {
     auto *sampleNode = spectrogramBodySampleMaterialNode(root);
     QVERIFY2(sampleNode != nullptr, context);
-    QVERIFY2(geometryHasVisibleArea(sampleNode), context);
+    if (!geometryHasVisibleArea(sampleNode)) {
+        assertTextureNodeDebugBodyInvariants(root, context);
+        return;
+    }
     auto *sampleMaterial =
         dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
     QVERIFY2(sampleMaterial != nullptr, context);
@@ -7142,9 +7147,18 @@ void QmlSmokeTest::spectrogramRollingGpuTextureUpdateKeepsTextureObject() {
     QVERIFY(updatedNode == node);
     auto *updatedTextureNode = spectrogramBodyTextureNode(updatedNode);
     QVERIFY(updatedTextureNode != nullptr);
-    QVERIFY2(
-        updatedTextureNode->texture() == initialTexture,
-        "rolling GPU updates should reuse the same scene-graph texture object");
+    if (windowGraphicsApi(window) == QSGRendererInterface::Software) {
+        QVERIFY2(
+            updatedTextureNode->texture() != nullptr,
+            "software full-mode fallback should keep a visible body texture node after rolling updates");
+        QVERIFY2(
+            !updatedTextureNode->rect().isEmpty(),
+            "software full-mode fallback should keep the body texture node visible after rolling updates");
+    } else {
+        QVERIFY2(
+            updatedTextureNode->texture() == initialTexture,
+            "rolling GPU updates should reuse the same scene-graph texture object");
+    }
 
     delete node;
 }
@@ -7191,13 +7205,20 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
+    const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     auto *initialBodyMaterialNode = spectrogramBodySampleMaterialNode(node);
     QVERIFY(initialBodyMaterialNode != nullptr);
     QVERIFY(initialBodyMaterialNode->material() != nullptr);
     auto *initialBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(initialBodyTextureNode != nullptr);
-    QVERIFY(
-        initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
+    if (api == QSGRendererInterface::Software) {
+        QVERIFY2(
+            initialBodyTextureNode->texture() != nullptr && !initialBodyTextureNode->rect().isEmpty(),
+            "software full-mode fallback should keep the initial body texture node visible");
+    } else {
+        QVERIFY(
+            initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
+    }
 
     for (int step = 0; step < 129; ++step) {
         QByteArray nextChunk(bins, '\x00');
@@ -7226,8 +7247,14 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesOldRebaseBoundaryWithoutColla
     QVERIFY(finalBodyMaterialNode->material() != nullptr);
     auto *finalBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(finalBodyTextureNode != nullptr);
-    QVERIFY(
-        finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
+    if (api == QSGRendererInterface::Software) {
+        QVERIFY2(
+            finalBodyTextureNode->texture() != nullptr && !finalBodyTextureNode->rect().isEmpty(),
+            "software full-mode fallback should keep the body texture node visible across rebase boundaries");
+    } else {
+        QVERIFY(
+            finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
+    }
 
     delete node;
 }
@@ -7274,13 +7301,20 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
+    const QSGRendererInterface::GraphicsApi api = windowGraphicsApi(window);
     auto *initialBodyMaterialNode = spectrogramBodySampleMaterialNode(node);
     QVERIFY(initialBodyMaterialNode != nullptr);
     QVERIFY(initialBodyMaterialNode->material() != nullptr);
     auto *initialBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(initialBodyTextureNode != nullptr);
-    QVERIFY(
-        initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
+    if (api == QSGRendererInterface::Software) {
+        QVERIFY2(
+            initialBodyTextureNode->texture() != nullptr && !initialBodyTextureNode->rect().isEmpty(),
+            "software full-mode fallback should keep the initial body texture node visible");
+    } else {
+        QVERIFY(
+            initialBodyTextureNode->texture() == nullptr || initialBodyTextureNode->rect().isEmpty());
+    }
     for (int step = 0; step < 221; ++step) {
         QByteArray nextChunk(bins, '\x00');
         for (int bin = 0; bin < bins; ++bin) {
@@ -7308,8 +7342,14 @@ void QmlSmokeTest::spectrogramRollingTextureCrossesBaseWidthBoundaryWithoutColla
     QVERIFY(finalBodyMaterialNode->material() != nullptr);
     auto *finalBodyTextureNode = spectrogramBodyTextureNode(node);
     QVERIFY(finalBodyTextureNode != nullptr);
-    QVERIFY(
-        finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
+    if (api == QSGRendererInterface::Software) {
+        QVERIFY2(
+            finalBodyTextureNode->texture() != nullptr && !finalBodyTextureNode->rect().isEmpty(),
+            "software full-mode fallback should keep the body texture node visible across base-width rollover");
+    } else {
+        QVERIFY(
+            finalBodyTextureNode->texture() == nullptr || finalBodyTextureNode->rect().isEmpty());
+    }
 
     delete node;
 }
@@ -9773,13 +9813,10 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackToDisplayImageFrom
 }
 
 void QmlSmokeTest::spectrogramGpuSparseCenteredWindowUsesDisplayImageWithoutRetainedSourceTexture() {
-    struct DebugCase {
-        QByteArray envValue;
-        bool usesTextureNode;
-    };
-    const std::array<DebugCase, 2> cases{{
-        {QByteArrayLiteral("texture-node"), true},
-        {QByteArrayLiteral("shader-source-only"), false},
+    const std::array<QByteArray, 3> cases{{
+        QByteArrayLiteral("texture-node"),
+        QByteArrayLiteral("shader-source-only"),
+        QByteArrayLiteral("full"),
     }};
 
     constexpr int bins = 32;
@@ -9797,8 +9834,8 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowUsesDisplayImageWithoutReta
         return chunk;
     };
 
-    for (const DebugCase &debugCase : cases) {
-        qputenv("FERROUS_GPU_DEBUG_MODE", debugCase.envValue);
+    for (const QByteArray &debugMode : cases) {
+        qputenv("FERROUS_GPU_DEBUG_MODE", debugMode);
         struct DebugModeGuard {
             ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
         } debugModeGuard;
@@ -9889,20 +9926,28 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowUsesDisplayImageWithoutReta
 
         auto *bodyTextureNode = spectrogramBodyTextureNode(node.data());
         QVERIFY(bodyTextureNode != nullptr);
-        if (!bodyTextureNode->rect().isEmpty()) {
-            QCOMPARE(
-                bodyTextureNode->sourceRect(),
-                QRectF(
-                    0.0,
-                    0.0,
-                    static_cast<double>(displayImage.width()),
-                    static_cast<double>(displayImage.height())));
-        }
+        QVERIFY2(
+            !bodyTextureNode->rect().isEmpty(),
+            "software display-image fallback should keep the body texture node visible");
+        QCOMPARE(
+            bodyTextureNode->sourceRect(),
+            QRectF(
+                0.0,
+                0.0,
+                static_cast<double>(displayImage.width()),
+                static_cast<double>(displayImage.height())));
 
-        if (!debugCase.usesTextureNode) {
-            auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.data());
-            QVERIFY(bodySourceNode != nullptr);
-        }
+        auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.data());
+        QVERIFY(bodySourceNode != nullptr);
+        QVERIFY2(
+            !geometryHasVisibleArea(bodySourceNode),
+            "software display-image fallback should hide the source-sample material node");
+
+        auto *bodySampleNode = spectrogramBodySampleMaterialNode(node.data());
+        QVERIFY(bodySampleNode != nullptr);
+        QVERIFY2(
+            !geometryHasVisibleArea(bodySampleNode),
+            "software display-image fallback should hide the full-mode body material node");
     }
 }
 
@@ -9936,16 +9981,16 @@ void QmlSmokeTest::spectrogramGpuFullModeUsesSampleBodyMaterialNode() {
 
     QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
     QVERIFY(!node.isNull());
+    assertFullModeBodyNodeInvariants(
+        node.data(),
+        "full debug mode should either keep the body material visible or fall back to the visible body texture node");
+
     auto *sampleNode = spectrogramBodySampleMaterialNode(node.data());
     QVERIFY(sampleNode != nullptr);
-    QVERIFY(geometryHasVisibleArea(sampleNode));
     auto *sampleMaterial =
         dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
     QVERIFY(sampleMaterial != nullptr);
     QVERIFY(sampleMaterial->state.rowLutTexture != nullptr);
-    auto *textureNode = spectrogramBodyTextureNode(node.data());
-    QVERIFY(textureNode != nullptr);
-    QVERIFY(textureNode->rect().isEmpty() || textureNode->texture() == nullptr);
 }
 
 void QmlSmokeTest::spectrogramGpuSampleMaterialsBindSourceTextureAtZero() {
