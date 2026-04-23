@@ -2605,7 +2605,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     spectrogramImageGeneration = m_gpuSourceGeneration;
                 }
                 spectrogramImageDebugMode = gpuDebugMode;
-                if (!canUseRetainedSourceTextureBody) {
+                if (!useRetainedSourceTextureBodyForFrame) {
                     spectrogramSourceRect = QRect(
                         0,
                         0,

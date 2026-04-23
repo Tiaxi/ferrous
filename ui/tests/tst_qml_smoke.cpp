@@ -1012,6 +1012,7 @@ private slots:
     void spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode();
     void spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage();
     void spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegments();
+    void spectrogramGpuSparseCenteredWindowFallsBackWithoutRetainedSourceTexture();
     void spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode();
     void spectrogramGpuFullModeUsesSampleBodyMaterialNode();
     void spectrogramGpuSampleMaterialsBindSourceTextureAtZero();
@@ -9387,12 +9388,18 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
         item.setShowFpsOverlay(false);
         item.setPlaying(false);
 
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+            QSKIP(qPrintable(
+                QStringLiteral("retained sparse-window overflow test requires OpenGL scene graph, got %1")
+                    .arg(graphicsApiName(windowGraphicsApi(window)))));
+        }
+
         item.feedPrecomputedChunk(
             makeChunk(2), bins, 0, 2, 0, totalColumns, 48000, 1024, false, true, trackToken);
         item.feedPrecomputedChunk(
             makeChunk(2), bins, 0, 2, 4, totalColumns, 48000, 1024, false, false, trackToken);
-        item.feedPrecomputedChunk(
-            makeChunk(2), bins, 0, 2, 8, totalColumns, 48000, 1024, true, false, trackToken);
         {
             QMutexLocker lock(&item.m_stateMutex);
             item.m_renderZoomLevel = effectiveZoom;
@@ -9400,15 +9407,69 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
         }
         item.setPositionSeconds(0.10);
 
-        window.show();
-        QVERIFY(QTest::qWaitForWindowExposed(&window));
         QCoreApplication::processEvents();
         QTest::qWait(50);
         QCoreApplication::processEvents();
 
-        QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
-        QVERIFY(!node.isNull());
+        std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+        QVERIFY(node != nullptr);
+        QSGTexture *retainedTexture = nullptr;
         QImage sourceImage;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            retainedTexture = item.m_gpuSourceTexture.texture();
+            sourceImage = item.m_gpuSourceImage;
+        }
+        QVERIFY2(retainedTexture != nullptr, "OpenGL precondition should produce a retained source texture");
+        QVERIFY2(
+            sourceImage.isNull(),
+            "retained sparse-window precondition should not populate the CPU source image before overflow");
+        if (debugCase.usesTextureNode) {
+            auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
+            auto *tailTextureNode = spectrogramTailTextureNode(node.get());
+            QVERIFY(bodyTextureNode != nullptr);
+            QVERIFY(tailTextureNode != nullptr);
+            QVERIFY2(
+                bodyTextureNode->texture() == retainedTexture,
+                "texture-node precondition should route the base run through the retained source texture");
+            QVERIFY2(
+                tailTextureNode->texture() == retainedTexture,
+                "texture-node precondition should route the tail run through the retained source texture");
+            QCOMPARE(bodyTextureNode->sourceRect(), QRectF(0.0, 0.0, 2.0, static_cast<double>(bins)));
+            QCOMPARE(tailTextureNode->sourceRect(), QRectF(4.0, 0.0, 2.0, static_cast<double>(bins)));
+            QVERIFY2(!bodyTextureNode->rect().isEmpty(), "base retained texture node should be visible");
+            QVERIFY2(!tailTextureNode->rect().isEmpty(), "tail retained texture node should be visible");
+        } else {
+            auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.get());
+            auto *tailSourceNode = spectrogramSourceSampleMaterialNode(node.get(), 1);
+            QVERIFY(bodySourceNode != nullptr);
+            QVERIFY(tailSourceNode != nullptr);
+            auto *bodyMaterial =
+                dynamic_cast<SpectrogramSourceSampleMaterial *>(bodySourceNode->material());
+            auto *tailMaterial =
+                dynamic_cast<SpectrogramSourceSampleMaterial *>(tailSourceNode->material());
+            QVERIFY(bodyMaterial != nullptr);
+            QVERIFY(tailMaterial != nullptr);
+            QVERIFY2(
+                bodyMaterial->state.sourceTexture == retainedTexture,
+                "shader-source-only precondition should sample the retained base run");
+            QVERIFY2(
+                tailMaterial->state.sourceTexture == retainedTexture,
+                "shader-source-only precondition should sample the retained tail run");
+            QCOMPARE(bodyMaterial->state.sourceRect, QRectF(0.0, 0.0, 2.0, static_cast<double>(bins)));
+            QCOMPARE(tailMaterial->state.sourceRect, QRectF(4.0, 0.0, 2.0, static_cast<double>(bins)));
+            QVERIFY2(geometryHasVisibleArea(bodySourceNode), "base retained sample node should be visible");
+            QVERIFY2(geometryHasVisibleArea(tailSourceNode), "tail retained sample node should be visible");
+        }
+
+        item.feedPrecomputedChunk(
+            makeChunk(2), bins, 0, 2, 8, totalColumns, 48000, 1024, true, false, trackToken);
+        QCoreApplication::processEvents();
+        QTest::qWait(50);
+        QCoreApplication::processEvents();
+
+        node.reset(item.updatePaintNode(node.release(), nullptr));
+        QVERIFY(node != nullptr);
         {
             QMutexLocker lock(&item.m_stateMutex);
             sourceImage = item.m_gpuSourceImage;
@@ -9434,25 +9495,153 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
             countVisiblePixelsInRect(sourceImage, QRect(6, 4, 2, bins - 8), 8) < 4,
             "gap between the second and third sparse runs should stay dark in the CPU fallback image");
         if (debugCase.usesTextureNode) {
-            assertTextureNodeDebugBodyInvariants(
-                node.data(),
-                "three visible sparse runs should fall back to the CPU texture-node body path");
-            auto *tailTextureNode = spectrogramTailTextureNode(node.data());
+            auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
+            auto *tailTextureNode = spectrogramTailTextureNode(node.get());
+            QVERIFY(bodyTextureNode != nullptr);
             QVERIFY(tailTextureNode != nullptr);
+            QVERIFY2(
+                bodyTextureNode->texture() != retainedTexture,
+                "overflow frame should stop sampling the retained base texture-node path");
+            QVERIFY2(!bodyTextureNode->rect().isEmpty(), "CPU fallback texture-node body should stay visible");
+            QCOMPARE(
+                bodyTextureNode->sourceRect(),
+                QRectF(0.0, 0.0, static_cast<double>(totalColumns), static_cast<double>(bins)));
             QVERIFY2(
                 tailTextureNode->rect().isEmpty(),
                 "three visible sparse runs should disable retained tail texture routing");
         } else {
-            auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.data());
+            auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.get());
             QVERIFY(bodySourceNode != nullptr);
+            auto *bodyMaterial =
+                dynamic_cast<SpectrogramSourceSampleMaterial *>(bodySourceNode->material());
+            QVERIFY(bodyMaterial != nullptr);
             QVERIFY2(
                 geometryHasVisibleArea(bodySourceNode),
                 "shader-source-only fallback should keep the CPU-backed source sample visible");
-            auto *tailSourceNode = spectrogramSourceSampleMaterialNode(node.data(), 1);
+            QVERIFY2(
+                bodyMaterial->state.sourceTexture != retainedTexture,
+                "overflow frame should stop sampling the retained shader-source-only texture");
+            QCOMPARE(
+                bodyMaterial->state.sourceRect,
+                QRectF(0.0, 0.0, static_cast<double>(totalColumns), static_cast<double>(bins)));
+            auto *tailSourceNode = spectrogramSourceSampleMaterialNode(node.get(), 1);
             QVERIFY(tailSourceNode != nullptr);
             QVERIFY2(
                 !geometryHasVisibleArea(tailSourceNode),
                 "three visible sparse runs should disable retained tail source routing");
+        }
+    }
+}
+
+void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackWithoutRetainedSourceTexture() {
+    struct DebugCase {
+        QByteArray envValue;
+        bool usesTextureNode;
+    };
+    const std::array<DebugCase, 2> cases{{
+        {QByteArrayLiteral("texture-node"), true},
+        {QByteArrayLiteral("shader-source-only"), false},
+    }};
+
+    constexpr int bins = 32;
+    constexpr int totalColumns = 12;
+    constexpr quint64 trackToken = 71;
+    constexpr double effectiveZoom = 10.0;
+
+    const auto makeChunk = [=](int columns) {
+        QByteArray chunk(columns * bins, '\x00');
+        for (int column = 0; column < columns; ++column) {
+            for (int bin = 4; bin < bins - 4; ++bin) {
+                chunk[column * bins + bin] = static_cast<char>(0xF0);
+            }
+        }
+        return chunk;
+    };
+
+    for (const DebugCase &debugCase : cases) {
+        qputenv("FERROUS_GPU_DEBUG_MODE", debugCase.envValue);
+        struct DebugModeGuard {
+            ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+        } debugModeGuard;
+
+        QQuickWindow window;
+        window.setColor(Qt::black);
+        window.resize(120, 80);
+
+        SpectrogramItem item;
+        item.setWidth(window.width());
+        item.setHeight(window.height());
+        item.setParentItem(window.contentItem());
+        item.setDisplayMode(1);
+        item.setGridEnabled(false);
+        item.setCrosshairEnabled(false);
+        item.setShowFpsOverlay(false);
+        item.setPlaying(false);
+
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        if (windowGraphicsApi(window) != QSGRendererInterface::Software) {
+            QSKIP(qPrintable(
+                QStringLiteral("non-OpenGL sparse-window fallback test requires software scene graph, got %1")
+                    .arg(graphicsApiName(windowGraphicsApi(window)))));
+        }
+
+        item.feedPrecomputedChunk(
+            makeChunk(2), bins, 0, 2, 0, totalColumns, 48000, 1024, false, true, trackToken);
+        item.feedPrecomputedChunk(
+            makeChunk(2), bins, 0, 2, 4, totalColumns, 48000, 1024, false, false, trackToken);
+        item.feedPrecomputedChunk(
+            makeChunk(2), bins, 0, 2, 8, totalColumns, 48000, 1024, true, false, trackToken);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_renderZoomLevel = effectiveZoom;
+            item.m_zoomLevel = effectiveZoom;
+        }
+        item.setPositionSeconds(0.10);
+
+        QCoreApplication::processEvents();
+        QTest::qWait(50);
+        QCoreApplication::processEvents();
+
+        QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+        QVERIFY(!node.isNull());
+        QImage sourceImage;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY(item.m_gpuSourceTexture.texture() == nullptr);
+            sourceImage = item.m_gpuSourceImage;
+        }
+        QVERIFY2(
+            !sourceImage.isNull(),
+            "software sparse-window fallback should render through the CPU source image");
+        QCOMPARE(sourceImage.width(), totalColumns);
+        QCOMPARE(sourceImage.height(), bins);
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(0, 4, 2, bins - 8), 8) > 30,
+            "first sparse run should remain visible in software fallback");
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(4, 4, 2, bins - 8), 8) > 30,
+            "second sparse run should remain visible in software fallback");
+        QVERIFY2(
+            countVisiblePixelsInRect(sourceImage, QRect(8, 4, 2, bins - 8), 8) > 30,
+            "third sparse run should remain visible in software fallback");
+        if (debugCase.usesTextureNode) {
+            auto *bodyTextureNode = spectrogramBodyTextureNode(node.data());
+            QVERIFY(bodyTextureNode != nullptr);
+            QVERIFY2(!bodyTextureNode->rect().isEmpty(), "software texture-node fallback should stay visible");
+            QCOMPARE(
+                bodyTextureNode->sourceRect(),
+                QRectF(0.0, 0.0, static_cast<double>(totalColumns), static_cast<double>(bins)));
+        } else {
+            auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.data());
+            QVERIFY(bodySourceNode != nullptr);
+            auto *bodyMaterial =
+                dynamic_cast<SpectrogramSourceSampleMaterial *>(bodySourceNode->material());
+            QVERIFY(bodyMaterial != nullptr);
+            QVERIFY2(geometryHasVisibleArea(bodySourceNode), "software shader-source-only fallback should stay visible");
+            QCOMPARE(
+                bodyMaterial->state.sourceRect,
+                QRectF(0.0, 0.0, static_cast<double>(totalColumns), static_cast<double>(bins)));
         }
     }
 }
