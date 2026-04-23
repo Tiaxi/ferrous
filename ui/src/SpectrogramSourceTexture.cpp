@@ -2,6 +2,7 @@
 
 #include "SpectrogramSourceTexture.h"
 
+#include <QObject>
 #include <QRunnable>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
@@ -43,13 +44,13 @@ void finishCleanupTicket(QObject *cleanupTicket) {
 class TextureDeleteRenderJob final : public QRunnable {
 public:
     TextureDeleteRenderJob(
+        QSGTexture *texture,
         const GLuint textureId,
-        QQuickWindow *ownerWindow,
         QOpenGLContext *ownerContext,
         QOpenGLContextGroup *shareGroup,
         QObject *cleanupTicket)
-        : m_textureId(textureId)
-        , m_ownerWindow(ownerWindow)
+        : m_texture(texture)
+        , m_textureId(textureId)
         , m_ownerContext(ownerContext)
         , m_shareGroup(shareGroup)
         , m_cleanupTicket(cleanupTicket) {
@@ -62,6 +63,8 @@ public:
 
         QOpenGLContext *context = QOpenGLContext::currentContext();
         if (canDeleteTextureOnContext(context, m_ownerContext, m_shareGroup)) {
+            delete m_texture;
+            m_texture = nullptr;
             if (QOpenGLFunctions *functions = context->functions()) {
                 GLuint textureId = m_textureId;
                 functions->glDeleteTextures(1, &textureId);
@@ -70,25 +73,20 @@ public:
             return;
         }
 
-        if (!m_ownerContext.isNull() && !m_ownerWindow.isNull()) {
-            m_ownerWindow->scheduleRenderJob(
-                new TextureDeleteRenderJob(
-                    m_textureId,
-                    m_ownerWindow.data(),
-                    m_ownerContext.data(),
-                    m_shareGroup.data(),
-                    m_cleanupTicket.data()),
-                QQuickWindow::AfterSynchronizingStage);
-            m_ownerWindow->update();
+        if (m_ownerContext.isNull()) {
+            delete m_texture;
+            m_texture = nullptr;
+            finishCleanupTicket(m_cleanupTicket.data());
             return;
         }
 
-        finishCleanupTicket(m_cleanupTicket.data());
+        // Keep the cleanup ticket alive so the owner can observe that cleanup
+        // did not run under a compatible scene-graph context.
     }
 
 private:
+    QSGTexture *m_texture{nullptr};
     GLuint m_textureId{0};
-    QPointer<QQuickWindow> m_ownerWindow;
     QPointer<QOpenGLContext> m_ownerContext;
     QPointer<QOpenGLContextGroup> m_shareGroup;
     QPointer<QObject> m_cleanupTicket;
@@ -164,7 +162,7 @@ bool SpectrogramSourceTexture::ensureCreated(QQuickWindow *window, const int wid
     if (window == nullptr || width <= 0 || height <= 0) {
         return false;
     }
-    if (m_texture != nullptr && m_size == QSize(width, height)) {
+    if (m_texture != nullptr && m_size == QSize(width, height) && m_ownerWindow == window) {
         return true;
     }
 
@@ -209,6 +207,9 @@ bool SpectrogramSourceTexture::uploadRgbaColumns(
     if (context == nullptr) {
         return false;
     }
+    if (!canDeleteTextureOnContext(context, m_ownerContext, m_shareGroup)) {
+        return false;
+    }
     QOpenGLFunctions *functions = context->functions();
     if (functions == nullptr) {
         return false;
@@ -229,30 +230,42 @@ void SpectrogramSourceTexture::clearPendingSpans() {
 }
 
 void SpectrogramSourceTexture::release() {
-    delete m_texture;
-    m_texture = nullptr;
+    QOpenGLContext *context = QOpenGLContext::currentContext();
+    const bool can_delete_now = canDeleteTextureOnContext(context, m_ownerContext, m_shareGroup);
 
-    if (m_textureId != 0) {
-        QOpenGLContext *context = QOpenGLContext::currentContext();
-        if (canDeleteTextureOnContext(context, m_ownerContext, m_shareGroup)) {
+    if (can_delete_now) {
+        delete m_texture;
+        m_texture = nullptr;
+
+        if (m_textureId != 0) {
             if (QOpenGLFunctions *functions = context->functions()) {
                 GLuint textureId = m_textureId;
                 functions->glDeleteTextures(1, &textureId);
             }
-        } else if (!m_ownerWindow.isNull()) {
-            auto *cleanupTicket = new QObject();
+            m_textureId = 0;
+        }
+    } else if ((m_texture != nullptr || m_textureId != 0) && !m_ownerWindow.isNull()) {
+        if (m_pendingCleanupJob.isNull()) {
+            auto *cleanupTicket = new QObject(m_ownerWindow);
             m_pendingCleanupJob = cleanupTicket;
             m_ownerWindow->scheduleRenderJob(
                 new TextureDeleteRenderJob(
+                    m_texture,
                     m_textureId,
-                    m_ownerWindow.data(),
                     m_ownerContext.data(),
                     m_shareGroup.data(),
                     cleanupTicket),
                 QQuickWindow::AfterSynchronizingStage);
             m_ownerWindow->update();
         }
+        m_texture = nullptr;
         m_textureId = 0;
+    } else {
+        Q_ASSERT_X(
+            m_texture == nullptr && m_textureId == 0,
+            "SpectrogramSourceTexture::release",
+            "releasing a live retained source texture requires either a compatible current "
+            "context or a live owning QQuickWindow");
     }
 
     m_size = QSize();

@@ -11,6 +11,7 @@
 #include <QPainter>
 #include <QQuickWindow>
 #include <QRegularExpression>
+#include <QRunnable>
 #include <QResource>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
@@ -29,6 +30,7 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -998,6 +1000,7 @@ private slots:
     void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
+    void spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow();
     void spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext();
     void spectrogramRetainedSourceTextureUploadRejectsInvalidArguments();
     void spectrogramGpuVisibleSourceImageTracksDisplayWindow();
@@ -1095,24 +1098,112 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCl
     window.update();
     QVERIFY(!window.grabWindow().isNull());
     QVERIFY(texture.m_pendingCleanupJob != nullptr);
-    delete texture.m_pendingCleanupJob.data();
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow() {
+    QQuickWindow firstWindow;
+    firstWindow.resize(96, 64);
+    firstWindow.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&firstWindow, 5000));
+    QVERIFY(!firstWindow.grabWindow().isNull());
+    if (windowGraphicsApi(firstWindow) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("real retained-source OpenGL lifecycle test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(firstWindow)))));
+    }
+
+    QQuickWindow secondWindow;
+    secondWindow.resize(96, 64);
+    secondWindow.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&secondWindow, 5000));
+    QVERIFY(!secondWindow.grabWindow().isNull());
+    if (windowGraphicsApi(secondWindow) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("second live window did not get an OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(secondWindow)))));
+    }
+
+    SpectrogramSourceTexture texture;
+    std::atomic_bool createFinished{false};
+    std::atomic_bool createSucceeded{false};
+    firstWindow.scheduleRenderJob(
+        QRunnable::create([&]() {
+            createSucceeded.store(texture.ensureCreated(&firstWindow, 8, 4));
+            createFinished.store(true);
+        }),
+        QQuickWindow::AfterSynchronizingStage);
+    firstWindow.update();
+    QVERIFY(!firstWindow.grabWindow().isNull());
+    QTRY_VERIFY(createFinished.load());
+    QVERIFY(createSucceeded.load());
+    QVERIFY(texture.texture() != nullptr);
+    QCOMPARE(texture.size(), QSize(8, 4));
+    QCOMPARE(texture.m_ownerWindow.data(), &firstWindow);
+    QSGTexture *firstWrapper = texture.texture();
+
+    std::atomic_bool recreateFinished{false};
+    std::atomic_bool recreateSucceeded{false};
+    secondWindow.scheduleRenderJob(
+        QRunnable::create([&]() {
+            recreateSucceeded.store(texture.ensureCreated(&secondWindow, 8, 4));
+            recreateFinished.store(true);
+        }),
+        QQuickWindow::AfterSynchronizingStage);
+    secondWindow.update();
+    QVERIFY(!secondWindow.grabWindow().isNull());
+    QTRY_VERIFY(recreateFinished.load());
+    QVERIFY(recreateSucceeded.load());
+    QVERIFY(texture.texture() != nullptr);
+    QVERIFY(texture.texture() != firstWrapper);
+    QCOMPARE(texture.m_ownerWindow.data(), &secondWindow);
+
+    QPointer<QOpenGLContext> liveOwnerContext = texture.m_ownerContext;
+    QPointer<QOpenGLContextGroup> liveShareGroup = texture.m_shareGroup;
+    texture.m_ownerContext = new QOpenGLContext(this);
+    texture.m_shareGroup.clear();
+
+    const QByteArray rgbaBytes(8 * 4 * 4, '\x7f');
+    std::atomic_bool uploadFinished{false};
+    std::atomic_bool uploadSucceeded{true};
+    secondWindow.scheduleRenderJob(
+        QRunnable::create([&]() {
+            uploadSucceeded.store(texture.uploadRgbaColumns(&secondWindow, 0, 8, 4, rgbaBytes));
+            uploadFinished.store(true);
+        }),
+        QQuickWindow::AfterSynchronizingStage);
+    secondWindow.update();
+    QVERIFY(!secondWindow.grabWindow().isNull());
+    QTRY_VERIFY(uploadFinished.load());
+    QVERIFY(!uploadSucceeded.load());
+
+    texture.m_ownerContext = liveOwnerContext;
+    texture.m_shareGroup = liveShareGroup;
+    texture.release();
+    QVERIFY(texture.texture() == nullptr);
+    QVERIFY(texture.m_pendingCleanupJob != nullptr);
+
+    secondWindow.update();
+    QVERIFY(!secondWindow.grabWindow().isNull());
     QTRY_VERIFY(texture.m_pendingCleanupJob == nullptr);
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext() {
     QVERIFY(QOpenGLContext::currentContext() == nullptr);
 
+    QQuickWindow ownerWindow;
+    QQuickWindow otherWindow;
     SpectrogramSourceTexture texture;
     texture.m_textureId = 33;
+    texture.m_ownerWindow = &ownerWindow;
     texture.m_ownerContext = new QOpenGLContext(this);
     texture.m_size = QSize(5, 7);
     texture.noteUploadedSpan({1, 2});
 
-    QQuickWindow window;
-    QVERIFY(!texture.ensureCreated(&window, 12, 16));
+    QVERIFY(!texture.ensureCreated(&otherWindow, 5, 7));
     QCOMPARE(texture.m_textureId, 33U);
     QCOMPARE(texture.size(), QSize(5, 7));
     QCOMPARE(texture.pendingUploadSpanCount(), 1);
+    QCOMPARE(texture.m_ownerWindow.data(), &ownerWindow);
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureUploadRejectsInvalidArguments() {
