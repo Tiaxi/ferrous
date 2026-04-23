@@ -70,6 +70,7 @@ inline QVector<SpectrogramSourceUploadSpan> mergeSpectrogramSourceUploadSpans(
 class QOpenGLContext;
 class QOpenGLContextGroup;
 class QObject;
+struct SpectrogramSourceTextureActiveOwnerState;
 struct SpectrogramSourceTextureDeferredCleanupState;
 
 class SpectrogramSourceTexture {
@@ -97,6 +98,13 @@ public:
     void release();
 
 private:
+    void armCleanupOwnerForCurrentTexture();
+    void disarmCleanupOwner();
+    void handOffActiveCleanupOwner(
+        const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState,
+        bool preferOwnerWindowAttempt,
+        bool watchOwnerWindow,
+        bool watchOwnerContext);
     [[nodiscard]] int pendingCleanupAttemptCount() const;
     [[nodiscard]] int pendingCleanupGenerationCount() const;
     void scheduleDeferredCleanup(
@@ -113,6 +121,7 @@ private:
     QPointer<QQuickWindow> m_ownerWindow;
     QPointer<QOpenGLContext> m_ownerContext;
     QPointer<QOpenGLContextGroup> m_shareGroup;
+    std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> m_activeOwnerState;
     std::shared_ptr<std::atomic_int> m_pendingCleanupAttemptCount{std::make_shared<std::atomic_int>(0)};
     std::shared_ptr<std::atomic_int> m_pendingCleanupCount{std::make_shared<std::atomic_int>(0)};
 };
