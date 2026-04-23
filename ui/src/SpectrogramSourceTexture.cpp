@@ -47,6 +47,7 @@ struct SpectrogramSourceTextureActiveOwnerState {
     QVector<QPointer<QOpenGLContext>> sharedContexts;
     QMetaObject::Connection ownerWindowDestroyedConnection;
     QMetaObject::Connection ownerContextDestroyedConnection;
+    QMetaObject::Connection sceneGraphInvalidatedConnection;
 };
 
 struct SpectrogramSourceTextureDeferredCleanupState {
@@ -58,13 +59,15 @@ struct SpectrogramSourceTextureDeferredCleanupState {
         QOpenGLContextGroup *group,
         QVector<QPointer<QOpenGLContext>> sharedContextsSnapshot,
         std::shared_ptr<DeferredCleanupTicket> ticket,
-        std::shared_ptr<std::atomic_int> attemptCount)
+        std::shared_ptr<std::atomic_int> attemptCount,
+        std::shared_ptr<std::atomic<std::uintptr_t>> wrapperDeletionThreadId)
         : ownerWindow(window)
         , ownerContext(context)
         , shareGroup(group)
         , sharedContexts(std::move(sharedContextsSnapshot))
         , cleanupTicket(std::move(ticket))
         , cleanupAttemptCount(std::move(attemptCount))
+        , wrapperDeletionThreadId(std::move(wrapperDeletionThreadId))
         , texture(wrappedTexture)
         , textureId(nativeTextureId) {
     }
@@ -96,6 +99,16 @@ struct SpectrogramSourceTextureDeferredCleanupState {
         return {wrappedTexture, nativeTextureId};
     }
 
+    [[nodiscard]] bool hasTexture() const {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return texture != nullptr;
+    }
+
+    [[nodiscard]] bool hasTextureId() const {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return textureId != 0;
+    }
+
     void abandonNativeTexture() {
         const std::lock_guard<std::mutex> lock(mutex);
         textureId = 0;
@@ -107,8 +120,10 @@ struct SpectrogramSourceTextureDeferredCleanupState {
     QVector<QPointer<QOpenGLContext>> sharedContexts;
     std::shared_ptr<DeferredCleanupTicket> cleanupTicket;
     std::shared_ptr<std::atomic_int> cleanupAttemptCount;
+    std::shared_ptr<std::atomic<std::uintptr_t>> wrapperDeletionThreadId;
     QMetaObject::Connection ownerWindowDestroyedConnection;
     QMetaObject::Connection ownerContextDestroyedConnection;
+    QMetaObject::Connection sceneGraphInvalidatedConnection;
 
 private:
     mutable std::mutex mutex;
@@ -175,28 +190,21 @@ void finishDeferredCleanup(
     finishCleanupTicket(cleanupState->cleanupTicket);
 }
 
-void queueWrapperDeletionOnGuiThread(
+void maybeFinishDeferredCleanup(
     const std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> &cleanupState) {
-    QSGTexture *texture = cleanupState->takeTexture();
-    if (texture == nullptr) {
+    if (!cleanupState->hasTexture() && !cleanupState->hasTextureId()) {
         finishDeferredCleanup(cleanupState);
-        return;
     }
+}
 
-    QCoreApplication *application = QCoreApplication::instance();
-    if (application != nullptr
-        && QMetaObject::invokeMethod(
-            application,
-            [texture, cleanupState]() {
-                delete texture;
-                finishDeferredCleanup(cleanupState);
-            },
-            Qt::QueuedConnection)) {
-        return;
+void deleteWrapperOnCurrentRenderThread(
+    const std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> &cleanupState) {
+    if (QSGTexture *texture = cleanupState->takeTexture()) {
+        cleanupState->wrapperDeletionThreadId->store(
+            reinterpret_cast<std::uintptr_t>(QThread::currentThread()));
+        delete texture;
     }
-
-    delete texture;
-    finishDeferredCleanup(cleanupState);
+    maybeFinishDeferredCleanup(cleanupState);
 }
 
 QVector<QPointer<QOpenGLContext>> snapshotSharedContexts(QOpenGLContextGroup *shareGroup) {
@@ -219,8 +227,10 @@ void disconnectCleanupWatchers(
     const std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> &cleanupState) {
     QObject::disconnect(cleanupState->ownerWindowDestroyedConnection);
     QObject::disconnect(cleanupState->ownerContextDestroyedConnection);
+    QObject::disconnect(cleanupState->sceneGraphInvalidatedConnection);
     cleanupState->ownerWindowDestroyedConnection = {};
     cleanupState->ownerContextDestroyedConnection = {};
+    cleanupState->sceneGraphInvalidatedConnection = {};
 }
 
 void disconnectActiveOwnerWatchers(
@@ -231,8 +241,10 @@ void disconnectActiveOwnerWatchers(
 
     QObject::disconnect(ownerState->ownerWindowDestroyedConnection);
     QObject::disconnect(ownerState->ownerContextDestroyedConnection);
+    QObject::disconnect(ownerState->sceneGraphInvalidatedConnection);
     ownerState->ownerWindowDestroyedConnection = {};
     ownerState->ownerContextDestroyedConnection = {};
+    ownerState->sceneGraphInvalidatedConnection = {};
 }
 
 void runDeferredCleanupAttempt(
@@ -247,7 +259,8 @@ std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> makeDeferredCleanu
     QOpenGLContext *ownerContext,
     QOpenGLContextGroup *shareGroup,
     const std::shared_ptr<std::atomic_int> &pendingCleanupCount,
-    const std::shared_ptr<std::atomic_int> &attemptCount);
+    const std::shared_ptr<std::atomic_int> &attemptCount,
+    const std::shared_ptr<std::atomic<std::uintptr_t>> &wrapperDeletionThreadId);
 void scheduleDeferredCleanupState(
     const std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> &cleanupState,
     bool watchOwnerWindow,
@@ -296,16 +309,22 @@ bool tryScheduleSharedContextCleanup(
 
             deleteNativeTexture(cleanupState->takeTextureId(), &cleanupContext);
             cleanupContext.doneCurrent();
-            queueWrapperDeletionOnGuiThread(cleanupState);
-            return;
-        }
-
-        if (tryScheduleCleanupAttemptOnOwnerWindow(cleanupState)) {
+            if (cleanupState->hasTexture()) {
+                if (tryScheduleCleanupAttemptOnOwnerWindow(cleanupState)) {
+                    return;
+                }
+            }
+            maybeFinishDeferredCleanup(cleanupState);
             return;
         }
 
         cleanupState->abandonNativeTexture();
-        queueWrapperDeletionOnGuiThread(cleanupState);
+        if (cleanupState->hasTexture()) {
+            if (tryScheduleCleanupAttemptOnOwnerWindow(cleanupState)) {
+                return;
+            }
+        }
+        maybeFinishDeferredCleanup(cleanupState);
     };
 
     return QMetaObject::invokeMethod(application, cleanupOnSharedContext, Qt::QueuedConnection);
@@ -330,29 +349,30 @@ void runDeferredCleanupAttempt(
     const std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> &cleanupState) {
     cleanupState->noteAttempt();
     QOpenGLContext *context = QOpenGLContext::currentContext();
-    if (canDestroyWrapperOnContext(context, cleanupState->ownerContext)) {
-        const auto [texture, textureId] = cleanupState->takeResources();
-        delete texture;
-        deleteNativeTexture(textureId, context);
-        finishDeferredCleanup(cleanupState);
+    if (!cleanupState->hasTextureId()) {
+        deleteWrapperOnCurrentRenderThread(cleanupState);
         return;
     }
 
     if (cleanupState->ownerContext.isNull()) {
         if (canDeleteNativeTextureOnContext(context, cleanupState->ownerContext, cleanupState->shareGroup)) {
             deleteNativeTexture(cleanupState->takeTextureId(), context);
-            queueWrapperDeletionOnGuiThread(cleanupState);
-            return;
-        }
-        if (!tryScheduleSharedContextCleanup(cleanupState)) {
+        } else if (!tryScheduleSharedContextCleanup(cleanupState)) {
             cleanupState->abandonNativeTexture();
-            queueWrapperDeletionOnGuiThread(cleanupState);
         }
+        deleteWrapperOnCurrentRenderThread(cleanupState);
         return;
     }
 
     if (canDeleteNativeTextureOnContext(context, cleanupState->ownerContext, cleanupState->shareGroup)) {
         deleteNativeTexture(cleanupState->takeTextureId(), context);
+        deleteWrapperOnCurrentRenderThread(cleanupState);
+        return;
+    }
+
+    if (tryScheduleSharedContextCleanup(cleanupState)) {
+        deleteWrapperOnCurrentRenderThread(cleanupState);
+        return;
     }
 
     // Keep the cleanup state alive until the owner context/window destruction
@@ -393,7 +413,8 @@ std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> makeDeferredCleanu
     QOpenGLContext *ownerContext,
     QOpenGLContextGroup *shareGroup,
     const std::shared_ptr<std::atomic_int> &pendingCleanupCount,
-    const std::shared_ptr<std::atomic_int> &attemptCount) {
+    const std::shared_ptr<std::atomic_int> &attemptCount,
+    const std::shared_ptr<std::atomic<std::uintptr_t>> &wrapperDeletionThreadId) {
     auto cleanupTicket = std::make_shared<DeferredCleanupTicket>(pendingCleanupCount);
     cleanupTicket->pendingCleanupCount->fetch_add(1);
     return std::make_shared<SpectrogramSourceTextureDeferredCleanupState>(
@@ -404,7 +425,8 @@ std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> makeDeferredCleanu
         shareGroup,
         snapshotSharedContexts(shareGroup),
         cleanupTicket,
-        attemptCount);
+        attemptCount,
+        wrapperDeletionThreadId);
 }
 
 void scheduleDeferredCleanupState(
@@ -413,6 +435,14 @@ void scheduleDeferredCleanupState(
     const bool watchOwnerContext,
     const bool preferOwnerWindowAttempt) {
     if (watchOwnerWindow && !cleanupState->ownerWindow.isNull()) {
+        cleanupState->sceneGraphInvalidatedConnection = QObject::connect(
+            cleanupState->ownerWindow.data(),
+            &QQuickWindow::sceneGraphInvalidated,
+            cleanupState->ownerWindow.data(),
+            [cleanupState]() {
+                runDeferredCleanupAttempt(cleanupState);
+            },
+            Qt::DirectConnection);
         cleanupState->ownerWindowDestroyedConnection = QObject::connect(
             cleanupState->ownerWindow.data(),
             &QObject::destroyed,
@@ -421,7 +451,7 @@ void scheduleDeferredCleanupState(
                     return;
                 }
                 cleanupState->abandonNativeTexture();
-                queueWrapperDeletionOnGuiThread(cleanupState);
+                maybeFinishDeferredCleanup(cleanupState);
             });
     }
 
@@ -437,7 +467,7 @@ void scheduleDeferredCleanupState(
                     return;
                 }
                 cleanupState->abandonNativeTexture();
-                queueWrapperDeletionOnGuiThread(cleanupState);
+                maybeFinishDeferredCleanup(cleanupState);
             });
     }
 
@@ -454,7 +484,12 @@ void scheduleDeferredCleanupState(
     } else {
         cleanupState->abandonNativeTexture();
     }
-    queueWrapperDeletionOnGuiThread(cleanupState);
+    if (cleanupState->hasTexture()) {
+        if (tryScheduleCleanupAttemptOnOwnerWindow(cleanupState)) {
+            return;
+        }
+    }
+    maybeFinishDeferredCleanup(cleanupState);
 }
 
 bool createWrappedTexture(
@@ -529,6 +564,18 @@ void SpectrogramSourceTexture::armCleanupOwnerForCurrentTexture() {
         m_ownerContext.data(),
         m_shareGroup.data(),
         snapshotSharedContexts(m_shareGroup.data()));
+    ownerState->sceneGraphInvalidatedConnection = QObject::connect(
+        m_ownerWindow.data(),
+        &QQuickWindow::sceneGraphInvalidated,
+        m_ownerWindow.data(),
+        [this, ownerState, ownerStateMutex, ownerStateAlive]() {
+            const std::lock_guard<std::recursive_mutex> callbackLock(*ownerStateMutex);
+            if (!ownerStateAlive->load()) {
+                return;
+            }
+            cleanUpActiveOwnerOnRenderThread(ownerState);
+        },
+        Qt::DirectConnection);
     ownerState->ownerWindowDestroyedConnection = QObject::connect(
         m_ownerWindow.data(),
         &QObject::destroyed,
@@ -558,20 +605,25 @@ void SpectrogramSourceTexture::armCleanupOwnerForCurrentTexture() {
     m_activeOwnerState = std::move(ownerState);
 }
 
+void SpectrogramSourceTexture::cleanUpActiveOwnerOnRenderThread(
+    const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState) {
+    if (auto cleanupState = takeActiveCleanupState(ownerState)) {
+        runDeferredCleanupAttempt(cleanupState);
+    }
+}
+
 void SpectrogramSourceTexture::disarmCleanupOwner() {
     const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     disconnectActiveOwnerWatchers(m_activeOwnerState);
     m_activeOwnerState.reset();
 }
 
-void SpectrogramSourceTexture::handOffActiveCleanupOwner(
-    const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState,
-    const bool preferOwnerWindowAttempt,
-    const bool watchOwnerWindow,
-    const bool watchOwnerContext) {
+std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState>
+SpectrogramSourceTexture::takeActiveCleanupState(
+    const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState) {
     const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     if (m_activeOwnerState != ownerState || (m_texture == nullptr && m_textureId == 0)) {
-        return;
+        return {};
     }
 
     auto cleanupState = makeDeferredCleanupState(
@@ -581,7 +633,8 @@ void SpectrogramSourceTexture::handOffActiveCleanupOwner(
         ownerState->ownerContext.data(),
         ownerState->shareGroup.data(),
         m_pendingCleanupCount,
-        m_pendingCleanupAttemptCount);
+        m_pendingCleanupAttemptCount,
+        m_lastWrapperDeletionThreadId);
     cleanupState->sharedContexts = ownerState->sharedContexts;
 
     disarmCleanupOwner();
@@ -593,11 +646,21 @@ void SpectrogramSourceTexture::handOffActiveCleanupOwner(
     m_ownerContext.clear();
     m_shareGroup.clear();
 
-    scheduleDeferredCleanupState(
-        cleanupState,
-        watchOwnerWindow,
-        watchOwnerContext,
-        preferOwnerWindowAttempt);
+    return cleanupState;
+}
+
+void SpectrogramSourceTexture::handOffActiveCleanupOwner(
+    const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState,
+    const bool preferOwnerWindowAttempt,
+    const bool watchOwnerWindow,
+    const bool watchOwnerContext) {
+    if (auto cleanupState = takeActiveCleanupState(ownerState)) {
+        scheduleDeferredCleanupState(
+            cleanupState,
+            watchOwnerWindow,
+            watchOwnerContext,
+            preferOwnerWindowAttempt);
+    }
 }
 
 QSize SpectrogramSourceTexture::size() const {
@@ -738,7 +801,8 @@ void SpectrogramSourceTexture::scheduleDeferredCleanup(
         ownerContext,
         shareGroup,
         m_pendingCleanupCount,
-        m_pendingCleanupAttemptCount);
+        m_pendingCleanupAttemptCount,
+        m_lastWrapperDeletionThreadId);
     scheduleDeferredCleanupState(cleanupState, true, ownerContext != nullptr, true);
 }
 
@@ -751,6 +815,8 @@ void SpectrogramSourceTexture::release() {
 
     if (can_destroy_wrapper_now) {
         disarmCleanupOwner();
+        m_lastWrapperDeletionThreadId->store(
+            reinterpret_cast<std::uintptr_t>(QThread::currentThread()));
         delete m_texture;
         m_texture = nullptr;
         deleteNativeTexture(m_textureId, context);
@@ -763,7 +829,8 @@ void SpectrogramSourceTexture::release() {
             m_activeOwnerState->ownerContext.data(),
             m_activeOwnerState->shareGroup.data(),
             m_pendingCleanupCount,
-            m_pendingCleanupAttemptCount);
+            m_pendingCleanupAttemptCount,
+            m_lastWrapperDeletionThreadId);
         cleanupState->sharedContexts = m_activeOwnerState->sharedContexts;
         const bool watchOwnerWindow = !m_activeOwnerState->ownerWindow.isNull();
         const bool watchOwnerContext = !m_activeOwnerState->ownerContext.isNull();

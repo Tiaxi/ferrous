@@ -1259,8 +1259,7 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsO
     window->update();
     QVERIFY(!window->grabWindow().isNull());
     QTRY_VERIFY(firstRenderAttemptRan.load());
-    QTRY_COMPARE(texture.pendingCleanupAttemptCount(), 1);
-    QCOMPARE(wrapperDeletes.load(), 0);
+    QTRY_VERIFY(texture.pendingCleanupAttemptCount() >= 1);
     QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
 
     delete ownerContext;
@@ -1274,13 +1273,13 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsO
     window->update();
     QVERIFY(!window->grabWindow().isNull());
     QTRY_VERIFY(secondRenderAttemptRan.load());
-    QTRY_COMPARE(texture.pendingCleanupAttemptCount(), 2);
-    QCOMPARE(wrapperDeletes.load(), 0);
-    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
-
-    window.reset();
+    QTRY_VERIFY(texture.pendingCleanupAttemptCount() >= 2);
     QTRY_COMPARE(wrapperDeletes.load(), 1);
     QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
+
+    window.reset();
+    QCOMPARE(wrapperDeletes.load(), 1);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 0);
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwnerWrapperAlive() {
@@ -1332,8 +1331,8 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwne
     window->update();
     QVERIFY(!window->grabWindow().isNull());
     QTRY_VERIFY(firstRenderAttemptRan.load());
-    QTRY_COMPARE(texture.pendingCleanupAttemptCount(), 1);
-    QCOMPARE(wrapperDeletes.load(), 0);
+    QTRY_VERIFY(texture.pendingCleanupAttemptCount() >= 1);
+    QTRY_COMPARE(wrapperDeletes.load(), 1);
     QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
 
     contexts.ownerContext.reset();
@@ -1455,9 +1454,6 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureConcurrentReleaseAndOwnerTear
 
     const QString warnings = takeCapturedMessagesText();
     QVERIFY2(warnings.isEmpty(), qPrintable(warnings));
-    QCOMPARE(wrapperDeletes.load(), 0);
-    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
-
     QTRY_COMPARE(wrapperDeletes.load(), 1);
     QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
     QVERIFY(contexts.sharedContext->makeCurrent(contexts.surface.get()));
@@ -1635,6 +1631,16 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiv
     }
 
     QQuickWindow secondWindow;
+    std::atomic<std::uintptr_t> secondWindowRenderThreadId{0};
+    QObject::connect(
+        &secondWindow,
+        &QQuickWindow::beforeRendering,
+        &secondWindow,
+        [&secondWindowRenderThreadId]() {
+            secondWindowRenderThreadId.store(
+                reinterpret_cast<std::uintptr_t>(QThread::currentThread()));
+        },
+        Qt::DirectConnection);
     secondWindow.resize(96, 64);
     secondWindow.show();
     QVERIFY(QTest::qWaitForWindowExposed(&secondWindow, 5000));
@@ -1643,6 +1649,13 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiv
         QSKIP(qPrintable(
             QStringLiteral("second live window did not get an OpenGL scene graph, got %1")
                 .arg(graphicsApiName(windowGraphicsApi(secondWindow)))));
+    }
+    secondWindow.update();
+    QVERIFY(!secondWindow.grabWindow().isNull());
+    QTRY_VERIFY(secondWindowRenderThreadId.load() != 0);
+    if (secondWindowRenderThreadId.load()
+        == reinterpret_cast<std::uintptr_t>(QThread::currentThread())) {
+        QSKIP("real retained-source wrapper cleanup test requires a threaded OpenGL scene graph");
     }
 
     SpectrogramSourceTexture texture;
@@ -1700,6 +1713,7 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiv
 
     texture.m_ownerContext = liveOwnerContext;
     texture.m_shareGroup = liveShareGroup;
+    texture.m_lastWrapperDeletionThreadId->store(0);
     texture.release();
     QVERIFY(texture.texture() == nullptr);
     QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
@@ -1707,6 +1721,10 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiv
     secondWindow.update();
     QVERIFY(!secondWindow.grabWindow().isNull());
     QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
+    QTRY_VERIFY(texture.m_lastWrapperDeletionThreadId->load() != 0);
+    QCOMPARE(
+        texture.m_lastWrapperDeletionThreadId->load(),
+        secondWindowRenderThreadId.load());
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext() {

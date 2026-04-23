@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -100,12 +101,16 @@ public:
 
 private:
     void armCleanupOwnerForCurrentTexture();
+    void cleanUpActiveOwnerOnRenderThread(
+        const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState);
     void disarmCleanupOwner();
     void handOffActiveCleanupOwner(
         const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState,
         bool preferOwnerWindowAttempt,
         bool watchOwnerWindow,
         bool watchOwnerContext);
+    [[nodiscard]] std::shared_ptr<SpectrogramSourceTextureDeferredCleanupState> takeActiveCleanupState(
+        const std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> &ownerState);
     [[nodiscard]] int pendingCleanupAttemptCount() const;
     [[nodiscard]] int pendingCleanupGenerationCount() const;
     void scheduleDeferredCleanup(
@@ -127,6 +132,8 @@ private:
         std::make_shared<std::recursive_mutex>()};
     std::shared_ptr<std::atomic_bool> m_ownerStateAlive{
         std::make_shared<std::atomic_bool>(true)};
+    std::shared_ptr<std::atomic<std::uintptr_t>> m_lastWrapperDeletionThreadId{
+        std::make_shared<std::atomic<std::uintptr_t>>(0)};
     std::shared_ptr<std::atomic_int> m_pendingCleanupAttemptCount{std::make_shared<std::atomic_int>(0)};
     std::shared_ptr<std::atomic_int> m_pendingCleanupCount{std::make_shared<std::atomic_int>(0)};
 };
