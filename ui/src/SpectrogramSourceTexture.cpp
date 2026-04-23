@@ -344,7 +344,10 @@ void runDeferredCleanupAttempt(
             queueWrapperDeletionOnGuiThread(cleanupState);
             return;
         }
-        tryScheduleSharedContextCleanup(cleanupState);
+        if (!tryScheduleSharedContextCleanup(cleanupState)) {
+            cleanupState->abandonNativeTexture();
+            queueWrapperDeletionOnGuiThread(cleanupState);
+        }
         return;
     }
 
@@ -608,6 +611,7 @@ QSGTexture *SpectrogramSourceTexture::texture() const {
 }
 
 int SpectrogramSourceTexture::pendingUploadSpanCount() const {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     return m_pendingUploadedSpans.size();
 }
 
@@ -700,10 +704,12 @@ bool SpectrogramSourceTexture::uploadRgbaColumns(
 }
 
 void SpectrogramSourceTexture::noteUploadedSpan(const SpectrogramSourceUploadSpan &span) {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     m_pendingUploadedSpans.push_back(span);
 }
 
 void SpectrogramSourceTexture::clearPendingSpans() {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     m_pendingUploadedSpans.clear();
 }
 

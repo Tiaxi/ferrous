@@ -1114,6 +1114,7 @@ private slots:
     void spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwnerWrapperAlive();
     void spectrogramRetainedSourceTextureOwnerTeardownBeforeReleaseStillDeletesNativeTexture();
     void spectrogramRetainedSourceTextureConcurrentReleaseAndOwnerTeardownRetiresOnce();
+    void spectrogramRetainedSourceTextureOwnerContextLossWithoutSharedFallbackRetiresCleanup();
     void spectrogramRetainedSourceTextureWindowDestructionHandsOffSharedCleanup();
     void spectrogramRetainedSourceTextureRetiresMultiplePendingCleanupGenerations();
     void spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow();
@@ -1464,6 +1465,47 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureConcurrentReleaseAndOwnerTear
     contexts.sharedContext->doneCurrent();
 }
 
+void QmlSmokeTest::spectrogramRetainedSourceTextureOwnerContextLossWithoutSharedFallbackRetiresCleanup() {
+    auto window = std::make_unique<QQuickWindow>();
+    window->resize(64, 64);
+    window->show();
+    QVERIFY(QTest::qWaitForWindowExposed(window.get(), 5000));
+    QVERIFY(!window->grabWindow().isNull());
+    QVERIFY(window->isSceneGraphInitialized());
+
+    SpectrogramSourceTexture texture;
+    std::atomic_int wrapperDeletes{0};
+    auto ownerContext = std::make_unique<QOpenGLContext>();
+    texture.m_texture = new CountingTexture(&wrapperDeletes, QSize(8, 4));
+    texture.m_textureId = 77;
+    texture.m_size = QSize(8, 4);
+    texture.m_ownerWindow = window.get();
+    texture.m_ownerContext = ownerContext.get();
+    texture.m_shareGroup.clear();
+    texture.armCleanupOwnerForCurrentTexture();
+
+    ownerContext.reset();
+
+    std::atomic_bool renderAttemptRan{false};
+    window->scheduleRenderJob(
+        QRunnable::create([&renderAttemptRan]() {
+            renderAttemptRan.store(true);
+        }),
+        QQuickWindow::AfterSynchronizingStage);
+    window->update();
+    QVERIFY(!window->grabWindow().isNull());
+    QTRY_VERIFY(renderAttemptRan.load());
+    QTRY_COMPARE(texture.pendingCleanupAttemptCount(), 1);
+    QTRY_COMPARE(wrapperDeletes.load(), 1);
+    QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
+
+    window->update();
+    QVERIFY(!window->grabWindow().isNull());
+    QCOMPARE(texture.pendingCleanupAttemptCount(), 1);
+    QCOMPARE(wrapperDeletes.load(), 1);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 0);
+}
+
 void QmlSmokeTest::spectrogramRetainedSourceTextureWindowDestructionHandsOffSharedCleanup() {
     SharedOpenGlContexts contexts = createSharedOpenGlContexts();
     if (!contexts.isValid()) {
@@ -1569,15 +1611,15 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureRetiresMultiplePendingCleanup
     secondWindow->update();
     QVERIFY(!firstWindow->grabWindow().isNull());
     QVERIFY(!secondWindow->grabWindow().isNull());
-    QCOMPARE(firstWrapperDeletes.load(), 0);
-    QCOMPARE(secondWrapperDeletes.load(), 0);
-    QCOMPARE(texture.pendingCleanupGenerationCount(), 2);
-
-    firstWindow.reset();
-    secondWindow.reset();
     QTRY_COMPARE(firstWrapperDeletes.load(), 1);
     QTRY_COMPARE(secondWrapperDeletes.load(), 1);
     QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
+
+    firstWindow.reset();
+    secondWindow.reset();
+    QCOMPARE(firstWrapperDeletes.load(), 1);
+    QCOMPARE(secondWrapperDeletes.load(), 1);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 0);
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow() {
