@@ -1218,9 +1218,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         && hopSize != m_precomputedHopSize
         && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
         && m_displayMode == 1
-        && !m_gpuDisplayImage.isNull()) {
+        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         captureZoomFillFrozenCacheLocked();
-        m_zoomFillActive = true;
+        m_zoomFillActive = !m_zoomFillFrozenDisplayImage.isNull();
     }
 
     // If this widget has no ring and receives data (not a reset), it was
@@ -1247,13 +1247,17 @@ void SpectrogramItem::feedPrecomputedChunk(
         // seconds wide.  The existing canvasFreeze machinery handles
         // the brief interval; readiness clears once the new session
         // has produced enough columns to cover the new display range.
-        const bool preserveCanvasForSeek =
-            !m_gpuDisplayImage.isNull()
-            && m_displayMode == 1
+        const bool canPreserveCanvasForSeek =
+            m_displayMode == 1
             && m_precomputedCanvasDisplayRight
                 >= m_precomputedCanvasDisplayLeft
             && m_precomputedTotalColumnsEstimate > 0
             && m_precomputedBinsPerColumn > 0;
+        if (canPreserveCanvasForSeek && m_gpuDisplayImage.isNull()) {
+            ensureZoomFillSnapshotImageLocked();
+        }
+        const bool preserveCanvasForSeek =
+            canPreserveCanvasForSeek && !m_gpuDisplayImage.isNull();
 
         m_ringWriteSeq = 0;
         m_ringOldestSeq = 0;
@@ -4326,7 +4330,45 @@ void SpectrogramItem::invalidateMapping() {
     m_gpuRowLutBins = 0;
 }
 
+bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
+    if (!m_gpuDisplayImage.isNull()) {
+        return true;
+    }
+    if (!m_precomputedReady
+        || m_precomputedBinsPerColumn <= 0
+        || m_precomputedCanvasDisplayRight < m_precomputedCanvasDisplayLeft) {
+        return false;
+    }
+
+    const int height = m_gpuDisplayHeight > 0
+        ? m_gpuDisplayHeight
+        : static_cast<int>(std::round(this->height()));
+    const int itemWidth = std::max(1, static_cast<int>(std::round(width())));
+    const int drawPixels = m_gpuDisplayWidth > 0
+        ? m_gpuDisplayWidth
+        : gpuDrawWidthForSourceColumnsLocked(
+              itemWidth,
+              m_precomputedCanvasDisplayLeft,
+              m_precomputedCanvasDisplayRight,
+              m_precomputedCanvasZoomLevel);
+    if (drawPixels <= 0 || height <= 0) {
+        return false;
+    }
+
+    ensureMapping(height);
+    syncPrecomputedDisplayImageLocked(
+        drawPixels,
+        height,
+        m_precomputedCanvasDisplayLeft,
+        m_precomputedCanvasDisplayRight,
+        m_precomputedCanvasRolling,
+        m_precomputedCanvasZoomLevel,
+        true);
+    return !m_gpuDisplayImage.isNull();
+}
+
 void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
+    ensureZoomFillSnapshotImageLocked();
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
     m_zoomFillFrozenDisplayGeneration = m_gpuDisplayGeneration;
 }

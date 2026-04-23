@@ -145,6 +145,7 @@ private:
     void rebuildPalette();
     void invalidateMapping();
     void ensureMapping(int height);
+    bool ensureZoomFillSnapshotImageLocked();
     void captureZoomFillFrozenCacheLocked();
     void clearZoomFillFrozenCacheLocked();
     void invalidateRenderCachesLocked();

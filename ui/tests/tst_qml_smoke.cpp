@@ -1172,6 +1172,8 @@ private slots:
     void spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZoomFill();
     void spectrogramFullModeFallsBackToFrozenDisplayDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
+    void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
+    void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
     void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
 };
@@ -10841,6 +10843,104 @@ void QmlSmokeTest::spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame() {
     }
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata() {
+    // Same retained-GPU gap as the seek clear case, but through the zoom-in
+    // worker restart path where hop size gets finer.
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int totalColumns = 512;
+    QByteArray baseline(240 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 240,
+        0, totalColumns, 44100, 1024, false,
+        true, 23, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, false);
+        QVERIFY2(
+            item.m_gpuDisplayImage.isNull(),
+            "retained-GPU playback should not keep the CPU display image hot");
+        QCOMPARE(item.m_precomputedHopSize, 1024);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+    }
+
+    QByteArray restarted(8 * bins, '\x55');
+    item.feedPrecomputedChunk(
+        restarted, bins, 0, 8,
+        0, totalColumns * 2, 44100, 512, false,
+        true, 23, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY2(
+            !item.m_zoomFillFrozenDisplayImage.isNull(),
+            "zoom restart should build a frozen snapshot from retained metadata");
+        QCOMPARE(item.m_zoomFillFrozenDisplayImage.width(), 120);
+        QCOMPARE(item.m_zoomFillFrozenDisplayImage.height(), 80);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+    }
+}
+
+void QmlSmokeTest::spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata() {
+    // Regression: retained-GPU playback does not keep m_gpuDisplayImage hot.
+    // A seek recompute then had no frozen frame to preserve, so centered mode
+    // visibly slid from the partially decoded left edge toward the target.
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 240;
+    QByteArray chunk(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 44100, 1024, false,
+        true, 17, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, false);
+        QVERIFY2(
+            item.m_gpuDisplayImage.isNull(),
+            "retained-GPU playback should not keep the CPU display image hot");
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+    }
+
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0,
+        0, 0, 0, 0, false,
+        true, 17, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_awaitingWorkerReset);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY2(
+            !item.m_zoomFillFrozenDisplayImage.isNull(),
+            "synthetic seek clear should build a frozen snapshot from retained metadata");
+        QCOMPARE(item.m_zoomFillFrozenDisplayImage.width(), 120);
+        QCOMPARE(item.m_zoomFillFrozenDisplayImage.height(), 80);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+    }
 }
 
 void QmlSmokeTest::spectrogramSyntheticClearPreservesGpuCacheDuringSeek() {
