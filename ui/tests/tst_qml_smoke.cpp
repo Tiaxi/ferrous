@@ -1161,6 +1161,7 @@ private slots:
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedTextureNodeFallsBackToFrozenCpuSourceDuringZoomFill();
     void spectrogramRetainedSourceOnlyFallsBackToFrozenCpuSourceDuringZoomFill();
+    void spectrogramFullModeFallsBackToFrozenCpuSourceDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
     void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
@@ -9496,13 +9497,19 @@ void QmlSmokeTest::spectrogramGpuFullModeKeepsTopBinVisibleWithRowLutSampling() 
 }
 
 void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegments() {
+    enum class DebugPath {
+        TextureNode,
+        SourceOnly,
+        Full,
+    };
     struct DebugCase {
         QByteArray envValue;
-        bool usesTextureNode;
+        DebugPath path;
     };
-    const std::array<DebugCase, 2> cases{{
-        {QByteArrayLiteral("texture-node"), true},
-        {QByteArrayLiteral("shader-source-only"), false},
+    const std::array<DebugCase, 3> cases{{
+        {QByteArrayLiteral("texture-node"), DebugPath::TextureNode},
+        {QByteArrayLiteral("shader-source-only"), DebugPath::SourceOnly},
+        {QByteArrayLiteral("full"), DebugPath::Full},
     }};
 
     constexpr int bins = 32;
@@ -9576,7 +9583,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
         QVERIFY2(
             sourceImage.isNull(),
             "retained sparse-window precondition should not populate the CPU source image before overflow");
-        if (debugCase.usesTextureNode) {
+        if (debugCase.path == DebugPath::TextureNode) {
             auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
             auto *tailTextureNode = spectrogramTailTextureNode(node.get());
             QVERIFY(bodyTextureNode != nullptr);
@@ -9591,7 +9598,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
             QCOMPARE(tailTextureNode->sourceRect(), QRectF(4.0, 0.0, 2.0, static_cast<double>(bins)));
             QVERIFY2(!bodyTextureNode->rect().isEmpty(), "base retained texture node should be visible");
             QVERIFY2(!tailTextureNode->rect().isEmpty(), "tail retained texture node should be visible");
-        } else {
+        } else if (debugCase.path == DebugPath::Full) {
             auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.get());
             auto *tailSourceNode = spectrogramSourceSampleMaterialNode(node.get(), 1);
             QVERIFY(bodySourceNode != nullptr);
@@ -9612,6 +9619,21 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
             QCOMPARE(tailMaterial->state.sourceRect, QRectF(4.0, 0.0, 2.0, static_cast<double>(bins)));
             QVERIFY2(geometryHasVisibleArea(bodySourceNode), "base retained sample node should be visible");
             QVERIFY2(geometryHasVisibleArea(tailSourceNode), "tail retained sample node should be visible");
+        } else if (debugCase.path == DebugPath::SourceOnly) {
+            assertFullModeBodyNodeInvariants(
+                node.get(),
+                "full-mode sparse retained precondition should keep the material body active");
+            auto *bodySampleNode = spectrogramBodySampleMaterialNode(node.get());
+            QVERIFY(bodySampleNode != nullptr);
+            auto *bodyMaterial =
+                dynamic_cast<SpectrogramBodySampleMaterial *>(bodySampleNode->material());
+            QVERIFY(bodyMaterial != nullptr);
+            QVERIFY2(
+                bodyMaterial->state.sourceTexture == retainedTexture,
+                "full-mode sparse retained precondition should sample the retained source texture");
+            QCOMPARE(
+                bodyMaterial->state.sourceRect,
+                QRectF(0.0, 0.0, 2.0, static_cast<double>(bins)));
         }
 
         item.feedPrecomputedChunk(
@@ -9646,7 +9668,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
         QVERIFY2(
             countVisiblePixelsInRect(sourceImage, QRect(6, 4, 2, bins - 8), 8) < 4,
             "gap between the second and third sparse runs should stay dark in the CPU fallback image");
-        if (debugCase.usesTextureNode) {
+        if (debugCase.path == DebugPath::TextureNode) {
             auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
             auto *tailTextureNode = spectrogramTailTextureNode(node.get());
             QVERIFY(bodyTextureNode != nullptr);
@@ -9661,7 +9683,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
             QVERIFY2(
                 tailTextureNode->rect().isEmpty(),
                 "three visible sparse runs should disable retained tail texture routing");
-        } else {
+        } else if (debugCase.path == DebugPath::SourceOnly) {
             auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.get());
             QVERIFY(bodySourceNode != nullptr);
             auto *bodyMaterial =
@@ -9681,6 +9703,27 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
             QVERIFY2(
                 !geometryHasVisibleArea(tailSourceNode),
                 "three visible sparse runs should disable retained tail source routing");
+        } else {
+            assertFullModeBodyNodeInvariants(
+                node.get(),
+                "sparse retained overflow should keep the full-mode body material active");
+            auto *bodySampleNode = spectrogramBodySampleMaterialNode(node.get());
+            QVERIFY(bodySampleNode != nullptr);
+            auto *bodyMaterial =
+                dynamic_cast<SpectrogramBodySampleMaterial *>(bodySampleNode->material());
+            QVERIFY(bodyMaterial != nullptr);
+            QVERIFY2(
+                geometryHasVisibleArea(bodySampleNode),
+                "full-mode sparse overflow fallback should keep the CPU-backed body sample visible");
+            QVERIFY2(
+                bodyMaterial->state.sourceTexture != retainedTexture,
+                "overflow frame should stop sampling the retained full-mode source texture");
+            QCOMPARE(
+                bodyMaterial->state.sourceRect,
+                QRectF(0.0, 0.0, static_cast<double>(totalColumns), static_cast<double>(bins)));
+            QVERIFY2(
+                bodyMaterial->state.rowLutTexture != nullptr,
+                "full-mode sparse overflow fallback should keep the row lookup texture bound");
         }
     }
 }
@@ -10290,6 +10333,120 @@ void QmlSmokeTest::spectrogramRetainedSourceOnlyFallsBackToFrozenCpuSourceDuring
     QVERIFY2(geometryHasVisibleArea(sourceNode), "frozen CPU fallback should keep the shader-source-only body visible");
     QCOMPARE(
         sourceMaterial->state.sourceRect,
+        QRectF(
+            0.0,
+            0.0,
+            static_cast<double>(initialSourceImage.width()),
+            static_cast<double>(initialSourceImage.height())));
+}
+
+void QmlSmokeTest::spectrogramFullModeFallsBackToFrozenCpuSourceDuringZoomFill() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+    item.setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int totalColumns = 256;
+    QByteArray baseline(128 * bins, '\x40');
+    QByteArray restarted(32 * bins, '\x55');
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained full-mode zoom-fill test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 128,
+        0, totalColumns, 48000, 1024, false, true, 1, false);
+    item.setPositionSeconds((64.0 * 1024.0) / 48000.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+
+    QSGTexture *retainedTexture = nullptr;
+    QImage initialSourceImage;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        retainedTexture = item.m_gpuSourceTexture.texture();
+        initialSourceImage = item.m_gpuSourceImage.copy();
+    }
+    QVERIFY2(retainedTexture != nullptr, "full baseline should build the retained source texture");
+    QVERIFY2(!initialSourceImage.isNull(), "full baseline should keep a CPU source snapshot for centered freeze");
+    assertFullModeBodyNodeInvariants(
+        node.get(),
+        "full baseline should keep the material-backed body active before zoom-fill fallback");
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node.get());
+    QVERIFY(sampleNode != nullptr);
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    QCOMPARE(sampleMaterial->state.sourceTexture, retainedTexture);
+
+    item.feedPrecomputedChunk(
+        restarted, bins, 0, 32,
+        0, totalColumns, 48000, 512, false, true, 1, false);
+
+    node.reset(item.updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+
+    assertFullModeBodyNodeInvariants(
+        node.get(),
+        "full-mode zoom-fill fallback should keep the body material active");
+    sampleNode = spectrogramBodySampleMaterialNode(node.get());
+    QVERIFY(sampleNode != nullptr);
+    sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    QSGTexture *currentRetainedTexture = nullptr;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        currentRetainedTexture = item.m_gpuSourceTexture.texture();
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY2(!item.m_zoomFillFrozenSourceImage.isNull(),
+            "zoom-fill should preserve a frozen CPU source snapshot in retained full mode");
+        QCOMPARE(item.m_zoomFillFrozenSourceImage, initialSourceImage);
+        QVERIFY2(!item.m_gpuSourceImage.isNull(),
+            "retained full mode should keep warming the CPU source cache during zoom-fill");
+    }
+    QVERIFY2(
+        geometryHasVisibleArea(sampleNode),
+        "full-mode zoom-fill fallback should keep the CPU-backed body sample visible");
+    QVERIFY2(
+        sampleMaterial->state.sourceTexture != currentRetainedTexture,
+        "zoom-fill frame should fall back from the retained full-mode route to the frozen CPU snapshot");
+    QVERIFY2(
+        sampleMaterial->state.dbRemapTexture != nullptr,
+        "full-mode zoom-fill fallback should keep the dB remap texture bound");
+    QVERIFY2(
+        sampleMaterial->state.paletteTexture != nullptr,
+        "full-mode zoom-fill fallback should keep the palette texture bound");
+    QVERIFY2(
+        sampleMaterial->state.rowLutTexture != nullptr,
+        "full-mode zoom-fill fallback should keep the row lookup texture bound");
+    QCOMPARE(
+        sampleMaterial->state.sourceRect,
         QRectF(
             0.0,
             0.0,
