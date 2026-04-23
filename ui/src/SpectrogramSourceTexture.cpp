@@ -678,13 +678,21 @@ int SpectrogramSourceTexture::pendingUploadSpanCount() const {
     return m_pendingUploadedSpans.size();
 }
 
+bool SpectrogramSourceTexture::matches(QQuickWindow *window, const QSize &size) const {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
+    return m_texture != nullptr
+        && !size.isEmpty()
+        && m_size == size
+        && m_ownerWindow == window;
+}
+
 bool SpectrogramSourceTexture::ensureCreated(QQuickWindow *window, const int width, const int height) {
     if (window == nullptr || width <= 0 || height <= 0) {
         return false;
     }
     {
         const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
-        if (m_texture != nullptr && m_size == QSize(width, height) && m_ownerWindow == window) {
+        if (matches(window, QSize(width, height))) {
             return true;
         }
     }

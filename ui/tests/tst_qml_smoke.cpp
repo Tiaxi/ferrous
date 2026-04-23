@@ -1118,6 +1118,7 @@ private slots:
     void spectrogramPeakHoldColumnSpanUsesMaxNotNearest();
     void spectrogramRetainedSourceLayoutPreserves64BitColumnRange();
     void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
+    void spectrogramRetainedSourceUploadPlannerTreatsWindowChangeAsTextureStateChange();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
     void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
@@ -6712,6 +6713,62 @@ void QmlSmokeTest::spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColu
     QCOMPARE(merged[0].xEnd, 11);
     QCOMPARE(merged[1].xBegin, 14);
     QCOMPARE(merged[1].xEnd, 17);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceUploadPlannerTreatsWindowChangeAsTextureStateChange() {
+    QQuickWindow embeddedWindow;
+    QQuickWindow fullscreenWindow;
+    SpectrogramItem item;
+    item.setWidth(160);
+    item.setHeight(80);
+    item.setDisplayMode(1);
+
+    constexpr int bins = 4;
+    constexpr int columns = 16;
+    constexpr quint64 trackToken = 77;
+    QByteArray data(bins * columns, '\0');
+    for (int column = 0; column < columns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(column * bins + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, trackToken, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const QSize retainedSize(item.m_ringCapacity, bins);
+    item.m_gpuSourceTexture.m_texture = reinterpret_cast<QSGTexture *>(quintptr(1));
+    item.m_gpuSourceTexture.m_size = retainedSize;
+    item.m_gpuSourceTexture.m_ownerWindow = &embeddedWindow;
+    item.m_gpuSourceTextureTrackToken = trackToken;
+    item.m_gpuSourceTextureRolling = false;
+    item.m_gpuSourceTextureDisplayLeft = 0;
+    item.m_gpuSourceTextureDisplayRight = columns - 1;
+    item.m_gpuSourceTextureMaxColumnIndex = columns - 1;
+
+    QVERIFY(!item.m_gpuSourceTexture.matches(&fullscreenWindow, retainedSize));
+    QVERIFY(item.retainedSourceTextureStateChangedLocked(
+        &fullscreenWindow,
+        retainedSize,
+        false));
+
+    const QVector<SpectrogramSourceUploadSpan> skippedSpans =
+        item.collectRetainedSourceUploadSpansLocked(0, columns - 1, false);
+    QVERIFY2(
+        skippedSpans.isEmpty(),
+        "same-window bookkeeping would otherwise skip upload for this display range");
+
+    const QVector<SpectrogramSourceUploadSpan> forcedSpans =
+        item.collectRetainedSourceUploadSpansLocked(0, columns - 1, false, true);
+    QCOMPARE(forcedSpans.size(), 1);
+    QCOMPARE(forcedSpans[0].xBegin, 0);
+    QCOMPARE(forcedSpans[0].xEnd, columns - 1);
+
+    item.m_gpuSourceTexture.m_texture = nullptr;
 }
 
 void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource() {

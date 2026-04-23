@@ -4526,10 +4526,20 @@ SpectrogramRetainedSourceLayout SpectrogramItem::buildRetainedSourceLayoutLocked
     };
 }
 
+bool SpectrogramItem::retainedSourceTextureStateChangedLocked(
+    QQuickWindow *window,
+    const QSize &retainedTextureSize,
+    const bool rollingMode) const {
+    return !m_gpuSourceTexture.matches(window, retainedTextureSize)
+        || m_gpuSourceTextureTrackToken != m_precomputedTrackToken
+        || m_gpuSourceTextureRolling != rollingMode;
+}
+
 QVector<SpectrogramSourceUploadSpan> SpectrogramItem::collectRetainedSourceUploadSpansLocked(
     const qint64 displayLeft,
     const qint64 displayRight,
-    const bool rollingMode) const {
+    const bool rollingMode,
+    const bool forceFullUpload) const {
     QVector<SpectrogramSourceUploadSpan> spans;
     if (m_ringCapacity <= 0
         || m_precomputedBinsPerColumn <= 0
@@ -4576,11 +4586,7 @@ QVector<SpectrogramSourceUploadSpan> SpectrogramItem::collectRetainedSourceUploa
         }
     };
 
-    const bool textureStateChanged =
-        m_gpuSourceTexture.size() != QSize(m_ringCapacity, m_precomputedBinsPerColumn)
-        || m_gpuSourceTextureTrackToken != m_precomputedTrackToken
-        || m_gpuSourceTextureRolling != rollingMode;
-    if (textureStateChanged) {
+    if (forceFullUpload) {
         appendDisplayRange(displayLeft, displayRight);
         return mergeSpectrogramSourceUploadSpans(spans);
     }
@@ -4630,9 +4636,7 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
         buildRetainedSourceLayoutLocked(displayLeft, displayRight, rollingMode);
     const QSize retainedTextureSize(layout.capacityColumns, layout.binsPerColumn);
     const bool textureStateChanged =
-        m_gpuSourceTexture.size() != retainedTextureSize
-        || m_gpuSourceTextureTrackToken != m_precomputedTrackToken
-        || m_gpuSourceTextureRolling != rollingMode;
+        retainedSourceTextureStateChangedLocked(window, retainedTextureSize, rollingMode);
     if (!m_gpuSourceTexture.ensureCreated(window, layout.capacityColumns, layout.binsPerColumn)) {
         return;
     }
@@ -4654,7 +4658,8 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
     m_gpuSourceUploadSpans = collectRetainedSourceUploadSpansLocked(
         displayLeft,
         displayRight,
-        rollingMode);
+        rollingMode,
+        textureStateChanged);
     if (m_gpuSourceUploadSpans.isEmpty()) {
         m_gpuSourceTextureDisplayLeft = displayLeft;
         m_gpuSourceTextureDisplayRight = displayRight;

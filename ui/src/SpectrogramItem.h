@@ -167,10 +167,15 @@ private:
     QImage buildPrecomputedDbRemapImageLocked() const;
     QImage buildPrecomputedPaletteImageLocked() const;
     QImage buildRowLutImageLocked(int height) const;
+    bool retainedSourceTextureStateChangedLocked(
+        QQuickWindow *window,
+        const QSize &retainedTextureSize,
+        bool rollingMode) const;
     QVector<SpectrogramSourceUploadSpan> collectRetainedSourceUploadSpansLocked(
         qint64 displayLeft,
         qint64 displayRight,
-        bool rollingMode) const;
+        bool rollingMode,
+        bool forceFullUpload = false) const;
     SpectrogramRetainedSourceLayout buildRetainedSourceLayoutLocked(
         qint64 displayLeft,
         qint64 displayRight,

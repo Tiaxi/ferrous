@@ -87,6 +87,7 @@ public:
     [[nodiscard]] QSize size() const;
     [[nodiscard]] QSGTexture *texture() const;
     [[nodiscard]] int pendingUploadSpanCount() const;
+    [[nodiscard]] bool matches(QQuickWindow *window, const QSize &size) const;
 
     bool ensureCreated(QQuickWindow *window, int width, int height);
     bool uploadRgbaColumns(
