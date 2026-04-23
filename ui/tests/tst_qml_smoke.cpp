@@ -1168,9 +1168,9 @@ private slots:
     void spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage();
     void spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
-    void spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZoomFill();
-    void spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZoomFill();
-    void spectrogramFullModeFallsBackToFrozenDisplayDuringZoomFill();
+    void spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill();
+    void spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill();
+    void spectrogramFullModeFreezesRetainedBodyDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
@@ -10446,7 +10446,7 @@ void QmlSmokeTest::spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns(
     QCOMPARE(bidirectionalMissingSpans[1].xEnd, 204);
 }
 
-void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZoomFill() {
+void QmlSmokeTest::spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -10503,6 +10503,8 @@ void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZ
     auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
     QVERIFY(bodyTextureNode != nullptr);
     QCOMPARE(bodyTextureNode->texture(), retainedTexture);
+    const QRectF initialSourceRect = bodyTextureNode->sourceRect();
+    const QRectF initialTargetRect = bodyTextureNode->rect();
 
     item.feedPrecomputedChunk(
         restarted, bins, 0, 32,
@@ -10518,26 +10520,18 @@ void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZ
         QMutexLocker lock(&item.m_stateMutex);
         currentRetainedTexture = item.m_gpuSourceTexture.texture();
         QVERIFY(item.m_zoomFillActive);
-        QVERIFY2(!item.m_zoomFillFrozenDisplayImage.isNull(),
-            "zoom-fill should preserve a frozen CPU display snapshot in retained texture-node mode");
-        QCOMPARE(item.m_zoomFillFrozenDisplayImage, initialDisplayImage);
+        QVERIFY(item.m_zoomFillFrozenRetainedActive);
         QVERIFY2(!item.m_gpuDisplayImage.isNull(),
             "retained texture-node mode should keep warming the CPU display cache during zoom-fill");
     }
-    QVERIFY2(
-        bodyTextureNode->texture() != currentRetainedTexture,
-        "zoom-fill frame should fall back from the retained texture-node route to the frozen display image");
-    QVERIFY2(!bodyTextureNode->rect().isEmpty(), "frozen display fallback should keep the texture-node body visible");
-    QCOMPARE(
-        bodyTextureNode->sourceRect(),
-        QRectF(
-            0.0,
-            0.0,
-            static_cast<double>(initialDisplayImage.width()),
-            static_cast<double>(initialDisplayImage.height())));
+    QCOMPARE(currentRetainedTexture, retainedTexture);
+    QCOMPARE(bodyTextureNode->texture(), retainedTexture);
+    QVERIFY2(!bodyTextureNode->rect().isEmpty(), "retained freeze should keep the texture-node body visible");
+    QCOMPARE(bodyTextureNode->sourceRect(), initialSourceRect);
+    QCOMPARE(bodyTextureNode->rect(), initialTargetRect);
 }
 
-void QmlSmokeTest::spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZoomFill() {
+void QmlSmokeTest::spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "shader-source-only");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -10597,6 +10591,7 @@ void QmlSmokeTest::spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZo
         dynamic_cast<SpectrogramSourceSampleMaterial *>(sourceNode->material());
     QVERIFY(sourceMaterial != nullptr);
     QCOMPARE(sourceMaterial->state.sourceTexture, retainedTexture);
+    const QRectF initialSourceRect = sourceMaterial->state.sourceRect;
 
     item.feedPrecomputedChunk(
         restarted, bins, 0, 32,
@@ -10610,33 +10605,23 @@ void QmlSmokeTest::spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZo
         QMutexLocker lock(&item.m_stateMutex);
         currentRetainedTexture = item.m_gpuSourceTexture.texture();
         QVERIFY(item.m_zoomFillActive);
-        QVERIFY2(!item.m_zoomFillFrozenDisplayImage.isNull(),
-            "zoom-fill should preserve a frozen CPU display snapshot in retained shader-source-only mode");
-        QCOMPARE(item.m_zoomFillFrozenDisplayImage, initialDisplayImage);
+        QVERIFY(item.m_zoomFillFrozenRetainedActive);
         QVERIFY2(!item.m_gpuDisplayImage.isNull(),
             "retained shader-source-only mode should keep warming the CPU display cache during zoom-fill");
     }
-    auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
-    QVERIFY(bodyTextureNode != nullptr);
-    QVERIFY2(
-        bodyTextureNode->texture() != currentRetainedTexture,
-        "zoom-fill frame should fall back from the retained shader-source-only route to the frozen display image");
-    QVERIFY2(!bodyTextureNode->rect().isEmpty(), "frozen display fallback should keep the shader-source-only body visible");
+    QCOMPARE(currentRetainedTexture, retainedTexture);
     sourceNode = spectrogramSourceSampleMaterialNode(node.get());
     QVERIFY(sourceNode != nullptr);
     QVERIFY2(
-        !geometryHasVisibleArea(sourceNode),
-        "shader-source-only zoom-fill fallback should hide the retained material node");
-    QCOMPARE(
-        bodyTextureNode->sourceRect(),
-        QRectF(
-            0.0,
-            0.0,
-            static_cast<double>(initialDisplayImage.width()),
-            static_cast<double>(initialDisplayImage.height())));
+        geometryHasVisibleArea(sourceNode),
+        "shader-source-only zoom-fill should keep the retained material node visible");
+    sourceMaterial = dynamic_cast<SpectrogramSourceSampleMaterial *>(sourceNode->material());
+    QVERIFY(sourceMaterial != nullptr);
+    QCOMPARE(sourceMaterial->state.sourceTexture, retainedTexture);
+    QCOMPARE(sourceMaterial->state.sourceRect, initialSourceRect);
 }
 
-void QmlSmokeTest::spectrogramFullModeFallsBackToFrozenDisplayDuringZoomFill() {
+void QmlSmokeTest::spectrogramFullModeFreezesRetainedBodyDuringZoomFill() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -10699,6 +10684,7 @@ void QmlSmokeTest::spectrogramFullModeFallsBackToFrozenDisplayDuringZoomFill() {
         dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
     QVERIFY(sampleMaterial != nullptr);
     QCOMPARE(sampleMaterial->state.sourceTexture, retainedTexture);
+    const QRectF initialSourceRect = sampleMaterial->state.sourceRect;
 
     item.feedPrecomputedChunk(
         restarted, bins, 0, 32,
@@ -10712,32 +10698,20 @@ void QmlSmokeTest::spectrogramFullModeFallsBackToFrozenDisplayDuringZoomFill() {
         QMutexLocker lock(&item.m_stateMutex);
         currentRetainedTexture = item.m_gpuSourceTexture.texture();
         QVERIFY(item.m_zoomFillActive);
-        QVERIFY2(!item.m_zoomFillFrozenDisplayImage.isNull(),
-            "zoom-fill should preserve a frozen CPU display snapshot in retained full mode");
-        QCOMPARE(item.m_zoomFillFrozenDisplayImage, initialDisplayImage);
+        QVERIFY(item.m_zoomFillFrozenRetainedActive);
         QVERIFY2(!item.m_gpuDisplayImage.isNull(),
             "retained full mode should keep warming the CPU display cache during zoom-fill");
     }
-    auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
-    QVERIFY(bodyTextureNode != nullptr);
-    QVERIFY2(
-        !bodyTextureNode->rect().isEmpty(),
-        "full-mode zoom-fill fallback should keep the display-backed body visible");
-    QVERIFY2(
-        bodyTextureNode->texture() != currentRetainedTexture,
-        "zoom-fill frame should fall back from the retained full-mode route to the frozen display image");
+    QCOMPARE(currentRetainedTexture, retainedTexture);
     sampleNode = spectrogramBodySampleMaterialNode(node.get());
     QVERIFY(sampleNode != nullptr);
     QVERIFY2(
-        !geometryHasVisibleArea(sampleNode),
-        "full-mode zoom-fill fallback should hide the retained full-mode material node");
-    QCOMPARE(
-        bodyTextureNode->sourceRect(),
-        QRectF(
-            0.0,
-            0.0,
-            static_cast<double>(initialDisplayImage.width()),
-            static_cast<double>(initialDisplayImage.height())));
+        geometryHasVisibleArea(sampleNode),
+        "full-mode zoom-fill should keep the retained full-mode material node visible");
+    sampleMaterial = dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    QCOMPARE(sampleMaterial->state.sourceTexture, retainedTexture);
+    QCOMPARE(sampleMaterial->state.sourceRect, initialSourceRect);
 }
 
 void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {

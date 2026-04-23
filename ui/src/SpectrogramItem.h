@@ -9,6 +9,8 @@
 #include <QMetaObject>
 #include <QMutex>
 #include <QQuickItem>
+#include <QRect>
+#include <QRectF>
 #include <QString>
 #include <QTimer>
 
@@ -141,6 +143,12 @@ protected:
 
 private:
     static constexpr int kGradientTableSize = 2048;
+
+    struct RetainedRenderSegment {
+        QRect sourceRect;
+        QRectF targetRect;
+        bool valid{false};
+    };
 
     void rebuildPalette();
     void invalidateMapping();
@@ -365,6 +373,7 @@ private:
     qint64 m_gpuSourceTextureMaxColumnIndex{-1};
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenDisplayImage;
+    std::array<RetainedRenderSegment, 2> m_zoomFillFrozenRetainedSegments{};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;
@@ -409,6 +418,8 @@ private:
     // the display.  updatePaintNode skips canvas updates while active.
     bool m_zoomFillActive{false};
     bool m_zoomFillDataReady{false};
+    bool m_zoomFillFrozenRetainedAvailable{false};
+    bool m_zoomFillFrozenRetainedActive{false};
     double m_precomputedCanvasZoomLevel{1.0};
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};
