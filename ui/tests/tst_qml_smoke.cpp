@@ -1010,7 +1010,7 @@ private slots:
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void testMutedChannelRendersGrayscale();
     void spectrogramGpuWindowCaptureUsesMaterialBackedBodyNode();
-    void spectrogramGpuSourceOnlySampleDebugModeUsesSampleMaterialNode();
+    void spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage();
     void spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode();
     void spectrogramGpuFullModeUsesSampleBodyMaterialNode();
     void spectrogramGpuSampleMaterialsBindSourceTextureAtZero();
@@ -1120,7 +1120,7 @@ private slots:
     void spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow();
     void spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext();
     void spectrogramRetainedSourceTextureUploadRejectsInvalidArguments();
-    void spectrogramGpuVisibleSourceImageTracksDisplayWindow();
+    void spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource();
     void spectrogramGpuImagesUseRgbaCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
     void spectrogramGpuCompressesOversizedSourceTexture();
@@ -6701,52 +6701,72 @@ void QmlSmokeTest::spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColu
     QCOMPARE(merged[1].xEnd, 17);
 }
 
-void QmlSmokeTest::spectrogramGpuVisibleSourceImageTracksDisplayWindow() {
+void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.resize(240, 120);
 
     SpectrogramItem item;
-    item.setWidth(100);
-    item.setHeight(10);
-    item.setDisplayMode(1); // Centered
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
 
-    constexpr int bins = 4;
-    constexpr int cols = 150;
-    QByteArray chunk(bins * cols, '\x10');
-    for (int b = 0; b < bins; ++b) {
-        chunk[50 * bins + b] = static_cast<char>(
-            static_cast<unsigned char>(0xF0));
+    constexpr int bins = 32;
+    constexpr int columns = 240;
+    QByteArray chunk(bins * columns, '\x10');
+    for (int column = 72; column < 136; ++column) {
+        for (int bin = 8; bin < 24; ++bin) {
+            chunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(0xF0));
+        }
     }
 
-    item.setZoomLevel(0.8);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
     item.feedPrecomputedChunk(
-        chunk, bins, 0, cols,
-        0, cols, 48000, 1024, true,
+        chunk, bins, 0, columns,
+        0, columns, 48000, 1024, true,
         true, 1, false);
-
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        item.m_renderZoomLevel = 0.8;
-    }
-
     item.setPositionSeconds(0.0);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
-    QVERIFY(node != nullptr);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained-source texture-node binding test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(!item.m_gpuSourceImage.isNull());
-        QCOMPARE(item.m_gpuSourceImage.width(), 125);
-        QCOMPARE(item.m_gpuSourceImage.height(), bins);
-
-        const QColor brightSample =
-            item.m_gpuSourceImage.pixelColor(50, 0);
-        const QColor darkSample =
-            item.m_gpuSourceImage.pixelColor(0, 0);
-        QVERIFY(qGray(brightSample.rgb()) > qGray(darkSample.rgb()));
+        item.m_gpuSourceImage = QImage();
     }
 
-    delete node;
-    qunsetenv("FERROUS_GPU_DEBUG_MODE");
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    auto *bodyTextureNode = spectrogramBodyTextureNode(node.data());
+    QVERIFY(bodyTextureNode != nullptr);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            item.m_gpuSourceTexture.texture() != nullptr,
+            "texture-node debug mode should create the retained source texture");
+        QVERIFY(item.m_gpuSourceImage.isNull());
+        QCOMPARE(bodyTextureNode->texture(), item.m_gpuSourceTexture.texture());
+    }
 }
 
 void QmlSmokeTest::spectrogramGpuImagesUseRgbaCompatibleFormats() {
@@ -8016,7 +8036,7 @@ void QmlSmokeTest::spectrogramRollingNonIntegerZoomAdvanceStaysIncremental() {
 }
 
 void QmlSmokeTest::spectrogramRollingGpuSourceCacheAdvancesIncrementally() {
-    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
 
     SpectrogramItem item;
     item.setWidth(8);
@@ -9246,7 +9266,7 @@ void QmlSmokeTest::spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialN
     QVERIFY(dynamic_cast<QSGTextureMaterial *>(stockMaterialNode->material()) != nullptr);
 }
 
-void QmlSmokeTest::spectrogramGpuSourceOnlySampleDebugModeUsesSampleMaterialNode() {
+void QmlSmokeTest::spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "shader-source-only");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -9272,10 +9292,39 @@ void QmlSmokeTest::spectrogramGpuSourceOnlySampleDebugModeUsesSampleMaterialNode
     }
     item.feedPrecomputedChunk(
         chunk, bins, 0, totalColumns, 0, totalColumns, 48000, 1024, false, true, 31);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    const QImage beforeFrame = window.grabWindow();
+    QVERIFY(!beforeFrame.isNull());
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained-source shader-source-only visibility test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_gpuSourceTexture.texture() != nullptr);
+        item.m_gpuSourceImage = QImage();
+    }
+
+    item.update();
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+    QVERIFY2(
+        countVisiblePixelsInRect(frame, QRect(40, 15, 160, 80), 8) > 100,
+        "shader-source-only should stay visible when the old CPU source image is absent");
 
     QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
     QVERIFY(!node.isNull());
@@ -9285,6 +9334,11 @@ void QmlSmokeTest::spectrogramGpuSourceOnlySampleDebugModeUsesSampleMaterialNode
     auto *sampleMaterial =
         dynamic_cast<SpectrogramSourceSampleMaterial *>(sampleNode->material());
     QVERIFY(sampleMaterial != nullptr);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(sampleMaterial->state.sourceTexture, item.m_gpuSourceTexture.texture());
+        QVERIFY(item.m_gpuSourceImage.isNull());
+    }
 }
 
 void QmlSmokeTest::spectrogramGpuFullModeUsesSampleBodyMaterialNode() {

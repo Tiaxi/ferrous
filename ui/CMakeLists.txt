@@ -329,6 +329,7 @@ if(BUILD_TESTING)
         src/MprisController.cpp
         src/SpectrogramBodyMaterial.cpp
         src/SpectrogramRenderUtils.cpp
+        src/SpectrogramSourceTexture.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp

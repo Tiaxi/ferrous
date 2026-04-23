@@ -174,6 +174,11 @@ private:
         qint64 displayLeft,
         qint64 displayRight,
         bool rollingMode) const;
+    void syncRetainedSourceTextureLocked(
+        QQuickWindow *window,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode);
     void syncPrecomputedGpuLookupImagesLocked();
     void paintPrecomputedGpuSourceColumnsLocked(
         QImage &image,
@@ -353,6 +358,16 @@ private:
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
+    SpectrogramSourceTexture m_gpuSourceTexture;
+    QByteArray m_gpuSourceUploadRgba;
+    QVector<SpectrogramSourceUploadSpan> m_gpuSourceUploadSpans;
+    qint64 m_gpuSourceTextureDisplayLeft{0};
+    qint64 m_gpuSourceTextureDisplayRight{-1};
+    bool m_gpuSourceTextureRolling{false};
+    quint64 m_gpuSourceTextureTrackToken{0};
+    qint64 m_gpuSourceTextureRingWriteSeq{-1};
+    qint64 m_gpuSourceTextureRingOldestSeq{-1};
+    qint32 m_gpuSourceTextureMaxColumnIndex{-1};
     QImage m_gpuSourceImage;
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenSourceImage;
