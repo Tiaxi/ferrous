@@ -504,16 +504,23 @@ bool createWrappedTexture(
 
 } // namespace
 
+SpectrogramSourceTexture::SpectrogramSourceTexture() = default;
+
 SpectrogramSourceTexture::~SpectrogramSourceTexture() {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
+    m_ownerStateAlive->store(false);
     release();
 }
 
 void SpectrogramSourceTexture::armCleanupOwnerForCurrentTexture() {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     disarmCleanupOwner();
     if ((m_texture == nullptr && m_textureId == 0) || m_ownerWindow.isNull()) {
         return;
     }
 
+    const auto ownerStateMutex = m_ownerStateMutex;
+    const auto ownerStateAlive = m_ownerStateAlive;
     auto ownerState = std::make_shared<SpectrogramSourceTextureActiveOwnerState>(
         m_ownerWindow.data(),
         m_ownerContext.data(),
@@ -522,7 +529,11 @@ void SpectrogramSourceTexture::armCleanupOwnerForCurrentTexture() {
     ownerState->ownerWindowDestroyedConnection = QObject::connect(
         m_ownerWindow.data(),
         &QObject::destroyed,
-        [this, ownerState](QObject *) {
+        [this, ownerState, ownerStateMutex, ownerStateAlive](QObject *) {
+            const std::lock_guard<std::recursive_mutex> callbackLock(*ownerStateMutex);
+            if (!ownerStateAlive->load()) {
+                return;
+            }
             handOffActiveCleanupOwner(
                 ownerState,
                 false,
@@ -533,7 +544,11 @@ void SpectrogramSourceTexture::armCleanupOwnerForCurrentTexture() {
         ownerState->ownerContextDestroyedConnection = QObject::connect(
             m_ownerContext.data(),
             &QObject::destroyed,
-            [this, ownerState](QObject *) {
+            [this, ownerState, ownerStateMutex, ownerStateAlive](QObject *) {
+                const std::lock_guard<std::recursive_mutex> callbackLock(*ownerStateMutex);
+                if (!ownerStateAlive->load()) {
+                    return;
+                }
                 handOffActiveCleanupOwner(ownerState, true, true, false);
             });
     }
@@ -541,6 +556,7 @@ void SpectrogramSourceTexture::armCleanupOwnerForCurrentTexture() {
 }
 
 void SpectrogramSourceTexture::disarmCleanupOwner() {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     disconnectActiveOwnerWatchers(m_activeOwnerState);
     m_activeOwnerState.reset();
 }
@@ -550,6 +566,7 @@ void SpectrogramSourceTexture::handOffActiveCleanupOwner(
     const bool preferOwnerWindowAttempt,
     const bool watchOwnerWindow,
     const bool watchOwnerContext) {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     if (m_activeOwnerState != ownerState || (m_texture == nullptr && m_textureId == 0)) {
         return;
     }
@@ -581,10 +598,12 @@ void SpectrogramSourceTexture::handOffActiveCleanupOwner(
 }
 
 QSize SpectrogramSourceTexture::size() const {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     return m_size;
 }
 
 QSGTexture *SpectrogramSourceTexture::texture() const {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     return m_texture;
 }
 
@@ -596,8 +615,11 @@ bool SpectrogramSourceTexture::ensureCreated(QQuickWindow *window, const int wid
     if (window == nullptr || width <= 0 || height <= 0) {
         return false;
     }
-    if (m_texture != nullptr && m_size == QSize(width, height) && m_ownerWindow == window) {
-        return true;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
+        if (m_texture != nullptr && m_size == QSize(width, height) && m_ownerWindow == window) {
+            return true;
+        }
     }
 
     CreatedSourceTexture createdTexture;
@@ -606,13 +628,16 @@ bool SpectrogramSourceTexture::ensureCreated(QQuickWindow *window, const int wid
     }
 
     release();
-    m_textureId = createdTexture.textureId;
-    m_size = createdTexture.size;
-    m_texture = createdTexture.texture;
-    m_ownerWindow = createdTexture.ownerWindow;
-    m_ownerContext = createdTexture.ownerContext;
-    m_shareGroup = createdTexture.shareGroup;
-    armCleanupOwnerForCurrentTexture();
+    {
+        const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
+        m_textureId = createdTexture.textureId;
+        m_size = createdTexture.size;
+        m_texture = createdTexture.texture;
+        m_ownerWindow = createdTexture.ownerWindow;
+        m_ownerContext = createdTexture.ownerContext;
+        m_shareGroup = createdTexture.shareGroup;
+        armCleanupOwnerForCurrentTexture();
+    }
     return true;
 }
 
@@ -622,19 +647,31 @@ bool SpectrogramSourceTexture::uploadRgbaColumns(
     const int width,
     const int height,
     const QByteArray &rgbaBytes) {
-    if (window == nullptr || m_size.isEmpty()) {
+    QSize textureSize;
+    GLuint textureId = 0;
+    QPointer<QOpenGLContext> ownerContext;
+    QPointer<QOpenGLContextGroup> shareGroup;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
+        textureSize = m_size;
+        textureId = m_textureId;
+        ownerContext = m_ownerContext;
+        shareGroup = m_shareGroup;
+    }
+
+    if (window == nullptr || textureSize.isEmpty()) {
         return false;
     }
     if (xOffset < 0 || width <= 0 || height <= 0) {
         return false;
     }
-    if (height != m_size.height() || xOffset + width > m_size.width()) {
+    if (height != textureSize.height() || xOffset + width > textureSize.width()) {
         return false;
     }
     if (rgbaBytes.size() != width * height * 4) {
         return false;
     }
-    if (!ensureCreated(window, m_size.width(), m_size.height())) {
+    if (!ensureCreated(window, textureSize.width(), textureSize.height())) {
         return false;
     }
 
@@ -642,7 +679,13 @@ bool SpectrogramSourceTexture::uploadRgbaColumns(
     if (context == nullptr) {
         return false;
     }
-    if (!canDeleteNativeTextureOnContext(context, m_ownerContext, m_shareGroup)) {
+    {
+        const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
+        textureId = m_textureId;
+        ownerContext = m_ownerContext;
+        shareGroup = m_shareGroup;
+    }
+    if (!canDeleteNativeTextureOnContext(context, ownerContext, shareGroup)) {
         return false;
     }
     QOpenGLFunctions *functions = context->functions();
@@ -650,7 +693,7 @@ bool SpectrogramSourceTexture::uploadRgbaColumns(
         return false;
     }
 
-    functions->glBindTexture(GL_TEXTURE_2D, m_textureId);
+    functions->glBindTexture(GL_TEXTURE_2D, textureId);
     functions->glTexSubImage2D(
         GL_TEXTURE_2D, 0, xOffset, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbaBytes.constData());
     return true;
@@ -694,6 +737,7 @@ void SpectrogramSourceTexture::scheduleDeferredCleanup(
 }
 
 void SpectrogramSourceTexture::release() {
+    const std::lock_guard<std::recursive_mutex> lock(*m_ownerStateMutex);
     QOpenGLContext *context = QOpenGLContext::currentContext();
     const bool can_destroy_wrapper_now = canDestroyWrapperOnContext(context, m_ownerContext);
     const bool can_delete_native_now =

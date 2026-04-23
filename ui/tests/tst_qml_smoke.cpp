@@ -1113,6 +1113,7 @@ private slots:
     void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
     void spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwnerWrapperAlive();
     void spectrogramRetainedSourceTextureOwnerTeardownBeforeReleaseStillDeletesNativeTexture();
+    void spectrogramRetainedSourceTextureConcurrentReleaseAndOwnerTeardownRetiresOnce();
     void spectrogramRetainedSourceTextureWindowDestructionHandsOffSharedCleanup();
     void spectrogramRetainedSourceTextureRetiresMultiplePendingCleanupGenerations();
     void spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow();
@@ -1398,6 +1399,69 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureOwnerTeardownBeforeReleaseSti
     texture.release();
     QCOMPARE(texture.pendingCleanupGenerationCount(), 0);
     QCOMPARE(texture.pendingCleanupAttemptCount(), attemptsBeforeRelease);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureConcurrentReleaseAndOwnerTeardownRetiresOnce() {
+    SharedOpenGlContexts contexts = createSharedOpenGlContexts();
+    if (!contexts.isValid()) {
+        QSKIP("shared OpenGL contexts are unavailable in this test environment");
+    }
+    if (!contexts.sharedContext->makeCurrent(contexts.surface.get())) {
+        QSKIP("failed to make the shared OpenGL context current");
+    }
+
+    auto window = std::make_unique<QQuickWindow>();
+    window->resize(64, 64);
+    window->show();
+    QVERIFY(QTest::qWaitForWindowExposed(window.get(), 5000));
+    QVERIFY(!window->grabWindow().isNull());
+    QVERIFY(window->isSceneGraphInitialized());
+
+    SpectrogramSourceTexture texture;
+    std::atomic_int wrapperDeletes{0};
+    std::atomic_bool releaseLockHeld{false};
+    std::atomic_bool teardownStarted{false};
+    QOpenGLFunctions *sharedFunctions = contexts.sharedContext->functions();
+    QVERIFY(sharedFunctions != nullptr);
+    const GLuint nativeTextureId = createNativeTexture(contexts.sharedContext.get());
+    QVERIFY(nativeTextureId != 0);
+    QVERIFY(sharedFunctions->glIsTexture(nativeTextureId));
+
+    texture.m_texture = new CountingTexture(&wrapperDeletes, QSize(8, 4));
+    texture.m_textureId = nativeTextureId;
+    texture.m_size = QSize(8, 4);
+    texture.m_ownerWindow = window.get();
+    texture.m_ownerContext = contexts.ownerContext.get();
+    texture.m_shareGroup = contexts.ownerContext->shareGroup();
+    texture.armCleanupOwnerForCurrentTexture();
+    contexts.sharedContext->doneCurrent();
+
+    std::thread releaseThread([&]() {
+        std::unique_lock<std::recursive_mutex> ownerStateLock(*texture.m_ownerStateMutex);
+        releaseLockHeld.store(true);
+        while (!teardownStarted.load()) {
+            std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        texture.release();
+    });
+
+    QTRY_VERIFY(releaseLockHeld.load());
+    teardownStarted.store(true);
+    contexts.ownerContext.reset();
+    window.reset();
+    releaseThread.join();
+
+    const QString warnings = takeCapturedMessagesText();
+    QVERIFY2(warnings.isEmpty(), qPrintable(warnings));
+    QCOMPARE(wrapperDeletes.load(), 0);
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
+
+    QTRY_COMPARE(wrapperDeletes.load(), 1);
+    QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
+    QVERIFY(contexts.sharedContext->makeCurrent(contexts.surface.get()));
+    QVERIFY(!sharedFunctions->glIsTexture(nativeTextureId));
+    contexts.sharedContext->doneCurrent();
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureWindowDestructionHandsOffSharedCleanup() {

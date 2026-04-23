@@ -13,6 +13,7 @@
 #include <atomic>
 #include <algorithm>
 #include <memory>
+#include <mutex>
 
 struct SpectrogramSourceUploadSpan {
     int xBegin{0};
@@ -75,7 +76,7 @@ struct SpectrogramSourceTextureDeferredCleanupState;
 
 class SpectrogramSourceTexture {
 public:
-    SpectrogramSourceTexture() = default;
+    SpectrogramSourceTexture();
     SpectrogramSourceTexture(const SpectrogramSourceTexture &) = delete;
     SpectrogramSourceTexture &operator=(const SpectrogramSourceTexture &) = delete;
     SpectrogramSourceTexture(SpectrogramSourceTexture &&) = delete;
@@ -122,6 +123,10 @@ private:
     QPointer<QOpenGLContext> m_ownerContext;
     QPointer<QOpenGLContextGroup> m_shareGroup;
     std::shared_ptr<SpectrogramSourceTextureActiveOwnerState> m_activeOwnerState;
+    std::shared_ptr<std::recursive_mutex> m_ownerStateMutex{
+        std::make_shared<std::recursive_mutex>()};
+    std::shared_ptr<std::atomic_bool> m_ownerStateAlive{
+        std::make_shared<std::atomic_bool>(true)};
     std::shared_ptr<std::atomic_int> m_pendingCleanupAttemptCount{std::make_shared<std::atomic_int>(0)};
     std::shared_ptr<std::atomic_int> m_pendingCleanupCount{std::make_shared<std::atomic_int>(0)};
 };
