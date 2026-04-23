@@ -127,7 +127,9 @@ bool effectiveHopMatchesZoom(int hopSize, double zoomLevel) {
     const double clampedZoom = std::clamp(zoomLevel, 0.05, 16.0);
     const int expectedHop = static_cast<int>(
         std::llround(kReferenceHopSamples / clampedZoom));
-    return std::abs(hopSize - expectedHop) <= 2;
+    const int tolerance = std::max(2, static_cast<int>(std::ceil(
+        static_cast<double>(expectedHop) * 0.01)));
+    return std::abs(hopSize - expectedHop) <= tolerance;
 }
 
 double zoomLevelForEffectiveHop(int hopSize) {

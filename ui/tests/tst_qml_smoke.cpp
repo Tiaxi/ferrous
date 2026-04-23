@@ -1112,6 +1112,7 @@ private slots:
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramRapidZoomOutIgnoresIntermediateReset();
     void spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaitingFlag();
+    void spectrogramMaxZoomOutRoundedHopSnapsRenderZoomWithoutAwaitingFlag();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
     void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
@@ -6559,6 +6560,53 @@ void QmlSmokeTest::spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaiting
     QVERIFY(std::abs(item.m_renderZoomLevel - 0.1) < 0.001);
     QVERIFY(std::abs(item.zoomLevel() - 0.1) < 0.001);
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+}
+
+void QmlSmokeTest::spectrogramMaxZoomOutRoundedHopSnapsRenderZoomWithoutAwaitingFlag() {
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int referenceColumns = 11763;
+    QByteArray initialChunk(binsPerColumn * referenceColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, referenceColumns,
+        0, referenceColumns, 48000, 1024, false,
+        true, 1, false);
+
+    const double viewportFitZoom =
+        static_cast<double>(static_cast<int>(item.width()))
+        / static_cast<double>(referenceColumns);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = viewportFitZoom;
+        item.m_renderZoomLevel = 0.02;
+        item.m_awaitingZoomData = false;
+    }
+
+    constexpr int coarseColumns = 1176;
+    QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
+    item.feedPrecomputedChunk(
+        coarseChunk, binsPerColumn, 0, coarseColumns,
+        0, coarseColumns, 48000, 10240, false,
+        true, 1, false);
+
+    QVERIFY2(
+        std::abs(item.m_renderZoomLevel - 0.1) < 0.001,
+        "backend's rounded max-zoom-out hop should be authoritative after rapid zoom-out");
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(coarseColumns - 1));
+    QVERIFY2(
+        item.m_gpuDisplayWidth >= coarseColumns - 8,
+        "rounded max-zoom-out data should render at near one pixel per backend column");
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack() {
