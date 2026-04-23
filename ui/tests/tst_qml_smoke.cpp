@@ -37,6 +37,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <thread>
 #include <type_traits>
 
 #include "../src/DiagnosticsLog.h"
@@ -1075,6 +1076,7 @@ private slots:
     void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
+    void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
     void spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwnerWrapperAlive();
     void spectrogramRetainedSourceTextureRetiresMultiplePendingCleanupGenerations();
     void spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow();
@@ -1175,6 +1177,37 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCl
     window.update();
     QVERIFY(!window.grabWindow().isNull());
     QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup() {
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    QVERIFY(!window.grabWindow().isNull());
+    QVERIFY(window.isSceneGraphInitialized());
+
+    SpectrogramSourceTexture texture;
+    auto *ownerContext = new QOpenGLContext();
+    texture.m_texture = new CountingTexture(nullptr, QSize(8, 4));
+    texture.m_textureId = 88;
+    texture.m_size = QSize(8, 4);
+    texture.m_ownerWindow = &window;
+    texture.m_ownerContext = ownerContext;
+
+    std::thread releaseThread([&texture]() {
+        texture.release();
+    });
+    releaseThread.join();
+
+    const QString releaseWarnings = takeCapturedMessagesText();
+    QVERIFY2(releaseWarnings.isEmpty(), qPrintable(releaseWarnings));
+    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
+
+    delete ownerContext;
+    window.update();
+    QVERIFY(!window.grabWindow().isNull());
+    QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwnerWrapperAlive() {
