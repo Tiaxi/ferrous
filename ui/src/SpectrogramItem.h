@@ -421,6 +421,8 @@ private:
     bool m_zoomFillFrozenRetainedAvailable{false};
     bool m_zoomFillFrozenRetainedActive{false};
     double m_precomputedCanvasZoomLevel{1.0};
+    int m_precomputedCanvasHopSize{0};
+    int m_precomputedCanvasTotalColumnsEstimate{0};
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};
     bool m_awaitingZoomData{false};

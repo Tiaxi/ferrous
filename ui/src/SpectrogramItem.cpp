@@ -2399,9 +2399,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const bool isSeekJump =
                     m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
                     && displayLeft < m_precomputedCanvasDisplayLeft - 2;
+                const bool canvasMatchesBackendScale =
+                    m_precomputedCanvasHopSize == m_precomputedHopSize
+                    && m_precomputedCanvasTotalColumnsEstimate
+                        == m_precomputedTotalColumnsEstimate
+                    && m_precomputedCanvasDisplayRight < estTotalCols;
                 if (!isSeekJump
                     && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
-                    && std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) < 0.001) {
+                    && std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) < 0.001
+                    && canvasMatchesBackendScale) {
                     displayLeft = std::max(displayLeft, m_precomputedCanvasDisplayLeft);
                     displayRight = std::max(displayRight, m_precomputedCanvasDisplayRight);
                 }
@@ -4527,6 +4533,8 @@ void SpectrogramItem::invalidateRenderCachesLocked() {
     m_precomputedCanvasDisplayRight = -1;
     m_precomputedCanvasRolling = false;
     m_precomputedCanvasDirty = true;
+    m_precomputedCanvasHopSize = 0;
+    m_precomputedCanvasTotalColumnsEstimate = 0;
     m_gpuDisplayImage = QImage();
     clearZoomFillFrozenCacheLocked();
     m_gpuDbRemapImage = QImage();
@@ -5212,6 +5220,8 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
     m_precomputedCanvasDisplayRight = displayRight;
     m_precomputedCanvasRolling = rollingMode;
     m_precomputedCanvasZoomLevel = effectiveZoom;
+    m_precomputedCanvasHopSize = m_precomputedHopSize;
+    m_precomputedCanvasTotalColumnsEstimate = m_precomputedTotalColumnsEstimate;
     m_precomputedCanvasDirty = false;
     const int filledPixels = std::min(
         drawPixels,

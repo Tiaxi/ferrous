@@ -1113,6 +1113,7 @@ private slots:
     void spectrogramRapidZoomOutIgnoresIntermediateReset();
     void spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaitingFlag();
     void spectrogramMaxZoomOutRoundedHopSnapsRenderZoomWithoutAwaitingFlag();
+    void spectrogramCenteredZoomOutDoesNotPreserveReferenceHopRange();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
     void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
@@ -6544,9 +6545,12 @@ void QmlSmokeTest::spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaiting
     // Regression: after rapid wheel input, an earlier restart can consume the
     // awaiting flag before the final max-out reset arrives. The same-track
     // reset's effective hop must still be authoritative for render zoom.
-    item.setZoomLevel(0.1);
-    item.m_zoomDebounceTimer->stop();
-    item.m_awaitingZoomData = false;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 0.1;
+        item.m_renderZoomLevel = 0.1;
+        item.m_awaitingZoomData = false;
+    }
     QVERIFY(std::abs(item.zoomLevel() - 0.1) < 0.001);
 
     constexpr int coarseColumns = 400;
@@ -6606,6 +6610,53 @@ void QmlSmokeTest::spectrogramMaxZoomOutRoundedHopSnapsRenderZoomWithoutAwaiting
     QVERIFY2(
         item.m_gpuDisplayWidth >= coarseColumns - 8,
         "rounded max-zoom-out data should render at near one pixel per backend column");
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramCenteredZoomOutDoesNotPreserveReferenceHopRange() {
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setPositionSeconds(10.0);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int referenceColumns = 4000;
+    QByteArray initialChunk(binsPerColumn * referenceColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, referenceColumns,
+        0, referenceColumns, 48000, 1024, false,
+        true, 1, false);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QVERIFY(item.m_precomputedCanvasDisplayRight > 1000);
+    QVERIFY(std::abs(item.m_precomputedCanvasZoomLevel - 1.0) < 0.001);
+    QCOMPARE(item.m_precomputedCanvasHopSize, 1024);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 0.1;
+        item.m_renderZoomLevel = 0.1;
+        item.m_awaitingZoomData = false;
+    }
+
+    constexpr int coarseColumns = 400;
+    QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
+    item.feedPrecomputedChunk(
+        coarseChunk, binsPerColumn, 0, coarseColumns,
+        0, coarseColumns, 48000, 10240, false,
+        true, 1, false);
+
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(coarseColumns - 1));
+    QVERIFY2(
+        item.m_gpuDisplayWidth >= coarseColumns,
+        "zoom-out should rebuild against the decimated full-track range, not the old reference-hop range");
     delete node;
 }
 
