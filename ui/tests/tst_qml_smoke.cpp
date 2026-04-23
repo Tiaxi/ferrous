@@ -1114,6 +1114,7 @@ private slots:
     void spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaitingFlag();
     void spectrogramMaxZoomOutRoundedHopSnapsRenderZoomWithoutAwaitingFlag();
     void spectrogramCenteredZoomOutDoesNotPreserveReferenceHopRange();
+    void spectrogramCenteredZoomOutDropsStaleSameTrackZoomChunks();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
     void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
@@ -6657,6 +6658,75 @@ void QmlSmokeTest::spectrogramCenteredZoomOutDoesNotPreserveReferenceHopRange() 
     QVERIFY2(
         item.m_gpuDisplayWidth >= coarseColumns,
         "zoom-out should rebuild against the decimated full-track range, not the old reference-hop range");
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramCenteredZoomOutDropsStaleSameTrackZoomChunks() {
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setPositionSeconds(10.0);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int referenceColumns = 4000;
+    QByteArray initialChunk(binsPerColumn * referenceColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, referenceColumns,
+        0, referenceColumns, 48000, 1024, false,
+        true, 1, false);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 0.1;
+        item.m_renderZoomLevel = 0.1;
+        item.m_awaitingZoomData = false;
+    }
+
+    constexpr int coarseColumns = 400;
+    QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
+    item.feedPrecomputedChunk(
+        coarseChunk, binsPerColumn, 0, coarseColumns,
+        0, coarseColumns, 48000, 10240, false,
+        true, 1, false);
+
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_precomputedHopSize, 10240);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(coarseColumns - 1));
+
+    constexpr int staleColumns = 800;
+    QByteArray staleResetChunk(binsPerColumn * staleColumns, '\x20');
+    item.feedPrecomputedChunk(
+        staleResetChunk, binsPerColumn, 0, staleColumns,
+        0, staleColumns, 48000, 2048, false,
+        true, 1, false);
+
+    QCOMPARE(item.m_precomputedHopSize, 10240);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
+
+    QByteArray staleDataChunk(binsPerColumn * staleColumns, '\x20');
+    item.feedPrecomputedChunk(
+        staleDataChunk, binsPerColumn, 0, staleColumns,
+        0, staleColumns, 48000, 2048, false,
+        false, 1, false);
+
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_precomputedHopSize, 10240);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(coarseColumns - 1));
+
     delete node;
 }
 

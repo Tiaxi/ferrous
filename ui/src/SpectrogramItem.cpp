@@ -1190,6 +1190,19 @@ void SpectrogramItem::feedPrecomputedChunk(
         return;
     }
 
+    const bool sameTrackSessionChunk =
+        trackToken != 0
+        && m_precomputedTrackToken != 0
+        && trackToken == m_precomputedTrackToken;
+    const bool sameTrackZoomHopMismatch =
+        m_displayMode == 1
+        && sameTrackSessionChunk
+        && hopSize > 0
+        && !effectiveHopMatchesZoom(hopSize, m_zoomLevel);
+    const bool shouldDropStaleSameTrackZoomChunk =
+        sameTrackZoomHopMismatch
+        && (m_awaitingZoomData || std::abs(m_zoomLevel - 1.0) > 0.001);
+
     // Determine the number of channels from the packed data size.
     // For metadata-only chunks (columns==0, e.g. buffer_reset), channelCount
     // is unknown from data alone, so we allow any channelIndex through for
@@ -1239,6 +1252,21 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_zoomFillDataReady = false;
         m_zoomFillFrozenRetainedActive =
             m_zoomFillFrozenRetainedAvailable && m_gpuSourceTexture.texture() != nullptr;
+    }
+
+    if (shouldDropStaleSameTrackZoomChunk) {
+        // Rapid zoom-out restarts share the same track token. Drop stale
+        // chunks after freeze capture but before reset handling so older
+        // sessions cannot clear/refill the ring after the final requested
+        // zoom has already arrived.
+        FERROUS_SPECTROGRAM_TRACE_LOGF(stderr,
+            "[Qt-stale-zoom-chunk@%p] drop tok=%llu cols=%d start=%d total=%d hop=%d zoom=%.4f reset=%d\n",
+            static_cast<const void *>(this),
+            static_cast<unsigned long long>(trackToken),
+            columns, startIndex, totalEstimate, hopSize, m_zoomLevel,
+            bufferReset ? 1 : 0);
+        update();
+        return;
     }
 
     // If this widget has no ring and receives data (not a reset), it was
