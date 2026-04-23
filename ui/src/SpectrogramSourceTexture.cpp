@@ -180,10 +180,8 @@ public:
         if (m_cleanupState->ownerContext.isNull()) {
             if (canDeleteNativeTextureOnContext(context, m_cleanupState->ownerContext, m_cleanupState->shareGroup)) {
                 deleteNativeTexture(m_cleanupState->takeTextureId(), context);
-            } else {
-                m_cleanupState->abandonNativeTexture();
+                queueWrapperDeletionOnGuiThread(m_cleanupState);
             }
-            queueWrapperDeletionOnGuiThread(m_cleanupState);
             return;
         }
 
@@ -198,6 +196,32 @@ public:
 private:
     std::shared_ptr<DeferredCleanupState> m_cleanupState;
 };
+
+bool tryScheduleCleanupAttemptOnOwnerWindow(const std::shared_ptr<DeferredCleanupState> &cleanupState) {
+    QQuickWindow *ownerWindow = cleanupState->ownerWindow.data();
+    if (ownerWindow == nullptr) {
+        return false;
+    }
+
+    const QPointer<QQuickWindow> ownerWindowPointer(ownerWindow);
+    const auto scheduleOnOwnerThread = [ownerWindowPointer, cleanupState]() {
+        if (ownerWindowPointer.isNull()) {
+            return;
+        }
+
+        ownerWindowPointer->scheduleRenderJob(
+            new TextureDeleteRenderJob(cleanupState),
+            QQuickWindow::AfterSynchronizingStage);
+        ownerWindowPointer->update();
+    };
+
+    if (ownerWindow->thread() == QThread::currentThread()) {
+        scheduleOnOwnerThread();
+        return true;
+    }
+
+    return QMetaObject::invokeMethod(ownerWindow, scheduleOnOwnerThread, Qt::QueuedConnection);
+}
 
 bool createWrappedTexture(
     QQuickWindow *window,
@@ -370,45 +394,27 @@ void SpectrogramSourceTexture::scheduleDeferredCleanup(
     });
     if (ownerContext != nullptr) {
         QObject::connect(ownerContext, &QObject::destroyed, [cleanupState](QObject *) {
+            if (tryScheduleCleanupAttemptOnOwnerWindow(cleanupState)) {
+                return;
+            }
             cleanupState->abandonNativeTexture();
             queueWrapperDeletionOnGuiThread(cleanupState);
         });
     }
 
-    const QPointer<QQuickWindow> ownerWindowPointer(ownerWindow);
     const QPointer<QOpenGLContext> ownerContextPointer(ownerContext);
     const QPointer<QOpenGLContextGroup> shareGroupPointer(shareGroup);
-    const auto scheduleOnOwnerThread =
-        [ownerWindowPointer,
-         ownerContextPointer,
-         shareGroupPointer,
-         cleanupState]() {
-            if (ownerWindowPointer.isNull()) {
-                cleanupState->abandonNativeTexture();
-                queueWrapperDeletionOnGuiThread(cleanupState);
-                return;
-            }
-
-            ownerWindowPointer->scheduleRenderJob(
-                new TextureDeleteRenderJob(cleanupState),
-                QQuickWindow::AfterSynchronizingStage);
-            ownerWindowPointer->update();
-        };
-
-    if (ownerWindow->thread() == QThread::currentThread()) {
-        scheduleOnOwnerThread();
+    if (tryScheduleCleanupAttemptOnOwnerWindow(cleanupState)) {
         return;
     }
 
-    if (!QMetaObject::invokeMethod(ownerWindow, scheduleOnOwnerThread, Qt::QueuedConnection)) {
-        QOpenGLContext *context = QOpenGLContext::currentContext();
-        if (canDeleteNativeTextureOnContext(context, ownerContextPointer, shareGroupPointer)) {
-            deleteNativeTexture(cleanupState->takeTextureId(), context);
-        } else {
-            cleanupState->abandonNativeTexture();
-        }
-        queueWrapperDeletionOnGuiThread(cleanupState);
+    QOpenGLContext *context = QOpenGLContext::currentContext();
+    if (canDeleteNativeTextureOnContext(context, ownerContextPointer, shareGroupPointer)) {
+        deleteNativeTexture(cleanupState->takeTextureId(), context);
+    } else {
+        cleanupState->abandonNativeTexture();
     }
+    queueWrapperDeletionOnGuiThread(cleanupState);
 }
 
 void SpectrogramSourceTexture::release() {
