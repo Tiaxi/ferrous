@@ -12,9 +12,7 @@
 
 #include <atomic>
 #include <algorithm>
-#include <mutex>
 #include <memory>
-#include <vector>
 
 struct SpectrogramSourceUploadSpan {
     int xBegin{0};
@@ -101,7 +99,6 @@ public:
 private:
     [[nodiscard]] int pendingCleanupAttemptCount() const;
     [[nodiscard]] int pendingCleanupGenerationCount() const;
-    void runPendingCleanupForCurrentContext();
     void scheduleDeferredCleanup(
         QSGTexture *texture,
         GLuint textureId,
@@ -116,8 +113,6 @@ private:
     QPointer<QQuickWindow> m_ownerWindow;
     QPointer<QOpenGLContext> m_ownerContext;
     QPointer<QOpenGLContextGroup> m_shareGroup;
-    std::mutex m_pendingCleanupStatesMutex;
-    std::vector<std::weak_ptr<SpectrogramSourceTextureDeferredCleanupState>> m_pendingCleanupStates;
     std::shared_ptr<std::atomic_int> m_pendingCleanupAttemptCount{std::make_shared<std::atomic_int>(0)};
     std::shared_ptr<std::atomic_int> m_pendingCleanupCount{std::make_shared<std::atomic_int>(0)};
 };
