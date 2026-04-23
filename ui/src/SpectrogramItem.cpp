@@ -2431,9 +2431,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && currentWindow->rendererInterface() != nullptr
                 && currentWindow->rendererInterface()->graphicsApi()
                     == QSGRendererInterface::OpenGL;
+            const bool needsCenteredFreezeSourceCache =
+                debugModeRequestsRetainedSourceTextureBody
+                && m_displayMode == 1;
             const bool needsSourceCache =
                 gpuDebugMode == SpectrogramGpu::DebugMode::Full
                 || gpuDebugMode == SpectrogramGpu::DebugMode::StockMaterial
+                || needsCenteredFreezeSourceCache
                 || !canUseRetainedSourceTextureBody;
             const bool maintainCpuDisplayImage = currentWindow == nullptr;
 
@@ -2569,7 +2573,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             const bool useRetainedSourceTextureBodyForFrame =
                 canUseRetainedSourceTextureBody
-                && retainedSourceTexture != nullptr;
+                && retainedSourceTexture != nullptr
+                && !rendererFreeze;
             const bool haveSelectedSpectrogramContent =
                 useRetainedSourceTextureBodyForFrame
                     ? haveRetainedTextureSegments
@@ -2630,7 +2635,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         ? m_gpuDisplaySubpixelOffset
                         : 0.0;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-                const double gpuEffectiveZoom = canUseRetainedSourceTextureBody
+                const double gpuEffectiveZoom = useRetainedSourceTextureBodyForFrame
                     ? static_cast<double>(drawPixels)
                         / static_cast<double>(std::max<qint64>(1, displayRight - displayLeft + 1))
                     : static_cast<double>(drawPixels)
@@ -2646,10 +2651,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         spectrogramTargetRect.y(),
                         spectrogramTargetRect.width(),
                         spectrogramTargetRect.height(),
-                        canUseRetainedSourceTextureBody
+                        useRetainedSourceTextureBodyForFrame
                             ? spectrogramSourceRect.width()
                             : spectrogramNodeImage.width(),
-                        canUseRetainedSourceTextureBody
+                        useRetainedSourceTextureBodyForFrame
                             ? m_precomputedBinsPerColumn
                             : spectrogramNodeImage.height(),
                         gpuEffectiveZoom);

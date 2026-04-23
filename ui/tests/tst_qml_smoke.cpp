@@ -1156,6 +1156,7 @@ private slots:
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramRetainedTextureNodeFallsBackToFrozenCpuSourceDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
     void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
@@ -6766,7 +6767,7 @@ void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResour
         QVERIFY2(
             item.m_gpuSourceTexture.texture() != nullptr,
             "texture-node debug mode should create the retained source texture");
-        QVERIFY(item.m_gpuSourceImage.isNull());
+        QVERIFY(!item.m_gpuSourceImage.isNull());
         QCOMPARE(bodyTextureNode->texture(), item.m_gpuSourceTexture.texture());
     }
 }
@@ -9339,7 +9340,7 @@ void QmlSmokeTest::spectrogramGpuSourceOnlyDebugRendersWithoutGpuSourceImage() {
     {
         QMutexLocker lock(&item.m_stateMutex);
         QCOMPARE(sampleMaterial->state.sourceTexture, item.m_gpuSourceTexture.texture());
-        QVERIFY(item.m_gpuSourceImage.isNull());
+        QVERIFY(!item.m_gpuSourceImage.isNull());
     }
 }
 
@@ -9951,6 +9952,95 @@ void QmlSmokeTest::spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView() {
     }
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenCpuSourceDuringZoomFill() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "texture-node");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+    item.setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int totalColumns = 256;
+    QByteArray baseline(128 * bins, '\x40');
+    QByteArray restarted(32 * bins, '\x55');
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained texture-node zoom-fill test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 128,
+        0, totalColumns, 48000, 1024, false, true, 1, false);
+    item.setPositionSeconds((64.0 * 1024.0) / 48000.0);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+
+    std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+
+    QSGTexture *retainedTexture = nullptr;
+    QImage initialSourceImage;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        retainedTexture = item.m_gpuSourceTexture.texture();
+        initialSourceImage = item.m_gpuSourceImage.copy();
+    }
+    QVERIFY2(retainedTexture != nullptr, "texture-node baseline should build the retained source texture");
+    QVERIFY2(!initialSourceImage.isNull(), "texture-node baseline should keep a CPU source snapshot for centered freeze");
+    auto *bodyTextureNode = spectrogramBodyTextureNode(node.get());
+    QVERIFY(bodyTextureNode != nullptr);
+    QCOMPARE(bodyTextureNode->texture(), retainedTexture);
+
+    item.feedPrecomputedChunk(
+        restarted, bins, 0, 32,
+        0, totalColumns, 48000, 512, false, true, 1, false);
+
+    node.reset(item.updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+
+    bodyTextureNode = spectrogramBodyTextureNode(node.get());
+    QVERIFY(bodyTextureNode != nullptr);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY2(!item.m_zoomFillFrozenSourceImage.isNull(),
+            "zoom-fill should preserve a frozen CPU source snapshot in retained texture-node mode");
+        QCOMPARE(item.m_zoomFillFrozenSourceImage, initialSourceImage);
+        QVERIFY2(!item.m_gpuSourceImage.isNull(),
+            "retained texture-node mode should keep warming the CPU source cache during zoom-fill");
+    }
+    QVERIFY2(
+        bodyTextureNode->texture() != retainedTexture,
+        "zoom-fill frame should fall back from the retained texture-node route to the frozen CPU snapshot");
+    QVERIFY2(!bodyTextureNode->rect().isEmpty(), "frozen CPU fallback should keep the texture-node body visible");
+    QCOMPARE(
+        bodyTextureNode->sourceRect(),
+        QRectF(
+            0.0,
+            0.0,
+            static_cast<double>(initialSourceImage.width()),
+            static_cast<double>(initialSourceImage.height())));
 }
 
 void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
