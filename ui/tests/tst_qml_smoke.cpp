@@ -1110,6 +1110,7 @@ private slots:
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
+    void spectrogramRapidZoomOutIgnoresIntermediateReset();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
     void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
@@ -6448,6 +6449,76 @@ void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
         true, 1, false);
 
     QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramRapidZoomOutIgnoresIntermediateReset() {
+    SpectrogramItem item;
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int referenceColumns = 4000;
+    QByteArray initialChunk(binsPerColumn * referenceColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, referenceColumns,
+        0, referenceColumns, 48000, 1024, false,
+        true, 1, false);
+
+    item.setZoomLevel(4.0);
+    item.m_zoomDebounceTimer->stop();
+    QByteArray zoomedInChunk(binsPerColumn * referenceColumns, '\x50');
+    item.feedPrecomputedChunk(
+        zoomedInChunk, binsPerColumn, 0, referenceColumns,
+        0, referenceColumns * 4, 48000, 256, false,
+        true, 1, false);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(!item.m_gpuDisplayImage.isNull());
+    QCOMPARE(item.m_awaitingZoomData, false);
+    QVERIFY(std::abs(item.m_renderZoomLevel - 4.0) < 0.001);
+
+    // User keeps wheel-zooming out while an older backend restart is still
+    // in flight. The intermediate hop must not snap/reveal, otherwise the
+    // view appears to get stuck before the final max-out request arrives.
+    item.setZoomLevel(0.1);
+    QVERIFY(item.m_awaitingZoomData);
+    QVERIFY(item.m_zoomDebounceTimer->isActive());
+
+    constexpr int intermediateColumns = 1600;
+    QByteArray intermediateChunk(binsPerColumn * intermediateColumns, '\x60');
+    item.feedPrecomputedChunk(
+        intermediateChunk, binsPerColumn, 0, intermediateColumns,
+        0, intermediateColumns, 48000, 512, false,
+        true, 1, false);
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    QVERIFY2(item.m_awaitingZoomData,
+             "intermediate zoom reset must not consume the latest pending zoom request");
+    QVERIFY2(item.m_zoomFillActive,
+             "intermediate zoom reset should remain hidden behind the frozen frame");
+    QCOMPARE(item.m_zoomFillDataReady, false);
+    QVERIFY(std::abs(item.m_renderZoomLevel - 4.0) < 0.001);
+
+    item.m_zoomDebounceTimer->stop();
+    constexpr int finalColumns = 400;
+    QByteArray finalChunk(binsPerColumn * finalColumns, '\x70');
+    item.feedPrecomputedChunk(
+        finalChunk, binsPerColumn, 0, finalColumns,
+        0, finalColumns, 48000, 10240, false,
+        true, 1, false);
+
+    updatedNode = item.updatePaintNode(updatedNode, nullptr);
+    QVERIFY(updatedNode == node);
+    QCOMPARE(item.m_awaitingZoomData, false);
+    QVERIFY(std::abs(item.m_renderZoomLevel - 0.1) < 0.001);
+    QVERIFY2(!item.m_zoomFillActive,
+             "matching final zoom reset should be allowed to reveal");
+
+    delete updatedNode;
 }
 
 void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack() {

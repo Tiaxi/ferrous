@@ -120,6 +120,16 @@ DebugFrameStats analyzeDebugFrame(const QImage &image) {
     return stats;
 }
 
+bool effectiveHopMatchesZoom(int hopSize, double zoomLevel) {
+    if (hopSize <= 0) {
+        return false;
+    }
+    const double clampedZoom = std::clamp(zoomLevel, 0.05, 16.0);
+    const int expectedHop = static_cast<int>(
+        std::llround(kReferenceHopSamples / clampedZoom));
+    return std::abs(hopSize - expectedHop) <= 2;
+}
+
 double linearInterpolate(double y1, double y2, double mu) {
     return y1 * (1.0 - mu) + y2 * mu;
 }
@@ -1089,6 +1099,9 @@ void SpectrogramItem::setZoomLevel(double value) {
     // until the backend restarts with matching data.
     m_pendingBackendZoom = static_cast<float>(m_zoomLevel);
     m_awaitingZoomData = true;
+    if (m_zoomFillActive) {
+        m_zoomFillDataReady = false;
+    }
     m_zoomDebounceTimer->start(); // restarts the 150ms timer
 
     lock.unlock();
@@ -1454,6 +1467,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         // When enough columns have arrived, the render zoom is applied and
         // the canvas is rebuilt with complete data — no left-to-right fill.
         if (m_awaitingZoomData && (appliedReset || appliedImplicitReset)) {
+            const bool resetMatchesRequestedZoom =
+                effectiveHopMatchesZoom(m_precomputedHopSize, m_zoomLevel);
             // Don't consume the awaiting flag if the zoom debounce timer is
             // still running — a zoom change command hasn't been sent to the
             // backend yet.  This reset is from a different trigger (e.g.
@@ -1461,6 +1476,19 @@ void SpectrogramItem::feedPrecomputedChunk(
             // Consuming the flag here would prevent the zoom snap from
             // firing when the actual zoom-change data arrives, leaving
             // renderZoomLevel stale and forcing full canvas rebuilds.
+            //
+            // Also ignore reset data whose effective hop does not match the
+            // latest requested zoom.  Rapid wheel zoom-out can leave older
+            // backend restarts in flight; revealing those intermediate hops
+            // makes the view appear stuck before the final max-out target.
+            if (!resetMatchesRequestedZoom) {
+                m_precomputedCanvasDirty = true;
+                update();
+                return;
+            }
+            if (m_zoomDebounceTimer->isActive()) {
+                m_zoomDebounceTimer->stop();
+            }
             if (!m_zoomDebounceTimer->isActive()) {
                 m_awaitingZoomData = false;
             }
@@ -1721,8 +1749,12 @@ void SpectrogramItem::feedPrecomputedChunk(
             && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
                 >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
 
-        if ((ringHasEnoughColumns && ringCoversDisplayRight)
-            || decodeReachedEnd) {
+        const bool fillMatchesRequestedZoom =
+            !m_awaitingZoomData
+            || effectiveHopMatchesZoom(m_precomputedHopSize, m_zoomLevel);
+        if (fillMatchesRequestedZoom
+            && ((ringHasEnoughColumns && ringCoversDisplayRight)
+                || decodeReachedEnd)) {
             // The decoder has enough data, but the final render resource may
             // not be ready yet. Keep showing the frozen frame until
             // updatePaintNode can reveal the current frame through its normal
@@ -2609,6 +2641,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             const bool freezeCanRevealFinalFrame =
                 rendererFreeze
                 && m_zoomFillDataReady
+                && !m_awaitingZoomData
                 && (canUseRetainedSourceTextureBody
                     ? retainedTextureCoversVisibleRange
                     : !m_gpuDisplayImage.isNull());
