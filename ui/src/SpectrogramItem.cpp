@@ -1221,6 +1221,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         captureZoomFillFrozenCacheLocked();
         m_zoomFillActive = !m_zoomFillFrozenDisplayImage.isNull();
+        m_zoomFillDataReady = false;
     }
 
     // If this widget has no ring and receives data (not a reset), it was
@@ -1278,6 +1279,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             // image through canvasFreeze.
             captureZoomFillFrozenCacheLocked();
             m_zoomFillActive = true;
+            m_zoomFillDataReady = false;
         } else {
             m_precomputedReady = false;
             m_precomputedCanvasDisplayLeft = 0;
@@ -1672,8 +1674,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
     }
 
-    // Canvas freeze readiness: clear m_zoomFillActive when the ring
-    // has enough data to cover the visible display.
+    // Canvas freeze readiness: mark decoded data ready when the ring
+    // has enough data to cover the visible display. The freeze is
+    // released later by updatePaintNode only when that frame can render
+    // through the active path.
     if (m_zoomFillActive) {
         const int screenWidth = std::max(static_cast<int>(width()), 1);
         // Two conditions must be met:
@@ -1722,11 +1726,11 @@ void SpectrogramItem::feedPrecomputedChunk(
 
         if ((ringHasEnoughColumns && ringCoversDisplayRight)
             || decodeReachedEnd) {
-            m_zoomFillActive = false;
-            clearZoomFillFrozenCacheLocked();
-            // Don't invalidate the render caches here — the cached image must
-            // stay valid so the NEXT zoom transition can activate its freeze.
-            // Just mark dirty; the rebuild replaces all displayed content.
+            // The decoder has enough data, but the final render resource may
+            // not be ready yet. Keep showing the frozen frame until
+            // updatePaintNode can reveal the current frame through its normal
+            // render path (retained source on OpenGL, display image otherwise).
+            m_zoomFillDataReady = true;
             m_precomputedCanvasDirty = true;
         }
     }
@@ -1762,6 +1766,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_renderZoomLevel = 1.0;
         m_awaitingZoomData = false;
         m_zoomFillActive = false;
+        m_zoomFillDataReady = false;
         clearZoomFillFrozenCacheLocked();
         // Cancel any pending debounced setZoomLevel that would
         // otherwise overwrite this reset 150 ms later.  Scenario: the
@@ -1844,6 +1849,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedTrackToken = 0;
     m_awaitingZoomData = false;
     m_zoomFillActive = false;
+    m_zoomFillDataReady = false;
     clearZoomFillFrozenCacheLocked();
     m_renderZoomLevel = m_zoomLevel;
     m_gaplessPositionOffset = 0.0;
@@ -2400,7 +2406,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
 
             const bool haveFreezeCache = !m_zoomFillFrozenDisplayImage.isNull();
-            const bool rendererFreeze =
+            bool rendererFreeze =
                 m_zoomFillActive
                 && haveFreezeCache
                 && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
@@ -2481,10 +2487,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             bool haveRetainedTextureSegments = false;
             bool retainedTextureSegmentsOverflowed = false;
+            bool retainedTextureCoversVisibleRange = false;
             if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
                 && currentWindow != nullptr) {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
+                bool retainedSegmentsCoverVisibleRange = true;
                 const double targetScale =
                     static_cast<double>(drawPixels)
                     / static_cast<double>(std::max<qint64>(1, displayRight - displayLeft + 1));
@@ -2526,6 +2534,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 for (qint64 displayIndex = displayLeft; displayIndex <= displayRight; ++displayIndex) {
                     const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
                     if (slot < 0) {
+                        retainedSegmentsCoverVisibleRange = false;
                         flushRetainedSegment();
                         continue;
                     }
@@ -2562,7 +2571,35 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     retainedTextureSegments = {};
                     retainedSourceTexture = nullptr;
                     haveRetainedTextureSegments = false;
+                    retainedSegmentsCoverVisibleRange = false;
                 }
+                const qint64 decodedVisibleRight = rollingMode
+                    ? displayRight
+                    : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+                const bool retainedUploadCoversVisibleRange =
+                    rollingMode
+                        ? m_gpuSourceTextureTrackToken == m_precomputedTrackToken
+                        : decodedVisibleRight >= displayLeft
+                            && m_gpuSourceTextureTrackToken == m_precomputedTrackToken
+                            && m_gpuSourceTextureMinColumnIndex <= displayLeft
+                            && m_gpuSourceTextureMaxColumnIndex >= decodedVisibleRight;
+                retainedTextureCoversVisibleRange =
+                    retainedSegmentsCoverVisibleRange
+                    && retainedUploadCoversVisibleRange
+                    && haveRetainedTextureSegments
+                    && retainedSourceTexture != nullptr;
+            }
+
+            const bool freezeCanRevealFinalFrame =
+                rendererFreeze
+                && m_zoomFillDataReady
+                && (canUseRetainedSourceTextureBody
+                    ? retainedTextureCoversVisibleRange
+                    : !m_gpuDisplayImage.isNull());
+            if (freezeCanRevealFinalFrame) {
+                m_zoomFillActive = false;
+                clearZoomFillFrozenCacheLocked();
+                rendererFreeze = false;
             }
 
             useRetainedSourceTextureBodyForFrame =
@@ -4378,6 +4415,7 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
 void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenDisplayImage = QImage();
     m_zoomFillFrozenDisplayGeneration = 0;
+    m_zoomFillDataReady = false;
 }
 
 void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {

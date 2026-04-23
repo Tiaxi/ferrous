@@ -408,6 +408,7 @@ private:
     // session restart changes the hop; cleared when the ring covers
     // the display.  updatePaintNode skips canvas updates while active.
     bool m_zoomFillActive{false};
+    bool m_zoomFillDataReady{false};
     double m_precomputedCanvasZoomLevel{1.0};
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};

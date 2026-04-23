@@ -1172,6 +1172,7 @@ private slots:
     void spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZoomFill();
     void spectrogramFullModeFallsBackToFrozenDisplayDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
+    void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
@@ -10842,6 +10843,58 @@ void QmlSmokeTest::spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame() {
         QVERIFY2(
             item.m_gpuDisplayGeneration > initialDisplayGeneration,
             "the new display cache should warm behind the frozen zoom-fill frame");
+    }
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomFillRevealsOnlyFromRenderableFrame() {
+    SpectrogramItem item;
+    item.setWidth(20);
+    item.setHeight(6);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(false);
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 128;
+    QByteArray baseline(40 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 40,
+        0, totalColumns, 48000, 1024, false, true, 1, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto now = std::chrono::steady_clock::now();
+        item.m_positionSeconds = (9.0 * 1024.0) / 48000.0;
+        item.m_positionAnchorSeconds = item.m_positionSeconds;
+        item.m_positionAnchorUpdatedAt = now;
+        item.m_positionAnchorInitialized = true;
+    }
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QByteArray restarted(40 * bins, '\x55');
+    item.feedPrecomputedChunk(
+        restarted, bins, 0, 40,
+        0, totalColumns, 48000, 512, false, true, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY(item.m_zoomFillDataReady);
+        QVERIFY(!item.m_zoomFillFrozenDisplayImage.isNull());
+    }
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            !item.m_zoomFillActive,
+            "freeze should clear on the frame that can render replacement content");
+        QVERIFY(!item.m_zoomFillDataReady);
+        QVERIFY(item.m_zoomFillFrozenDisplayImage.isNull());
     }
 
     delete node;
