@@ -9598,7 +9598,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
             QCOMPARE(tailTextureNode->sourceRect(), QRectF(4.0, 0.0, 2.0, static_cast<double>(bins)));
             QVERIFY2(!bodyTextureNode->rect().isEmpty(), "base retained texture node should be visible");
             QVERIFY2(!tailTextureNode->rect().isEmpty(), "tail retained texture node should be visible");
-        } else if (debugCase.path == DebugPath::Full) {
+        } else if (debugCase.path == DebugPath::SourceOnly) {
             auto *bodySourceNode = spectrogramSourceSampleMaterialNode(node.get());
             auto *tailSourceNode = spectrogramSourceSampleMaterialNode(node.get(), 1);
             QVERIFY(bodySourceNode != nullptr);
@@ -9619,7 +9619,7 @@ void QmlSmokeTest::spectrogramGpuSparseCenteredWindowFallsBackFromRetainedSegmen
             QCOMPARE(tailMaterial->state.sourceRect, QRectF(4.0, 0.0, 2.0, static_cast<double>(bins)));
             QVERIFY2(geometryHasVisibleArea(bodySourceNode), "base retained sample node should be visible");
             QVERIFY2(geometryHasVisibleArea(tailSourceNode), "tail retained sample node should be visible");
-        } else if (debugCase.path == DebugPath::SourceOnly) {
+        } else if (debugCase.path == DebugPath::Full) {
             assertFullModeBodyNodeInvariants(
                 node.get(),
                 "full-mode sparse retained precondition should keep the material body active");
