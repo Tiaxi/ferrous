@@ -2,7 +2,11 @@
 
 #pragma once
 
+#include <QByteArray>
+#include <QQuickWindow>
+#include <QSGTexture>
 #include <QRect>
+#include <QSize>
 #include <QVector>
 
 #include <algorithm>
@@ -59,3 +63,29 @@ inline QVector<SpectrogramSourceUploadSpan> mergeSpectrogramSourceUploadSpans(
     }
     return merged;
 }
+
+class SpectrogramSourceTexture {
+public:
+    ~SpectrogramSourceTexture();
+
+    [[nodiscard]] QSize size() const;
+    [[nodiscard]] QSGTexture *texture() const;
+    [[nodiscard]] int pendingUploadSpanCount() const;
+
+    bool ensureCreated(QQuickWindow *window, int width, int height);
+    bool uploadRgbaColumns(
+        QQuickWindow *window,
+        int xOffset,
+        int width,
+        int height,
+        const QByteArray &rgbaBytes);
+    void noteUploadedSpan(const SpectrogramSourceUploadSpan &span);
+    void clearPendingSpans();
+    void release();
+
+private:
+    GLuint m_textureId{0};
+    QSize m_size;
+    QSGTexture *m_texture{nullptr};
+    QVector<SpectrogramSourceUploadSpan> m_pendingUploadedSpans;
+};

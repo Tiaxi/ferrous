@@ -992,6 +992,8 @@ private slots:
     void spectrogramPeakHoldColumnSpanUsesMaxNotNearest();
     void spectrogramRetainedSourceLayoutPreserves64BitColumnRange();
     void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
+    void spectrogramRetainedSourceTextureCreatesWrappedQsgTexture();
+    void spectrogramRetainedSourceTextureTracksUploadSpanWithoutCpuSourceImage();
     void spectrogramGpuVisibleSourceImageTracksDisplayWindow();
     void spectrogramGpuImagesUseRgbaCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
@@ -1047,6 +1049,19 @@ void QmlSmokeTest::cleanup() {
 void QmlSmokeTest::cleanupTestCase() {
     qInstallMessageHandler(previousMessageHandler());
     previousMessageHandler() = nullptr;
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesWrappedQsgTexture() {
+    SpectrogramSourceTexture texture;
+    QCOMPARE(texture.texture(), nullptr);
+    QCOMPARE(texture.size(), QSize());
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureTracksUploadSpanWithoutCpuSourceImage() {
+    SpectrogramSourceTexture texture;
+    QCOMPARE(texture.pendingUploadSpanCount(), 0);
+    texture.noteUploadedSpan({4, 7});
+    QCOMPARE(texture.pendingUploadSpanCount(), 1);
 }
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
