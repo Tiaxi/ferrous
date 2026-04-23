@@ -8,6 +8,7 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QOffscreenSurface>
 #include <QPainter>
 #include <QQuickWindow>
@@ -574,6 +575,39 @@ SharedOpenGlContexts createSharedOpenGlContexts() {
     contexts.ownerContext = std::move(ownerContext);
     contexts.sharedContext = std::move(sharedContext);
     return contexts;
+}
+
+GLuint createNativeTexture(QOpenGLContext *context, const QSize size = QSize(4, 4)) {
+    if (context == nullptr) {
+        return 0;
+    }
+
+    QOpenGLFunctions *functions = context->functions();
+    if (functions == nullptr) {
+        return 0;
+    }
+
+    GLuint textureId = 0;
+    functions->glGenTextures(1, &textureId);
+    if (textureId == 0) {
+        return 0;
+    }
+
+    QByteArray pixels(size.width() * size.height() * 4, '\x7f');
+    functions->glBindTexture(GL_TEXTURE_2D, textureId);
+    functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    functions->glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        size.width(),
+        size.height(),
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        pixels.constData());
+    return textureId;
 }
 
 QSGSimpleTextureNode *findTopLevelTextureChild(QSGNode *root, int ordinal) {
@@ -1263,8 +1297,13 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwne
 
     SpectrogramSourceTexture texture;
     std::atomic_int wrapperDeletes{0};
+    QOpenGLFunctions *sharedFunctions = contexts.sharedContext->functions();
+    QVERIFY(sharedFunctions != nullptr);
+    const GLuint nativeTextureId = createNativeTexture(contexts.sharedContext.get());
+    QVERIFY(nativeTextureId != 0);
+    QVERIFY(sharedFunctions->glIsTexture(nativeTextureId));
     texture.m_texture = new CountingTexture(&wrapperDeletes, QSize(8, 4));
-    texture.m_textureId = 73;
+    texture.m_textureId = nativeTextureId;
     texture.m_size = QSize(8, 4);
     texture.m_ownerWindow = window.get();
     texture.m_ownerContext = contexts.ownerContext.get();
@@ -1276,6 +1315,9 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwne
     QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
     QCOMPARE(texture.texture(), nullptr);
     QCOMPARE(texture.m_textureId, 0U);
+    QVERIFY(sharedFunctions->glIsTexture(nativeTextureId));
+
+    contexts.sharedContext->doneCurrent();
 
     std::atomic_bool firstRenderAttemptRan{false};
     window->scheduleRenderJob(
@@ -1290,25 +1332,19 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureSharedContextReleaseKeepsOwne
     QCOMPARE(wrapperDeletes.load(), 0);
     QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
 
-    contexts.sharedContext->doneCurrent();
     contexts.ownerContext.reset();
+    QVERIFY(contexts.sharedContext->makeCurrent(contexts.surface.get()));
+    QVERIFY(sharedFunctions->glIsTexture(nativeTextureId));
 
-    std::atomic_bool secondRenderAttemptRan{false};
-    window->scheduleRenderJob(
-        QRunnable::create([&secondRenderAttemptRan]() {
-            secondRenderAttemptRan.store(true);
-        }),
-        QQuickWindow::AfterSynchronizingStage);
-    window->update();
-    QVERIFY(!window->grabWindow().isNull());
-    QTRY_VERIFY(secondRenderAttemptRan.load());
-    QTRY_COMPARE(texture.pendingCleanupAttemptCount(), 2);
+    texture.runPendingCleanupForCurrentContext();
+    QTRY_VERIFY(texture.pendingCleanupAttemptCount() >= 2);
+    QVERIFY(!sharedFunctions->glIsTexture(nativeTextureId));
     QCOMPARE(wrapperDeletes.load(), 0);
-    QCOMPARE(texture.pendingCleanupGenerationCount(), 1);
-
-    window.reset();
     QTRY_COMPARE(wrapperDeletes.load(), 1);
     QTRY_COMPARE(texture.pendingCleanupGenerationCount(), 0);
+
+    contexts.sharedContext->doneCurrent();
+    window.reset();
 }
 
 void QmlSmokeTest::spectrogramRetainedSourceTextureRetiresMultiplePendingCleanupGenerations() {
