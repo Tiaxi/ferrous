@@ -1270,6 +1270,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedMaxColumnIndex = -1;
         m_precomputedCanvasDirty = true;
         m_awaitingWorkerReset = true;
+        invalidateRetainedSourceTextureStateLocked();
 
         if (preserveCanvasForSeek) {
             // Canvas, m_precomputedReady, and the stored display range
@@ -1901,6 +1902,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
         m_ringCapacity = 0;
+        invalidateRetainedSourceTextureStateLocked();
     } else {
         // Preserve only the history that has actually been shown on screen.
         // Any speculative lookahead beyond the current playback head is stale
@@ -4378,6 +4380,20 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenDisplayGeneration = 0;
 }
 
+void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
+    m_gpuSourceUploadRgba.clear();
+    m_gpuSourceUploadSpans.clear();
+    m_gpuSourceTextureDisplayLeft = 0;
+    m_gpuSourceTextureDisplayRight = -1;
+    m_gpuSourceTextureRolling = false;
+    m_gpuSourceTextureTrackToken = 0;
+    m_gpuSourceTextureRingWriteSeq = -1;
+    m_gpuSourceTextureRingOldestSeq = -1;
+    m_gpuSourceTextureMinColumnIndex = 0;
+    m_gpuSourceTextureMaxColumnIndex = -1;
+    m_gpuSourceTexture.clearPendingSpans();
+}
+
 void SpectrogramItem::invalidateRenderCachesLocked() {
     const bool hadGpuImages =
         !m_gpuDisplayImage.isNull()
@@ -4420,17 +4436,7 @@ void SpectrogramItem::invalidateRenderCachesLocked() {
     m_gpuDisplayLastShiftPixels = 0;
     m_gpuDisplayLastUpdatedColumns = 0;
     m_gpuDisplaySubpixelOffset = 0.0;
-    m_gpuSourceUploadRgba.clear();
-    m_gpuSourceUploadSpans.clear();
-    m_gpuSourceTextureDisplayLeft = 0;
-    m_gpuSourceTextureDisplayRight = -1;
-    m_gpuSourceTextureRolling = false;
-    m_gpuSourceTextureTrackToken = 0;
-    m_gpuSourceTextureRingWriteSeq = -1;
-    m_gpuSourceTextureRingOldestSeq = -1;
-    m_gpuSourceTextureMinColumnIndex = 0;
-    m_gpuSourceTextureMaxColumnIndex = -1;
-    m_gpuSourceTexture.clearPendingSpans();
+    invalidateRetainedSourceTextureStateLocked();
     m_gpuDbRemapBins = 0;
     m_gpuDbRemapDbRange = 132.0;
     m_gpuPaletteMuted = false;

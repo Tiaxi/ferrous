@@ -148,6 +148,7 @@ private:
     bool ensureZoomFillSnapshotImageLocked();
     void captureZoomFillFrozenCacheLocked();
     void clearZoomFillFrozenCacheLocked();
+    void invalidateRetainedSourceTextureStateLocked();
     void invalidateRenderCachesLocked();
     bool reanchorRollingEpochForCurrentDataLocked(
         std::chrono::steady_clock::time_point now);

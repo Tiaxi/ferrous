@@ -1174,6 +1174,8 @@ private slots:
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
+    void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
+    void spectrogramDataResetInvalidatesRetainedSourceStateDuringFreeze();
     void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
     void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
 };
@@ -10940,6 +10942,109 @@ void QmlSmokeTest::spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMeta
         QCOMPARE(item.m_zoomFillFrozenDisplayImage.height(), 80);
         QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
         QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+    }
+}
+
+void QmlSmokeTest::spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze() {
+    // Regression: the frozen-frame seek path preserved retained-source
+    // upload bookkeeping while wiping the ring. Same-track refills then
+    // skipped uploads for columns that looked already resident, leaving
+    // stale/empty texture slots visible as black gaps and wrong timing.
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 240;
+    constexpr quint64 trackToken = 31;
+    QByteArray chunk(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 44100, 1024, false,
+        true, trackToken, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, true);
+        QVERIFY(!item.m_gpuDisplayImage.isNull());
+
+        item.m_gpuSourceTextureDisplayLeft = 0;
+        item.m_gpuSourceTextureDisplayRight = 119;
+        item.m_gpuSourceTextureRolling = false;
+        item.m_gpuSourceTextureTrackToken = item.m_precomputedTrackToken;
+        item.m_gpuSourceTextureRingWriteSeq = item.m_ringWriteSeq;
+        item.m_gpuSourceTextureRingOldestSeq = item.m_ringOldestSeq;
+        item.m_gpuSourceTextureMinColumnIndex = 0;
+        item.m_gpuSourceTextureMaxColumnIndex = 119;
+    }
+
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0,
+        0, 0, 0, 0, false,
+        true, trackToken, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY(!item.m_zoomFillFrozenDisplayImage.isNull());
+        QCOMPARE(item.m_gpuSourceTextureTrackToken, static_cast<quint64>(0));
+        QCOMPARE(item.m_gpuSourceTextureDisplayRight, static_cast<qint64>(-1));
+        QVERIFY(item.m_gpuSourceTextureMaxColumnIndex < item.m_gpuSourceTextureMinColumnIndex);
+    }
+}
+
+void QmlSmokeTest::spectrogramDataResetInvalidatesRetainedSourceStateDuringFreeze() {
+    // Some centered seeks deliver the worker reset as the first data-bearing
+    // chunk. That path also wipes/remaps ring slots and must force retained
+    // source re-upload even when the frozen display image is preserved.
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 8;
+    constexpr int columns = 240;
+    constexpr quint64 trackToken = 37;
+    QByteArray baseline(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, columns,
+        0, 1024, 44100, 1024, false,
+        true, trackToken, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, true);
+        item.captureZoomFillFrozenCacheLocked();
+        item.m_zoomFillActive = true;
+        item.m_gpuSourceTextureDisplayLeft = 0;
+        item.m_gpuSourceTextureDisplayRight = 119;
+        item.m_gpuSourceTextureRolling = false;
+        item.m_gpuSourceTextureTrackToken = item.m_precomputedTrackToken;
+        item.m_gpuSourceTextureRingWriteSeq = item.m_ringWriteSeq;
+        item.m_gpuSourceTextureRingOldestSeq = item.m_ringOldestSeq;
+        item.m_gpuSourceTextureMinColumnIndex = 0;
+        item.m_gpuSourceTextureMaxColumnIndex = 119;
+    }
+
+    QByteArray restarted(16 * bins, '\x55');
+    item.feedPrecomputedChunk(
+        restarted, bins, 0, 16,
+        512, 1024, 44100, 1024, false,
+        true, trackToken, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY(!item.m_zoomFillFrozenDisplayImage.isNull());
+        QCOMPARE(item.m_gpuSourceTextureTrackToken, static_cast<quint64>(0));
+        QCOMPARE(item.m_gpuSourceTextureDisplayRight, static_cast<qint64>(-1));
+        QVERIFY(item.m_gpuSourceTextureMaxColumnIndex < item.m_gpuSourceTextureMinColumnIndex);
     }
 }
 
