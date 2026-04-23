@@ -4385,6 +4385,7 @@ void SpectrogramItem::invalidateRenderCachesLocked() {
     m_gpuSourceTextureTrackToken = 0;
     m_gpuSourceTextureRingWriteSeq = -1;
     m_gpuSourceTextureRingOldestSeq = -1;
+    m_gpuSourceTextureMinColumnIndex = 0;
     m_gpuSourceTextureMaxColumnIndex = -1;
     m_gpuSourceTexture.clearPendingSpans();
     m_gpuDbRemapBins = 0;
@@ -4616,15 +4617,21 @@ QVector<SpectrogramSourceUploadSpan> SpectrogramItem::collectRetainedSourceUploa
                 displayRight);
         }
     } else {
-        const bool sameDisplayWindow =
-            displayLeft == m_gpuSourceTextureDisplayLeft
-            && displayRight == m_gpuSourceTextureDisplayRight;
-        if (!sameDisplayWindow) {
+        const bool haveUploadedColumnRange =
+            m_gpuSourceTextureMaxColumnIndex >= m_gpuSourceTextureMinColumnIndex;
+        if (!haveUploadedColumnRange) {
             appendDisplayRange(displayLeft, displayRight);
         } else {
-            appendDisplayRange(
-                std::max(displayLeft, static_cast<qint64>(m_gpuSourceTextureMaxColumnIndex) + 1),
-                std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex)));
+            if (displayLeft < m_gpuSourceTextureMinColumnIndex) {
+                appendDisplayRange(
+                    displayLeft,
+                    std::min(displayRight, m_gpuSourceTextureMinColumnIndex - 1));
+            }
+            if (displayRight > m_gpuSourceTextureMaxColumnIndex) {
+                appendDisplayRange(
+                    std::max(displayLeft, m_gpuSourceTextureMaxColumnIndex + 1),
+                    displayRight);
+            }
         }
     }
 
@@ -4653,6 +4660,32 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
         return;
     }
 
+    const auto noteVisibleColumnsUploaded = [&]() {
+        if (rollingMode) {
+            m_gpuSourceTextureMinColumnIndex = 0;
+            m_gpuSourceTextureMaxColumnIndex = m_precomputedMaxColumnIndex;
+            return;
+        }
+
+        const qint64 decodedVisibleRight =
+            std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+        if (decodedVisibleRight < displayLeft) {
+            return;
+        }
+
+        if (textureStateChanged
+            || m_gpuSourceTextureMaxColumnIndex < m_gpuSourceTextureMinColumnIndex) {
+            m_gpuSourceTextureMinColumnIndex = displayLeft;
+            m_gpuSourceTextureMaxColumnIndex = decodedVisibleRight;
+            return;
+        }
+
+        m_gpuSourceTextureMinColumnIndex =
+            std::min(m_gpuSourceTextureMinColumnIndex, displayLeft);
+        m_gpuSourceTextureMaxColumnIndex =
+            std::max(m_gpuSourceTextureMaxColumnIndex, decodedVisibleRight);
+    };
+
     m_gpuSourceTexture.clearPendingSpans();
     if (textureStateChanged) {
         m_gpuSourceUploadRgba.resize(layout.capacityColumns * layout.binsPerColumn * 4);
@@ -4673,13 +4706,13 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
         rollingMode,
         textureStateChanged);
     if (m_gpuSourceUploadSpans.isEmpty()) {
+        noteVisibleColumnsUploaded();
         m_gpuSourceTextureDisplayLeft = displayLeft;
         m_gpuSourceTextureDisplayRight = displayRight;
         m_gpuSourceTextureRolling = rollingMode;
         m_gpuSourceTextureTrackToken = m_precomputedTrackToken;
         m_gpuSourceTextureRingWriteSeq = m_ringWriteSeq;
         m_gpuSourceTextureRingOldestSeq = m_ringOldestSeq;
-        m_gpuSourceTextureMaxColumnIndex = m_precomputedMaxColumnIndex;
         return;
     }
 
@@ -4718,13 +4751,13 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
         m_gpuSourceTexture.noteUploadedSpan(span);
     }
 
+    noteVisibleColumnsUploaded();
     m_gpuSourceTextureDisplayLeft = displayLeft;
     m_gpuSourceTextureDisplayRight = displayRight;
     m_gpuSourceTextureRolling = rollingMode;
     m_gpuSourceTextureTrackToken = m_precomputedTrackToken;
     m_gpuSourceTextureRingWriteSeq = m_ringWriteSeq;
     m_gpuSourceTextureRingOldestSeq = m_ringOldestSeq;
-    m_gpuSourceTextureMaxColumnIndex = m_precomputedMaxColumnIndex;
 }
 
 void SpectrogramItem::syncPrecomputedGpuLookupImagesLocked() {

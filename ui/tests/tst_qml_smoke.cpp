@@ -1165,6 +1165,7 @@ private slots:
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
     void spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage();
+    void spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZoomFill();
     void spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZoomFill();
@@ -10376,6 +10377,45 @@ void QmlSmokeTest::spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage
         QCOMPARE(item.m_gpuDisplayLastShiftPixels, 4);
         QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 4);
     }
+}
+
+void QmlSmokeTest::spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 8;
+    constexpr int columns = 5000;
+    QByteArray chunk(bins * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 44100, 1024, false,
+        true, 92, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    item.m_gpuSourceTextureMinColumnIndex = 0;
+    item.m_gpuSourceTextureMaxColumnIndex = 3439;
+    item.m_gpuSourceTextureDisplayLeft = 0;
+    item.m_gpuSourceTextureDisplayRight = 3439;
+    item.m_gpuSourceTextureRolling = false;
+    item.m_gpuSourceTextureTrackToken = item.m_precomputedTrackToken;
+
+    const QVector<SpectrogramSourceUploadSpan> forwardScrollSpans =
+        item.collectRetainedSourceUploadSpansLocked(
+            4, 3443, false, false);
+    QCOMPARE(forwardScrollSpans.size(), 1);
+    QCOMPARE(forwardScrollSpans[0].xBegin, 3440);
+    QCOMPARE(forwardScrollSpans[0].xEnd, 3443);
+
+    item.m_gpuSourceTextureMinColumnIndex = 100;
+    item.m_gpuSourceTextureMaxColumnIndex = 200;
+    const QVector<SpectrogramSourceUploadSpan> bidirectionalMissingSpans =
+        item.collectRetainedSourceUploadSpansLocked(
+            96, 204, false, false);
+    QCOMPARE(bidirectionalMissingSpans.size(), 2);
+    QCOMPARE(bidirectionalMissingSpans[0].xBegin, 96);
+    QCOMPARE(bidirectionalMissingSpans[0].xEnd, 99);
+    QCOMPARE(bidirectionalMissingSpans[1].xBegin, 201);
+    QCOMPARE(bidirectionalMissingSpans[1].xEnd, 204);
 }
 
 void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZoomFill() {

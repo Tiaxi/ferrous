@@ -359,7 +359,8 @@ private:
     quint64 m_gpuSourceTextureTrackToken{0};
     qint64 m_gpuSourceTextureRingWriteSeq{-1};
     qint64 m_gpuSourceTextureRingOldestSeq{-1};
-    qint32 m_gpuSourceTextureMaxColumnIndex{-1};
+    qint64 m_gpuSourceTextureMinColumnIndex{0};
+    qint64 m_gpuSourceTextureMaxColumnIndex{-1};
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenDisplayImage;
     QImage m_gpuDbRemapImage;
