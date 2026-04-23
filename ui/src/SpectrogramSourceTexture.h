@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QPointer>
 #include <QQuickWindow>
 #include <QSGTexture>
 #include <QRect>
@@ -64,8 +65,17 @@ inline QVector<SpectrogramSourceUploadSpan> mergeSpectrogramSourceUploadSpans(
     return merged;
 }
 
+class QOpenGLContext;
+class QOpenGLContextGroup;
+class QObject;
+
 class SpectrogramSourceTexture {
 public:
+    SpectrogramSourceTexture() = default;
+    SpectrogramSourceTexture(const SpectrogramSourceTexture &) = delete;
+    SpectrogramSourceTexture &operator=(const SpectrogramSourceTexture &) = delete;
+    SpectrogramSourceTexture(SpectrogramSourceTexture &&) = delete;
+    SpectrogramSourceTexture &operator=(SpectrogramSourceTexture &&) = delete;
     ~SpectrogramSourceTexture();
 
     [[nodiscard]] QSize size() const;
@@ -88,4 +98,8 @@ private:
     QSize m_size;
     QSGTexture *m_texture{nullptr};
     QVector<SpectrogramSourceUploadSpan> m_pendingUploadedSpans;
+    QPointer<QQuickWindow> m_ownerWindow;
+    QPointer<QOpenGLContext> m_ownerContext;
+    QPointer<QOpenGLContextGroup> m_shareGroup;
+    QPointer<QObject> m_pendingCleanupJob;
 };

@@ -7,6 +7,7 @@
 #include <QHoverEvent>
 #include <QImage>
 #include <QMouseEvent>
+#include <QOpenGLContext>
 #include <QPainter>
 #include <QQuickWindow>
 #include <QRegularExpression>
@@ -32,13 +33,16 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <type_traits>
 
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/SpectrogramBodyMaterial.h"
 #include "../src/SpectrogramRenderUtils.h"
 #include "../src/SpectrogramSeekTrace.h"
+#define private public
 #include "../src/SpectrogramSourceTexture.h"
+#undef private
 #define protected public
 #define private public
 #include "../src/SpectrogramItem.h"
@@ -992,8 +996,10 @@ private slots:
     void spectrogramPeakHoldColumnSpanUsesMaxNotNearest();
     void spectrogramRetainedSourceLayoutPreserves64BitColumnRange();
     void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
-    void spectrogramRetainedSourceTextureCreatesWrappedQsgTexture();
-    void spectrogramRetainedSourceTextureTracksUploadSpanWithoutCpuSourceImage();
+    void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
+    void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
+    void spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext();
+    void spectrogramRetainedSourceTextureUploadRejectsInvalidArguments();
     void spectrogramGpuVisibleSourceImageTracksDisplayWindow();
     void spectrogramGpuImagesUseRgbaCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
@@ -1051,16 +1057,78 @@ void QmlSmokeTest::cleanupTestCase() {
     previousMessageHandler() = nullptr;
 }
 
-void QmlSmokeTest::spectrogramRetainedSourceTextureCreatesWrappedQsgTexture() {
+void QmlSmokeTest::spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable() {
     SpectrogramSourceTexture texture;
     QCOMPARE(texture.texture(), nullptr);
     QCOMPARE(texture.size(), QSize());
+    QCOMPARE(texture.pendingUploadSpanCount(), 0);
+    QVERIFY(!std::is_copy_constructible_v<SpectrogramSourceTexture>);
+    QVERIFY(!std::is_copy_assignable_v<SpectrogramSourceTexture>);
+    QVERIFY(!std::is_move_constructible_v<SpectrogramSourceTexture>);
+    QVERIFY(!std::is_move_assignable_v<SpectrogramSourceTexture>);
 }
 
-void QmlSmokeTest::spectrogramRetainedSourceTextureTracksUploadSpanWithoutCpuSourceImage() {
+void QmlSmokeTest::spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup() {
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    QVERIFY(!window.grabWindow().isNull());
+    QVERIFY(window.isSceneGraphInitialized());
+
     SpectrogramSourceTexture texture;
-    QCOMPARE(texture.pendingUploadSpanCount(), 0);
+    texture.m_textureId = 77;
+    texture.m_ownerWindow = &window;
+    texture.m_ownerContext = new QOpenGLContext(this);
+    texture.m_size = QSize(9, 11);
     texture.noteUploadedSpan({4, 7});
+
+    texture.release();
+
+    QCOMPARE(texture.texture(), nullptr);
+    QCOMPARE(texture.size(), QSize());
+    QCOMPARE(texture.pendingUploadSpanCount(), 0);
+    QCOMPARE(texture.m_textureId, 0U);
+    QVERIFY(texture.m_ownerWindow == nullptr);
+    QVERIFY(texture.m_pendingCleanupJob != nullptr);
+
+    window.update();
+    QVERIFY(!window.grabWindow().isNull());
+    QVERIFY(texture.m_pendingCleanupJob != nullptr);
+    delete texture.m_pendingCleanupJob.data();
+    QTRY_VERIFY(texture.m_pendingCleanupJob == nullptr);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext() {
+    QVERIFY(QOpenGLContext::currentContext() == nullptr);
+
+    SpectrogramSourceTexture texture;
+    texture.m_textureId = 33;
+    texture.m_ownerContext = new QOpenGLContext(this);
+    texture.m_size = QSize(5, 7);
+    texture.noteUploadedSpan({1, 2});
+
+    QQuickWindow window;
+    QVERIFY(!texture.ensureCreated(&window, 12, 16));
+    QCOMPARE(texture.m_textureId, 33U);
+    QCOMPARE(texture.size(), QSize(5, 7));
+    QCOMPARE(texture.pendingUploadSpanCount(), 1);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureUploadRejectsInvalidArguments() {
+    SpectrogramSourceTexture texture;
+    texture.m_textureId = 44;
+    texture.m_ownerContext = new QOpenGLContext(this);
+    texture.m_size = QSize(8, 4);
+    texture.noteUploadedSpan({2, 3});
+
+    QQuickWindow window;
+    QVERIFY(!texture.uploadRgbaColumns(&window, -1, 2, 4, QByteArray(2 * 4 * 4, '\0')));
+    QVERIFY(!texture.uploadRgbaColumns(&window, 1, 2, 3, QByteArray(2 * 3 * 4, '\0')));
+    QVERIFY(!texture.uploadRgbaColumns(&window, 7, 2, 4, QByteArray(2 * 4 * 4, '\0')));
+    QVERIFY(!texture.uploadRgbaColumns(&window, 1, 2, 4, QByteArray(3, '\0')));
+    QCOMPARE(texture.m_textureId, 44U);
+    QCOMPARE(texture.size(), QSize(8, 4));
     QCOMPARE(texture.pendingUploadSpanCount(), 1);
 }
 
