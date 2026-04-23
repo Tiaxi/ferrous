@@ -1213,7 +1213,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && hopSize != m_precomputedHopSize
         && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
         && m_displayMode == 1
-        && !m_gpuSourceImage.isNull()) {
+        && !m_gpuDisplayImage.isNull()) {
         captureZoomFillFrozenCacheLocked();
         m_zoomFillActive = true;
     }
@@ -1243,7 +1243,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         // the brief interval; readiness clears once the new session
         // has produced enough columns to cover the new display range.
         const bool preserveCanvasForSeek =
-            !m_gpuSourceImage.isNull()
+            !m_gpuDisplayImage.isNull()
             && m_displayMode == 1
             && m_precomputedCanvasDisplayRight
                 >= m_precomputedCanvasDisplayLeft
@@ -1907,7 +1907,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_timeGridDirty = true;
     // During a zoom fill, preserve the old canvas so updatePaintNode
     // can keep showing it while the ring refills at the new hop.
-    if (m_zoomFillActive && !m_gpuSourceImage.isNull()) {
+    if (m_zoomFillActive && !m_gpuDisplayImage.isNull()) {
         // Keep the last GPU cache alive while the ring refills. The
         // next paint freezes against this cached image until the new
         // session covers the visible display.
@@ -2388,11 +2388,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 w,
                 static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
 
-            const bool freezeUsesSource = true;
-            const bool haveFreezeCache =
-                freezeUsesSource
-                    ? !m_zoomFillFrozenSourceImage.isNull()
-                    : !m_zoomFillFrozenDisplayImage.isNull();
+            const bool freezeUsesSource = false;
+            const bool haveFreezeCache = freezeUsesSource
+                ? false
+                : !m_zoomFillFrozenDisplayImage.isNull();
             const bool rendererFreeze =
                 m_zoomFillActive
                 && haveFreezeCache
@@ -2438,24 +2437,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && currentWindow->rendererInterface() != nullptr
                 && currentWindow->rendererInterface()->graphicsApi()
                     == QSGRendererInterface::OpenGL;
-            const bool needsCenteredFreezeSourceCache =
-                debugModeRequestsRetainedSourceTextureBody
-                && m_displayMode == 1;
-            const bool needsSourceCache =
-                gpuDebugMode == SpectrogramGpu::DebugMode::StockMaterial
-                || needsCenteredFreezeSourceCache
+            const bool maintainCpuDisplayImage =
+                currentWindow == nullptr
+                || m_displayMode == 1
                 || !canUseRetainedSourceTextureBody;
-            const bool maintainCpuDisplayImage = currentWindow == nullptr;
 
             if (visibleCols > 0) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 const auto syncStart = std::chrono::steady_clock::now();
 #endif
-                if (needsSourceCache) {
-                    const int maxTextureColumns = gpuMaxTextureColumns(currentWindow);
-                    syncPrecomputedGpuImagesLocked(
-                        w, h, displayLeft, displayRight, rollingMode, effectiveZoom, maxTextureColumns);
-                }
                 syncPrecomputedDisplayImageLocked(
                     drawPixels,
                     h,
@@ -2483,6 +2473,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             bool haveRetainedTextureSegments = false;
             bool retainedTextureSegmentsOverflowed = false;
+            bool useDisplayImageTextureFallback = rendererFreeze;
             if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
                 && currentWindow != nullptr) {
@@ -2560,17 +2551,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 if (retainedTextureSegmentsOverflowed) {
                     // Sparse centered windows can contain more than two visible
                     // runs when evicted columns leave holes inside the viewport.
-                    // The CPU source-image path preserves the full window, so
-                    // fall back for this frame instead of silently dropping a run.
-                    const int maxTextureColumns = gpuMaxTextureColumns(currentWindow);
-                    syncPrecomputedGpuImagesLocked(
-                        w,
-                        h,
-                        displayLeft,
-                        displayRight,
-                        rollingMode,
-                        effectiveZoom,
-                        maxTextureColumns);
+                    // Fall back to the warmed CPU display image for this frame.
+                    useDisplayImageTextureFallback = true;
                     retainedTextureSegments = {};
                     retainedSourceTexture = nullptr;
                     haveRetainedTextureSegments = false;
@@ -2585,8 +2567,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 useRetainedSourceTextureBodyForFrame
                     ? haveRetainedTextureSegments
                     : (rendererFreeze
-                           ? !m_zoomFillFrozenSourceImage.isNull()
-                           : !m_gpuSourceImage.isNull());
+                           ? !m_zoomFillFrozenDisplayImage.isNull()
+                           : !m_gpuDisplayImage.isNull());
 
             if (haveSelectedSpectrogramContent && drawPixels > 0) {
                 if (maintainCpuDisplayImage && m_gpuDisplayImage.isNull()) {
@@ -2612,13 +2594,16 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 if (useRetainedSourceTextureBodyForFrame) {
                     spectrogramSourceRect = retainedTextureSegments[0].sourceRect;
                 } else if (rendererFreeze) {
-                    spectrogramNodeImage = m_zoomFillFrozenSourceImage;
-                    spectrogramImageGeneration = m_zoomFillFrozenSourceGeneration;
+                    spectrogramNodeImage = m_zoomFillFrozenDisplayImage;
+                    spectrogramImageGeneration = m_zoomFillFrozenDisplayGeneration;
                 } else {
-                    spectrogramNodeImage = m_gpuSourceImage;
-                    spectrogramImageGeneration = m_gpuSourceGeneration;
+                    spectrogramNodeImage = m_gpuDisplayImage;
+                    spectrogramImageGeneration = m_gpuDisplayGeneration;
                 }
-                spectrogramImageDebugMode = gpuDebugMode;
+                spectrogramImageDebugMode =
+                    (!useRetainedSourceTextureBodyForFrame && useDisplayImageTextureFallback)
+                        ? SpectrogramGpu::DebugMode::TextureNode
+                        : gpuDebugMode;
                 if (!useRetainedSourceTextureBodyForFrame) {
                     spectrogramSourceRect = QRect(
                         0,
@@ -2632,18 +2617,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 spectrogramDbRemapGeneration = m_gpuDbRemapGeneration;
                 spectrogramPaletteGeneration = m_gpuPaletteGeneration;
                 spectrogramRowLutGeneration = m_gpuRowLutGeneration;
-                spectrogramRollingIncrementalScroll =
-                    !useRetainedSourceTextureBodyForFrame
-                    && !rendererFreeze
-                    && gpuDebugMode == SpectrogramGpu::DebugMode::Full
-                    && rollingMode
-                    && m_gpuSourceLastUpdateWasIncremental
-                    && m_gpuSourceLastShiftColumns > 0
-                    && m_gpuSourceLastUpdatedColumns == m_gpuSourceLastShiftColumns
-                    && m_gpuSourceImage.width() == spectrogramNodeImage.width();
-                spectrogramRollingShiftPixels = m_gpuSourceLastShiftColumns;
+                spectrogramRollingIncrementalScroll = false;
+                spectrogramRollingShiftPixels = 0;
                 spectrogramSubpixelOffset =
-                    (gpuDebugMode == SpectrogramGpu::DebugMode::Full && rollingMode)
+                    (useRetainedSourceTextureBodyForFrame
+                        && gpuDebugMode == SpectrogramGpu::DebugMode::Full
+                        && rollingMode)
                         ? m_gpuDisplaySubpixelOffset
                         : 0.0;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -2651,7 +2630,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     ? static_cast<double>(drawPixels)
                         / static_cast<double>(std::max<qint64>(1, displayRight - displayLeft + 1))
                     : static_cast<double>(drawPixels)
-                        / static_cast<double>(std::max(1, m_gpuSourceImage.width()));
+                        / static_cast<double>(std::max(1, spectrogramNodeImage.width()));
                 const int remainingLogs = g_gpuDebugStageLogBudget.fetch_sub(1);
                 if (remainingLogs > 0 && gpuDebugMode != SpectrogramGpu::DebugMode::Full) {
                     FERROUS_SPECTROGRAM_TRACE_LOGF(
@@ -2834,13 +2813,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QSGTexture *oldTimeGridOverlayTexture = nullptr;
     QSGTexture *oldCrosshairOverlayTexture = nullptr;
     const bool useTextureNodeBody =
-        gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode;
+        spectrogramImageDebugMode == SpectrogramGpu::DebugMode::TextureNode;
     const bool useSourceOnlySampleBody =
-        gpuDebugMode == SpectrogramGpu::DebugMode::ShaderSourceOnly;
+        spectrogramImageDebugMode == SpectrogramGpu::DebugMode::ShaderSourceOnly;
     const bool useStockMaterialBody =
-        gpuDebugMode == SpectrogramGpu::DebugMode::StockMaterial;
+        spectrogramImageDebugMode == SpectrogramGpu::DebugMode::StockMaterial;
     const bool useBodySampleMaterial =
-        gpuDebugMode == SpectrogramGpu::DebugMode::Full;
+        spectrogramImageDebugMode == SpectrogramGpu::DebugMode::Full;
     const bool useRetainedSourceTextureBody =
         (useTextureNodeBody || useSourceOnlySampleBody || useBodySampleMaterial)
         && useRetainedSourceTextureBodyForFrame;
@@ -4321,23 +4300,18 @@ void SpectrogramItem::invalidateMapping() {
 }
 
 void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
-    m_zoomFillFrozenSourceImage = m_gpuSourceImage;
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
-    m_zoomFillFrozenSourceGeneration = m_gpuSourceGeneration;
     m_zoomFillFrozenDisplayGeneration = m_gpuDisplayGeneration;
 }
 
 void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
-    m_zoomFillFrozenSourceImage = QImage();
     m_zoomFillFrozenDisplayImage = QImage();
-    m_zoomFillFrozenSourceGeneration = 0;
     m_zoomFillFrozenDisplayGeneration = 0;
 }
 
 void SpectrogramItem::invalidateRenderCachesLocked() {
     const bool hadGpuImages =
-        !m_gpuSourceImage.isNull()
-        || !m_gpuDisplayImage.isNull()
+        !m_gpuDisplayImage.isNull()
         || !m_gpuDbRemapImage.isNull()
         || !m_gpuPaletteImage.isNull()
         || !m_gpuRowLutImage.isNull();
@@ -4345,14 +4319,12 @@ void SpectrogramItem::invalidateRenderCachesLocked() {
     m_precomputedCanvasDisplayRight = -1;
     m_precomputedCanvasRolling = false;
     m_precomputedCanvasDirty = true;
-    m_gpuSourceImage = QImage();
     m_gpuDisplayImage = QImage();
     clearZoomFillFrozenCacheLocked();
     m_gpuDbRemapImage = QImage();
     m_gpuPaletteImage = QImage();
     m_gpuRowLutImage = QImage();
     if (hadGpuImages) {
-        bumpImageGeneration(m_gpuSourceGeneration);
         bumpImageGeneration(m_gpuDisplayGeneration);
         bumpImageGeneration(m_gpuDbRemapGeneration);
         bumpImageGeneration(m_gpuPaletteGeneration);
@@ -4379,17 +4351,6 @@ void SpectrogramItem::invalidateRenderCachesLocked() {
     m_gpuDisplayLastShiftPixels = 0;
     m_gpuDisplayLastUpdatedColumns = 0;
     m_gpuDisplaySubpixelOffset = 0.0;
-    m_gpuSourceDisplayLeft = 0;
-    m_gpuSourceDisplayRight = -1;
-    m_gpuSourceRolling = false;
-    m_gpuSourceActualColumns = 0;
-    m_gpuSourceRingWriteSeq = -1;
-    m_gpuSourceRingOldestSeq = -1;
-    m_gpuSourceMaxColumnIndex = -1;
-    m_gpuSourceTrackToken = 0;
-    m_gpuSourceLastUpdateWasIncremental = false;
-    m_gpuSourceLastShiftColumns = 0;
-    m_gpuSourceLastUpdatedColumns = 0;
     m_gpuSourceUploadRgba.clear();
     m_gpuSourceUploadSpans.clear();
     m_gpuSourceTextureDisplayLeft = 0;
@@ -4792,285 +4753,6 @@ int SpectrogramItem::gpuDrawWidthForSourceColumnsLocked(
     return drawPixels;
 }
 
-void SpectrogramItem::paintPrecomputedGpuSourceColumnsLocked(
-    QImage &image,
-    int xBegin,
-    int xEnd,
-    qint64 displayLeft,
-    qint64 displayRight,
-    bool rollingMode) const {
-    if (image.isNull()
-        || xBegin > xEnd
-        || displayRight < displayLeft
-        || m_precomputedBinsPerColumn <= 0) {
-        return;
-    }
-
-    const int textureColumns = image.width();
-    const int bins = image.height();
-    if (textureColumns <= 0 || bins <= 0) {
-        return;
-    }
-
-    const int sourceColumns = static_cast<int>(displayRight - displayLeft + 1);
-    const bool needsCompression = textureColumns < sourceColumns;
-    const auto *ringData = reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
-    const int clampedXBegin = std::clamp(xBegin, 0, textureColumns - 1);
-    const int clampedXEnd = std::clamp(xEnd, clampedXBegin, textureColumns - 1);
-
-    for (int x = clampedXBegin; x <= clampedXEnd; ++x) {
-        qint64 firstDisplayIndex = displayLeft + x;
-        qint64 lastDisplayIndex = firstDisplayIndex;
-        if (needsCompression) {
-            const double rangeStart =
-                static_cast<double>(x) * static_cast<double>(sourceColumns)
-                / static_cast<double>(textureColumns);
-            const double rangeEnd =
-                static_cast<double>(x + 1) * static_cast<double>(sourceColumns)
-                / static_cast<double>(textureColumns);
-            firstDisplayIndex =
-                displayLeft + static_cast<qint64>(std::floor(rangeStart));
-            lastDisplayIndex =
-                displayLeft + static_cast<qint64>(std::ceil(rangeEnd)) - 1;
-            firstDisplayIndex = std::clamp(firstDisplayIndex, displayLeft, displayRight);
-            lastDisplayIndex = std::clamp(lastDisplayIndex, firstDisplayIndex, displayRight);
-        }
-
-        if (ringData == nullptr) {
-            for (int b = 0; b < bins; ++b) {
-                auto *line = image.scanLine(b);
-                writeRgba8888GrayPixel(line, x, 0);
-            }
-            continue;
-        }
-
-        if (!needsCompression) {
-            const int slot = ringSlotForDisplayIndexLocked(firstDisplayIndex, rollingMode);
-            if (slot < 0) {
-                for (int b = 0; b < bins; ++b) {
-                    auto *line = image.scanLine(b);
-                    writeRgba8888GrayPixel(line, x, 0);
-                }
-                continue;
-            }
-            const int baseOff = slot * bins;
-            for (int b = 0; b < bins; ++b) {
-                const quint8 value = ringData[baseOff + b];
-                auto *line = image.scanLine(b);
-                writeRgba8888GrayPixel(line, x, value);
-            }
-            continue;
-        }
-
-        for (int b = 0; b < bins; ++b) {
-            quint8 value = 0;
-            bool found = false;
-            for (qint64 displayIndex = firstDisplayIndex;
-                 displayIndex <= lastDisplayIndex;
-                 ++displayIndex) {
-                const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
-                if (slot < 0) {
-                    continue;
-                }
-                found = true;
-                value = std::max(value, ringData[slot * bins + b]);
-            }
-            auto *line = image.scanLine(b);
-            writeRgba8888GrayPixel(line, x, found ? value : 0);
-        }
-    }
-}
-
-void SpectrogramItem::syncPrecomputedGpuImagesLocked(
-    int width,
-    int height,
-    qint64 displayLeft,
-    qint64 displayRight,
-    bool rollingMode,
-    double effectiveZoom,
-    int maxTextureColumns) {
-    if (width <= 0 || height <= 0 || displayRight < displayLeft || m_precomputedBinsPerColumn <= 0) {
-        const bool hadGpuImages = !m_gpuSourceImage.isNull() || !m_gpuDisplayImage.isNull();
-        m_gpuSourceImage = QImage();
-        m_gpuDisplayImage = QImage();
-        if (hadGpuImages) {
-            bumpImageGeneration(m_gpuSourceGeneration);
-            bumpImageGeneration(m_gpuDisplayGeneration);
-        }
-        m_gpuDisplaySourceGeneration = 0;
-        m_gpuDisplayWidth = 0;
-        m_gpuDisplayFilledWidth = 0;
-        m_gpuDisplayHeight = 0;
-        m_gpuDisplaySampleRateHz = 0;
-        m_gpuDisplayBins = 0;
-        m_gpuDisplayRingWriteSeq = -1;
-        m_gpuDisplayRingOldestSeq = -1;
-        m_gpuDisplayMaxColumnIndex = -1;
-        m_gpuDisplayTrackToken = 0;
-        m_gpuSourceLastUpdateWasIncremental = false;
-        m_gpuSourceLastShiftColumns = 0;
-        m_gpuSourceLastUpdatedColumns = 0;
-        return;
-    }
-
-    const int sourceColumns = static_cast<int>(displayRight - displayLeft + 1);
-    const int safeMaxTextureColumns = std::max(1, maxTextureColumns);
-    const int textureColumns = std::min(sourceColumns, safeMaxTextureColumns);
-    const int bins = m_precomputedBinsPerColumn;
-    const bool needsCompression = textureColumns < sourceColumns;
-    const bool sameCachedView =
-        !m_gpuSourceImage.isNull()
-        && m_gpuSourceImage.width() == textureColumns
-        && m_gpuSourceImage.height() == bins
-        && m_gpuSourceActualColumns == sourceColumns
-        && m_gpuSourceDisplayLeft == displayLeft
-        && m_gpuSourceDisplayRight == displayRight
-        && m_gpuSourceRolling == rollingMode
-        && m_gpuSourceTrackToken == m_precomputedTrackToken;
-    const bool centeredCachedViewComplete =
-        sameCachedView
-        && !rollingMode
-        && m_gpuSourceMaxColumnIndex >= displayRight;
-    const qint64 cachedVisibleValidLeft =
-        std::max(m_gpuSourceDisplayLeft, m_gpuSourceRingOldestSeq);
-    const qint64 cachedVisibleValidRight =
-        std::min(m_gpuSourceDisplayRight, m_gpuSourceRingWriteSeq - 1);
-    const qint64 newVisibleValidLeft =
-        std::max(displayLeft, m_ringOldestSeq);
-    const qint64 newVisibleValidRight =
-        std::min(displayRight, m_ringWriteSeq - 1);
-    const bool sourceDirty =
-        !sameCachedView
-        || (rollingMode
-            && (displayLeft != m_gpuSourceDisplayLeft
-                || displayRight != m_gpuSourceDisplayRight
-                || cachedVisibleValidLeft != newVisibleValidLeft
-                || cachedVisibleValidRight != newVisibleValidRight))
-        || (!rollingMode
-            && !centeredCachedViewComplete
-            && m_gpuSourceMaxColumnIndex != m_precomputedMaxColumnIndex);
-    m_gpuSourceLastUpdateWasIncremental = false;
-    m_gpuSourceLastShiftColumns = 0;
-    m_gpuSourceLastUpdatedColumns = 0;
-    if (sourceDirty) {
-        const qint64 advanceColumns =
-            rollingMode && m_gpuSourceRolling
-                ? (displayLeft - m_gpuSourceDisplayLeft)
-                : 0;
-        const qint64 advanceRight =
-            rollingMode && m_gpuSourceRolling
-                ? (displayRight - m_gpuSourceDisplayRight)
-                : 0;
-        const bool canIncrementallyAdvanceRolling =
-            rollingMode
-            && m_gpuSourceRolling
-            && !m_gpuSourceImage.isNull()
-            && m_gpuSourceImage.width() == textureColumns
-            && m_gpuSourceImage.height() == bins
-            && !needsCompression
-            && m_gpuSourceTrackToken == m_precomputedTrackToken
-            && advanceColumns > 0
-            && advanceColumns == advanceRight
-            && advanceColumns < textureColumns
-            && displayLeft >= m_gpuSourceDisplayLeft
-            && displayRight >= m_gpuSourceDisplayRight;
-
-        if (canIncrementallyAdvanceRolling) {
-            const int shiftColumns = static_cast<int>(advanceColumns);
-            for (int b = 0; b < bins; ++b) {
-                auto *line =
-                    reinterpret_cast<uchar *>(m_gpuSourceImage.scanLine(b));
-                std::memmove(
-                    line,
-                    line + shiftColumns * 4,
-                    static_cast<size_t>(textureColumns - shiftColumns) * 4);
-                std::fill(
-                    line + (textureColumns - shiftColumns) * 4,
-                    line + textureColumns * 4,
-                    static_cast<uchar>(0));
-            }
-
-            const qint64 dirtyStartDisplay =
-                std::max(displayLeft, cachedVisibleValidRight + 1);
-            if (dirtyStartDisplay <= displayRight) {
-                const int dirtyXBegin = static_cast<int>(dirtyStartDisplay - displayLeft);
-                paintPrecomputedGpuSourceColumnsLocked(
-                    m_gpuSourceImage,
-                    dirtyXBegin,
-                    textureColumns - 1,
-                    displayLeft,
-                    displayRight,
-                    rollingMode);
-                m_gpuSourceLastUpdatedColumns = textureColumns - dirtyXBegin;
-            }
-            m_gpuSourceLastUpdateWasIncremental = true;
-            m_gpuSourceLastShiftColumns = shiftColumns;
-            if (m_gpuSourceLastUpdatedColumns == 0) {
-                m_gpuSourceLastUpdatedColumns = shiftColumns;
-            }
-        } else {
-            m_gpuSourceImage = QImage(
-                textureColumns,
-                bins,
-                QImage::Format_RGBA8888);
-            paintPrecomputedGpuSourceColumnsLocked(
-                m_gpuSourceImage,
-                0,
-                textureColumns - 1,
-                displayLeft,
-                displayRight,
-                rollingMode);
-            m_gpuSourceLastUpdatedColumns = textureColumns;
-        }
-        m_gpuSourceActualColumns = sourceColumns;
-        m_gpuSourceDisplayLeft = displayLeft;
-        m_gpuSourceDisplayRight = displayRight;
-        m_gpuSourceRolling = rollingMode;
-        m_gpuSourceRingWriteSeq = m_ringWriteSeq;
-        m_gpuSourceRingOldestSeq = m_ringOldestSeq;
-        m_gpuSourceMaxColumnIndex = m_precomputedMaxColumnIndex;
-        m_gpuSourceTrackToken = m_precomputedTrackToken;
-        m_gpuSourceGeneration += 1;
-
-        const int remainingLogs = g_gpuSpectrogramPaintLogBudget.fetch_sub(1);
-        if (remainingLogs > 0) {
-            const QColor firstPixel = m_gpuSourceImage.pixelColor(0, 0);
-            const QColor lastPixel = m_gpuSourceImage.pixelColor(
-                std::max(0, m_gpuSourceImage.width() - 1),
-                std::max(0, m_gpuSourceImage.height() - 1));
-            std::fprintf(
-                stderr,
-                "[Qt-gpu-source@%p] actualCols=%d texCols=%d bins=%d limit=%d rolling=%d "
-                "left=%lld right=%lld zoom=%.4f compressed=%d first=(%d,%d,%d,%d) "
-                "last=(%d,%d,%d,%d)\n",
-                static_cast<const void *>(this),
-                sourceColumns,
-                textureColumns,
-                bins,
-                safeMaxTextureColumns,
-                rollingMode ? 1 : 0,
-                static_cast<long long>(displayLeft),
-                static_cast<long long>(displayRight),
-                effectiveZoom,
-                needsCompression ? 1 : 0,
-                firstPixel.red(),
-                firstPixel.green(),
-                firstPixel.blue(),
-                firstPixel.alpha(),
-                lastPixel.red(),
-                lastPixel.green(),
-                lastPixel.blue(),
-                lastPixel.alpha());
-        }
-    }
-
-    m_precomputedCanvasDisplayLeft = displayLeft;
-    m_precomputedCanvasDisplayRight = displayRight;
-    m_precomputedCanvasRolling = rollingMode;
-    m_precomputedCanvasZoomLevel = effectiveZoom;
-    m_precomputedCanvasDirty = false;
-}
-
 void SpectrogramItem::paintPrecomputedDisplayColumnsLocked(
     QImage &image,
     int xBegin,
@@ -5445,7 +5127,7 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
             m_gpuDisplaySubpixelOffset = 0.0;
         }
 
-        m_gpuDisplaySourceGeneration = m_gpuSourceGeneration;
+        m_gpuDisplaySourceGeneration = m_gpuDisplayGeneration;
         m_gpuDisplayWidth = drawPixels;
         m_gpuDisplayFilledWidth = filledPixels;
         m_gpuDisplayHeight = height;
@@ -5564,7 +5246,7 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         imagePixelsChanged = true;
     }
 
-    m_gpuDisplaySourceGeneration = m_gpuSourceGeneration;
+    m_gpuDisplaySourceGeneration = m_gpuDisplayGeneration;
     if (imagePixelsChanged) {
         m_gpuDisplayGeneration += 1;
     }

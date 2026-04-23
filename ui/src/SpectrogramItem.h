@@ -182,21 +182,6 @@ private:
         bool rollingMode);
     void syncPrecomputedGpuLookupImagesLocked();
     void syncGpuRowLutImageLocked(int height);
-    void paintPrecomputedGpuSourceColumnsLocked(
-        QImage &image,
-        int xBegin,
-        int xEnd,
-        qint64 displayLeft,
-        qint64 displayRight,
-        bool rollingMode) const;
-    void syncPrecomputedGpuImagesLocked(
-        int width,
-        int height,
-        qint64 displayLeft,
-        qint64 displayRight,
-        bool rollingMode,
-        double effectiveZoom,
-        int maxTextureColumns);
     void syncPrecomputedDisplayImageLocked(
         int drawPixels,
         int height,
@@ -370,16 +355,12 @@ private:
     qint64 m_gpuSourceTextureRingWriteSeq{-1};
     qint64 m_gpuSourceTextureRingOldestSeq{-1};
     qint32 m_gpuSourceTextureMaxColumnIndex{-1};
-    QImage m_gpuSourceImage;
     QImage m_gpuDisplayImage;
-    QImage m_zoomFillFrozenSourceImage;
     QImage m_zoomFillFrozenDisplayImage;
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;
-    quint64 m_gpuSourceGeneration{0};
     quint64 m_gpuDisplayGeneration{0};
-    quint64 m_zoomFillFrozenSourceGeneration{0};
     quint64 m_zoomFillFrozenDisplayGeneration{0};
     quint64 m_gpuDbRemapGeneration{0};
     quint64 m_gpuPaletteGeneration{0};
@@ -405,17 +386,6 @@ private:
     int m_gpuDisplayLastShiftPixels{0};
     int m_gpuDisplayLastUpdatedColumns{0};
     double m_gpuDisplaySubpixelOffset{0.0};
-    qint64 m_gpuSourceDisplayLeft{0};
-    qint64 m_gpuSourceDisplayRight{-1};
-    bool m_gpuSourceRolling{false};
-    int m_gpuSourceActualColumns{0};
-    qint64 m_gpuSourceRingWriteSeq{-1};
-    qint64 m_gpuSourceRingOldestSeq{-1};
-    qint32 m_gpuSourceMaxColumnIndex{-1};
-    quint64 m_gpuSourceTrackToken{0};
-    bool m_gpuSourceLastUpdateWasIncremental{false};
-    int m_gpuSourceLastShiftColumns{0};
-    int m_gpuSourceLastUpdatedColumns{0};
     int m_gpuDbRemapBins{0};
     double m_gpuDbRemapDbRange{132.0};
     bool m_gpuPaletteMuted{false};
