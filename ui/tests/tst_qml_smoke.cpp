@@ -1164,6 +1164,7 @@ private slots:
     void spectrogramGpuWindowCaptureShowsSpectrogramPixelsWithoutOverlays();
     void spectrogramGpuWindowCaptureShowsLargeCenteredTrackPixels();
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
+    void spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZoomFill();
     void spectrogramRetainedSourceOnlyFallsBackToFrozenDisplayDuringZoomFill();
@@ -10321,6 +10322,60 @@ void QmlSmokeTest::spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView() {
     }
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage() {
+    SpectrogramItem item;
+    item.setWidth(3440);
+    item.setHeight(720);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 4096;
+    constexpr double effectiveZoom = 1.0;
+    QByteArray chunk(bins * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, 12000, 44100, 1024, false,
+        true, 91, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = effectiveZoom;
+        item.ensureMapping(720);
+        item.syncPrecomputedDisplayImageLocked(
+            3440, 720, 0, 3439, false, effectiveZoom, false);
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            item.m_gpuDisplayImage.isNull(),
+            "retained-GPU centered playback should not allocate the CPU display image");
+        QCOMPARE(item.m_gpuDisplayDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_gpuDisplayDisplayRight, static_cast<qint64>(3439));
+        QCOMPARE(item.m_gpuDisplayWidth, 3440);
+        QCOMPARE(item.m_gpuDisplayHeight, 720);
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.syncPrecomputedDisplayImageLocked(
+            3440, 720, 4, 3443, false, effectiveZoom, false);
+    }
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            item.m_gpuDisplayImage.isNull(),
+            "metadata-only centered scroll should stay off the CPU paint path");
+        QCOMPARE(item.m_gpuDisplayDisplayLeft, static_cast<qint64>(4));
+        QCOMPARE(item.m_gpuDisplayDisplayRight, static_cast<qint64>(3443));
+        QVERIFY(item.m_gpuDisplayLastUpdateWasIncremental);
+        QCOMPARE(item.m_gpuDisplayLastShiftPixels, 4);
+        QCOMPARE(item.m_gpuDisplayLastUpdatedColumns, 4);
+    }
 }
 
 void QmlSmokeTest::spectrogramRetainedTextureNodeFallsBackToFrozenDisplayDuringZoomFill() {

@@ -2440,8 +2440,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     == QSGRendererInterface::OpenGL;
             const bool maintainCpuDisplayImage =
                 currentWindow == nullptr
-                || m_displayMode == 1
-                || !canUseRetainedSourceTextureBody;
+                || !canUseRetainedSourceTextureBody
+                || (m_displayMode == 1 && (!m_playing || m_zoomFillActive));
 
             if (visibleCols > 0) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -2562,6 +2562,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 canUseRetainedSourceTextureBody
                 && retainedSourceTexture != nullptr
                 && !rendererFreeze;
+            if (!useRetainedSourceTextureBodyForFrame
+                && retainedTextureSegmentsOverflowed
+                && m_gpuDisplayImage.isNull()) {
+                syncPrecomputedDisplayImageLocked(
+                    drawPixels,
+                    h,
+                    displayLeft,
+                    displayRight,
+                    rollingMode,
+                    effectiveZoom,
+                    true);
+            }
             const bool haveSelectedSpectrogramContent =
                 useRetainedSourceTextureBodyForFrame
                     ? haveRetainedTextureSegments
@@ -5031,8 +5043,6 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         return;
     }
 
-    const auto dbRemap = buildPrecomputedDbRemapLocked();
-    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
     m_gpuDisplayLastUpdateWasIncremental = false;
     m_gpuDisplayLastShiftPixels = 0;
     m_gpuDisplayLastUpdatedColumns = filledPixels;
@@ -5165,6 +5175,9 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
         m_gpuDisplayEffectiveZoom = effectiveZoom;
         return;
     }
+
+    const auto dbRemap = buildPrecomputedDbRemapLocked();
+    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
 
     if (canIncrementallyGrowRollingDisplay) {
         const int growthPixels = filledPixels - m_gpuDisplayFilledWidth;
