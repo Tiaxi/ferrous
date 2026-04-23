@@ -4273,6 +4273,19 @@ QImage SpectrogramItem::buildPrecomputedPaletteImageLocked() const {
     return image;
 }
 
+SpectrogramRetainedSourceLayout SpectrogramItem::buildRetainedSourceLayoutLocked(
+    const qint64 displayLeft,
+    const qint64 displayRight,
+    const bool rollingMode) const {
+    return SpectrogramRetainedSourceLayout{
+        .capacityColumns = m_ringCapacity,
+        .binsPerColumn = m_precomputedBinsPerColumn,
+        .displayLeft = displayLeft,
+        .displayRight = displayRight,
+        .rollingMode = rollingMode,
+    };
+}
+
 void SpectrogramItem::syncPrecomputedGpuLookupImagesLocked() {
     const bool dbRemapDirty =
         m_gpuDbRemapImage.isNull()

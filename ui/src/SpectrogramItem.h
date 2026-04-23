@@ -11,6 +11,9 @@
 #include <QQuickItem>
 #include <QString>
 #include <QTimer>
+
+#include "SpectrogramSourceTexture.h"
+
 #include <array>
 #include <chrono>
 #include <limits>
@@ -163,6 +166,14 @@ private:
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
     QImage buildPrecomputedDbRemapImageLocked() const;
     QImage buildPrecomputedPaletteImageLocked() const;
+    QVector<SpectrogramSourceUploadSpan> collectRetainedSourceUploadSpansLocked(
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode) const;
+    SpectrogramRetainedSourceLayout buildRetainedSourceLayoutLocked(
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode) const;
     void syncPrecomputedGpuLookupImagesLocked();
     void paintPrecomputedGpuSourceColumnsLocked(
         QImage &image,

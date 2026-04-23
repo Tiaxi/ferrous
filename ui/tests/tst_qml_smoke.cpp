@@ -38,6 +38,7 @@
 #include "../src/SpectrogramBodyMaterial.h"
 #include "../src/SpectrogramRenderUtils.h"
 #include "../src/SpectrogramSeekTrace.h"
+#include "../src/SpectrogramSourceTexture.h"
 #define protected public
 #define private public
 #include "../src/SpectrogramItem.h"
@@ -989,6 +990,8 @@ private slots:
     void spectrogramCenteredModeUsesWindowedCapacity();
     void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
     void spectrogramPeakHoldColumnSpanUsesMaxNotNearest();
+    void spectrogramRetainedSourceLayoutPreserves64BitColumnRange();
+    void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
     void spectrogramGpuVisibleSourceImageTracksDisplayWindow();
     void spectrogramGpuImagesUseRgbaCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
@@ -5948,6 +5951,40 @@ void QmlSmokeTest::spectrogramPeakHoldColumnSpanUsesMaxNotNearest() {
     QVERIFY(interpolationSpan.interpolate);
     QVERIFY(interpolationSpan.interpolationT > 0.49);
     QVERIFY(interpolationSpan.interpolationT < 0.51);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceLayoutPreserves64BitColumnRange() {
+    SpectrogramRetainedSourceLayout layout{
+        .capacityColumns = 1024,
+        .binsPerColumn = 64,
+        .displayLeft = 3'000'000'000LL,
+        .displayRight = 3'000'000'127LL,
+        .rollingMode = true,
+    };
+
+    const SpectrogramSourceColumnRange visibleColumns = layout.visibleColumnRange();
+    QCOMPARE(visibleColumns.xBegin, 3'000'000'000LL);
+    QCOMPARE(visibleColumns.xEnd, 3'000'000'127LL);
+    QCOMPARE(visibleColumns.width(), 128);
+    QCOMPARE(layout.capacityColumns, 1024);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns() {
+    QVector<SpectrogramSourceUploadSpan> spans = {
+        {10, 10},
+        {11, 11},
+        {14, 14},
+        {15, 17},
+    };
+
+    const QVector<SpectrogramSourceUploadSpan> merged =
+        mergeSpectrogramSourceUploadSpans(spans);
+
+    QCOMPARE(merged.size(), 2);
+    QCOMPARE(merged[0].xBegin, 10);
+    QCOMPARE(merged[0].xEnd, 11);
+    QCOMPARE(merged[1].xBegin, 14);
+    QCOMPARE(merged[1].xEnd, 17);
 }
 
 void QmlSmokeTest::spectrogramGpuVisibleSourceImageTracksDisplayWindow() {
