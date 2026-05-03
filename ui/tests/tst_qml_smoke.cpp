@@ -7667,8 +7667,8 @@ void QmlSmokeTest::spectrogramRetainedPageCoverageSkipsLegacyTextureUpload() {
         !item.shouldSyncLegacyRetainedSourceTextureLocked(&window, layout, true),
         "page-backed retained coverage should skip the old monolithic texture upload even when that texture would fit");
     QVERIFY2(
-        item.shouldSyncLegacyRetainedSourceTextureLocked(&window, layout, false),
-        "legacy texture upload remains a fallback when page coverage is unavailable and the texture fits");
+        !item.shouldSyncLegacyRetainedSourceTextureLocked(&window, layout, false),
+        "sparse page-backed retained coverage should not rebuild the old monolithic texture");
 }
 
 void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource() {

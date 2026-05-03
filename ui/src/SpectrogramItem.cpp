@@ -5711,11 +5711,10 @@ bool SpectrogramItem::shouldSyncLegacyRetainedSourceTextureLocked(
     QQuickWindow *window,
     const SpectrogramRetainedSourceLayout &layout,
     const bool retainedPagesCoverVisibleRange) const {
-    return !retainedPagesCoverVisibleRange
-        && retainedSourceTextureFitsGpuLimit(
-            window,
-            layout.capacityColumns,
-            layout.binsPerColumn);
+    Q_UNUSED(window);
+    Q_UNUSED(layout);
+    Q_UNUSED(retainedPagesCoverVisibleRange);
+    return false;
 }
 
 QVector<SpectrogramSourceUploadSpan> SpectrogramItem::collectRetainedSourceUploadSpansLocked(
