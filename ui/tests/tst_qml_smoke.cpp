@@ -1024,6 +1024,7 @@ private slots:
     void spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode();
     void spectrogramGpuFullModeUsesSampleBodyMaterialNode();
     void spectrogramGpuSampleMaterialsBindSourceTextureAtZero();
+    void spectrogramGpuSampleMaterialCompareIncludesSamplingState();
     void spectrogramGpuSampledTexturesCommitPendingUploads();
     void spectrogramGpuSampleMaterialNodesFlipVerticalTextureCoords();
     void spectrogramGpuSamplerLoggingIgnoresPlaceholderTextureSize();
@@ -10396,6 +10397,62 @@ void QmlSmokeTest::spectrogramGpuSampleMaterialsBindSourceTextureAtZero() {
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 2), bodyState.paletteTexture);
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 3), bodyState.rowLutTexture);
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 4), nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuSampleMaterialCompareIncludesSamplingState() {
+    class StubTexture final : public QSGTexture {
+    public:
+        explicit StubTexture(qint64 key) : m_key(key) {}
+        qint64 comparisonKey() const override { return m_key; }
+        QSize textureSize() const override { return QSize(64, 32); }
+        bool hasAlphaChannel() const override { return true; }
+        bool hasMipmaps() const override { return false; }
+
+    private:
+        qint64 m_key;
+    };
+
+    StubTexture source(1);
+    StubTexture remap(2);
+    StubTexture palette(3);
+    StubTexture rowLut(4);
+
+    SpectrogramBodySampleMaterial first;
+    first.state.sourceTexture = &source;
+    first.state.dbRemapTexture = &remap;
+    first.state.paletteTexture = &palette;
+    first.state.rowLutTexture = &rowLut;
+    first.state.sourceRect = QRectF(0.0, 0.0, 32.0, 16.0);
+    first.state.sourceTextureSize = source.textureSize();
+    first.state.effectiveZoom = 0.5F;
+    first.state.sourceColumnOffset = 0.0F;
+
+    SpectrogramBodySampleMaterial shifted;
+    shifted.state = first.state;
+    shifted.state.sourceRect = QRectF(8.0, 0.0, 32.0, 16.0);
+    shifted.state.sourceColumnOffset = 8.0F;
+
+    SpectrogramBodySampleMaterial zoomed;
+    zoomed.state = first.state;
+    zoomed.state.effectiveZoom = 2.0F;
+
+    QVERIFY2(
+        first.compare(&shifted) != 0,
+        "full-mode material comparison must include source column offset");
+    QVERIFY2(
+        first.compare(&zoomed) != 0,
+        "full-mode material comparison must include effective zoom");
+
+    SpectrogramSourceSampleMaterial sourceOnlyFirst;
+    sourceOnlyFirst.state.sourceTexture = &source;
+    sourceOnlyFirst.state.sourceRect = QRectF(0.0, 0.0, 32.0, 16.0);
+
+    SpectrogramSourceSampleMaterial sourceOnlyShifted;
+    sourceOnlyShifted.state = sourceOnlyFirst.state;
+    sourceOnlyShifted.state.sourceRect = QRectF(8.0, 0.0, 32.0, 16.0);
+    QVERIFY2(
+        sourceOnlyFirst.compare(&sourceOnlyShifted) != 0,
+        "source-only material comparison must include source rect");
 }
 
 void QmlSmokeTest::spectrogramGpuSampledTexturesCommitPendingUploads() {

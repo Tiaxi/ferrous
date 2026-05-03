@@ -295,6 +295,51 @@ QSGGeometry *createBodyGeometry() {
     return geometry;
 }
 
+qint64 textureComparisonKey(QSGTexture *texture) {
+    return texture != nullptr ? texture->comparisonKey() : 0;
+}
+
+int compareFloat(float lhs, float rhs) {
+    if (lhs < rhs) {
+        return -1;
+    }
+    if (lhs > rhs) {
+        return 1;
+    }
+    return 0;
+}
+
+int compareRect(const QRectF &lhs, const QRectF &rhs) {
+    const std::array<float, 4> lhsValues{
+        static_cast<float>(lhs.x()),
+        static_cast<float>(lhs.y()),
+        static_cast<float>(lhs.width()),
+        static_cast<float>(lhs.height()),
+    };
+    const std::array<float, 4> rhsValues{
+        static_cast<float>(rhs.x()),
+        static_cast<float>(rhs.y()),
+        static_cast<float>(rhs.width()),
+        static_cast<float>(rhs.height()),
+    };
+    for (size_t i = 0; i < lhsValues.size(); ++i) {
+        if (const int cmp = compareFloat(lhsValues[i], rhsValues[i]); cmp != 0) {
+            return cmp;
+        }
+    }
+    return 0;
+}
+
+int compareSize(const QSize &lhs, const QSize &rhs) {
+    if (lhs.width() != rhs.width()) {
+        return lhs.width() < rhs.width() ? -1 : 1;
+    }
+    if (lhs.height() != rhs.height()) {
+        return lhs.height() < rhs.height() ? -1 : 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 SpectrogramBodySampleMaterial::SpectrogramBodySampleMaterial() {
@@ -344,47 +389,65 @@ QSGMaterialShader *SpectrogramSourceSampleMaterial::createShader(QSGRendererInte
 }
 
 int SpectrogramBodySampleMaterial::compare(const QSGMaterial *other) const {
-    const auto textureKey = [](QSGTexture *texture) -> qint64 {
-        return texture != nullptr ? texture->comparisonKey() : 0;
-    };
-
     if (other == nullptr || other->type() != type()) {
         return 1;
     }
     const auto *otherMaterial = static_cast<const SpectrogramBodySampleMaterial *>(other);
     const std::array<qint64, 4> keys{
-        textureKey(state.sourceTexture),
-        textureKey(state.dbRemapTexture),
-        textureKey(state.paletteTexture),
-        textureKey(state.rowLutTexture),
+        textureComparisonKey(state.sourceTexture),
+        textureComparisonKey(state.dbRemapTexture),
+        textureComparisonKey(state.paletteTexture),
+        textureComparisonKey(state.rowLutTexture),
     };
     const std::array<qint64, 4> otherKeys{
-        textureKey(otherMaterial->state.sourceTexture),
-        textureKey(otherMaterial->state.dbRemapTexture),
-        textureKey(otherMaterial->state.paletteTexture),
-        textureKey(otherMaterial->state.rowLutTexture),
+        textureComparisonKey(otherMaterial->state.sourceTexture),
+        textureComparisonKey(otherMaterial->state.dbRemapTexture),
+        textureComparisonKey(otherMaterial->state.paletteTexture),
+        textureComparisonKey(otherMaterial->state.rowLutTexture),
     };
     for (size_t i = 0; i < keys.size(); ++i) {
         if (keys[i] != otherKeys[i]) {
             return keys[i] < otherKeys[i] ? -1 : 1;
         }
     }
+    if (const int cmp = compareRect(state.sourceRect, otherMaterial->state.sourceRect);
+        cmp != 0) {
+        return cmp;
+    }
+    if (const int cmp = compareSize(
+            state.sourceTextureSize,
+            otherMaterial->state.sourceTextureSize);
+        cmp != 0) {
+        return cmp;
+    }
+    if (const int cmp = compareFloat(
+            state.effectiveZoom,
+            otherMaterial->state.effectiveZoom);
+        cmp != 0) {
+        return cmp;
+    }
+    if (const int cmp = compareFloat(
+            state.sourceColumnOffset,
+            otherMaterial->state.sourceColumnOffset);
+        cmp != 0) {
+        return cmp;
+    }
     return 0;
 }
 
 int SpectrogramSourceSampleMaterial::compare(const QSGMaterial *other) const {
-    const auto textureKey = [](QSGTexture *texture) -> qint64 {
-        return texture != nullptr ? texture->comparisonKey() : 0;
-    };
-
     if (other == nullptr || other->type() != type()) {
         return 1;
     }
     const auto *otherMaterial = static_cast<const SpectrogramSourceSampleMaterial *>(other);
-    const qint64 key = textureKey(state.sourceTexture);
-    const qint64 otherKey = textureKey(otherMaterial->state.sourceTexture);
+    const qint64 key = textureComparisonKey(state.sourceTexture);
+    const qint64 otherKey = textureComparisonKey(otherMaterial->state.sourceTexture);
     if (key != otherKey) {
         return key < otherKey ? -1 : 1;
+    }
+    if (const int cmp = compareRect(state.sourceRect, otherMaterial->state.sourceRect);
+        cmp != 0) {
+        return cmp;
     }
     return 0;
 }
