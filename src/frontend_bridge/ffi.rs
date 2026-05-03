@@ -115,13 +115,19 @@ struct SearchResultsFrame {
     bytes: Vec<u8>,
 }
 
+struct PendingPrecomputedSpectrogramFrame {
+    generation: u64,
+    bytes: Vec<u8>,
+}
+
 struct FfiRuntime {
     command_tx: crossbeam_channel::Sender<BridgeCommand>,
     analysis_state: AnalysisEmitState,
     queue_section_cache: QueueSectionCache,
     pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
-    pending_precomputed_spectrogram: VecDeque<Vec<u8>>,
+    pending_precomputed_spectrogram: VecDeque<PendingPrecomputedSpectrogramFrame>,
+    latest_precomputed_generation: u64,
     pending_library_trees: VecDeque<LibraryTreeFrame>,
     pending_search_results: VecDeque<SearchResultsFrame>,
     next_tree_version: u32,
@@ -146,6 +152,7 @@ impl FfiRuntime {
             pending_precomputed_spectrogram: VecDeque::with_capacity(
                 MAX_PENDING_PRECOMPUTED_SPECTROGRAM,
             ),
+            latest_precomputed_generation: 0,
             pending_library_trees: VecDeque::with_capacity(MAX_PENDING_LIBRARY_TREES),
             pending_search_results: VecDeque::with_capacity(MAX_PENDING_SEARCH_RESULTS),
             next_tree_version: 1,
@@ -275,22 +282,54 @@ impl FfiRuntime {
         }
     }
 
-    fn push_precomputed_spectrogram(&mut self, frame: Vec<u8>) {
+    fn push_precomputed_spectrogram(&mut self, chunk: &PrecomputedSpectrogramChunk) {
+        if chunk.generation != 0 {
+            if chunk.generation < self.latest_precomputed_generation {
+                return;
+            }
+            if chunk.generation > self.latest_precomputed_generation {
+                self.latest_precomputed_generation = chunk.generation;
+                self.pending_precomputed_spectrogram.retain(|pending| {
+                    pending.generation == 0 || pending.generation >= chunk.generation
+                });
+            }
+        }
+
+        let frame = encode_precomputed_spectrogram_chunk(chunk);
         if frame.is_empty() {
             return;
         }
         let was_empty = !self.has_pending_queues();
+        // Precomputed spectrogram chunks form a lossless column stream.
+        // Under rapid zoom restarts, purge stale generations but never drop
+        // the prefix of the active generation; missing early columns render
+        // as sparse/blocky max-zoom views.
         while self.pending_precomputed_spectrogram.len() >= MAX_PENDING_PRECOMPUTED_SPECTROGRAM {
+            let Some(front) = self.pending_precomputed_spectrogram.front() else {
+                break;
+            };
+            if chunk.generation != 0
+                && front.generation != 0
+                && front.generation >= chunk.generation
+            {
+                break;
+            }
             self.pending_precomputed_spectrogram.pop_front();
         }
-        self.pending_precomputed_spectrogram.push_back(frame);
+        self.pending_precomputed_spectrogram
+            .push_back(PendingPrecomputedSpectrogramFrame {
+                generation: chunk.generation,
+                bytes: frame,
+            });
         if was_empty {
             self.signal_wakeup_if_needed();
         }
     }
 
     fn pop_precomputed_spectrogram(&mut self) -> Option<Vec<u8>> {
-        self.pending_precomputed_spectrogram.pop_front()
+        self.pending_precomputed_spectrogram
+            .pop_front()
+            .map(|frame| frame.bytes)
     }
 
     fn push_library_tree_frame(&mut self, bytes: Vec<u8>) {
@@ -360,7 +399,7 @@ impl FfiRuntime {
                     latest_snapshot = Some(*snapshot);
                 }
                 BridgeEvent::PrecomputedSpectrogramChunk(chunk) => {
-                    self.push_precomputed_spectrogram(encode_precomputed_spectrogram_chunk(&chunk));
+                    self.push_precomputed_spectrogram(&chunk);
                 }
                 BridgeEvent::Error(message) => {
                     self.push_binary_event(encode_error_event(&message));
@@ -2770,6 +2809,41 @@ mod tests {
         assert_ne!(mask & SECTION_METADATA, 0);
     }
 
+    fn test_precomputed_chunk(
+        generation: u64,
+        start_column_index: u32,
+    ) -> PrecomputedSpectrogramChunk {
+        PrecomputedSpectrogramChunk {
+            track_token: 7,
+            generation,
+            columns_u8: vec![u8::try_from(start_column_index % 251).expect("sample byte")],
+            bins_per_column: 1,
+            column_count: 1,
+            channel_count: 1,
+            start_column_index,
+            total_columns_estimate: 512,
+            sample_rate_hz: 48_000,
+            hop_size: 1_024,
+            coverage_seconds: f32::from(u16::try_from(start_column_index).unwrap_or(u16::MAX)),
+            complete: false,
+            buffer_reset: start_column_index == 0,
+            clear_history: start_column_index == 0,
+        }
+    }
+
+    fn decode_precomputed_generation_and_start(frame: &[u8]) -> (u64, u32) {
+        let mut offset = 4usize;
+        assert_eq!(frame[offset], PRECOMPUTED_SPECTROGRAM_MAGIC);
+        offset += 1;
+        let _track_token = read_u64(frame, &mut offset);
+        let generation = read_u64(frame, &mut offset);
+        let _bins_per_column = read_u16(frame, &mut offset);
+        let _column_count = read_u16(frame, &mut offset);
+        offset += 1; // channel_count
+        let start_column_index = read_u32(frame, &mut offset);
+        (generation, start_column_index)
+    }
+
     #[test]
     fn precomputed_spectrogram_frame_includes_generation() {
         let chunk = PrecomputedSpectrogramChunk {
@@ -2812,6 +2886,46 @@ mod tests {
         assert_eq!(frame[offset + 2], 1);
         offset += 3;
         assert_eq!(&frame[offset..], chunk.columns_u8.as_slice());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn precomputed_queue_preserves_active_generation_prefix_when_full() {
+        let mut runtime = test_runtime_with_wake_pipe();
+        let stale_frames = MAX_PENDING_PRECOMPUTED_SPECTROGRAM;
+        for start in 0..stale_frames {
+            runtime.process_bridge_events(vec![BridgeEvent::PrecomputedSpectrogramChunk(
+                test_precomputed_chunk(1, u32::try_from(start).expect("stale start")),
+            )]);
+        }
+
+        const ACTIVE_EXTRA_FRAMES: usize = 6;
+        let active_frames = MAX_PENDING_PRECOMPUTED_SPECTROGRAM + ACTIVE_EXTRA_FRAMES;
+        for start in 0..active_frames {
+            runtime.process_bridge_events(vec![BridgeEvent::PrecomputedSpectrogramChunk(
+                test_precomputed_chunk(2, u32::try_from(start).expect("active start")),
+            )]);
+        }
+
+        let mut active_starts = Vec::new();
+        while let Some(frame) = runtime.pop_precomputed_spectrogram() {
+            let (generation, start) = decode_precomputed_generation_and_start(&frame);
+            if generation == 2 {
+                active_starts.push(start);
+            }
+        }
+
+        assert_eq!(
+            active_starts.len(),
+            active_frames,
+            "the active spectrogram generation must be lossless"
+        );
+        assert_eq!(active_starts.first().copied(), Some(0));
+        for (expected, actual) in active_starts.iter().copied().enumerate() {
+            assert_eq!(actual, u32::try_from(expected).expect("expected start"));
+        }
+
+        runtime.close_wakeup_pipe();
     }
 
     #[test]
