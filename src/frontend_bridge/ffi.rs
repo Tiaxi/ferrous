@@ -2026,21 +2026,22 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// ```text
 /// [0]      u8   magic = 0xA2
 /// [1..9]   u64  track_token
-/// [9..11]  u16  bins_per_column
-/// [11..13] u16  column_count
-/// [13]     u8   channel_count
-/// [14..18] u32  start_column_index
-/// [18..22] u32  total_columns_estimate
-/// [22..26] u32  sample_rate_hz
-/// [26..28] u16  hop_size
-/// [28..32] f32  coverage_seconds
-/// [32]     u8   complete (0 or 1)
-/// [33]     u8   buffer_reset (0 or 1)
-/// [34]     u8   clear_history (0 or 1)
-/// [35..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [9..17]  u64  generation
+/// [17..19] u16  bins_per_column
+/// [19..21] u16  column_count
+/// [21]     u8   channel_count
+/// [22..26] u32  start_column_index
+/// [26..30] u32  total_columns_estimate
+/// [30..34] u32  sample_rate_hz
+/// [34..36] u16  hop_size
+/// [36..40] f32  coverage_seconds
+/// [40]     u8   complete (0 or 1)
+/// [41]     u8   buffer_reset (0 or 1)
+/// [42]     u8   clear_history (0 or 1)
+/// [43..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 35;
+    let header_len = 43;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -2049,6 +2050,7 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.extend_from_slice(&clamp_u32(total_len).to_le_bytes());
     out.push(PRECOMPUTED_SPECTROGRAM_MAGIC);
     out.extend_from_slice(&chunk.track_token.to_le_bytes());
+    out.extend_from_slice(&chunk.generation.to_le_bytes());
     out.extend_from_slice(&chunk.bins_per_column.to_le_bytes());
     out.extend_from_slice(&chunk.column_count.to_le_bytes());
     out.push(chunk.channel_count);
@@ -2219,6 +2221,13 @@ mod tests {
         let end = start + 4;
         *offset = end;
         u32::from_le_bytes(bytes[start..end].try_into().expect("u32 bytes"))
+    }
+
+    fn read_u64(bytes: &[u8], offset: &mut usize) -> u64 {
+        let start = *offset;
+        let end = start + 8;
+        *offset = end;
+        u64::from_le_bytes(bytes[start..end].try_into().expect("u64 bytes"))
     }
 
     fn read_i32(bytes: &[u8], offset: &mut usize) -> i32 {
@@ -2759,6 +2768,50 @@ mod tests {
         assert_ne!(mask & SECTION_PLAYBACK, 0);
         assert_eq!(mask & SECTION_QUEUE, 0);
         assert_ne!(mask & SECTION_METADATA, 0);
+    }
+
+    #[test]
+    fn precomputed_spectrogram_frame_includes_generation() {
+        let chunk = PrecomputedSpectrogramChunk {
+            track_token: 7,
+            generation: 42,
+            columns_u8: vec![1, 2, 3, 4],
+            bins_per_column: 2,
+            column_count: 2,
+            channel_count: 1,
+            start_column_index: 9,
+            total_columns_estimate: 12,
+            sample_rate_hz: 48_000,
+            hop_size: 5_120,
+            coverage_seconds: 0.25,
+            complete: false,
+            buffer_reset: true,
+            clear_history: true,
+        };
+
+        let frame = encode_precomputed_spectrogram_chunk(&chunk);
+        let payload_len = u32::from_le_bytes(frame[0..4].try_into().expect("length prefix"));
+        assert_eq!(payload_len, 43 + 4);
+
+        let mut offset = 4usize;
+        assert_eq!(frame[offset], PRECOMPUTED_SPECTROGRAM_MAGIC);
+        offset += 1;
+        assert_eq!(read_u64(&frame, &mut offset), 7);
+        assert_eq!(read_u64(&frame, &mut offset), 42);
+        assert_eq!(read_u16(&frame, &mut offset), 2);
+        assert_eq!(read_u16(&frame, &mut offset), 2);
+        assert_eq!(frame[offset], 1);
+        offset += 1;
+        assert_eq!(read_u32(&frame, &mut offset), 9);
+        assert_eq!(read_u32(&frame, &mut offset), 12);
+        assert_eq!(read_u32(&frame, &mut offset), 48_000);
+        assert_eq!(read_u16(&frame, &mut offset), 5_120);
+        assert!((read_f32(&frame, &mut offset) - 0.25).abs() < f32::EPSILON);
+        assert_eq!(frame[offset], 0);
+        assert_eq!(frame[offset + 1], 1);
+        assert_eq!(frame[offset + 2], 1);
+        offset += 3;
+        assert_eq!(&frame[offset..], chunk.columns_u8.as_slice());
     }
 
     #[test]

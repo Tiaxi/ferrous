@@ -165,6 +165,7 @@ pub struct AnalysisSnapshot {
 #[derive(Debug, Clone)]
 pub struct PrecomputedSpectrogramChunk {
     pub track_token: u64,
+    pub generation: u64,
     /// Packed column data: `column_count` × `channel_count` × `bins_per_column` bytes.
     /// Within each column, all channels are contiguous.
     pub columns_u8: Vec<u8>,
@@ -763,6 +764,7 @@ impl AnalysisRuntimeState {
             .send(AnalysisEvent::PrecomputedSpectrogramChunk(
                 PrecomputedSpectrogramChunk {
                     track_token: outgoing_track_token,
+                    generation: 0,
                     columns_u8: Vec::new(),
                     bins_per_column,
                     column_count: 0,
@@ -1279,6 +1281,7 @@ impl AnalysisRuntimeState {
                     .send(AnalysisEvent::PrecomputedSpectrogramChunk(
                         PrecomputedSpectrogramChunk {
                             track_token: self.active_track_token,
+                            generation: 0,
                             columns_u8: Vec::new(),
                             bins_per_column: 0,
                             column_count: 0,
@@ -3050,6 +3053,7 @@ mod tests {
                 for i in 0..5u32 {
                     let _ = tx.send(PrecomputedSpectrogramChunk {
                         track_token: 0,
+                        generation: 0,
                         columns_u8: vec![0u8; 4],
                         bins_per_column: 4,
                         column_count: 1,
@@ -3071,6 +3075,7 @@ mod tests {
                 }
                 let _ = tx.send(PrecomputedSpectrogramChunk {
                     track_token: 0,
+                    generation: 0,
                     columns_u8: vec![0u8; 4],
                     bins_per_column: 4,
                     column_count: 1,
@@ -3106,6 +3111,7 @@ mod tests {
         for i in 0..3u32 {
             let _ = tx.send(PrecomputedSpectrogramChunk {
                 track_token: 0,
+                generation: 0,
                 columns_u8: vec![0u8; 12],
                 bins_per_column: 4,
                 column_count: 3,

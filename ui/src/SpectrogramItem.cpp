@@ -1128,18 +1128,32 @@ void SpectrogramItem::feedPrecomputedChunk(
     const QByteArray &data, int bins, int channelIndex,
     int columns, int startIndex, int totalEstimate,
     int sampleRate, int hopSize, bool complete,
-    bool bufferReset, quint64 trackToken, bool clearHistoryOnReset) {
+    bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
+    quint64 generation) {
     using Clock = std::chrono::steady_clock;
     QMutexLocker lock(&m_stateMutex);
 
     FERROUS_SPECTROGRAM_TRACE_LOGF(stderr,
-        "[Qt-feed@%p] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu ready=%d reset=%d clear=%d await=%d complete=%d\n",
+        "[Qt-feed@%p] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu gen=%llu ready=%d reset=%d clear=%d await=%d complete=%d\n",
         static_cast<const void *>(this),
         channelIndex, columns, startIndex, totalEstimate, bins,
         sampleRate, hopSize, static_cast<unsigned long long>(trackToken),
+        static_cast<unsigned long long>(generation),
         m_precomputedReady ? 1 : 0, bufferReset ? 1 : 0,
         clearHistoryOnReset ? 1 : 0, m_awaitingWorkerReset ? 1 : 0,
         complete ? 1 : 0);
+
+    const bool hasGeneration = generation != 0;
+    if (hasGeneration
+        && m_precomputedCommittedGeneration != 0
+        && generation < m_precomputedCommittedGeneration) {
+        return;
+    }
+    if (hasGeneration
+        && m_precomputedSessionGeneration != 0
+        && generation < m_precomputedSessionGeneration) {
+        return;
+    }
 
     // Finalize chunk: carries the true decoded-column count for the
     // matching track so the centered-mode EOF clamp fires at the real
@@ -1153,6 +1167,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         if (totalEstimate > 0
             && (m_precomputedCommittedToken == 0
                 || trackToken == m_precomputedCommittedToken)
+            && (!hasGeneration
+                || m_precomputedSessionGeneration == 0
+                || generation == m_precomputedSessionGeneration)
             && m_precomputedTotalColumnsEstimate > 0
             && static_cast<int>(totalEstimate) < m_precomputedTotalColumnsEstimate) {
             m_precomputedTotalColumnsEstimate = totalEstimate;
@@ -1173,6 +1190,9 @@ void SpectrogramItem::feedPrecomputedChunk(
     // chunks from a superseded session that arrive out of order.
     if (bufferReset && trackToken != 0) {
         m_precomputedCommittedToken = trackToken;
+    }
+    if (bufferReset && hasGeneration) {
+        m_precomputedCommittedGeneration = generation;
     }
     // Drop chunks from superseded sessions: tokens older than the most
     // recent reset are stale (from a rapid double track change).  Tokens
@@ -1268,7 +1288,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     // Apply an implicit reset so the widget can accept the arriving data.
     bool appliedImplicitReset = false;
     if (!bufferReset && columns > 0 && m_ringCapacity == 0 && !m_precomputedResetPending) {
-        applyPrecomputedResetLocked(startIndex, bins, trackToken, true);
+        applyPrecomputedResetLocked(startIndex, bins, trackToken, generation, true);
         appliedImplicitReset = true;
     }
 
@@ -1342,14 +1362,16 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetStartIndex = startIndex;
         m_precomputedPendingResetBins = bins;
         m_precomputedPendingResetTrackToken = trackToken;
+        m_precomputedPendingResetGeneration = generation;
         m_precomputedPendingResetClearHistory = clearHistoryOnReset;
     } else if (bufferReset) {
         applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, clearHistoryOnReset);
+            startIndex, bins, trackToken, generation, clearHistoryOnReset);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
         m_precomputedPendingResetTrackToken = 0;
+        m_precomputedPendingResetGeneration = 0;
         m_precomputedPendingResetClearHistory = false;
         appliedReset = true;
     } else if (m_precomputedResetPending
@@ -1357,7 +1379,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         && bins == m_precomputedPendingResetBins
         && (m_precomputedPendingResetTrackToken == 0
             || trackToken == 0
-            || trackToken == m_precomputedPendingResetTrackToken)) {
+            || trackToken == m_precomputedPendingResetTrackToken)
+        && (m_precomputedPendingResetGeneration == 0
+            || generation == 0
+            || generation == m_precomputedPendingResetGeneration)) {
         FERROUS_SPECTROGRAM_TRACE_LOGF(stderr,
             "[Qt-deferred-reset] pendingTok=%llu dataTok=%llu clear=%d writeSeqBefore=%lld\n",
             static_cast<unsigned long long>(m_precomputedPendingResetTrackToken),
@@ -1370,11 +1395,15 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedPendingResetTrackToken != 0
                 ? m_precomputedPendingResetTrackToken
                 : trackToken,
+            m_precomputedPendingResetGeneration != 0
+                ? m_precomputedPendingResetGeneration
+                : generation,
             m_precomputedPendingResetClearHistory);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
         m_precomputedPendingResetTrackToken = 0;
+        m_precomputedPendingResetGeneration = 0;
         m_precomputedPendingResetClearHistory = false;
         appliedReset = true;
     }
@@ -1899,6 +1928,8 @@ void SpectrogramItem::clearPrecomputed() {
     m_rollingEpoch = 0;
     m_precomputedMaxColumnIndex = -1;
     m_precomputedCommittedToken = 0;
+    m_precomputedSessionGeneration = 0;
+    m_precomputedCommittedGeneration = 0;
     m_precomputedBinsPerColumn = 0;
     // Don't zero m_precomputedTotalColumnsEstimate here — it represents
     // the track length and should persist across resets. Zeroing it
@@ -1908,6 +1939,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedPendingResetStartIndex = 0;
     m_precomputedPendingResetBins = 0;
     m_precomputedPendingResetTrackToken = 0;
+    m_precomputedPendingResetGeneration = 0;
     m_precomputedPendingResetClearHistory = false;
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
@@ -1935,8 +1967,12 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     int startIndex,
     int bins,
     quint64 trackToken,
+    quint64 generation,
     bool clearHistoryOnReset) {
     Q_UNUSED(trackToken);
+    if (generation != 0) {
+        m_precomputedSessionGeneration = generation;
+    }
     // A reset (seek or manual track change) breaks the continuous
     // gapless coordinate space — clear the accumulated offset,
     // per-track column tracking, and canvas display range so the

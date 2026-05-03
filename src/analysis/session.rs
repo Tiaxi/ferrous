@@ -262,6 +262,7 @@ impl StagingChunkState {
             seconds_from_frames(self.total_covered_samples, u64::from(self.effective_rate));
         Some(PrecomputedSpectrogramChunk {
             track_token: 0,
+            generation: 0,
             columns_u8: std::mem::take(&mut self.chunk_buf),
             bins_per_column: clamp_to_u16(self.bins_per_column),
             column_count: self.chunk_columns,
@@ -341,6 +342,7 @@ fn staging_drain_stft_rows(
                 seconds_from_frames(state.total_covered_samples, u64::from(state.effective_rate));
             let chunk = PrecomputedSpectrogramChunk {
                 track_token: 0,
+                generation: 0,
                 columns_u8: std::mem::take(&mut state.chunk_buf),
                 bins_per_column: clamp_to_u16(state.bins_per_column),
                 column_count: state.chunk_columns,
@@ -930,6 +932,7 @@ fn run_spectrogram_session(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token,
+            generation: gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(bins_per_column),
             column_count: 0,
@@ -1536,6 +1539,7 @@ fn handle_session_seek(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: session.track_token,
+            generation: session.gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(session.bins_per_column),
             column_count: 0,
@@ -1704,6 +1708,7 @@ fn session_drain_stft_rows(
             let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
                 PrecomputedSpectrogramChunk {
                     track_token: session.track_token,
+                    generation: session.gen,
                     columns_u8: std::mem::take(&mut session.chunk_buf),
                     bins_per_column: clamp_to_u16(session.bins_per_column),
                     column_count: session.chunk_columns,
@@ -1859,6 +1864,7 @@ fn session_flush_chunk(
         let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
             PrecomputedSpectrogramChunk {
                 track_token: session.track_token,
+                generation: session.gen,
                 columns_u8: std::mem::take(&mut session.chunk_buf),
                 bins_per_column: clamp_to_u16(session.bins_per_column),
                 column_count: session.chunk_columns,
@@ -1897,6 +1903,7 @@ fn session_flush_token(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: session.track_token,
+            generation: session.gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(session.bins_per_column),
             column_count: 0,
@@ -1937,6 +1944,7 @@ fn session_emit_finalize_chunk(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: session.track_token,
+            generation: session.gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(session.bins_per_column),
             column_count: 0,
@@ -2168,6 +2176,7 @@ mod tests {
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
                 assert_eq!(chunk.start_column_index, 256);
                 assert_eq!(chunk.column_count, 1);
+                assert_eq!(chunk.generation, 1);
             }
             other => panic!("expected precomputed chunk, got {other:?}"),
         }
@@ -2231,7 +2240,7 @@ mod tests {
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
         let mut session = SpectrogramSessionState {
             track_token: 7,
-            gen: 1,
+            gen: 13,
             fft_size: 2_048,
             hop_size: 256,
             effective_hop: 1_024,
@@ -2278,6 +2287,7 @@ mod tests {
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
                 assert_eq!(chunk.start_column_index, 256);
                 assert_eq!(chunk.column_count, 1);
+                assert_eq!(chunk.generation, 13);
             }
             other => panic!("expected precomputed chunk, got {other:?}"),
         }
@@ -2665,6 +2675,7 @@ mod tests {
         // only for a session that actually consumed the source.
         let mut session = make_test_session();
         session.track_token = 42;
+        session.gen = 17;
         session.columns_produced = 7_777;
         session.bins_per_column = 1_025;
         session.channel_count = 2;
@@ -2681,6 +2692,7 @@ mod tests {
         assert!(chunk.complete);
         assert_eq!(chunk.column_count, 0);
         assert_eq!(chunk.track_token, 42);
+        assert_eq!(chunk.generation, 17);
         assert_eq!(chunk.total_columns_estimate, 7_777);
         assert_eq!(chunk.start_column_index, 7_777);
         assert!(!chunk.buffer_reset);
@@ -2877,6 +2889,7 @@ mod tests {
             if chunk_columns >= target_chunk_columns {
                 chunks.push(PrecomputedSpectrogramChunk {
                     track_token: 0,
+                    generation: 0,
                     columns_u8: vec![0u8; usize::from(chunk_columns) * bins_per_column],
                     bins_per_column: clamp_to_u16(bins_per_column),
                     column_count: chunk_columns,

@@ -346,7 +346,7 @@ signals:
         const QByteArray &data, int bins, int channelCount, int columns,
         int startIndex, int totalEstimate, int sampleRate, int hopSize,
         float coverage, bool complete, bool bufferReset, bool clearHistory,
-        quint64 trackToken);
+        quint64 trackToken, quint64 generation);
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();

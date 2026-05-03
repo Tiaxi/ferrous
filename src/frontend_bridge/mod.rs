@@ -1760,6 +1760,7 @@ mod tests {
 
         let first = crate::analysis::PrecomputedSpectrogramChunk {
             track_token: 7,
+            generation: 11,
             columns_u8: vec![1, 2],
             bins_per_column: 1,
             column_count: 2,
@@ -1775,6 +1776,7 @@ mod tests {
         };
         let second = crate::analysis::PrecomputedSpectrogramChunk {
             track_token: 7,
+            generation: 11,
             columns_u8: vec![3, 4],
             bins_per_column: 1,
             column_count: 2,
@@ -1802,6 +1804,7 @@ mod tests {
             Ok(BridgeEvent::PrecomputedSpectrogramChunk(chunk)) => {
                 assert_eq!(chunk.start_column_index, first.start_column_index);
                 assert_eq!(chunk.column_count, first.column_count);
+                assert_eq!(chunk.generation, first.generation);
                 assert_eq!(chunk.columns_u8, first.columns_u8);
             }
             other => panic!("expected first precomputed chunk, got {other:?}"),
@@ -1811,6 +1814,7 @@ mod tests {
             Ok(BridgeEvent::PrecomputedSpectrogramChunk(chunk)) => {
                 assert_eq!(chunk.start_column_index, second.start_column_index);
                 assert_eq!(chunk.column_count, second.column_count);
+                assert_eq!(chunk.generation, second.generation);
                 assert_eq!(chunk.columns_u8, second.columns_u8);
             }
             other => panic!("expected drained precomputed chunk, got {other:?}"),
