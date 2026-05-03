@@ -6509,17 +6509,18 @@ void QmlSmokeTest::spectrogramRapidZoomOutIgnoresIntermediateReset() {
     QVERIFY(std::abs(item.m_renderZoomLevel - 4.0) < 0.001);
 
     item.m_zoomDebounceTimer->stop();
-    constexpr int finalColumns = 400;
+    constexpr int finalColumns = 800;
     QByteArray finalChunk(binsPerColumn * finalColumns, '\x70');
     item.feedPrecomputedChunk(
         finalChunk, binsPerColumn, 0, finalColumns,
-        0, finalColumns, 48000, 10240, false,
+        0, finalColumns, 48000, 5120, false,
         true, 1, false);
 
     updatedNode = item.updatePaintNode(updatedNode, nullptr);
     QVERIFY(updatedNode == node);
     QCOMPARE(item.m_awaitingZoomData, false);
     QVERIFY(std::abs(item.m_renderZoomLevel - 0.1) < 0.001);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 0.5) < 0.01);
     QVERIFY2(!item.m_zoomFillActive,
              "matching final zoom reset should be allowed to reveal");
 
@@ -6555,17 +6556,17 @@ void QmlSmokeTest::spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaiting
     }
     QVERIFY(std::abs(item.zoomLevel() - 0.1) < 0.001);
 
-    constexpr int coarseColumns = 400;
+    constexpr int coarseColumns = 800;
     QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
     item.feedPrecomputedChunk(
         coarseChunk, binsPerColumn, 0, coarseColumns,
-        0, coarseColumns, 48000, 10240, false,
+        0, coarseColumns, 48000, 5120, false,
         true, 1, false);
 
     QCOMPARE(item.m_awaitingZoomData, false);
     QVERIFY(std::abs(item.m_renderZoomLevel - 0.1) < 0.001);
     QVERIFY(std::abs(item.zoomLevel() - 0.1) < 0.001);
-    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 0.5) < 0.01);
 }
 
 void QmlSmokeTest::spectrogramMaxZoomOutRoundedHopSnapsRenderZoomWithoutAwaitingFlag() {
@@ -6593,25 +6594,25 @@ void QmlSmokeTest::spectrogramMaxZoomOutRoundedHopSnapsRenderZoomWithoutAwaiting
         item.m_awaitingZoomData = false;
     }
 
-    constexpr int coarseColumns = 1176;
+    constexpr int coarseColumns = 2352;
     QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
     item.feedPrecomputedChunk(
         coarseChunk, binsPerColumn, 0, coarseColumns,
-        0, coarseColumns, 48000, 10240, false,
+        0, coarseColumns, 48000, 5120, false,
         true, 1, false);
 
     QVERIFY2(
         std::abs(item.m_renderZoomLevel - 0.1) < 0.001,
         "backend's rounded max-zoom-out hop should be authoritative after rapid zoom-out");
-    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 0.5) < 0.01);
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(coarseColumns - 1));
     QVERIFY2(
-        item.m_gpuDisplayWidth >= coarseColumns - 8,
-        "rounded max-zoom-out data should render at near one pixel per backend column");
+        item.m_gpuDisplayWidth >= static_cast<int>(item.width()) - 8,
+        "rounded max-zoom-out data should render at near full widget width from oversampled columns");
     delete node;
 }
 
@@ -6645,11 +6646,11 @@ void QmlSmokeTest::spectrogramCenteredZoomOutDoesNotPreserveReferenceHopRange() 
         item.m_awaitingZoomData = false;
     }
 
-    constexpr int coarseColumns = 400;
+    constexpr int coarseColumns = 800;
     QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
     item.feedPrecomputedChunk(
         coarseChunk, binsPerColumn, 0, coarseColumns,
-        0, coarseColumns, 48000, 10240, false,
+        0, coarseColumns, 48000, 5120, false,
         true, 1, false);
 
     node = item.updatePaintNode(node, nullptr);
@@ -6657,8 +6658,8 @@ void QmlSmokeTest::spectrogramCenteredZoomOutDoesNotPreserveReferenceHopRange() 
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(coarseColumns - 1));
     QVERIFY2(
-        item.m_gpuDisplayWidth >= coarseColumns,
-        "zoom-out should rebuild against the decimated full-track range, not the old reference-hop range");
+        std::abs(item.m_gpuDisplayWidth - static_cast<int>(coarseColumns * item.effectiveZoomLocked())) <= 2,
+        "zoom-out should rebuild against the oversampled full-track range, not the old reference-hop range");
     delete node;
 }
 
@@ -6688,16 +6689,16 @@ void QmlSmokeTest::spectrogramCenteredZoomOutDropsStaleSameTrackZoomChunks() {
         item.m_awaitingZoomData = false;
     }
 
-    constexpr int coarseColumns = 400;
+    constexpr int coarseColumns = 800;
     QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
     item.feedPrecomputedChunk(
         coarseChunk, binsPerColumn, 0, coarseColumns,
-        0, coarseColumns, 48000, 10240, false,
+        0, coarseColumns, 48000, 5120, false,
         true, 1, false);
 
     node = item.updatePaintNode(node, nullptr);
     QVERIFY(node != nullptr);
-    QCOMPARE(item.m_precomputedHopSize, 10240);
+    QCOMPARE(item.m_precomputedHopSize, 5120);
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
     QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
@@ -6710,7 +6711,7 @@ void QmlSmokeTest::spectrogramCenteredZoomOutDropsStaleSameTrackZoomChunks() {
         0, staleColumns, 48000, 2048, false,
         true, 1, false);
 
-    QCOMPARE(item.m_precomputedHopSize, 10240);
+    QCOMPARE(item.m_precomputedHopSize, 5120);
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
     QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
 
@@ -6722,7 +6723,7 @@ void QmlSmokeTest::spectrogramCenteredZoomOutDropsStaleSameTrackZoomChunks() {
 
     node = item.updatePaintNode(node, nullptr);
     QVERIFY(node != nullptr);
-    QCOMPARE(item.m_precomputedHopSize, 10240);
+    QCOMPARE(item.m_precomputedHopSize, 5120);
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
     QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
@@ -6755,12 +6756,12 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     item.m_zoomDebounceTimer->stop();
     QVERIFY(item.m_awaitingZoomData);
 
-    constexpr int zoomedOutTotalColumns = 200;
-    constexpr int zoomedOutDecodedColumns = 32;
+    constexpr int zoomedOutTotalColumns = 400;
+    constexpr int zoomedOutDecodedColumns = 64;
     QByteArray zoomedOutChunk(binsPerColumn * zoomedOutDecodedColumns, '\x60');
     item.feedPrecomputedChunk(
         zoomedOutChunk, binsPerColumn, 0, zoomedOutDecodedColumns,
-        0, zoomedOutTotalColumns, 48000, 10240, false,
+        0, zoomedOutTotalColumns, 48000, 5120, false,
         true, 1, false);
 
     QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
@@ -6776,13 +6777,13 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     QCOMPARE(item.m_gpuDisplayDisplayLeft, static_cast<qint64>(0));
     QCOMPARE(item.m_gpuDisplayDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
     QVERIFY(!item.m_gpuDisplayImage.isNull());
-    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 0.5) < 0.001);
 
-    constexpr int zoomedOutReadyColumns = 200;
+    constexpr int zoomedOutReadyColumns = 400;
     QByteArray readyChunk(binsPerColumn * zoomedOutReadyColumns, '\x60');
     item.feedPrecomputedChunk(
         readyChunk, binsPerColumn, 0, zoomedOutReadyColumns,
-        0, zoomedOutTotalColumns, 48000, 10240, false,
+        0, zoomedOutTotalColumns, 48000, 5120, false,
         true, 1, false);
 
     updatedNode = item.updatePaintNode(updatedNode, nullptr);
@@ -6863,23 +6864,23 @@ void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
     const int hop1 = item.m_precomputedHopSize;
 
     // Simulate zoom to 0.8: backend restarts with a DIFFERENT hop.
-    // With fractional resampling: effective_hop = round(1024 * 1.25) = 1280.
+    // With zoom-out oversampling: effective_hop = round(1024 / (0.8 * 2)) = 640.
     // This is distinct from 1024.
     // With the OLD integer decimation: factor=1, effective_hop=1024 (same!).
     item.setZoomLevel(0.8);
     QByteArray chunk2(bins * cols, '\x40');
     item.feedPrecomputedChunk(
         chunk2, bins, 0, cols,
-        0, cols, 48000, 1280, true,
+        0, cols, 48000, 640, true,
         true, 1, false);
     const int hop2 = item.m_precomputedHopSize;
 
     // The hops MUST differ — this is the dead zone fix.
     QVERIFY(hop1 != hop2);
-    // Verify effectiveZoom is close to 1.0.
+    // Verify effectiveZoom keeps 2x source oversampling for GPU peak-hold.
     const double ez = item.m_renderZoomLevel
         * static_cast<double>(hop2) / 1024.0;
-    QVERIFY(std::abs(ez - 1.0) < 0.01);
+    QVERIFY(std::abs(ez - 0.5) < 0.01);
 }
 
 void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {

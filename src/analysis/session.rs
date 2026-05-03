@@ -78,10 +78,11 @@ fn output_interval_for_hop(hop: usize, zoom_level: f32) -> f64 {
     // zoom level produces a distinct output rate.  At zoom=0.8 with
     // hop=1024, this gives 1.25 (not 1).
     let zoom = f64::from(zoom_level.clamp(0.001, 1.0));
+    let zoom_out_oversample = if zoom < 0.999 { 2.0 } else { 1.0 };
     // REFERENCE_HOP and hop are small compile-time/session constants;
     // precision loss from usize→f64 is negligible.
     #[allow(clippy::cast_precision_loss)]
-    let target_effective_hop = REFERENCE_HOP as f64 / zoom;
+    let target_effective_hop = REFERENCE_HOP as f64 / (zoom * zoom_out_oversample);
     #[allow(clippy::cast_precision_loss)]
     let interval = target_effective_hop / hop as f64;
     interval.max(1.0)
@@ -3044,17 +3045,17 @@ mod tests {
         let i1 = output_interval_for_hop(1024, 1.0);
         assert!((i1 - 1.0).abs() < 0.001);
 
-        let i2 = output_interval_for_hop(1024, 0.8);
-        assert!((i2 - 1.25).abs() < 0.001);
+        let i2 = output_interval_for_hop(256, 0.8);
+        assert!((i2 - 2.5).abs() < 0.001);
         assert!(
-            i2 > i1,
-            "zoom=0.8 must produce a different interval than zoom=1.0"
+            i2 < output_interval_for_hop(256, 1.0),
+            "zoom-out should keep oversampled source columns for GPU peak-hold"
         );
 
-        let i3 = output_interval_for_hop(1024, 0.5);
-        assert!((i3 - 2.0).abs() < 0.001);
+        let i3 = output_interval_for_hop(256, 0.5);
+        assert!((i3 - 4.0).abs() < 0.001);
 
         let i4 = output_interval_for_hop(128, 0.7);
-        assert!((i4 - 11.43).abs() < 0.1);
+        assert!((i4 - 5.71).abs() < 0.1);
     }
 }

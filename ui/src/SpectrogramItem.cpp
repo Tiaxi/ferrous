@@ -125,18 +125,12 @@ bool effectiveHopMatchesZoom(int hopSize, double zoomLevel) {
         return false;
     }
     const double clampedZoom = std::clamp(zoomLevel, 0.05, 16.0);
+    const double zoomOutOversample = clampedZoom < 0.999 ? 2.0 : 1.0;
     const int expectedHop = static_cast<int>(
-        std::llround(kReferenceHopSamples / clampedZoom));
+        std::llround(kReferenceHopSamples / (clampedZoom * zoomOutOversample)));
     const int tolerance = std::max(2, static_cast<int>(std::ceil(
         static_cast<double>(expectedHop) * 0.01)));
     return std::abs(hopSize - expectedHop) <= tolerance;
-}
-
-double zoomLevelForEffectiveHop(int hopSize) {
-    if (hopSize <= 0) {
-        return 1.0;
-    }
-    return kReferenceHopSamples / static_cast<double>(hopSize);
 }
 
 double linearInterpolate(double y1, double y2, double mu) {
@@ -1529,18 +1523,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             if (!m_zoomDebounceTimer->isActive()) {
                 m_awaitingZoomData = false;
             }
-            // Snap renderZoomLevel so effectiveZoom = renderZoom × hop / ref
-            // equals exactly 1.0.  Without this snap, hop rounding at
-            // non-power-of-2 zoom levels (e.g. zoom=3.815 → hop=268 →
-            // effectiveZoom=0.998) causes the advance path to fail,
-            // forcing 42ms full rebuilds every frame.
-            if (m_precomputedHopSize > 0
-                && m_precomputedHopSize
-                    != static_cast<int>(kReferenceHopSamples)) {
-                m_renderZoomLevel = zoomLevelForEffectiveHop(m_precomputedHopSize);
-            } else {
-                m_renderZoomLevel = m_zoomLevel;
-            }
+            m_renderZoomLevel = m_zoomLevel;
             m_crosshairDirty = true;
         } else if ((appliedReset || appliedImplicitReset)
             && !isTrackChange
@@ -1553,10 +1536,8 @@ void SpectrogramItem::feedPrecomputedChunk(
             // intermediate reset has cleared m_awaitingZoomData; rendering
             // that coarse data with the stale 1.0 render zoom makes the view
             // look stuck at default zoom.
-            const double backendZoom = zoomLevelForEffectiveHop(m_precomputedHopSize);
-            if (std::abs(m_renderZoomLevel - backendZoom) > 0.001) {
-                m_renderZoomLevel = backendZoom;
-                m_zoomLevel = backendZoom;
+            if (std::abs(m_renderZoomLevel - m_zoomLevel) > 0.001) {
+                m_renderZoomLevel = m_zoomLevel;
                 m_precomputedCanvasDirty = true;
                 m_crosshairDirty = true;
             }
