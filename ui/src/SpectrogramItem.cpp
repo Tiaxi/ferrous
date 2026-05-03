@@ -5088,6 +5088,10 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
 void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
     m_gpuSourceUploadRgba.clear();
     m_gpuSourceUploadSpans.clear();
+    m_gpuSourcePages.clear();
+    m_gpuSourcePageUploadSpanCount = 0;
+    m_gpuSourcePageUploadColumns = 0;
+    m_gpuSourcePageTextureReset = false;
     m_gpuSourceTextureDisplayLeft = 0;
     m_gpuSourceTextureDisplayRight = -1;
     m_gpuSourceTextureRolling = false;

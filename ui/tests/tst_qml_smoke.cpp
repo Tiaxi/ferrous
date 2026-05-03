@@ -1133,6 +1133,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans();
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
+    void spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
     void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
@@ -7359,6 +7360,31 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth(
     QCOMPARE(
         item.retainedSourcePageWidthForGpuLimit(&window),
         SpectrogramItem::kRetainedSourcePageWidth);
+}
+
+void QmlSmokeTest::spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset() {
+    SpectrogramItem item;
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        auto page = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+        page->key = SpectrogramItem::RetainedSourcePageKey{
+            .trackToken = 5,
+            .rollingMode = false,
+            .pageIndex = 0,
+        };
+        page->width = SpectrogramItem::kRetainedSourcePageWidth;
+        page->binsPerColumn = 4;
+        page->uploadedDisplayLeft = 0;
+        page->uploadedDisplayRight = 128;
+        item.m_gpuSourcePages.push_back(std::move(page));
+
+        item.invalidateRetainedSourceTextureStateLocked();
+
+        QVERIFY2(
+            item.m_gpuSourcePages.empty(),
+            "retained source pages must be dropped with legacy retained texture state so same-token zoom/seek resets cannot reuse stale page uploads");
+    }
 }
 
 void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource() {
