@@ -1135,6 +1135,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
     void spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset();
     void spectrogramRetainedLegacyTextureInvalidationKeepsPages();
+    void spectrogramRetainedPageCoverageSkipsLegacyTextureUpload();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
     void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
@@ -7411,6 +7412,9 @@ void QmlSmokeTest::spectrogramRetainedLegacyTextureInvalidationKeepsPages() {
         item.m_gpuSourceTextureDisplayRight = 2304;
         item.m_gpuSourceTextureMinColumnIndex = 2048;
         item.m_gpuSourceTextureMaxColumnIndex = 2304;
+        item.m_gpuSourcePageUploadSpanCount = 2;
+        item.m_gpuSourcePageUploadColumns = 384;
+        item.m_gpuSourcePageTextureReset = true;
 
         item.invalidateLegacyRetainedSourceTextureStateLocked();
 
@@ -7418,7 +7422,37 @@ void QmlSmokeTest::spectrogramRetainedLegacyTextureInvalidationKeepsPages() {
         QCOMPARE(item.m_gpuSourcePages[0]->key.pageIndex, 1);
         QCOMPARE(item.m_gpuSourceTextureTrackToken, 0ULL);
         QCOMPARE(item.m_gpuSourceTextureMaxColumnIndex, -1LL);
+        QCOMPARE(item.m_gpuSourcePageUploadSpanCount, 2);
+        QCOMPARE(item.m_gpuSourcePageUploadColumns, 384);
+        QVERIFY(item.m_gpuSourcePageTextureReset);
     }
+}
+
+void QmlSmokeTest::spectrogramRetainedPageCoverageSkipsLegacyTextureUpload() {
+    SpectrogramItem item;
+    QQuickWindow window;
+
+    item.setDisplayMode(1); // Centered
+    item.m_gpuMaxTextureColumns = 32768;
+
+    constexpr int bins = 4;
+    constexpr int columns = 4096;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 61, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramRetainedSourceLayout layout =
+        item.buildRetainedSourceLayoutLocked(0, columns - 1, false);
+
+    QVERIFY2(
+        !item.shouldSyncLegacyRetainedSourceTextureLocked(&window, layout, true),
+        "page-backed retained coverage should skip the old monolithic texture upload even when that texture would fit");
+    QVERIFY2(
+        item.shouldSyncLegacyRetainedSourceTextureLocked(&window, layout, false),
+        "legacy texture upload remains a fallback when page coverage is unavailable and the texture fits");
 }
 
 void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource() {

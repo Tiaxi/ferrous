@@ -227,6 +227,17 @@ private:
         QQuickWindow *window,
         const QSize &retainedTextureSize,
         bool rollingMode) const;
+    bool retainedSourcePagesCoverDisplayRangeLocked(
+        qint64 displayLeft,
+        qint64 displayRight,
+        qint64 renderableRight,
+        bool rollingMode,
+        int pageWidth,
+        bool requireTextures) const;
+    bool shouldSyncLegacyRetainedSourceTextureLocked(
+        QQuickWindow *window,
+        const SpectrogramRetainedSourceLayout &layout,
+        bool retainedPagesCoverVisibleRange) const;
     QVector<SpectrogramSourceUploadSpan> collectRetainedSourceUploadSpansLocked(
         qint64 displayLeft,
         qint64 displayRight,

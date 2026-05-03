@@ -5087,9 +5087,6 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
 void SpectrogramItem::invalidateLegacyRetainedSourceTextureStateLocked() {
     m_gpuSourceUploadRgba.clear();
     m_gpuSourceUploadSpans.clear();
-    m_gpuSourcePageUploadSpanCount = 0;
-    m_gpuSourcePageUploadColumns = 0;
-    m_gpuSourcePageTextureReset = false;
     m_gpuSourceTextureDisplayLeft = 0;
     m_gpuSourceTextureDisplayRight = -1;
     m_gpuSourceTextureRolling = false;
@@ -5104,6 +5101,9 @@ void SpectrogramItem::invalidateLegacyRetainedSourceTextureStateLocked() {
 void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
     invalidateLegacyRetainedSourceTextureStateLocked();
     m_gpuSourcePages.clear();
+    m_gpuSourcePageUploadSpanCount = 0;
+    m_gpuSourcePageUploadColumns = 0;
+    m_gpuSourcePageTextureReset = false;
 }
 
 void SpectrogramItem::invalidateRenderCachesLocked() {
@@ -5536,6 +5536,54 @@ bool SpectrogramItem::retainedSourceTextureStateChangedLocked(
         || m_gpuSourceTextureRolling != rollingMode;
 }
 
+bool SpectrogramItem::retainedSourcePagesCoverDisplayRangeLocked(
+    const qint64 displayLeft,
+    const qint64 displayRight,
+    const qint64 renderableRight,
+    const bool rollingMode,
+    const int pageWidth,
+    const bool requireTextures) const {
+    const QVector<RetainedPageSpan> pageSpans =
+        buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
+    if (pageSpans.isEmpty()) {
+        return displayRight < displayLeft || renderableRight < displayLeft;
+    }
+
+    qint64 expectedDisplayLeft = displayLeft;
+    for (const RetainedPageSpan &span : pageSpans) {
+        if (span.displayLeft > expectedDisplayLeft) {
+            return false;
+        }
+        const RetainedSourcePageState *page = findRetainedSourcePageLocked(
+            m_precomputedTrackToken,
+            rollingMode,
+            span.pageIndex);
+        if (page == nullptr
+            || page->width != pageWidth
+            || page->binsPerColumn != m_precomputedBinsPerColumn
+            || page->uploadedDisplayLeft > span.displayLeft
+            || page->uploadedDisplayRight < span.displayRight
+            || (requireTextures && page->texture.texture() == nullptr)) {
+            return false;
+        }
+        expectedDisplayLeft = span.displayRight + 1;
+    }
+
+    const qint64 scanRight = std::min(displayRight, renderableRight);
+    return expectedDisplayLeft > scanRight;
+}
+
+bool SpectrogramItem::shouldSyncLegacyRetainedSourceTextureLocked(
+    QQuickWindow *window,
+    const SpectrogramRetainedSourceLayout &layout,
+    const bool retainedPagesCoverVisibleRange) const {
+    return !retainedPagesCoverVisibleRange
+        && retainedSourceTextureFitsGpuLimit(
+            window,
+            layout.capacityColumns,
+            layout.binsPerColumn);
+}
+
 QVector<SpectrogramSourceUploadSpan> SpectrogramItem::collectRetainedSourceUploadSpansLocked(
     const qint64 displayLeft,
     const qint64 displayRight,
@@ -5777,10 +5825,18 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
         displayRight,
         pageRenderableRight,
         rollingMode);
-    if (!retainedSourceTextureFitsGpuLimit(
+    const bool retainedPagesCoverVisibleRange =
+        retainedSourcePagesCoverDisplayRangeLocked(
+            displayLeft,
+            displayRight,
+            pageRenderableRight,
+            rollingMode,
+            retainedSourcePageWidthForGpuLimit(window),
+            true);
+    if (!shouldSyncLegacyRetainedSourceTextureLocked(
             window,
-            layout.capacityColumns,
-            layout.binsPerColumn)) {
+            layout,
+            retainedPagesCoverVisibleRange)) {
         invalidateLegacyRetainedSourceTextureStateLocked();
         return;
     }
