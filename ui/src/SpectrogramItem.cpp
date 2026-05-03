@@ -2831,6 +2831,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && (canUseRetainedSourceTextureBody
                     ? retainedTextureCoversVisibleRange
                     : !m_gpuDisplayImage.isNull());
+            // Reveal the first completed zoom-fill frame through the warmed
+            // display image; retained full-mode sampling resumes on the next
+            // frame after the blank-prone transition has passed.
+            const bool revealViaWarmedDisplayImage =
+                freezeCanRevealFinalFrame
+                && gpuDebugMode == SpectrogramGpu::DebugMode::Full
+                && !m_gpuDisplayImage.isNull();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             if (rendererFreeze && m_zoomFillDataReady && !m_awaitingZoomData) {
                 const int remainingLogs = g_zoomFillRenderLogBudget.fetch_sub(1);
@@ -2953,6 +2960,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             useRetainedSourceTextureBodyForFrame =
                 canUseRetainedSourceTextureBody
+                && !revealViaWarmedDisplayImage
                 && retainedSourceTexture != nullptr
                 && haveRetainedTextureSegments
                 && (!rendererFreeze || useFrozenRetainedSourceForFrame);

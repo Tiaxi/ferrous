@@ -1183,6 +1183,7 @@ private slots:
     void spectrogramFullModeFreezesRetainedBodyDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
+    void spectrogramFullscreenMaxZoomRevealUsesWarmedDisplayImageFirst();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
@@ -11440,6 +11441,83 @@ void QmlSmokeTest::spectrogramZoomFillRevealsOnlyFromRenderableFrame() {
         QVERIFY(!item.m_zoomFillDataReady);
         QVERIFY(item.m_zoomFillFrozenDisplayImage.isNull());
     }
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramFullscreenMaxZoomRevealUsesWarmedDisplayImageFirst() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(3440, 720);
+
+    SpectrogramItem *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(window.width());
+    item->setHeight(window.height());
+    item->setDisplayMode(1); // Centered
+    item->setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int baselineColumns = 5000;
+    constexpr int maxZoomColumns = 4200;
+    constexpr int totalColumns = 230864;
+    constexpr quint64 trackToken = 107;
+
+    QByteArray baseline(baselineColumns * bins, '\x40');
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item->feedPrecomputedChunk(
+        baseline, bins, 0, baselineColumns,
+        0, baselineColumns, 48000, 1024, false,
+        true, trackToken, false, 1);
+    item->setPositionSeconds(2.5);
+
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        item->m_zoomLevel = 16.0;
+        item->m_renderZoomLevel = 16.0;
+        item->m_awaitingZoomData = false;
+        item->m_gpuDisplayImage = QImage();
+    }
+
+    QByteArray maxZoomChunk(maxZoomColumns * bins, '\x70');
+    item->feedPrecomputedChunk(
+        maxZoomChunk, bins, 0, maxZoomColumns,
+        0, totalColumns, 48000, 64, false,
+        true, trackToken, false, 2);
+    item->setPositionSeconds(2.8);
+
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        QVERIFY(item->m_zoomFillActive);
+        QVERIFY(item->m_zoomFillDataReady);
+        QVERIFY2(
+            !item->m_gpuDisplayImage.isNull(),
+            "max-zoom fill should warm a CPU display image before reveal");
+    }
+
+    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    auto *textureNode = spectrogramBodyTextureNode(node);
+    QVERIFY(textureNode != nullptr);
+    QVERIFY2(
+        textureNode->texture() != nullptr && !textureNode->rect().isEmpty(),
+        "fullscreen max-zoom reveal should use the warmed display image for the first visible frame");
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node);
+    QVERIFY(sampleNode != nullptr);
+    QVERIFY2(
+        !geometryHasVisibleArea(sampleNode),
+        "fullscreen max-zoom reveal should not immediately switch to the retained full-mode shader path");
 
     delete node;
 }
