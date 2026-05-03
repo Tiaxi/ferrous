@@ -5070,9 +5070,7 @@ bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
 }
 
 void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
-    if (!m_zoomFillFrozenRetainedAvailable) {
-        ensureZoomFillSnapshotImageLocked();
-    }
+    ensureZoomFillSnapshotImageLocked();
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
     m_zoomFillFrozenDisplayGeneration = m_gpuDisplayGeneration;
 }

@@ -1199,6 +1199,7 @@ private slots:
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
     void spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectly();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
+    void spectrogramZoomFillBuildsSnapshotEvenWhenRetainedFreezeWasAvailable();
     void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
     void spectrogramDataResetInvalidatesRetainedSourceStateDuringFreeze();
@@ -11988,6 +11989,49 @@ void QmlSmokeTest::spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata()
         QCOMPARE(item.m_zoomFillFrozenDisplayImage.height(), 80);
         QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
         QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+    }
+}
+
+void QmlSmokeTest::spectrogramZoomFillBuildsSnapshotEvenWhenRetainedFreezeWasAvailable() {
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 240;
+    QByteArray chunk(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 44100, 1024, true,
+        true, 24, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, false);
+        QVERIFY(item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+
+        item.m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(0, 0, 120, bins),
+                QRectF(0.0, 0.0, 120.0, 80.0),
+                true,
+            },
+        };
+        item.m_zoomFillFrozenRetainedAvailable = true;
+
+        item.captureZoomFillFrozenCacheLocked();
+
+        QVERIFY2(
+            !item.m_zoomFillFrozenDisplayImage.isNull(),
+            "retained freeze capture must still build a CPU snapshot because retained pages can be invalidated by the reset handoff");
+        QCOMPARE(item.m_zoomFillFrozenDisplayImage.width(), 120);
+        QCOMPARE(item.m_zoomFillFrozenDisplayImage.height(), 80);
     }
 }
 
