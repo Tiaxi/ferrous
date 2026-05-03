@@ -1137,6 +1137,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerLabelsResetReasons();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
     void spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset();
+    void spectrogramRetainedPageSyncKeepsPagesWhenVisibleRangeUndecoded();
     void spectrogramRetainedLegacyTextureInvalidationKeepsPages();
     void spectrogramRetainedPageCoverageSkipsLegacyTextureUpload();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
@@ -7501,6 +7502,47 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset()
             item.m_gpuSourcePages.empty(),
             "retained source pages must be dropped with legacy retained texture state so same-token zoom/seek resets cannot reuse stale page uploads");
     }
+}
+
+void QmlSmokeTest::spectrogramRetainedPageSyncKeepsPagesWhenVisibleRangeUndecoded() {
+    SpectrogramItem item;
+    QQuickWindow window;
+
+    constexpr int bins = 4;
+    constexpr int columns = 64;
+    constexpr quint64 trackToken = 54;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, trackToken, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    auto retainedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+    retainedPage->key = SpectrogramItem::RetainedSourcePageKey{
+        .trackToken = trackToken,
+        .rollingMode = false,
+        .pageIndex = 0,
+    };
+    retainedPage->width = SpectrogramItem::kRetainedSourcePageWidth;
+    retainedPage->binsPerColumn = bins;
+    retainedPage->uploadedDisplayLeft = 0;
+    retainedPage->uploadedDisplayRight = columns - 1;
+    item.m_gpuSourcePages.push_back(std::move(retainedPage));
+
+    item.syncRetainedSourcePagesLocked(
+        &window,
+        columns + 128,
+        columns + 255,
+        columns - 1,
+        false);
+
+    QCOMPARE(item.m_gpuSourcePages.size(), static_cast<size_t>(1));
+    QCOMPARE(item.m_gpuSourcePageUploadSpanCount, 0);
+    QCOMPARE(item.m_gpuSourcePageUploadColumns, 0);
+    QCOMPARE(
+        item.m_gpuSourcePageResetReason,
+        SpectrogramItem::RetainedPageResetReason::None);
 }
 
 void QmlSmokeTest::spectrogramRetainedLegacyTextureInvalidationKeepsPages() {

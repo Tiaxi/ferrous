@@ -5761,6 +5761,9 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
         m_gpuSourcePages.clear();
         return;
     }
+    if (std::min(displayRight, renderableRight) < displayLeft) {
+        return;
+    }
 
     const QVector<RetainedPageSpan> visiblePages =
         buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
