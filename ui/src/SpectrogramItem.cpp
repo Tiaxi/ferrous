@@ -5084,10 +5084,9 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedActive = false;
 }
 
-void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
+void SpectrogramItem::invalidateLegacyRetainedSourceTextureStateLocked() {
     m_gpuSourceUploadRgba.clear();
     m_gpuSourceUploadSpans.clear();
-    m_gpuSourcePages.clear();
     m_gpuSourcePageUploadSpanCount = 0;
     m_gpuSourcePageUploadColumns = 0;
     m_gpuSourcePageTextureReset = false;
@@ -5100,6 +5099,11 @@ void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
     m_gpuSourceTextureMinColumnIndex = 0;
     m_gpuSourceTextureMaxColumnIndex = -1;
     m_gpuSourceTexture.clearPendingSpans();
+}
+
+void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
+    invalidateLegacyRetainedSourceTextureStateLocked();
+    m_gpuSourcePages.clear();
 }
 
 void SpectrogramItem::invalidateRenderCachesLocked() {
@@ -5777,7 +5781,7 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
             window,
             layout.capacityColumns,
             layout.binsPerColumn)) {
-        invalidateRetainedSourceTextureStateLocked();
+        invalidateLegacyRetainedSourceTextureStateLocked();
         return;
     }
     const QSize retainedTextureSize(layout.capacityColumns, layout.binsPerColumn);

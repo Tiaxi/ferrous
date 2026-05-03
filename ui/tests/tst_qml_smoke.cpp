@@ -1134,6 +1134,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
     void spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset();
+    void spectrogramRetainedLegacyTextureInvalidationKeepsPages();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
     void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
@@ -7386,6 +7387,37 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset()
         QVERIFY2(
             item.m_gpuSourcePages.empty(),
             "retained source pages must be dropped with legacy retained texture state so same-token zoom/seek resets cannot reuse stale page uploads");
+    }
+}
+
+void QmlSmokeTest::spectrogramRetainedLegacyTextureInvalidationKeepsPages() {
+    SpectrogramItem item;
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        auto page = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+        page->key = SpectrogramItem::RetainedSourcePageKey{
+            .trackToken = 5,
+            .rollingMode = false,
+            .pageIndex = 1,
+        };
+        page->width = SpectrogramItem::kRetainedSourcePageWidth;
+        page->binsPerColumn = 4;
+        page->uploadedDisplayLeft = 2048;
+        page->uploadedDisplayRight = 2304;
+        item.m_gpuSourcePages.push_back(std::move(page));
+        item.m_gpuSourceTextureTrackToken = 5;
+        item.m_gpuSourceTextureDisplayLeft = 2048;
+        item.m_gpuSourceTextureDisplayRight = 2304;
+        item.m_gpuSourceTextureMinColumnIndex = 2048;
+        item.m_gpuSourceTextureMaxColumnIndex = 2304;
+
+        item.invalidateLegacyRetainedSourceTextureStateLocked();
+
+        QCOMPARE(item.m_gpuSourcePages.size(), 1U);
+        QCOMPARE(item.m_gpuSourcePages[0]->key.pageIndex, 1);
+        QCOMPARE(item.m_gpuSourceTextureTrackToken, 0ULL);
+        QCOMPARE(item.m_gpuSourceTextureMaxColumnIndex, -1LL);
     }
 }
 

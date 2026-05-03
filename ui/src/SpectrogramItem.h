@@ -199,6 +199,7 @@ private:
     bool ensureZoomFillSnapshotImageLocked();
     void captureZoomFillFrozenCacheLocked();
     void clearZoomFillFrozenCacheLocked();
+    void invalidateLegacyRetainedSourceTextureStateLocked();
     void invalidateRetainedSourceTextureStateLocked();
     void invalidateRenderCachesLocked();
     bool reanchorRollingEpochForCurrentDataLocked(
