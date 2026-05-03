@@ -2364,8 +2364,8 @@ void BridgeClient::previous() {
 void BridgeClient::seek(double seconds) {
     const double target = std::max(0.0, seconds);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     SpectrogramSeekTrace::noteSeekIssued(target);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
         FERROUS_PROFILE_LOG_DIAGNOSTIC(
             QStringLiteral("ui-prof"),

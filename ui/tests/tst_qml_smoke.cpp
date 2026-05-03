@@ -1136,6 +1136,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerLabelsResetReasons();
     void spectrogramRetainedPageTextureExtentBoundsSmallSpans();
+    void spectrogramRetainedUploadDefersTinyUncoveredSeekFrames();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
     void spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset();
     void spectrogramRetainedPageSyncKeepsPagesWhenVisibleRangeUndecoded();
@@ -7497,6 +7498,34 @@ void QmlSmokeTest::spectrogramRetainedPageTextureExtentBoundsSmallSpans() {
 
     QCOMPARE(wide.xOrigin, 0);
     QCOMPARE(wide.width, SpectrogramItem::kRetainedSourcePageWidth);
+}
+
+void QmlSmokeTest::spectrogramRetainedUploadDefersTinyUncoveredSeekFrames() {
+    QVERIFY(SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
+        7,
+        true,
+        false,
+        240));
+    QVERIFY(!SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
+        127,
+        true,
+        false,
+        240));
+    QVERIFY(!SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
+        7,
+        false,
+        false,
+        240));
+    QVERIFY(!SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
+        7,
+        true,
+        true,
+        240));
+    QVERIFY(!SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
+        7,
+        true,
+        false,
+        400));
 }
 
 void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth() {

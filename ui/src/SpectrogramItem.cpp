@@ -2474,6 +2474,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto paintStart = std::chrono::steady_clock::now();
 #endif
+    const qint64 paintNowMs = QDateTime::currentMSecsSinceEpoch();
     const auto renderNow = std::chrono::steady_clock::now();
     auto *node = static_cast<SpectrogramSceneNode *>(oldNode);
     QQuickWindow *currentWindow = window();
@@ -2899,9 +2900,36 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && m_zoomFillFrozenRetainedActive;
             const bool useFrozenRetainedSourceForFrame =
                 retainedFreezeAvailableForFrame && !m_zoomFillDataReady;
+            const qint64 retainedRenderableRight = rollingMode
+                ? displayRight
+                : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+            const int retainedPageWidth = retainedSourcePageWidthForGpuLimit(currentWindow);
+            const bool retainedPagesCoverBeforeUpload =
+                canUseRetainedSourceTextureBody
+                && retainedSourcePagesCoverDisplayRangeLocked(
+                    displayLeft,
+                    displayRight,
+                    retainedRenderableRight,
+                    rollingMode,
+                    retainedPageWidth,
+                    true);
+            const qint64 seekStartedAtMs = SpectrogramSeekTrace::startedAtMs();
+            const qint64 seekAgeMs = seekStartedAtMs > 0 ? paintNowMs - seekStartedAtMs : -1;
+            const bool deferTinyRetainedUploadDuringSeek =
+                shouldDeferTinyRetainedUploadDuringSeek(
+                    visibleCols,
+                    rendererFreeze,
+                    retainedPagesCoverBeforeUpload,
+                    seekAgeMs);
             const bool shouldSyncRetainedSourceTexture =
                 canUseRetainedSourceTextureBody
-                && (!retainedFreezeAvailableForFrame || m_zoomFillDataReady);
+                && (!retainedFreezeAvailableForFrame || m_zoomFillDataReady)
+                && !deferTinyRetainedUploadDuringSeek;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            if (deferTinyRetainedUploadDuringSeek) {
+                profileFallbackReason = "seek-tiny-retained-defer";
+            }
+#endif
 
             if (visibleCols > 0) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -5113,6 +5141,21 @@ SpectrogramItem::RetainedPageTextureExtent SpectrogramItem::retainedPageTextureE
         .xOrigin = origin,
         .width = textureWidth,
     };
+}
+
+bool SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
+    const int visibleColumns,
+    const bool rendererFreeze,
+    const bool retainedPagesCoverVisibleRange,
+    const qint64 seekAgeMs) {
+    static constexpr int tinyVisibleColumnThreshold = 32;
+    static constexpr qint64 seekDeferralWindowMs = 300;
+    return visibleColumns > 0
+        && visibleColumns <= tinyVisibleColumnThreshold
+        && rendererFreeze
+        && !retainedPagesCoverVisibleRange
+        && seekAgeMs >= 0
+        && seekAgeMs <= seekDeferralWindowMs;
 }
 
 const char *SpectrogramItem::retainedPageResetReasonName(

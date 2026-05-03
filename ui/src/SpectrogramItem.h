@@ -218,6 +218,11 @@ private:
         int pageXBegin,
         int pageXEnd,
         int pageWidth);
+    static bool shouldDeferTinyRetainedUploadDuringSeek(
+        int visibleColumns,
+        bool rendererFreeze,
+        bool retainedPagesCoverVisibleRange,
+        qint64 seekAgeMs);
     static const char *retainedPageResetReasonName(RetainedPageResetReason reason);
     void invalidateLegacyRetainedSourceTextureStateLocked();
     void invalidateRetainedSourceTextureStateLocked();
