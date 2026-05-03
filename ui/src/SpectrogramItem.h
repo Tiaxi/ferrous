@@ -172,6 +172,7 @@ private:
     double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
     void setPositionAnchorLocked(double value, std::chrono::steady_clock::time_point now);
     void syncPositionAnchorLocked(std::chrono::steady_clock::time_point now);
+    qint64 firstMissingCenteredDisplayColumnLocked(qint64 displayLeft, qint64 displayRight) const;
     int ringSlotForDisplayIndexLocked(
         qint64 displayIndex,
         bool rollingMode) const;

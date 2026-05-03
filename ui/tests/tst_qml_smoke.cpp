@@ -1175,6 +1175,7 @@ private slots:
     void spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage();
     void spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns();
     void spectrogramZoomFillWaitsForZoomOutVisibleColumns();
+    void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill();
     void spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill();
@@ -10913,6 +10914,59 @@ void QmlSmokeTest::spectrogramZoomFillWaitsForZoomOutVisibleColumns() {
         QMutexLocker lock(&item.m_stateMutex);
         QCOMPARE(item.m_precomputedMaxColumnIndex, totalColumns - 1);
         QVERIFY(item.m_zoomFillDataReady);
+    }
+}
+
+void QmlSmokeTest::spectrogramZoomFillWaitsForContiguousVisibleColumns() {
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(20);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+    item.setPositionSeconds(0.0);
+
+    constexpr int bins = 4;
+    constexpr int finalTotalColumns = 260;
+    constexpr quint64 trackToken = 96;
+
+    QByteArray baseline(160 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 160,
+        0, finalTotalColumns * 2, 48000, 1024, false,
+        true, trackToken, false, 1);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 0.25;
+        item.m_renderZoomLevel = 0.25;
+        item.m_awaitingZoomData = false;
+        item.m_zoomFillActive = true;
+        item.m_zoomFillDataReady = false;
+        item.m_gpuDisplayImage =
+            QImage(100, 20, QImage::Format_ARGB32_Premultiplied);
+        item.m_gpuDisplayImage.fill(Qt::black);
+    }
+
+    QByteArray leftZoomOut(91 * bins, '\x55');
+    item.feedPrecomputedChunk(
+        leftZoomOut, bins, 0, 91,
+        0, finalTotalColumns, 48000, 2048, false,
+        true, trackToken, false, 2);
+
+    QByteArray rightZoomOut(93 * bins, '\x66');
+    item.feedPrecomputedChunk(
+        rightZoomOut, bins, 0, 93,
+        120, finalTotalColumns, 48000, 2048, false,
+        false, trackToken, false, 2);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedMaxColumnIndex, 212);
+        QCOMPARE(item.m_ringWriteSeq - item.m_ringOldestSeq, static_cast<qint64>(184));
+        QVERIFY2(
+            !item.m_zoomFillDataReady,
+            "zoom-fill must not reveal a centered max-zoom frame when the visible "
+            "range has an interior column hole");
     }
 }
 

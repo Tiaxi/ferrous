@@ -1801,17 +1801,21 @@ void SpectrogramItem::feedPrecomputedChunk(
             : 1.0;
         const qint64 nowCol = static_cast<qint64>(
             std::floor(std::max(0.0, m_positionSeconds) * cps));
+        qint64 displayLeftCol = 0;
         qint64 displayRightCol;
         const qint64 halfWindowCols = visibleWindowCols / 2;
         if (m_displayMode == 1) {
             if (visibleWindowCols * 100 / estimatedTrackCols >= 90) {
+                displayLeftCol = 0;
                 displayRightCol = estimatedTrackCols - 1;
             } else {
-                const qint64 displayLeft = std::max<qint64>(
+                displayLeftCol = std::max<qint64>(
                     0, nowCol - halfWindowCols);
                 displayRightCol = std::min(
                     estimatedTrackCols - 1,
-                    displayLeft + visibleWindowCols - 1);
+                    displayLeftCol + visibleWindowCols - 1);
+                displayLeftCol = std::max<qint64>(
+                    0, displayRightCol - visibleWindowCols + 1);
             }
         } else {
             displayRightCol = nowCol + halfWindowCols;
@@ -1820,6 +1824,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                     displayRightCol,
                     static_cast<qint64>(m_precomputedTotalColumnsEstimate) - 1);
             }
+            displayLeftCol = std::max<qint64>(0, displayRightCol - visibleWindowCols + 1);
         }
         const bool ringCoversDisplayRight =
             static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 16
@@ -1844,9 +1849,56 @@ void SpectrogramItem::feedPrecomputedChunk(
         const bool fillMatchesRequestedZoom =
             !m_awaitingZoomData
             || effectiveHopMatchesZoom(m_precomputedHopSize, m_zoomLevel);
-        if (fillMatchesRequestedZoom
-            && ((ringHasEnoughColumns && ringCoversDisplayRight)
-                || decodeReachedEnd)) {
+        const qint64 decodedVisibleRight = std::min(
+            displayRightCol,
+            static_cast<qint64>(m_precomputedMaxColumnIndex));
+        const qint64 firstMissingVisibleColumn =
+            m_displayMode == 1 && decodedVisibleRight >= displayLeftCol
+                ? firstMissingCenteredDisplayColumnLocked(
+                    displayLeftCol, decodedVisibleRight)
+                : static_cast<qint64>(-1);
+        const bool centeredVisibleColumnsCovered =
+            m_displayMode != 1
+            || (decodedVisibleRight >= displayLeftCol
+                && firstMissingVisibleColumn < 0);
+        const bool zoomFillReadyForData =
+            fillMatchesRequestedZoom
+            && centeredVisibleColumnsCovered
+            && ((ringHasEnoughColumns && ringCoversDisplayRight) || decodeReachedEnd);
+        const bool shouldLogZoomFillGate =
+            !m_zoomFillDataReady
+            && (zoomFillReadyForData
+                || (!centeredVisibleColumnsCovered
+                    && (complete || decodeReachedEnd || ringHasEnoughColumns)));
+        if (shouldLogZoomFillGate) {
+            FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
+                "[ui-spectrogram] zoom_fill_gate ready=%d mode=%d zoom=%.4f render_zoom=%.4f "
+                "hop=%d match=%d display=%lld..%lld decoded_right=%lld missing=%lld "
+                "ring_fill=%lld fill_width=%lld max_col=%d estimate=%d enough=%d covers_right=%d "
+                "decode_end=%d await=%d complete=%d token=%llu gen=%llu\n",
+                zoomFillReadyForData ? 1 : 0,
+                m_displayMode,
+                m_zoomLevel,
+                m_renderZoomLevel,
+                m_precomputedHopSize,
+                fillMatchesRequestedZoom ? 1 : 0,
+                static_cast<long long>(displayLeftCol),
+                static_cast<long long>(displayRightCol),
+                static_cast<long long>(decodedVisibleRight),
+                static_cast<long long>(firstMissingVisibleColumn),
+                static_cast<long long>(ringFill),
+                static_cast<long long>(fillWidth),
+                static_cast<int>(m_precomputedMaxColumnIndex),
+                m_precomputedTotalColumnsEstimate,
+                ringHasEnoughColumns ? 1 : 0,
+                ringCoversDisplayRight ? 1 : 0,
+                decodeReachedEnd ? 1 : 0,
+                m_awaitingZoomData ? 1 : 0,
+                complete ? 1 : 0,
+                static_cast<unsigned long long>(m_precomputedTrackToken),
+                static_cast<unsigned long long>(generation));
+        }
+        if (zoomFillReadyForData) {
             // The decoder has enough data, but the final render resource may
             // not be ready yet. Keep showing the frozen frame until
             // updatePaintNode can reveal the current frame through its normal
@@ -5588,6 +5640,22 @@ void SpectrogramItem::syncPrecomputedDisplayImageLocked(
     m_gpuDisplayMaxColumnIndex = m_precomputedMaxColumnIndex;
     m_gpuDisplayTrackToken = m_precomputedTrackToken;
     m_gpuDisplayEffectiveZoom = effectiveZoom;
+}
+
+qint64 SpectrogramItem::firstMissingCenteredDisplayColumnLocked(
+    const qint64 displayLeft,
+    const qint64 displayRight) const {
+    if (displayRight < displayLeft
+        || displayLeft < 0
+        || displayRight > std::numeric_limits<qint32>::max()) {
+        return displayLeft;
+    }
+    for (qint64 displayIndex = displayLeft; displayIndex <= displayRight; ++displayIndex) {
+        if (ringSlotForDisplayIndexLocked(displayIndex, false) < 0) {
+            return displayIndex;
+        }
+    }
+    return -1;
 }
 
 int SpectrogramItem::ringSlotForDisplayIndexLocked(
