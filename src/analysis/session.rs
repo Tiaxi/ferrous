@@ -561,7 +561,9 @@ fn spectrogram_worker_loop(
                 Err(_) => break,
             },
         };
-        let cmd = coalesce_queued_new_track_command(cmd, cmd_rx);
+        let Some(cmd) = coalesce_queued_new_track_command(cmd, cmd_rx, generation) else {
+            continue;
+        };
 
         match cmd {
             SpectrogramWorkerCommand::NewTrack {
@@ -649,9 +651,10 @@ fn spectrogram_worker_loop(
 fn coalesce_queued_new_track_command(
     initial_cmd: SpectrogramWorkerCommand,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
-) -> SpectrogramWorkerCommand {
+    generation: &AtomicU64,
+) -> Option<SpectrogramWorkerCommand> {
     if !matches!(initial_cmd, SpectrogramWorkerCommand::NewTrack { .. }) {
-        return initial_cmd;
+        return Some(initial_cmd);
     }
 
     let mut latest_new_track = initial_cmd;
@@ -660,11 +663,22 @@ fn coalesce_queued_new_track_command(
             SpectrogramWorkerCommand::NewTrack { .. } => {
                 latest_new_track = cmd;
             }
-            SpectrogramWorkerCommand::Stop => return SpectrogramWorkerCommand::Stop,
+            SpectrogramWorkerCommand::Stop => return Some(SpectrogramWorkerCommand::Stop),
             _ => {}
         }
     }
-    latest_new_track
+    let &SpectrogramWorkerCommand::NewTrack {
+        generation: cmd_generation,
+        ..
+    } = &latest_new_track
+    else {
+        return Some(latest_new_track);
+    };
+    if cmd_generation == generation.load(Ordering::Relaxed) {
+        Some(latest_new_track)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2420,6 +2434,7 @@ mod tests {
     #[test]
     fn idle_worker_coalesces_queued_new_tracks_before_starting_session() {
         let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        let generation_state = AtomicU64::new(3);
         let initial = SpectrogramWorkerCommand::NewTrack {
             track_token: 30,
             generation: 2,
@@ -2452,7 +2467,8 @@ mod tests {
         })
         .unwrap();
 
-        let cmd = coalesce_queued_new_track_command(initial, &rx);
+        let cmd = coalesce_queued_new_track_command(initial, &rx, &generation_state)
+            .expect("latest queued generation should still be live");
         let SpectrogramWorkerCommand::NewTrack {
             generation,
             zoom_level,
@@ -2463,6 +2479,33 @@ mod tests {
         };
         assert_eq!(generation, 3);
         assert!((zoom_level - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn idle_worker_drops_stale_new_track_before_starting_session() {
+        let (_tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        let generation_state = AtomicU64::new(3);
+        let initial = SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 2,
+            path: PathBuf::from("/tmp/intermediate.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.5,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        };
+
+        let cmd = coalesce_queued_new_track_command(initial, &rx, &generation_state);
+        assert!(
+            cmd.is_none(),
+            "stale NewTrack generations should not open files or emit reset chunks"
+        );
     }
 
     // ---------------------------------------------------------------
