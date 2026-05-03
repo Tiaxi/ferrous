@@ -1135,6 +1135,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans();
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerLabelsResetReasons();
+    void spectrogramRetainedPageTextureExtentBoundsSmallSpans();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
     void spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset();
     void spectrogramRetainedPageSyncKeepsPagesWhenVisibleRangeUndecoded();
@@ -7440,7 +7441,7 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerLabelsResetReasons() {
         .rollingMode = false,
         .pageIndex = 0,
     };
-    wrongWidthPage->width = SpectrogramItem::kRetainedSourcePageWidth / 2;
+    wrongWidthPage->width = columns / 2;
     wrongWidthPage->binsPerColumn = bins;
     wrongWidthPage->uploadedDisplayLeft = 0;
     wrongWidthPage->uploadedDisplayRight = columns - 1;
@@ -7464,6 +7465,38 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerLabelsResetReasons() {
     QCOMPARE(
         uploads[0].resetReason,
         SpectrogramItem::RetainedPageResetReason::BinsChanged);
+}
+
+void QmlSmokeTest::spectrogramRetainedPageTextureExtentBoundsSmallSpans() {
+    const SpectrogramItem::RetainedPageTextureExtent singleColumn =
+        SpectrogramItem::retainedPageTextureExtentForSpan(
+            7,
+            7,
+            SpectrogramItem::kRetainedSourcePageWidth);
+
+    QCOMPARE(singleColumn.width, 256);
+    QVERIFY(singleColumn.xOrigin <= 7);
+    QVERIFY(singleColumn.xOrigin + singleColumn.width > 7);
+
+    const SpectrogramItem::RetainedPageTextureExtent rightEdge =
+        SpectrogramItem::retainedPageTextureExtentForSpan(
+            SpectrogramItem::kRetainedSourcePageWidth - 2,
+            SpectrogramItem::kRetainedSourcePageWidth - 1,
+            SpectrogramItem::kRetainedSourcePageWidth);
+
+    QCOMPARE(rightEdge.width, 256);
+    QCOMPARE(
+        rightEdge.xOrigin + rightEdge.width,
+        SpectrogramItem::kRetainedSourcePageWidth);
+
+    const SpectrogramItem::RetainedPageTextureExtent wide =
+        SpectrogramItem::retainedPageTextureExtentForSpan(
+            0,
+            SpectrogramItem::kRetainedSourcePageWidth - 1,
+            SpectrogramItem::kRetainedSourcePageWidth);
+
+    QCOMPARE(wide.xOrigin, 0);
+    QCOMPARE(wide.width, SpectrogramItem::kRetainedSourcePageWidth);
 }
 
 void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth() {

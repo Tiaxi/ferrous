@@ -186,6 +186,11 @@ private:
         RetainedPageResetReason resetReason{RetainedPageResetReason::None};
     };
 
+    struct RetainedPageTextureExtent {
+        int xOrigin{0};
+        int width{0};
+    };
+
     struct RetainedSourcePageKey {
         quint64 trackToken{0};
         bool rollingMode{false};
@@ -195,6 +200,7 @@ private:
     struct RetainedSourcePageState {
         RetainedSourcePageKey key;
         SpectrogramSourceTexture texture;
+        int pageXOrigin{0};
         int width{0};
         int binsPerColumn{0};
         qint64 uploadedDisplayLeft{0};
@@ -208,6 +214,10 @@ private:
     bool ensureZoomFillSnapshotImageLocked();
     void captureZoomFillFrozenCacheLocked();
     void clearZoomFillFrozenCacheLocked();
+    static RetainedPageTextureExtent retainedPageTextureExtentForSpan(
+        int pageXBegin,
+        int pageXEnd,
+        int pageWidth);
     static const char *retainedPageResetReasonName(RetainedPageResetReason reason);
     void invalidateLegacyRetainedSourceTextureStateLocked();
     void invalidateRetainedSourceTextureStateLocked();

@@ -2988,14 +2988,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         pageIndex);
                     QSGTexture *pageTexture =
                         page != nullptr ? page->texture.texture() : nullptr;
-                    if (pageTexture == nullptr) {
+                    if (pageTexture == nullptr
+                        || pageX < page->pageXOrigin
+                        || pageX + segment.sourceRect.width()
+                            > page->pageXOrigin + page->width) {
                         allSegmentsHaveTextures = false;
                         continue;
                     }
                     retainedBodyDrawSegments.push_back(RetainedBodyDrawSegment{
                         .targetRect = segment.targetRect,
                         .sourceRect = QRect(
-                            pageX,
+                            pageX - page->pageXOrigin,
                             segment.sourceRect.y(),
                             segment.sourceRect.width(),
                             segment.sourceRect.height()),
@@ -5091,6 +5094,27 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedActive = false;
 }
 
+SpectrogramItem::RetainedPageTextureExtent SpectrogramItem::retainedPageTextureExtentForSpan(
+    const int pageXBegin,
+    const int pageXEnd,
+    const int pageWidth) {
+    if (pageWidth <= 0 || pageXEnd < pageXBegin) {
+        return {};
+    }
+
+    static constexpr int minTextureWidth = 256;
+    const int clampedBegin = std::clamp(pageXBegin, 0, pageWidth - 1);
+    const int clampedEnd = std::clamp(pageXEnd, clampedBegin, pageWidth - 1);
+    const int spanWidth = clampedEnd - clampedBegin + 1;
+    const int textureWidth = std::min(pageWidth, std::max(minTextureWidth, spanWidth));
+    const int maxOrigin = pageWidth - textureWidth;
+    const int origin = std::clamp(clampedBegin, 0, maxOrigin);
+    return RetainedPageTextureExtent{
+        .xOrigin = origin,
+        .width = textureWidth,
+    };
+}
+
 const char *SpectrogramItem::retainedPageResetReasonName(
     const RetainedPageResetReason reason) {
     switch (reason) {
@@ -5479,7 +5503,8 @@ QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetaine
         RetainedPageResetReason resetReason = RetainedPageResetReason::None;
         if (page == nullptr) {
             resetReason = RetainedPageResetReason::MissingPage;
-        } else if (page->width != pageWidth) {
+        } else if (span.pageXBegin < page->pageXOrigin
+            || span.pageXEnd >= page->pageXOrigin + page->width) {
             resetReason = RetainedPageResetReason::PageWidthChanged;
         } else if (page->binsPerColumn != m_precomputedBinsPerColumn) {
             resetReason = RetainedPageResetReason::BinsChanged;
@@ -5624,7 +5649,8 @@ bool SpectrogramItem::retainedSourcePagesCoverDisplayRangeLocked(
             rollingMode,
             span.pageIndex);
         if (page == nullptr
-            || page->width != pageWidth
+            || span.pageXBegin < page->pageXOrigin
+            || span.pageXEnd >= page->pageXOrigin + page->width
             || page->binsPerColumn != m_precomputedBinsPerColumn
             || page->uploadedDisplayLeft > span.displayLeft
             || page->uploadedDisplayRight < span.displayRight
@@ -5811,7 +5837,13 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             continue;
         }
         if (span.resetPage) {
+            const RetainedPageTextureExtent extent = retainedPageTextureExtentForSpan(
+                span.pageXBegin,
+                span.pageXEnd,
+                pageWidth);
             page->texture.release();
+            page->pageXOrigin = extent.xOrigin;
+            page->width = extent.width;
             page->uploadedDisplayLeft = 0;
             page->uploadedDisplayRight = -1;
             m_gpuSourcePageTextureReset = true;
@@ -5820,7 +5852,7 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             }
         }
         const bool hadPageTexture = page->texture.texture() != nullptr;
-        if (!page->texture.ensureCreated(window, pageWidth, m_precomputedBinsPerColumn)) {
+        if (!page->texture.ensureCreated(window, page->width, m_precomputedBinsPerColumn)) {
             continue;
         }
         m_gpuSourcePageTextureReset =
@@ -5831,11 +5863,14 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             && m_gpuSourcePageResetReason == RetainedPageResetReason::None) {
             m_gpuSourcePageResetReason = RetainedPageResetReason::UploadReset;
         }
-        page->width = pageWidth;
         page->binsPerColumn = m_precomputedBinsPerColumn;
 
         const int spanWidth = span.pageXEnd - span.pageXBegin + 1;
         if (spanWidth <= 0) {
+            continue;
+        }
+        const int textureXBegin = span.pageXBegin - page->pageXOrigin;
+        if (textureXBegin < 0 || textureXBegin + spanWidth > page->width) {
             continue;
         }
 
@@ -5854,13 +5889,16 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
 
         if (!page->texture.uploadRgbaColumns(
                 window,
-                span.pageXBegin,
+                textureXBegin,
                 spanWidth,
                 m_precomputedBinsPerColumn,
                 m_gpuSourceUploadRgba)) {
             continue;
         }
-        const SpectrogramSourceUploadSpan uploadedSpan{span.pageXBegin, span.pageXEnd};
+        const SpectrogramSourceUploadSpan uploadedSpan{
+            textureXBegin,
+            textureXBegin + spanWidth - 1,
+        };
         page->texture.noteUploadedSpan(uploadedSpan);
         page->dirtySpans.push_back(uploadedSpan);
         m_gpuSourcePageUploadSpanCount += 1;
