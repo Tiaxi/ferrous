@@ -5122,11 +5122,12 @@ QVector<SpectrogramItem::RetainedPageSpan> SpectrogramItem::buildRetainedPageSpa
     const qint64 displayLeft,
     const qint64 displayRight,
     const qint64 renderableRight,
-    const bool rollingMode) const {
+    const bool rollingMode,
+    const int pageWidth) const {
     QVector<RetainedPageSpan> spans;
     if (displayRight < displayLeft
         || m_precomputedBinsPerColumn <= 0
-        || kRetainedSourcePageWidth <= 0) {
+        || pageWidth <= 0) {
         return spans;
     }
 
@@ -5157,8 +5158,8 @@ QVector<SpectrogramItem::RetainedPageSpan> SpectrogramItem::buildRetainedPageSpa
             continue;
         }
 
-        const qint64 pageIndex = slot / kRetainedSourcePageWidth;
-        const int pageX = slot % kRetainedSourcePageWidth;
+        const qint64 pageIndex = slot / pageWidth;
+        const int pageX = slot % pageWidth;
         const bool extendsCurrent =
             haveCurrent
             && current.pageIndex == pageIndex
@@ -5205,10 +5206,11 @@ QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetaine
     const qint64 displayLeft,
     const qint64 displayRight,
     const qint64 renderableRight,
-    const bool rollingMode) const {
+    const bool rollingMode,
+    const int pageWidth) const {
     QVector<RetainedPageUploadSpan> uploads;
     const QVector<RetainedPageSpan> pageSpans =
-        buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode);
+        buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
     for (const RetainedPageSpan &span : pageSpans) {
         const RetainedSourcePageState *page = findRetainedSourcePageLocked(
             m_precomputedTrackToken,
@@ -5216,7 +5218,7 @@ QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetaine
             span.pageIndex);
         const bool resetPage =
             page == nullptr
-            || page->width <= 0
+            || page->width != pageWidth
             || page->binsPerColumn != m_precomputedBinsPerColumn;
         if (resetPage) {
             uploads.push_back(RetainedPageUploadSpan{
@@ -5459,6 +5461,120 @@ QVector<SpectrogramSourceUploadSpan> SpectrogramItem::collectRetainedSourceUploa
     return mergeSpectrogramSourceUploadSpans(spans);
 }
 
+void SpectrogramItem::syncRetainedSourcePagesLocked(
+    QQuickWindow *window,
+    const qint64 displayLeft,
+    const qint64 displayRight,
+    const qint64 renderableRight,
+    const bool rollingMode) {
+    if (window == nullptr
+        || m_ringCapacity <= 0
+        || m_precomputedBinsPerColumn <= 0
+        || displayRight < displayLeft) {
+        return;
+    }
+
+    const int pageWidth = retainedSourcePageWidthForGpuLimit(window);
+    if (m_precomputedBinsPerColumn > gpuMaxTextureColumns(window)) {
+        m_gpuSourcePages.clear();
+        return;
+    }
+
+    const QVector<RetainedPageSpan> visiblePages =
+        buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
+    const QVector<RetainedPageUploadSpan> uploadSpans =
+        collectRetainedPageUploadSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
+
+    std::erase_if(m_gpuSourcePages, [&](const auto &page) {
+        if (page == nullptr
+            || page->key.trackToken != m_precomputedTrackToken
+            || page->key.rollingMode != rollingMode) {
+            return true;
+        }
+        return std::none_of(visiblePages.cbegin(), visiblePages.cend(), [&](const RetainedPageSpan &span) {
+            return span.pageIndex == page->key.pageIndex;
+        });
+    });
+
+    const auto ensurePage = [&](const qint64 pageIndex) -> RetainedSourcePageState * {
+        if (RetainedSourcePageState *existing = findRetainedSourcePageLocked(
+                m_precomputedTrackToken,
+                rollingMode,
+                pageIndex)) {
+            return existing;
+        }
+        auto page = std::make_unique<RetainedSourcePageState>();
+        page->key = RetainedSourcePageKey{
+            .trackToken = m_precomputedTrackToken,
+            .rollingMode = rollingMode,
+            .pageIndex = pageIndex,
+        };
+        RetainedSourcePageState *rawPage = page.get();
+        m_gpuSourcePages.push_back(std::move(page));
+        return rawPage;
+    };
+
+    const auto *ringData =
+        reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
+    if (ringData == nullptr) {
+        return;
+    }
+
+    for (const RetainedPageUploadSpan &span : uploadSpans) {
+        RetainedSourcePageState *page = ensurePage(span.pageIndex);
+        if (page == nullptr) {
+            continue;
+        }
+        if (span.resetPage) {
+            page->texture.release();
+            page->uploadedDisplayLeft = 0;
+            page->uploadedDisplayRight = -1;
+        }
+        if (!page->texture.ensureCreated(window, pageWidth, m_precomputedBinsPerColumn)) {
+            continue;
+        }
+        page->width = pageWidth;
+        page->binsPerColumn = m_precomputedBinsPerColumn;
+
+        const int spanWidth = span.pageXEnd - span.pageXBegin + 1;
+        if (spanWidth <= 0) {
+            continue;
+        }
+
+        m_gpuSourceUploadRgba.resize(spanWidth * m_precomputedBinsPerColumn * 4);
+        m_gpuSourceUploadRgba.fill('\0');
+        for (int bin = 0; bin < m_precomputedBinsPerColumn; ++bin) {
+            uchar *row = reinterpret_cast<uchar *>(m_gpuSourceUploadRgba.data())
+                + static_cast<qsizetype>(bin) * spanWidth * 4;
+            for (int localX = 0; localX < spanWidth; ++localX) {
+                const int slot = static_cast<int>(span.pageIndex) * pageWidth
+                    + span.pageXBegin + localX;
+                const quint8 value = ringData[slot * m_precomputedBinsPerColumn + bin];
+                writeRgba8888GrayPixel(row, localX, value);
+            }
+        }
+
+        if (!page->texture.uploadRgbaColumns(
+                window,
+                span.pageXBegin,
+                spanWidth,
+                m_precomputedBinsPerColumn,
+                m_gpuSourceUploadRgba)) {
+            continue;
+        }
+        const SpectrogramSourceUploadSpan uploadedSpan{span.pageXBegin, span.pageXEnd};
+        page->texture.noteUploadedSpan(uploadedSpan);
+        page->dirtySpans.push_back(uploadedSpan);
+        if (page->uploadedDisplayRight < page->uploadedDisplayLeft) {
+            page->uploadedDisplayLeft = span.displayLeft;
+            page->uploadedDisplayRight = span.displayRight;
+        } else {
+            page->uploadedDisplayLeft = std::min(page->uploadedDisplayLeft, span.displayLeft);
+            page->uploadedDisplayRight = std::max(page->uploadedDisplayRight, span.displayRight);
+        }
+    }
+}
+
 void SpectrogramItem::syncRetainedSourceTextureLocked(
     QQuickWindow *window,
     const qint64 displayLeft,
@@ -5474,6 +5590,15 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
 
     const SpectrogramRetainedSourceLayout layout =
         buildRetainedSourceLayoutLocked(displayLeft, displayRight, rollingMode);
+    const qint64 pageRenderableRight = rollingMode
+        ? displayRight
+        : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+    syncRetainedSourcePagesLocked(
+        window,
+        displayLeft,
+        displayRight,
+        pageRenderableRight,
+        rollingMode);
     if (!retainedSourceTextureFitsGpuLimit(
             window,
             layout.capacityColumns,

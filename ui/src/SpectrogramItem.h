@@ -239,12 +239,14 @@ private:
         qint64 displayLeft,
         qint64 displayRight,
         qint64 renderableRight,
-        bool rollingMode) const;
+        bool rollingMode,
+        int pageWidth = kRetainedSourcePageWidth) const;
     QVector<RetainedPageUploadSpan> collectRetainedPageUploadSpansLocked(
         qint64 displayLeft,
         qint64 displayRight,
         qint64 renderableRight,
-        bool rollingMode) const;
+        bool rollingMode,
+        int pageWidth = kRetainedSourcePageWidth) const;
     RetainedSourcePageState *findRetainedSourcePageLocked(
         quint64 trackToken,
         bool rollingMode,
@@ -261,6 +263,12 @@ private:
         QQuickWindow *window,
         qint64 displayLeft,
         qint64 displayRight,
+        bool rollingMode);
+    void syncRetainedSourcePagesLocked(
+        QQuickWindow *window,
+        qint64 displayLeft,
+        qint64 displayRight,
+        qint64 renderableRight,
         bool rollingMode);
     void syncPrecomputedGpuLookupImagesLocked();
     void syncGpuRowLutImageLocked(int height);

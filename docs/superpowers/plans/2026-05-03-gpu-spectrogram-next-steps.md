@@ -358,9 +358,9 @@ Expected invariants:
 ./scripts/run-tests.sh --ui-only
 ```
 
-- [ ] **Step 3: Replace monolithic source texture sync with page sync**
+- [x] **Step 3: Add page sync alongside legacy monolithic compatibility**
 
-Replace `syncRetainedSourceTextureLocked()` internals with page-oriented logic:
+Add page-oriented sync in `syncRetainedSourceTextureLocked()` while retaining the legacy monolithic upload until Task 5 routes rendering through page textures:
 - build visible page spans
 - find or create page state by `(trackToken, rollingMode, pageIndex)`
 - call `SpectrogramSourceTexture::ensureCreated(window, pageWidth, bins)`
@@ -377,7 +377,7 @@ Increment existing fields:
 - `retained_spans` by number of uploaded page spans
 - `retained_cols` by uploaded page-local column count
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 ```bash
 ./scripts/run-tests.sh --ui-only
