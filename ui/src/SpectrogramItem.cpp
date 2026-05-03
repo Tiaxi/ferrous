@@ -1264,10 +1264,11 @@ void SpectrogramItem::feedPrecomputedChunk(
         && m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         captureZoomFillFrozenCacheLocked();
-        m_zoomFillActive = !m_zoomFillFrozenDisplayImage.isNull();
-        m_zoomFillDataReady = false;
         m_zoomFillFrozenRetainedActive =
             m_zoomFillFrozenRetainedAvailable && m_gpuSourceTexture.texture() != nullptr;
+        m_zoomFillActive =
+            !m_zoomFillFrozenDisplayImage.isNull() || m_zoomFillFrozenRetainedActive;
+        m_zoomFillDataReady = false;
     }
 
     if (shouldDropStaleSameTrackZoomChunk) {
@@ -2421,9 +2422,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QSize crosshairOverlaySize;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     double profileCacheSyncMs = 0.0;
+    double profileDisplayImageBuildMs = 0.0;
+    double profileRetainedUploadMs = 0.0;
     double profileOverlayBuildMs = 0.0;
     double profileSpectrogramTextureUploadMs = 0.0;
     double profileOverlayTextureUploadMs = 0.0;
+    const char *profilePaintPath = "empty";
+    const char *profileFallbackReason = "none";
+    bool profileCpuDisplayImageRebuilt = false;
+    bool profileRetainedTextureReset = false;
+    int profileRetainedUploadSpanCount = 0;
+    int profileRetainedUploadColumns = 0;
     bool profileUsedFullSpectrogramUpload = false;
     bool profileUsedTailSpectrogramUpload = false;
     int profileTailUploadWidth = 0;
@@ -2736,8 +2745,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && retainedSourceTextureFitsGpuLimits;
             const bool maintainCpuDisplayImage =
                 currentWindow == nullptr
-                || !canUseRetainedSourceTextureBody
-                || (m_displayMode == 1 && (!m_playing || m_zoomFillActive));
+                || !canUseRetainedSourceTextureBody;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            if (currentWindow == nullptr) {
+                profileFallbackReason = "no-window";
+            } else if (!debugModeRequestsRetainedSourceTextureBody) {
+                profileFallbackReason = "debug-cpu";
+            } else if (!retainedSourceTextureFitsGpuLimits) {
+                profileFallbackReason = "texture-limit";
+            } else if (!canUseRetainedSourceTextureBody) {
+                profileFallbackReason = "unsupported-api";
+            }
+#endif
             const bool retainedFreezeAvailableForFrame =
                 rendererFreeze
                 && canUseRetainedSourceTextureBody
@@ -2752,6 +2771,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (visibleCols > 0) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 const auto syncStart = std::chrono::steady_clock::now();
+                const auto displayStart = syncStart;
+                const quint64 displayGenerationBefore = m_gpuDisplayGeneration;
 #endif
                 syncPrecomputedDisplayImageLocked(
                     drawPixels,
@@ -2761,12 +2782,35 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     rollingMode,
                     effectiveZoom,
                     maintainCpuDisplayImage);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileDisplayImageBuildMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - displayStart).count();
+                profileCpuDisplayImageRebuilt =
+                    profileCpuDisplayImageRebuilt
+                    || (m_gpuDisplayGeneration != displayGenerationBefore
+                        && !m_gpuDisplayImage.isNull());
+#endif
                 if (shouldSyncRetainedSourceTexture) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    const auto retainedUploadStart = std::chrono::steady_clock::now();
+                    const bool retainedHadTexture = m_gpuSourceTexture.texture() != nullptr;
+#endif
                     syncRetainedSourceTextureLocked(
                         currentWindow,
                         displayLeft,
                         displayRight,
                         rollingMode);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profileRetainedUploadMs += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - retainedUploadStart).count();
+                    profileRetainedTextureReset =
+                        profileRetainedTextureReset
+                        || (!retainedHadTexture && m_gpuSourceTexture.texture() != nullptr);
+                    profileRetainedUploadSpanCount += static_cast<int>(m_gpuSourceUploadSpans.size());
+                    for (const SpectrogramSourceUploadSpan &span : m_gpuSourceUploadSpans) {
+                        profileRetainedUploadColumns += std::max(0, span.xEnd - span.xBegin + 1);
+                    }
+#endif
                 }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 profileCacheSyncMs += std::chrono::duration<double, std::milli>(
@@ -2837,12 +2881,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && (canUseRetainedSourceTextureBody
                     ? retainedTextureCoversVisibleRange
                     : !m_gpuDisplayImage.isNull());
-            // Reveal the first completed zoom-fill frame through the warmed
-            // display image; retained full-mode sampling resumes on the next
-            // frame after the blank-prone transition has passed.
             const bool revealViaWarmedDisplayImage =
                 freezeCanRevealFinalFrame
                 && gpuDebugMode == SpectrogramGpu::DebugMode::Full
+                && !retainedTextureCoversVisibleRange
                 && !m_gpuDisplayImage.isNull();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             if (rendererFreeze && m_zoomFillDataReady && !m_awaitingZoomData) {
@@ -2979,6 +3021,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (!useRetainedSourceTextureBodyForFrame
                 && retainedTextureSegmentsOverflowed
                 && m_gpuDisplayImage.isNull()) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileFallbackReason = "retained-segment-overflow";
+                const auto displayStart = std::chrono::steady_clock::now();
+                const quint64 displayGenerationBefore = m_gpuDisplayGeneration;
+#endif
                 syncPrecomputedDisplayImageLocked(
                     drawPixels,
                     h,
@@ -2987,6 +3034,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     rollingMode,
                     effectiveZoom,
                     true);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileDisplayImageBuildMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - displayStart).count();
+                profileCpuDisplayImageRebuilt =
+                    profileCpuDisplayImageRebuilt
+                    || (m_gpuDisplayGeneration != displayGenerationBefore
+                        && !m_gpuDisplayImage.isNull());
+#endif
             }
             const bool haveSelectedSpectrogramContent =
                 useRetainedSourceTextureBodyForFrame
@@ -2997,6 +3052,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (haveSelectedSpectrogramContent && drawPixels > 0) {
                 if (maintainCpuDisplayImage && m_gpuDisplayImage.isNull()) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    const auto displayStart = std::chrono::steady_clock::now();
+                    const quint64 displayGenerationBefore = m_gpuDisplayGeneration;
+#endif
                     syncPrecomputedDisplayImageLocked(
                         drawPixels,
                         h,
@@ -3005,6 +3064,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         rollingMode,
                         effectiveZoom,
                         true);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profileDisplayImageBuildMs += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - displayStart).count();
+                    profileCpuDisplayImageRebuilt =
+                        profileCpuDisplayImageRebuilt
+                        || (m_gpuDisplayGeneration != displayGenerationBefore
+                            && !m_gpuDisplayImage.isNull());
+#endif
                 }
                 syncPrecomputedGpuLookupImagesLocked();
                 if (gpuDebugMode == SpectrogramGpu::DebugMode::Full) {
@@ -3017,11 +3084,26 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     static_cast<double>(drawPixels),
                     static_cast<double>(h));
                 if (useRetainedSourceTextureBodyForFrame) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profilePaintPath =
+                        gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
+                            ? "retained-texture-node"
+                            : "retained-full";
+#endif
                     spectrogramSourceRect = retainedTextureSegments[0].sourceRect;
                 } else if (rendererFreeze) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profilePaintPath = "frozen-display";
+#endif
                     spectrogramNodeImage = m_zoomFillFrozenDisplayImage;
                     spectrogramImageGeneration = m_zoomFillFrozenDisplayGeneration;
                 } else {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                    profilePaintPath =
+                        debugModeRequestsRetainedSourceTextureBody
+                            ? "fallback-display"
+                            : "cpu-display";
+#endif
                     spectrogramNodeImage = m_gpuDisplayImage;
                     spectrogramImageGeneration = m_gpuDisplayGeneration;
                 }
@@ -3939,14 +4021,24 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         if (paintMs >= 4.0 && shouldLogProfileSpike(&m_profileLastPaintSpike, paintEnd)) {
             FERROUS_SPECTROGRAM_PROFILE_LOGF(
                 stderr,
-                "[ui-spectrogram] paint_spike ms=%.3f cache_ms=%.3f overlay_build_ms=%.3f "
-                "tex_ms=%.3f overlay_tex_ms=%.3f full_upload=%d tail_upload=%d tail_w=%d "
+                "[ui-spectrogram] paint_spike path=%s fallback=%s ms=%.3f cache_ms=%.3f "
+                "display_ms=%.3f retained_upload_ms=%.3f overlay_build_ms=%.3f "
+                "tex_ms=%.3f overlay_tex_ms=%.3f cpu_rebuild=%d retained_reset=%d "
+                "retained_spans=%d retained_cols=%d full_upload=%d tail_upload=%d tail_w=%d "
                 "ov=%d fg=%d tg=%d ch=%d pending=%zu cols=%zu bins=%d size=%dx%d\n",
+                profilePaintPath,
+                profileFallbackReason,
                 paintMs,
                 profileCacheSyncMs,
+                profileDisplayImageBuildMs,
+                profileRetainedUploadMs,
                 profileOverlayBuildMs,
                 profileSpectrogramTextureUploadMs,
                 profileOverlayTextureUploadMs,
+                profileCpuDisplayImageRebuilt ? 1 : 0,
+                profileRetainedTextureReset ? 1 : 0,
+                profileRetainedUploadSpanCount,
+                profileRetainedUploadColumns,
                 profileUsedFullSpectrogramUpload ? 1 : 0,
                 profileUsedTailSpectrogramUpload ? 1 : 0,
                 profileTailUploadWidth,
@@ -3964,10 +4056,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         if (elapsed >= 1.0) {
             FERROUS_SPECTROGRAM_PROFILE_LOGF(
                 stderr,
-                "[ui-spectrogram] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f cols=%zu bins=%d\n",
+                "[ui-spectrogram] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f "
+                "last_path=%s last_fallback=%s last_display_ms=%.3f "
+                "last_retained_upload_ms=%.3f last_retained_cols=%d cols=%zu bins=%d\n",
                 static_cast<unsigned long long>(m_profilePaints),
                 m_profilePaintMs,
                 m_profilePaints > 0 ? (m_profilePaintMs / static_cast<double>(m_profilePaints)) : 0.0,
+                profilePaintPath,
+                profileFallbackReason,
+                profileDisplayImageBuildMs,
+                profileRetainedUploadMs,
+                profileRetainedUploadColumns,
                 profileColumnCount,
                 profileBinsPerColumn);
             m_profileLast = paintEnd;
@@ -4777,7 +4876,9 @@ bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
 }
 
 void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
-    ensureZoomFillSnapshotImageLocked();
+    if (!m_zoomFillFrozenRetainedAvailable || m_gpuSourceTexture.texture() == nullptr) {
+        ensureZoomFillSnapshotImageLocked();
+    }
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
     m_zoomFillFrozenDisplayGeneration = m_gpuDisplayGeneration;
 }

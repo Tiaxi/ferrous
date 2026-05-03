@@ -1141,6 +1141,7 @@ private slots:
     void spectrogramRetainedSourceTextureUploadRejectsInvalidArguments();
     void spectrogramRetainedSourceTextureRejectsCapacityBeyondGpuLimit();
     void spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource();
+    void spectrogramGpuFullModeUsesRetainedSourceWithoutCpuDisplayImage();
     void spectrogramGpuLookupAndDisplayImagesUseCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
     void spectrogramGpuTextureNodeDebugStaysVisibleAfterRepeatedRollingUpdatesWithoutCpuSourceImage();
@@ -1184,7 +1185,7 @@ private slots:
     void spectrogramFullModeFreezesRetainedBodyDuringZoomFill();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
-    void spectrogramFullscreenMaxZoomRevealUsesWarmedDisplayImageFirst();
+    void spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectly();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
@@ -7239,6 +7240,63 @@ void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResour
             QSGSimpleTextureNode::MirrorVertically));
 }
 
+void QmlSmokeTest::spectrogramGpuFullModeUsesRetainedSourceWithoutCpuDisplayImage() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+
+    constexpr int bins = 32;
+    constexpr int columns = 240;
+    QByteArray chunk(bins * columns, '\x40');
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained-source full-mode binding test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(!node.isNull());
+    auto *bodyTextureNode = spectrogramBodyTextureNode(node.data());
+    QVERIFY(bodyTextureNode != nullptr);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(
+            item.m_gpuSourceTexture.texture() != nullptr,
+            "full mode should create the retained source texture");
+        QCOMPARE(bodyTextureNode->texture(), item.m_gpuSourceTexture.texture());
+        QVERIFY2(
+            item.m_gpuDisplayImage.isNull(),
+            "full mode should not build the CPU display image when retained coverage is complete");
+    }
+}
+
 void QmlSmokeTest::spectrogramGpuLookupAndDisplayImagesUseCompatibleFormats() {
     SpectrogramItem item;
     item.setWidth(100);
@@ -11457,7 +11515,7 @@ void QmlSmokeTest::spectrogramZoomFillRevealsOnlyFromRenderableFrame() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramFullscreenMaxZoomRevealUsesWarmedDisplayImageFirst() {
+void QmlSmokeTest::spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectly() {
     qputenv("FERROUS_GPU_DEBUG_MODE", "full");
     struct DebugModeGuard {
         ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
@@ -11483,6 +11541,11 @@ void QmlSmokeTest::spectrogramFullscreenMaxZoomRevealUsesWarmedDisplayImageFirst
     QByteArray baseline(baselineColumns * bins, '\x40');
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained full-mode max-zoom reveal test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
 
     item->feedPrecomputedChunk(
         baseline, bins, 0, baselineColumns,
@@ -11513,23 +11576,25 @@ void QmlSmokeTest::spectrogramFullscreenMaxZoomRevealUsesWarmedDisplayImageFirst
         QVERIFY(item->m_zoomFillActive);
         QVERIFY(item->m_zoomFillDataReady);
         QVERIFY2(
-            !item->m_gpuDisplayImage.isNull(),
-            "max-zoom fill should warm a CPU display image before reveal");
+            item->m_gpuDisplayImage.isNull(),
+            "retained full-mode max-zoom fill should not warm a CPU display image before reveal");
     }
 
     QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
     QVERIFY(updatedNode == node);
 
-    auto *textureNode = spectrogramBodyTextureNode(node);
-    QVERIFY(textureNode != nullptr);
-    QVERIFY2(
-        textureNode->texture() != nullptr && !textureNode->rect().isEmpty(),
-        "fullscreen max-zoom reveal should use the warmed display image for the first visible frame");
     auto *sampleNode = spectrogramBodySampleMaterialNode(node);
     QVERIFY(sampleNode != nullptr);
     QVERIFY2(
-        !geometryHasVisibleArea(sampleNode),
-        "fullscreen max-zoom reveal should not immediately switch to the retained full-mode shader path");
+        geometryHasVisibleArea(sampleNode),
+        "fullscreen max-zoom reveal should switch directly to the retained full-mode shader path");
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        QVERIFY2(
+            item->m_gpuDisplayImage.isNull(),
+            "retained full-mode reveal should leave the CPU display image cold");
+        QVERIFY(item->m_gpuSourceTexture.texture() != nullptr);
+    }
 
     delete node;
 }
