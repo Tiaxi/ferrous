@@ -561,6 +561,7 @@ fn spectrogram_worker_loop(
                 Err(_) => break,
             },
         };
+        let cmd = coalesce_queued_new_track_command(cmd, cmd_rx);
 
         match cmd {
             SpectrogramWorkerCommand::NewTrack {
@@ -643,6 +644,27 @@ fn spectrogram_worker_loop(
             _ => {} // UpdateTrackToken, CancelPendingContinue, etc. — stale outside session
         }
     }
+}
+
+fn coalesce_queued_new_track_command(
+    initial_cmd: SpectrogramWorkerCommand,
+    cmd_rx: &Receiver<SpectrogramWorkerCommand>,
+) -> SpectrogramWorkerCommand {
+    if !matches!(initial_cmd, SpectrogramWorkerCommand::NewTrack { .. }) {
+        return initial_cmd;
+    }
+
+    let mut latest_new_track = initial_cmd;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            SpectrogramWorkerCommand::NewTrack { .. } => {
+                latest_new_track = cmd;
+            }
+            SpectrogramWorkerCommand::Stop => return SpectrogramWorkerCommand::Stop,
+            _ => {}
+        }
+    }
+    latest_new_track
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1297,7 @@ fn process_session_commands(
     session: &mut SpectrogramSessionState,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
 ) -> Option<SessionAction> {
+    let mut latest_new_track: Option<SpectrogramWorkerCommand> = None;
     let mut latest_position: Option<f64> = None;
     let mut latest_seek: Option<f64> = None;
     let mut needs_flush_token = false;
@@ -1289,7 +1312,7 @@ fn process_session_commands(
                 latest_seek = Some(position_seconds);
             }
             SpectrogramWorkerCommand::NewTrack { .. } => {
-                return Some(SessionAction::NewSession(cmd));
+                latest_new_track = Some(cmd);
             }
             SpectrogramWorkerCommand::SetDisplayMode(mode) => {
                 apply_display_mode(session, mode);
@@ -1323,6 +1346,10 @@ fn process_session_commands(
                 return Some(SessionAction::Stop);
             }
         }
+    }
+
+    if let Some(cmd) = latest_new_track {
+        return Some(SessionAction::NewSession(cmd));
     }
 
     // FlushToken takes priority over position-only results — the UI
@@ -2337,6 +2364,105 @@ mod tests {
         let action = process_session_commands(&mut session, &rx);
         // NewTrack must take priority.
         assert!(matches!(action, Some(SessionAction::NewSession(_))));
+    }
+
+    #[test]
+    fn process_session_commands_coalesces_queued_new_tracks_to_latest() {
+        let mut session = make_test_session();
+
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 2,
+            path: PathBuf::from("/tmp/intermediate.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.5,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        })
+        .unwrap();
+        tx.send(SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 3,
+            path: PathBuf::from("/tmp/final.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.1,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        })
+        .unwrap();
+
+        let action = process_session_commands(&mut session, &rx);
+        let Some(SessionAction::NewSession(SpectrogramWorkerCommand::NewTrack {
+            generation,
+            zoom_level,
+            ..
+        })) = action
+        else {
+            panic!("expected latest queued NewTrack");
+        };
+        assert_eq!(generation, 3);
+        assert!((zoom_level - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn idle_worker_coalesces_queued_new_tracks_before_starting_session() {
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        let initial = SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 2,
+            path: PathBuf::from("/tmp/intermediate.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.5,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        };
+        tx.send(SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 3,
+            path: PathBuf::from("/tmp/final.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.1,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        })
+        .unwrap();
+
+        let cmd = coalesce_queued_new_track_command(initial, &rx);
+        let SpectrogramWorkerCommand::NewTrack {
+            generation,
+            zoom_level,
+            ..
+        } = cmd
+        else {
+            panic!("expected latest queued NewTrack");
+        };
+        assert_eq!(generation, 3);
+        assert!((zoom_level - 0.1).abs() < f32::EPSILON);
     }
 
     // ---------------------------------------------------------------
