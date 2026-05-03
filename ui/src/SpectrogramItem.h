@@ -151,6 +151,13 @@ private:
         bool valid{false};
     };
 
+    struct RetainedRenderPlan {
+        std::array<RetainedRenderSegment, 2> segments{};
+        bool haveSegments{false};
+        bool overflowed{false};
+        bool coversRange{false};
+    };
+
     void rebuildPalette();
     void invalidateMapping();
     void ensureMapping(int height);
@@ -192,6 +199,14 @@ private:
     SpectrogramRetainedSourceLayout buildRetainedSourceLayoutLocked(
         qint64 displayLeft,
         qint64 displayRight,
+        bool rollingMode) const;
+    RetainedRenderPlan buildRetainedRenderPlanLocked(
+        qint64 displayLeft,
+        qint64 displayRight,
+        qint64 renderableRight,
+        double drawX,
+        int drawPixels,
+        int height,
         bool rollingMode) const;
     void syncRetainedSourceTextureLocked(
         QQuickWindow *window,

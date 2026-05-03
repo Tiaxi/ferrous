@@ -2786,78 +2786,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && drawPixels > 0
                 && currentWindow != nullptr) {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
-                bool retainedSegmentsCoverVisibleRange = true;
-                const double targetScale =
-                    static_cast<double>(drawPixels)
-                    / static_cast<double>(std::max<qint64>(1, displayRight - displayLeft + 1));
-                int segmentIndex = 0;
-                qint64 runDisplayLeft = 0;
-                qint64 runDisplayRight = -1;
-                int runSlotLeft = -1;
-                int previousSlot = -2;
-                const auto flushRetainedSegment = [&]() {
-                    if (runDisplayRight < runDisplayLeft
-                        || runSlotLeft < 0) {
-                        runDisplayRight = -1;
-                        runSlotLeft = -1;
-                        previousSlot = -2;
-                        return;
-                    }
-                    if (segmentIndex >= static_cast<int>(retainedTextureSegments.size())) {
-                        retainedTextureSegmentsOverflowed = true;
-                        runDisplayRight = -1;
-                        runSlotLeft = -1;
-                        previousSlot = -2;
-                        return;
-                    }
-                    const int runWidth = static_cast<int>(runDisplayRight - runDisplayLeft + 1);
-                    const double targetX =
-                        drawX + static_cast<double>(runDisplayLeft - displayLeft) * targetScale;
-                    retainedTextureSegments[static_cast<size_t>(segmentIndex)] = RetainedRenderSegment{
-                        QRect(runSlotLeft, 0, runWidth, m_precomputedBinsPerColumn),
-                        QRectF(targetX, 0.0, static_cast<double>(runWidth) * targetScale, static_cast<double>(h)),
-                        true,
-                    };
-                    haveRetainedTextureSegments = true;
-                    segmentIndex += 1;
-                    runDisplayRight = -1;
-                    runSlotLeft = -1;
-                    previousSlot = -2;
-                };
-
-                for (qint64 displayIndex = displayLeft; displayIndex <= displayRight; ++displayIndex) {
-                    const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
-                    if (slot < 0) {
-                        retainedSegmentsCoverVisibleRange = false;
-                        flushRetainedSegment();
-                        continue;
-                    }
-
-                    if (runSlotLeft < 0) {
-                        runDisplayLeft = displayIndex;
-                        runDisplayRight = displayIndex;
-                        runSlotLeft = slot;
-                        previousSlot = slot;
-                        continue;
-                    }
-
-                    if (slot == previousSlot + 1) {
-                        runDisplayRight = displayIndex;
-                        previousSlot = slot;
-                        continue;
-                    }
-
-                    flushRetainedSegment();
-                    if (segmentIndex >= static_cast<int>(retainedTextureSegments.size())) {
-                        retainedTextureSegmentsOverflowed = true;
-                        break;
-                    }
-                    runDisplayLeft = displayIndex;
-                    runDisplayRight = displayIndex;
-                    runSlotLeft = slot;
-                    previousSlot = slot;
-                }
-                flushRetainedSegment();
+                const qint64 decodedVisibleRight = rollingMode
+                    ? displayRight
+                    : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+                const RetainedRenderPlan retainedPlan = buildRetainedRenderPlanLocked(
+                    displayLeft,
+                    displayRight,
+                    decodedVisibleRight,
+                    drawX,
+                    drawPixels,
+                    h,
+                    rollingMode);
+                retainedTextureSegments = retainedPlan.segments;
+                haveRetainedTextureSegments = retainedPlan.haveSegments;
+                retainedTextureSegmentsOverflowed = retainedPlan.overflowed;
+                bool retainedSegmentsCoverVisibleRange = retainedPlan.coversRange;
                 if (retainedTextureSegmentsOverflowed) {
                     // Sparse centered windows can contain more than two visible
                     // runs when evicted columns leave holes inside the viewport.
@@ -2867,9 +2810,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     haveRetainedTextureSegments = false;
                     retainedSegmentsCoverVisibleRange = false;
                 }
-                const qint64 decodedVisibleRight = rollingMode
-                    ? displayRight
-                    : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
                 const bool retainedUploadCoversVisibleRange =
                     rollingMode
                         ? m_gpuSourceTextureTrackToken == m_precomputedTrackToken
@@ -5045,6 +4985,102 @@ SpectrogramRetainedSourceLayout SpectrogramItem::buildRetainedSourceLayoutLocked
         .displayRight = displayRight,
         .rollingMode = rollingMode,
     };
+}
+
+SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLocked(
+    const qint64 displayLeft,
+    const qint64 displayRight,
+    const qint64 renderableRight,
+    const double drawX,
+    const int drawPixels,
+    const int height,
+    const bool rollingMode) const {
+    RetainedRenderPlan plan;
+    if (displayRight < displayLeft
+        || drawPixels <= 0
+        || height <= 0
+        || m_precomputedBinsPerColumn <= 0) {
+        return plan;
+    }
+
+    const qint64 scanRight = std::min(displayRight, renderableRight);
+    if (scanRight < displayLeft) {
+        return plan;
+    }
+
+    const double targetScale =
+        static_cast<double>(drawPixels)
+        / static_cast<double>(std::max<qint64>(1, displayRight - displayLeft + 1));
+    int segmentIndex = 0;
+    qint64 runDisplayLeft = 0;
+    qint64 runDisplayRight = -1;
+    int runSlotLeft = -1;
+    int previousSlot = -2;
+    plan.coversRange = true;
+    const auto flushRetainedSegment = [&]() {
+        if (runDisplayRight < runDisplayLeft
+            || runSlotLeft < 0) {
+            runDisplayRight = -1;
+            runSlotLeft = -1;
+            previousSlot = -2;
+            return;
+        }
+        if (segmentIndex >= static_cast<int>(plan.segments.size())) {
+            plan.overflowed = true;
+            runDisplayRight = -1;
+            runSlotLeft = -1;
+            previousSlot = -2;
+            return;
+        }
+        const int runWidth = static_cast<int>(runDisplayRight - runDisplayLeft + 1);
+        const double targetX =
+            drawX + static_cast<double>(runDisplayLeft - displayLeft) * targetScale;
+        plan.segments[static_cast<size_t>(segmentIndex)] = RetainedRenderSegment{
+            QRect(runSlotLeft, 0, runWidth, m_precomputedBinsPerColumn),
+            QRectF(targetX, 0.0, static_cast<double>(runWidth) * targetScale, static_cast<double>(height)),
+            true,
+        };
+        plan.haveSegments = true;
+        segmentIndex += 1;
+        runDisplayRight = -1;
+        runSlotLeft = -1;
+        previousSlot = -2;
+    };
+
+    for (qint64 displayIndex = displayLeft; displayIndex <= scanRight; ++displayIndex) {
+        const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
+        if (slot < 0) {
+            plan.coversRange = false;
+            flushRetainedSegment();
+            continue;
+        }
+
+        if (runSlotLeft < 0) {
+            runDisplayLeft = displayIndex;
+            runDisplayRight = displayIndex;
+            runSlotLeft = slot;
+            previousSlot = slot;
+            continue;
+        }
+
+        if (slot == previousSlot + 1) {
+            runDisplayRight = displayIndex;
+            previousSlot = slot;
+            continue;
+        }
+
+        flushRetainedSegment();
+        if (segmentIndex >= static_cast<int>(plan.segments.size())) {
+            plan.overflowed = true;
+            break;
+        }
+        runDisplayLeft = displayIndex;
+        runDisplayRight = displayIndex;
+        runSlotLeft = slot;
+        previousSlot = slot;
+    }
+    flushRetainedSegment();
+    return plan;
 }
 
 bool SpectrogramItem::retainedSourceTextureStateChangedLocked(

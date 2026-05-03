@@ -1177,6 +1177,7 @@ private slots:
     void spectrogramZoomFillWaitsForZoomOutVisibleColumns();
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
     void spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill();
     void spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill();
     void spectrogramFullModeFreezesRetainedBodyDuringZoomFill();
@@ -11297,6 +11298,43 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     QCOMPARE(item.m_zoomFillActive, false);
     QCOMPARE(item.m_zoomFillDataReady, false);
     delete node;
+}
+
+void QmlSmokeTest::spectrogramRetainedRenderPlanAllowsDecodedTailSlack() {
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(159);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 2366;
+    constexpr int decodedColumns = 2351;
+    QByteArray decoded(decodedColumns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        decoded, bins, 0, decodedColumns,
+        0, totalColumns, 48000, 4473, false,
+        true, 1, false, 1);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(
+            0,
+            totalColumns - 1,
+            decodedColumns - 1,
+            0.0,
+            1183,
+            159,
+            false);
+
+    QVERIFY(plan.haveSegments);
+    QVERIFY(!plan.overflowed);
+    QVERIFY2(
+        plan.coversRange,
+        "retained rendering should treat accepted decoded tail slack as covered");
+    QVERIFY(plan.segments[0].valid);
+    QCOMPARE(plan.segments[0].sourceRect, QRect(0, 0, decodedColumns, bins));
+    QVERIFY(!plan.segments[1].valid);
+    QVERIFY(plan.segments[0].targetRect.width() < 1183.0);
 }
 
 void QmlSmokeTest::spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame() {
