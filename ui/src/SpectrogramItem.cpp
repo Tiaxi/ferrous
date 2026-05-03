@@ -1769,33 +1769,61 @@ void SpectrogramItem::feedPrecomputedChunk(
     // through the active path.
     if (m_zoomFillActive) {
         const int screenWidth = std::max(static_cast<int>(width()), 1);
+        const double effectiveZoom = std::max(0.001, effectiveZoomLocked());
+        const qint64 visibleWindowCols = std::max<qint64>(
+            1,
+            static_cast<qint64>(std::ceil(
+                static_cast<double>(screenWidth) / effectiveZoom)));
+        const qint64 maxDecodedCount = m_precomputedMaxColumnIndex >= 0
+            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+            : static_cast<qint64>(0);
+        const qint64 estimateCount = std::max<qint64>(
+            static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+            static_cast<qint64>(1));
+        const qint64 estimatedTrackCols =
+            std::max(maxDecodedCount, estimateCount);
+
         // Two conditions must be met:
-        // 1. The ring has at least screenWidth columns (enough data
-        //    to fill the canvas).
-        // 2. The newest column in the ring covers the display's
-        //    right edge (playheadCol + screenWidth/2), so the
-        //    display won't have a black region on the right.
-        // Both are capped at totalEstimate for max zoom-out.
+        // 1. The ring has enough columns for the visible source span at
+        //    the pending zoom. At sub-1.0 effective zoom this can be
+        //    much wider than the widget in pixels.
+        // 2. The newest decoded column covers the target display right
+        //    edge, so the display won't reveal an unbacked region.
+        // Both are capped at the track estimate for max zoom-out.
         const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
-        const int fillWidth = m_precomputedTotalColumnsEstimate > 0
-            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
-            : screenWidth;
-        const bool ringHasEnoughColumns =
-            ringFill >= static_cast<qint64>(fillWidth) - 16;
+        const qint64 fillWidth =
+            std::min(visibleWindowCols, estimatedTrackCols);
+        const bool ringHasEnoughColumns = ringFill + 16 >= fillWidth;
 
         const double cps = m_precomputedHopSize > 0
             ? static_cast<double>(m_precomputedSampleRateHz)
                 / static_cast<double>(m_precomputedHopSize)
             : 1.0;
-        const qint64 displayRightCol = static_cast<qint64>(
-            std::max(0.0, m_positionSeconds) * cps) + screenWidth / 2;
-        const qint64 displayRightCapped =
-            m_precomputedTotalColumnsEstimate > 0
-                ? std::min(displayRightCol,
-                    static_cast<qint64>(m_precomputedTotalColumnsEstimate))
-                : displayRightCol;
+        const qint64 nowCol = static_cast<qint64>(
+            std::floor(std::max(0.0, m_positionSeconds) * cps));
+        qint64 displayRightCol;
+        const qint64 halfWindowCols = visibleWindowCols / 2;
+        if (m_displayMode == 1) {
+            if (visibleWindowCols * 100 / estimatedTrackCols >= 90) {
+                displayRightCol = estimatedTrackCols - 1;
+            } else {
+                const qint64 displayLeft = std::max<qint64>(
+                    0, nowCol - halfWindowCols);
+                displayRightCol = std::min(
+                    estimatedTrackCols - 1,
+                    displayLeft + visibleWindowCols - 1);
+            }
+        } else {
+            displayRightCol = nowCol + halfWindowCols;
+            if (m_precomputedTotalColumnsEstimate > 0) {
+                displayRightCol = std::min(
+                    displayRightCol,
+                    static_cast<qint64>(m_precomputedTotalColumnsEstimate) - 1);
+            }
+        }
         const bool ringCoversDisplayRight =
-            m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
+            static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 16
+            >= displayRightCol + 1;
 
         // Decode tail-end: the STFT window truncates the last few
         // columns so maxCol+1 stops short of the estimate by ~20–30

@@ -1174,6 +1174,7 @@ private slots:
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
     void spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage();
     void spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns();
+    void spectrogramZoomFillWaitsForZoomOutVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill();
     void spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill();
@@ -10856,6 +10857,63 @@ void QmlSmokeTest::spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns(
     QCOMPARE(bidirectionalMissingSpans[0].xEnd, 99);
     QCOMPARE(bidirectionalMissingSpans[1].xBegin, 201);
     QCOMPARE(bidirectionalMissingSpans[1].xEnd, 204);
+}
+
+void QmlSmokeTest::spectrogramZoomFillWaitsForZoomOutVisibleColumns() {
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(20);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 180;
+    constexpr quint64 trackToken = 95;
+
+    QByteArray baseline(120 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 120,
+        0, 360, 48000, 1024, false,
+        true, trackToken, false, 1);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 0.25;
+        item.m_renderZoomLevel = 0.25;
+        item.m_awaitingZoomData = false;
+        item.m_zoomFillActive = true;
+        item.m_zoomFillDataReady = false;
+        item.m_gpuDisplayImage =
+            QImage(100, 20, QImage::Format_ARGB32_Premultiplied);
+        item.m_gpuDisplayImage.fill(Qt::black);
+    }
+
+    QByteArray partialZoomOut(100 * bins, '\x55');
+    item.feedPrecomputedChunk(
+        partialZoomOut, bins, 0, 100,
+        0, totalColumns, 48000, 2048, false,
+        true, trackToken, false, 2);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedMaxColumnIndex, 99);
+        QVERIFY2(
+            !item.m_zoomFillDataReady,
+            "max zoom-out freeze must wait for the whole visible column range, "
+            "not only one screen-width of decoded columns");
+    }
+
+    QByteArray tailZoomOut((totalColumns - 100) * bins, '\x66');
+    item.feedPrecomputedChunk(
+        tailZoomOut, bins, 0, totalColumns - 100,
+        100, totalColumns, 48000, 2048, false,
+        false, trackToken, false, 2);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedMaxColumnIndex, totalColumns - 1);
+        QVERIFY(item.m_zoomFillDataReady);
+    }
 }
 
 void QmlSmokeTest::spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill() {
