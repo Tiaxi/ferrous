@@ -5114,6 +5114,74 @@ SpectrogramRetainedSourceLayout SpectrogramItem::buildRetainedSourceLayoutLocked
     };
 }
 
+QVector<SpectrogramItem::RetainedPageSpan> SpectrogramItem::buildRetainedPageSpansLocked(
+    const qint64 displayLeft,
+    const qint64 displayRight,
+    const qint64 renderableRight,
+    const bool rollingMode) const {
+    QVector<RetainedPageSpan> spans;
+    if (displayRight < displayLeft
+        || m_precomputedBinsPerColumn <= 0
+        || kRetainedSourcePageWidth <= 0) {
+        return spans;
+    }
+
+    const qint64 scanRight = std::min(displayRight, renderableRight);
+    if (scanRight < displayLeft) {
+        return spans;
+    }
+
+    RetainedPageSpan current;
+    bool haveCurrent = false;
+    int previousPageX = -1;
+    qint64 previousDisplay = -1;
+
+    const auto flushSpan = [&]() {
+        if (haveCurrent && current.displayRight >= current.displayLeft) {
+            spans.push_back(current);
+        }
+        current = RetainedPageSpan{};
+        haveCurrent = false;
+        previousPageX = -1;
+        previousDisplay = -1;
+    };
+
+    for (qint64 displayIndex = displayLeft; displayIndex <= scanRight; ++displayIndex) {
+        const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
+        if (slot < 0) {
+            flushSpan();
+            continue;
+        }
+
+        const qint64 pageIndex = slot / kRetainedSourcePageWidth;
+        const int pageX = slot % kRetainedSourcePageWidth;
+        const bool extendsCurrent =
+            haveCurrent
+            && current.pageIndex == pageIndex
+            && pageX == previousPageX + 1
+            && displayIndex == previousDisplay + 1;
+        if (!extendsCurrent) {
+            flushSpan();
+            current = RetainedPageSpan{
+                .pageIndex = pageIndex,
+                .pageXBegin = pageX,
+                .pageXEnd = pageX,
+                .displayLeft = displayIndex,
+                .displayRight = displayIndex,
+            };
+            haveCurrent = true;
+        } else {
+            current.pageXEnd = pageX;
+            current.displayRight = displayIndex;
+        }
+        previousPageX = pageX;
+        previousDisplay = displayIndex;
+    }
+
+    flushSpan();
+    return spans;
+}
+
 SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLocked(
     const qint64 displayLeft,
     const qint64 displayRight,

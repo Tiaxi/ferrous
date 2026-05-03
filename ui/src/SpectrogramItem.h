@@ -19,6 +19,7 @@
 #include <array>
 #include <chrono>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -144,6 +145,7 @@ protected:
 
 private:
     static constexpr int kGradientTableSize = 2048;
+    static constexpr int kRetainedSourcePageWidth = 2048;
 
     struct RetainedRenderSegment {
         QRect sourceRect;
@@ -156,6 +158,30 @@ private:
         bool haveSegments{false};
         bool overflowed{false};
         bool coversRange{false};
+    };
+
+    struct RetainedPageSpan {
+        qint64 pageIndex{0};
+        int pageXBegin{0};
+        int pageXEnd{-1};
+        qint64 displayLeft{0};
+        qint64 displayRight{-1};
+    };
+
+    struct RetainedSourcePageKey {
+        quint64 trackToken{0};
+        bool rollingMode{false};
+        qint64 pageIndex{0};
+    };
+
+    struct RetainedSourcePageState {
+        RetainedSourcePageKey key;
+        SpectrogramSourceTexture texture;
+        int width{0};
+        int binsPerColumn{0};
+        qint64 uploadedDisplayLeft{0};
+        qint64 uploadedDisplayRight{-1};
+        QVector<SpectrogramSourceUploadSpan> dirtySpans;
     };
 
     void rebuildPalette();
@@ -199,6 +225,11 @@ private:
     SpectrogramRetainedSourceLayout buildRetainedSourceLayoutLocked(
         qint64 displayLeft,
         qint64 displayRight,
+        bool rollingMode) const;
+    QVector<RetainedPageSpan> buildRetainedPageSpansLocked(
+        qint64 displayLeft,
+        qint64 displayRight,
+        qint64 renderableRight,
         bool rollingMode) const;
     RetainedRenderPlan buildRetainedRenderPlanLocked(
         qint64 displayLeft,
@@ -396,6 +427,7 @@ private:
     qint64 m_gpuSourceTextureRingOldestSeq{-1};
     qint64 m_gpuSourceTextureMinColumnIndex{0};
     qint64 m_gpuSourceTextureMaxColumnIndex{-1};
+    std::vector<std::unique_ptr<RetainedSourcePageState>> m_gpuSourcePages;
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenDisplayImage;
     std::array<RetainedRenderSegment, 2> m_zoomFillFrozenRetainedSegments{};

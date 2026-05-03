@@ -30,9 +30,11 @@ Completed in this checkpoint:
 - [x] Keep CPU display-image fallback for software scene graph, unsupported renderer, texture-limit fallback, and retained segment overflow.
 - [x] Add Qt tests for retained full mode avoiding CPU display image on OpenGL.
 - [x] Update max-zoom reveal test intent from warmed CPU image to direct retained full-mode reveal.
+- [x] Add retained source page constants/state scaffolding.
+- [x] Add pure retained page span planning across single-page, page-boundary, and rolling-wrap ranges.
 
 Not completed yet:
-- [ ] Replace the monolithic retained source texture with retained source pages.
+- [ ] Upload retained source data into retained source pages.
 - [ ] Replace the fixed two-segment retained render plan with a dynamic segment list.
 - [ ] Pool dynamic retained segment nodes/materials.
 - [ ] Retarget `full`, `texture-node`, and `shader-source-only` debug modes to page-backed source textures.
@@ -216,7 +218,7 @@ Observed on 2026-05-03:
 - Modify: `ui/src/SpectrogramItem.cpp`
 - Modify: `ui/tests/tst_qml_smoke.cpp`
 
-- [ ] **Step 1: Add page constants and structs**
+- [x] **Step 1: Add page constants and structs**
 
 Add to `SpectrogramItem` private section:
 
@@ -248,7 +250,7 @@ QVector<std::unique_ptr<RetainedSourcePageState>> m_gpuSourcePages;
 
 If `std::unique_ptr` is used, include `<memory>` in `ui/src/SpectrogramItem.h`.
 
-- [ ] **Step 2: Write page span planning tests**
+- [x] **Step 2: Write page span planning tests**
 
 Add tests in `ui/tests/tst_qml_smoke.cpp`:
 
@@ -263,7 +265,7 @@ Expected invariants:
 - display `2040..2055` maps to two page spans
 - rolling wrap maps to two or more page spans without forcing CPU fallback
 
-- [ ] **Step 3: Run tests and verify RED**
+- [x] **Step 3: Run tests and verify RED**
 
 Run:
 
@@ -277,7 +279,7 @@ Expected before implementation:
 FAIL: page planning helper/test symbols are missing or return empty plans
 ```
 
-- [ ] **Step 4: Implement pure page planner**
+- [x] **Step 4: Implement pure page planner**
 
 Add a helper that does not require an OpenGL scene graph:
 
@@ -304,7 +306,7 @@ The helper must:
 - split whenever ring slots are non-contiguous within a page
 - preserve `qint64` display indices
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 Run:
 
@@ -318,7 +320,7 @@ Expected:
 100% tests passed, 0 tests failed out of 3
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add ui/src/SpectrogramItem.h ui/src/SpectrogramItem.cpp ui/tests/tst_qml_smoke.cpp

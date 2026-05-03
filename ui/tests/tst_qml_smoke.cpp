@@ -1127,6 +1127,9 @@ private slots:
     void spectrogramRetainedSourceLayoutPreserves64BitColumnRange();
     void spectrogramRetainedSourceUploadPlannerMergesAdjacentDirtyColumns();
     void spectrogramRetainedSourceUploadPlannerTreatsWindowChangeAsTextureStateChange();
+    void spectrogramRetainedPagePlanSplitsSinglePageRange();
+    void spectrogramRetainedPagePlanSplitsAcrossPageBoundary();
+    void spectrogramRetainedPagePlanSplitsRollingWrap();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
     void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
@@ -7172,6 +7175,95 @@ void QmlSmokeTest::spectrogramRetainedSourceUploadPlannerTreatsWindowChangeAsTex
     QCOMPARE(forcedSpans[0].xEnd, columns - 1);
 
     item.m_gpuSourceTexture.m_texture = nullptr;
+}
+
+void QmlSmokeTest::spectrogramRetainedPagePlanSplitsSinglePageRange() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = SpectrogramItem::kRetainedSourcePageWidth;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 19, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const QVector<SpectrogramItem::RetainedPageSpan> spans =
+        item.buildRetainedPageSpansLocked(0, columns - 1, columns - 1, false);
+
+    QCOMPARE(spans.size(), 1);
+    QCOMPARE(spans[0].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(spans[0].pageXBegin, 0);
+    QCOMPARE(spans[0].pageXEnd, SpectrogramItem::kRetainedSourcePageWidth - 1);
+    QCOMPARE(spans[0].displayLeft, static_cast<qint64>(0));
+    QCOMPARE(spans[0].displayRight, static_cast<qint64>(columns - 1));
+}
+
+void QmlSmokeTest::spectrogramRetainedPagePlanSplitsAcrossPageBoundary() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = SpectrogramItem::kRetainedSourcePageWidth + 64;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 23, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const QVector<SpectrogramItem::RetainedPageSpan> spans =
+        item.buildRetainedPageSpansLocked(2040, 2055, 2055, false);
+
+    QCOMPARE(spans.size(), 2);
+    QCOMPARE(spans[0].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(spans[0].pageXBegin, 2040);
+    QCOMPARE(spans[0].pageXEnd, 2047);
+    QCOMPARE(spans[0].displayLeft, static_cast<qint64>(2040));
+    QCOMPARE(spans[0].displayRight, static_cast<qint64>(2047));
+    QCOMPARE(spans[1].pageIndex, static_cast<qint64>(1));
+    QCOMPARE(spans[1].pageXBegin, 0);
+    QCOMPARE(spans[1].pageXEnd, 7);
+    QCOMPARE(spans[1].displayLeft, static_cast<qint64>(2048));
+    QCOMPARE(spans[1].displayRight, static_cast<qint64>(2055));
+}
+
+void QmlSmokeTest::spectrogramRetainedPagePlanSplitsRollingWrap() {
+    SpectrogramItem item;
+    item.setDisplayMode(0); // Rolling
+
+    QMutexLocker lock(&item.m_stateMutex);
+    item.m_precomputedBinsPerColumn = 4;
+    item.m_precomputedTrackToken = 31;
+    item.m_ringCapacity = 8;
+    item.m_ringOldestSeq = 4;
+    item.m_ringWriteSeq = 12;
+    item.m_ringColumnId.assign(8, -1);
+    item.m_ringSequenceId.assign(8, -1);
+    item.m_ringTrackToken.assign(8, 0);
+    for (qint64 seq = item.m_ringOldestSeq; seq < item.m_ringWriteSeq; ++seq) {
+        const int slot = static_cast<int>(seq % item.m_ringCapacity);
+        item.m_ringColumnId[static_cast<size_t>(slot)] = static_cast<qint32>(seq);
+        item.m_ringSequenceId[static_cast<size_t>(slot)] = seq;
+        item.m_ringTrackToken[static_cast<size_t>(slot)] = item.m_precomputedTrackToken;
+    }
+
+    const QVector<SpectrogramItem::RetainedPageSpan> spans =
+        item.buildRetainedPageSpansLocked(6, 11, 11, true);
+
+    QCOMPARE(spans.size(), 2);
+    QCOMPARE(spans[0].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(spans[0].pageXBegin, 6);
+    QCOMPARE(spans[0].pageXEnd, 7);
+    QCOMPARE(spans[0].displayLeft, static_cast<qint64>(6));
+    QCOMPARE(spans[0].displayRight, static_cast<qint64>(7));
+    QCOMPARE(spans[1].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(spans[1].pageXBegin, 0);
+    QCOMPARE(spans[1].pageXEnd, 3);
+    QCOMPARE(spans[1].displayLeft, static_cast<qint64>(8));
+    QCOMPARE(spans[1].displayRight, static_cast<qint64>(11));
 }
 
 void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource() {
