@@ -91,14 +91,14 @@ def append_float(target: object, fields: dict[str, str], key: str) -> None:
     if not isinstance(target, list) or key not in fields:
         return
     try:
-        target.append(float(fields[key]))
+        target.append(float(fields[key].replace(",", ".")))
     except ValueError:
         return
 
 
 def int_value(fields: dict[str, str], key: str) -> int:
     try:
-        return int(float(fields.get(key, "0")))
+        return int(float(fields.get(key, "0").replace(",", ".")))
     except ValueError:
         return 0
 
