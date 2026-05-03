@@ -406,11 +406,19 @@ private:
 
     struct BridgePollRunResult {
         int processedAnalysisFrames{0};
+        int processedPrecomputedFrames{0};
         int processedTreeFrames{0};
         int processedSearchFrames{0};
         int processedEvents{0};
         qsizetype processedAnalysisBytes{0};
+        qsizetype processedPrecomputedBytes{0};
+        double analysisMs{0.0};
+        double precomputedMs{0.0};
+        double treeMs{0.0};
+        double searchMs{0.0};
+        double eventMs{0.0};
         bool analysisCapSaturated{false};
+        bool precomputedCapSaturated{false};
         bool treeCapSaturated{false};
         bool searchCapSaturated{false};
         bool eventCapSaturated{false};
@@ -418,6 +426,7 @@ private:
 
         bool anyWorkProcessed() const {
             return processedAnalysisFrames > 0
+                || processedPrecomputedFrames > 0
                 || processedTreeFrames > 0
                 || processedSearchFrames > 0
                 || processedEvents > 0;
@@ -426,6 +435,7 @@ private:
         bool shouldContinueImmediately() const {
             return budgetExhausted
                 || analysisCapSaturated
+                || precomputedCapSaturated
                 || treeCapSaturated
                 || searchCapSaturated
                 || eventCapSaturated;

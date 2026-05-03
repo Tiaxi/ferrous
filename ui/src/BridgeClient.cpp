@@ -1547,124 +1547,156 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         }
         return false;
     };
+    const auto elapsedMs = [](const QElapsedTimer &timer) {
+        return static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
+    };
 
     constexpr int kMaxAnalysisFramesPerPass = 8;
-    while (result.processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
-        if (markBudgetExhaustedIfNeeded()) {
-            break;
+    {
+        QElapsedTimer phaseTimer;
+        phaseTimer.start();
+        while (result.processedAnalysisFrames < kMaxAnalysisFramesPerPass) {
+            if (markBudgetExhaustedIfNeeded()) {
+                break;
+            }
+            std::size_t len = 0;
+            std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
+            if (framePtr == nullptr || len == 0) {
+                break;
+            }
+            result.processedAnalysisFrames++;
+            const QByteArray chunk(
+                reinterpret_cast<const char *>(framePtr),
+                static_cast<qsizetype>(len));
+            result.processedAnalysisBytes += chunk.size();
+            ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
+            processAnalysisBytes(chunk);
         }
-        std::size_t len = 0;
-        std::uint8_t *framePtr = ferrous_ffi_bridge_pop_analysis_frame(m_ffiBridge, &len);
-        if (framePtr == nullptr || len == 0) {
-            break;
-        }
-        result.processedAnalysisFrames++;
-        const QByteArray chunk(
-            reinterpret_cast<const char *>(framePtr),
-            static_cast<qsizetype>(len));
-        result.processedAnalysisBytes += chunk.size();
-        ferrous_ffi_bridge_free_analysis_frame(framePtr, len);
-        processAnalysisBytes(chunk);
+        result.analysisMs = elapsedMs(phaseTimer);
     }
     result.analysisCapSaturated = result.processedAnalysisFrames >= kMaxAnalysisFramesPerPass;
 
     // Drain precomputed spectrogram chunks.
     constexpr int kMaxPrecomputedPerPass = 4;
-    int precomputedPopped = 0;
-    for (int pci = 0; pci < kMaxPrecomputedPerPass; ++pci) {
-        if (markBudgetExhaustedIfNeeded()) {
-            break;
+    {
+        QElapsedTimer phaseTimer;
+        phaseTimer.start();
+        for (int pci = 0; pci < kMaxPrecomputedPerPass; ++pci) {
+            if (markBudgetExhaustedIfNeeded()) {
+                break;
+            }
+            std::size_t len = 0;
+            std::uint8_t *ptr = ferrous_ffi_bridge_pop_precomputed_spectrogram(m_ffiBridge, &len);
+            if (ptr == nullptr || len == 0) {
+                break;
+            }
+            result.processedPrecomputedFrames++;
+            const QByteArray raw(
+                reinterpret_cast<const char *>(ptr),
+                static_cast<qsizetype>(len));
+            result.processedPrecomputedBytes += raw.size();
+            ferrous_ffi_bridge_free_precomputed_spectrogram(ptr, len);
+            parsePrecomputedSpectrogramFrame(raw);
         }
-        std::size_t len = 0;
-        std::uint8_t *ptr = ferrous_ffi_bridge_pop_precomputed_spectrogram(m_ffiBridge, &len);
-        if (ptr == nullptr || len == 0) {
-            break;
-        }
-        precomputedPopped++;
-        const QByteArray raw(
-            reinterpret_cast<const char *>(ptr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_precomputed_spectrogram(ptr, len);
-        parsePrecomputedSpectrogramFrame(raw);
+        result.precomputedMs = elapsedMs(phaseTimer);
     }
-    if (precomputedPopped > 0) {
-        FERROUS_SPECTROGRAM_LOGF(stderr, "[Qt-drain] popped %d precomputed frames\n", precomputedPopped);
+    result.precomputedCapSaturated =
+        result.processedPrecomputedFrames >= kMaxPrecomputedPerPass;
+    if (result.processedPrecomputedFrames > 0) {
+        FERROUS_SPECTROGRAM_LOGF(stderr,
+            "[Qt-drain] popped %d precomputed frames\n",
+            result.processedPrecomputedFrames);
     }
 
     constexpr int kMaxTreeFramesPerPass = 4;
-    while (!result.budgetExhausted && result.processedTreeFrames < kMaxTreeFramesPerPass) {
-        if (markBudgetExhaustedIfNeeded()) {
-            break;
+    {
+        QElapsedTimer phaseTimer;
+        phaseTimer.start();
+        while (!result.budgetExhausted && result.processedTreeFrames < kMaxTreeFramesPerPass) {
+            if (markBudgetExhaustedIfNeeded()) {
+                break;
+            }
+            std::size_t len = 0;
+            std::uint32_t version = 0;
+            std::uint8_t *treePtr = ferrous_ffi_bridge_pop_library_tree(m_ffiBridge, &len, &version);
+            if (treePtr == nullptr || len == 0) {
+                break;
+            }
+            result.processedTreeFrames++;
+            const QByteArray treeBytes(
+                reinterpret_cast<const char *>(treePtr),
+                static_cast<qsizetype>(len));
+            ferrous_ffi_bridge_free_library_tree(treePtr, len);
+            const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
+                ? std::numeric_limits<int>::max()
+                : static_cast<int>(version);
+            applyLibraryTreeFrame(versionInt, treeBytes);
         }
-        std::size_t len = 0;
-        std::uint32_t version = 0;
-        std::uint8_t *treePtr = ferrous_ffi_bridge_pop_library_tree(m_ffiBridge, &len, &version);
-        if (treePtr == nullptr || len == 0) {
-            break;
-        }
-        result.processedTreeFrames++;
-        const QByteArray treeBytes(
-            reinterpret_cast<const char *>(treePtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_library_tree(treePtr, len);
-        const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
-            ? std::numeric_limits<int>::max()
-            : static_cast<int>(version);
-        applyLibraryTreeFrame(versionInt, treeBytes);
+        result.treeMs = elapsedMs(phaseTimer);
     }
     result.treeCapSaturated = result.processedTreeFrames >= kMaxTreeFramesPerPass;
 
     constexpr int kMaxSearchFramesPerPass = 4;
-    while (!result.budgetExhausted && result.processedSearchFrames < kMaxSearchFramesPerPass) {
-        if (markBudgetExhaustedIfNeeded()) {
-            break;
+    {
+        QElapsedTimer phaseTimer;
+        phaseTimer.start();
+        while (!result.budgetExhausted && result.processedSearchFrames < kMaxSearchFramesPerPass) {
+            if (markBudgetExhaustedIfNeeded()) {
+                break;
+            }
+            QElapsedTimer popTimer;
+            popTimer.start();
+            std::size_t len = 0;
+            std::uint32_t seq = 0;
+            std::uint8_t *searchPtr = ferrous_ffi_bridge_pop_search_results(
+                m_ffiBridge,
+                &len,
+                &seq);
+            if (searchPtr == nullptr || len == 0) {
+                break;
+            }
+            result.processedSearchFrames++;
+            const QByteArray payload(
+                reinterpret_cast<const char *>(searchPtr),
+                static_cast<qsizetype>(len));
+            ferrous_ffi_bridge_free_search_results(searchPtr, len);
+            enqueueSearchFrame(seq, payload, popTimer.elapsed());
         }
-        QElapsedTimer popTimer;
-        popTimer.start();
-        std::size_t len = 0;
-        std::uint32_t seq = 0;
-        std::uint8_t *searchPtr = ferrous_ffi_bridge_pop_search_results(
-            m_ffiBridge,
-            &len,
-            &seq);
-        if (searchPtr == nullptr || len == 0) {
-            break;
-        }
-        result.processedSearchFrames++;
-        const QByteArray payload(
-            reinterpret_cast<const char *>(searchPtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_search_results(searchPtr, len);
-        enqueueSearchFrame(seq, payload, popTimer.elapsed());
+        result.searchMs = elapsedMs(phaseTimer);
     }
     result.searchCapSaturated = result.processedSearchFrames >= kMaxSearchFramesPerPass;
 
     constexpr int kMaxEventsPerPass = 3;
-    while (!result.budgetExhausted && result.processedEvents < kMaxEventsPerPass) {
-        if (markBudgetExhaustedIfNeeded()) {
-            break;
-        }
-        std::size_t len = 0;
-        std::uint8_t *packetPtr = ferrous_ffi_bridge_pop_binary_event(m_ffiBridge, &len);
-        if (packetPtr == nullptr || len == 0) {
-            break;
-        }
-        result.processedEvents++;
-        const QByteArray packet(
-            reinterpret_cast<const char *>(packetPtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_binary_event(packetPtr, len);
+    {
+        QElapsedTimer phaseTimer;
+        phaseTimer.start();
+        while (!result.budgetExhausted && result.processedEvents < kMaxEventsPerPass) {
+            if (markBudgetExhaustedIfNeeded()) {
+                break;
+            }
+            std::size_t len = 0;
+            std::uint8_t *packetPtr = ferrous_ffi_bridge_pop_binary_event(m_ffiBridge, &len);
+            if (packetPtr == nullptr || len == 0) {
+                break;
+            }
+            result.processedEvents++;
+            const QByteArray packet(
+                reinterpret_cast<const char *>(packetPtr),
+                static_cast<qsizetype>(len));
+            ferrous_ffi_bridge_free_binary_event(packetPtr, len);
 
-        BinaryBridgeCodec::DecodedSnapshot decoded;
-        QString decodeError;
-        if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
-            logDiagnostic(
-                QStringLiteral("bridge"),
-                QStringLiteral("snapshot decode error: %1").arg(decodeError));
-            emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
-            continue;
+            BinaryBridgeCodec::DecodedSnapshot decoded;
+            QString decodeError;
+            if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
+                logDiagnostic(
+                    QStringLiteral("bridge"),
+                    QStringLiteral("snapshot decode error: %1").arg(decodeError));
+                emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
+                continue;
+            }
+            processBinarySnapshot(decoded);
         }
-        processBinarySnapshot(decoded);
+        result.eventMs = elapsedMs(phaseTimer);
     }
     result.eventCapSaturated = result.processedEvents >= kMaxEventsPerPass;
 
@@ -1925,13 +1957,20 @@ void BridgeClient::pollInProcessBridge() {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("ui-prof"),
                 QStringLiteral(
-                    "bridge_poll ms=%1 analysis_frames=%2 analysis_kb=%3 tree_frames=%4 search_frames=%5 events=%6 budget_exhausted=%7 saturated=%8 wake_notifier=%9 timer_active=%10")
+                    "bridge_poll ms=%1 analysis_frames=%2 analysis_kb=%3 precomputed_frames=%4 precomputed_kb=%5 tree_frames=%6 search_frames=%7 events=%8 analysis_ms=%9 precomputed_ms=%10 tree_ms=%11 search_ms=%12 event_ms=%13 budget_exhausted=%14 saturated=%15 wake_notifier=%16 timer_active=%17")
                     .arg(pollMs, 0, 'f', 2)
                     .arg(run.processedAnalysisFrames)
                     .arg(static_cast<double>(run.processedAnalysisBytes) / 1024.0, 0, 'f', 1)
+                    .arg(run.processedPrecomputedFrames)
+                    .arg(static_cast<double>(run.processedPrecomputedBytes) / 1024.0, 0, 'f', 1)
                     .arg(run.processedTreeFrames)
                     .arg(run.processedSearchFrames)
                     .arg(run.processedEvents)
+                    .arg(run.analysisMs, 0, 'f', 2)
+                    .arg(run.precomputedMs, 0, 'f', 2)
+                    .arg(run.treeMs, 0, 'f', 2)
+                    .arg(run.searchMs, 0, 'f', 2)
+                    .arg(run.eventMs, 0, 'f', 2)
                     .arg(run.budgetExhausted ? 1 : 0)
                     .arg(saturated ? 1 : 0)
                     .arg(m_bridgeWakeNotifier != nullptr ? 1 : 0)

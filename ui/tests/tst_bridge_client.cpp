@@ -50,6 +50,7 @@ private slots:
     void queuePathFallbackUsesCachedFirstIndex();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
+    void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
     void spectrogramProfileSummaryLoggingStaysAvailableWithoutDetailedTrace();
     void diagnosticsWritesBatchOffHotPath();
@@ -224,6 +225,18 @@ void BridgeClientTest::scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRea
     QVERIFY(!client.m_bridgeWakeNotifier->isEnabled());
 
     isolateBridgeClient(client);
+}
+
+void BridgeClientTest::bridgePollRunResultCountsPrecomputedSpectrogramWork() {
+    BridgeClient::BridgePollRunResult result;
+    result.processedPrecomputedFrames = 1;
+    result.processedPrecomputedBytes = 4096;
+
+    QVERIFY(result.anyWorkProcessed());
+    QVERIFY(!result.shouldContinueImmediately());
+
+    result.precomputedCapSaturated = true;
+    QVERIFY(result.shouldContinueImmediately());
 }
 
 void BridgeClientTest::spectrogramDetailedTraceLoggingRequiresExplicitOptIn() {

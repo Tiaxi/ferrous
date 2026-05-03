@@ -47,6 +47,8 @@ def parse_log(path: Path) -> dict[str, object]:
         "texture_upload_ms": [],
         "frame_gap_ms": [],
         "event_stall_ms": [],
+        "bridge_poll_ms": [],
+        "bridge_precomputed_ms": [],
         "paths": Counter(),
         "fallbacks": Counter(),
         "cpu_rebuilds": 0,
@@ -81,8 +83,13 @@ def parse_log(path: Path) -> dict[str, object]:
             )
         elif "[ui-spectrogram] smoothness_window" in line:
             append_float(metrics["frame_gap_ms"], fields, "max_gap_ms")
+        elif "[ui-spectrogram] frame_gap" in line:
+            append_float(metrics["frame_gap_ms"], fields, "ms")
         elif "[ui-prof] event_loop_stall" in line:
             append_float(metrics["event_stall_ms"], fields, "ms")
+        elif "[ui-prof] bridge_poll" in line:
+            append_float(metrics["bridge_poll_ms"], fields, "ms")
+            append_float(metrics["bridge_precomputed_ms"], fields, "precomputed_ms")
 
     return metrics
 
@@ -116,6 +123,8 @@ def summarize(label: str, metrics: dict[str, object]) -> list[str]:
     texture = list_value(metrics, "texture_upload_ms")
     gaps = list_value(metrics, "frame_gap_ms")
     stalls = list_value(metrics, "event_stall_ms")
+    bridge = list_value(metrics, "bridge_poll_ms")
+    bridge_precomputed = list_value(metrics, "bridge_precomputed_ms")
     paths = counter_value(metrics, "paths")
     fallbacks = counter_value(metrics, "fallbacks")
 
@@ -127,6 +136,9 @@ def summarize(label: str, metrics: dict[str, object]) -> list[str]:
         f"retained-upload avg={avg(upload):.3f}ms texture-upload avg={avg(texture):.3f}ms",
         f"  frame gaps count={len(gaps)} p90={percentile(gaps, 0.90):.1f}ms max={max(gaps, default=0.0):.1f}ms "
         f"event stalls count={len(stalls)} max={max(stalls, default=0.0):.1f}ms",
+        f"  bridge polls count={len(bridge)} p90={percentile(bridge, 0.90):.1f}ms "
+        f"max={max(bridge, default=0.0):.1f}ms precomputed avg={avg(bridge_precomputed):.3f}ms "
+        f"max={max(bridge_precomputed, default=0.0):.1f}ms",
         f"  cpu rebuilds={metrics['cpu_rebuilds']} retained resets={metrics['retained_resets']} "
         f"retained uploaded cols={metrics['retained_upload_cols']}",
         f"  paths={format_counter(paths)}",
