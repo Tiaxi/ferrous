@@ -2805,11 +2805,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         std::chrono::steady_clock::now() - retainedUploadStart).count();
                     profileRetainedTextureReset =
                         profileRetainedTextureReset
-                        || (!retainedHadTexture && m_gpuSourceTexture.texture() != nullptr);
+                        || (!retainedHadTexture && m_gpuSourceTexture.texture() != nullptr)
+                        || m_gpuSourcePageTextureReset;
                     profileRetainedUploadSpanCount += static_cast<int>(m_gpuSourceUploadSpans.size());
                     for (const SpectrogramSourceUploadSpan &span : m_gpuSourceUploadSpans) {
                         profileRetainedUploadColumns += std::max(0, span.xEnd - span.xBegin + 1);
                     }
+                    profileRetainedUploadSpanCount += m_gpuSourcePageUploadSpanCount;
+                    profileRetainedUploadColumns += m_gpuSourcePageUploadColumns;
 #endif
                 }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -5473,6 +5476,9 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
         || displayRight < displayLeft) {
         return;
     }
+    m_gpuSourcePageUploadSpanCount = 0;
+    m_gpuSourcePageUploadColumns = 0;
+    m_gpuSourcePageTextureReset = false;
 
     const int pageWidth = retainedSourcePageWidthForGpuLimit(window);
     if (m_precomputedBinsPerColumn > gpuMaxTextureColumns(window)) {
@@ -5529,10 +5535,15 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             page->texture.release();
             page->uploadedDisplayLeft = 0;
             page->uploadedDisplayRight = -1;
+            m_gpuSourcePageTextureReset = true;
         }
+        const bool hadPageTexture = page->texture.texture() != nullptr;
         if (!page->texture.ensureCreated(window, pageWidth, m_precomputedBinsPerColumn)) {
             continue;
         }
+        m_gpuSourcePageTextureReset =
+            m_gpuSourcePageTextureReset
+            || (!hadPageTexture && page->texture.texture() != nullptr);
         page->width = pageWidth;
         page->binsPerColumn = m_precomputedBinsPerColumn;
 
@@ -5565,6 +5576,8 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
         const SpectrogramSourceUploadSpan uploadedSpan{span.pageXBegin, span.pageXEnd};
         page->texture.noteUploadedSpan(uploadedSpan);
         page->dirtySpans.push_back(uploadedSpan);
+        m_gpuSourcePageUploadSpanCount += 1;
+        m_gpuSourcePageUploadColumns += spanWidth;
         if (page->uploadedDisplayRight < page->uploadedDisplayLeft) {
             page->uploadedDisplayLeft = span.displayLeft;
             page->uploadedDisplayRight = span.displayRight;
@@ -5581,6 +5594,9 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
     const qint64 displayRight,
     const bool rollingMode) {
     m_gpuSourceUploadSpans.clear();
+    m_gpuSourcePageUploadSpanCount = 0;
+    m_gpuSourcePageUploadColumns = 0;
+    m_gpuSourcePageTextureReset = false;
     if (window == nullptr
         || m_ringCapacity <= 0
         || m_precomputedBinsPerColumn <= 0

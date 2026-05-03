@@ -446,6 +446,9 @@ private:
     SpectrogramSourceTexture m_gpuSourceTexture;
     QByteArray m_gpuSourceUploadRgba;
     QVector<SpectrogramSourceUploadSpan> m_gpuSourceUploadSpans;
+    int m_gpuSourcePageUploadSpanCount{0};
+    int m_gpuSourcePageUploadColumns{0};
+    bool m_gpuSourcePageTextureReset{false};
     qint64 m_gpuSourceTextureDisplayLeft{0};
     qint64 m_gpuSourceTextureDisplayRight{-1};
     bool m_gpuSourceTextureRolling{false};

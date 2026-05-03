@@ -370,7 +370,7 @@ Add page-oriented sync in `syncRetainedSourceTextureLocked()` while retaining th
 
 Keep the existing monolithic helper available only until all render routing has moved to pages.
 
-- [ ] **Step 4: Update telemetry**
+- [x] **Step 4: Update telemetry**
 
 Increment existing fields:
 - `retained_reset` when a page texture is created/recreated
@@ -383,7 +383,7 @@ Increment existing fields:
 ./scripts/run-tests.sh --ui-only
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add ui/src/SpectrogramItem.h ui/src/SpectrogramItem.cpp ui/tests/tst_qml_smoke.cpp
