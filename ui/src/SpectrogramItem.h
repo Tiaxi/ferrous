@@ -168,6 +168,14 @@ private:
         qint64 displayRight{-1};
     };
 
+    enum class RetainedPageResetReason {
+        None,
+        MissingPage,
+        PageWidthChanged,
+        BinsChanged,
+        UploadReset,
+    };
+
     struct RetainedPageUploadSpan {
         qint64 pageIndex{0};
         int pageXBegin{0};
@@ -175,6 +183,7 @@ private:
         qint64 displayLeft{0};
         qint64 displayRight{-1};
         bool resetPage{false};
+        RetainedPageResetReason resetReason{RetainedPageResetReason::None};
     };
 
     struct RetainedSourcePageKey {
@@ -199,6 +208,7 @@ private:
     bool ensureZoomFillSnapshotImageLocked();
     void captureZoomFillFrozenCacheLocked();
     void clearZoomFillFrozenCacheLocked();
+    static const char *retainedPageResetReasonName(RetainedPageResetReason reason);
     void invalidateLegacyRetainedSourceTextureStateLocked();
     void invalidateRetainedSourceTextureStateLocked();
     void invalidateRenderCachesLocked();
@@ -466,6 +476,7 @@ private:
     int m_gpuSourcePageUploadSpanCount{0};
     int m_gpuSourcePageUploadColumns{0};
     bool m_gpuSourcePageTextureReset{false};
+    RetainedPageResetReason m_gpuSourcePageResetReason{RetainedPageResetReason::None};
     qint64 m_gpuSourceTextureDisplayLeft{0};
     qint64 m_gpuSourceTextureDisplayRight{-1};
     bool m_gpuSourceTextureRolling{false};

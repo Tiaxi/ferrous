@@ -2565,6 +2565,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     double profileOverlayTextureUploadMs = 0.0;
     const char *profilePaintPath = "empty";
     const char *profileFallbackReason = "none";
+    const char *profileRetainedResetReason = "none";
     bool profileCpuDisplayImageRebuilt = false;
     bool profileRetainedTextureReset = false;
     int profileRetainedUploadSpanCount = 0;
@@ -2947,6 +2948,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     }
                     profileRetainedUploadSpanCount += m_gpuSourcePageUploadSpanCount;
                     profileRetainedUploadColumns += m_gpuSourcePageUploadColumns;
+                    if (m_gpuSourcePageResetReason != RetainedPageResetReason::None) {
+                        profileRetainedResetReason =
+                            retainedPageResetReasonName(m_gpuSourcePageResetReason);
+                    }
 #endif
                 }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -4218,7 +4223,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 "[ui-spectrogram] paint_spike path=%s fallback=%s ms=%.3f cache_ms=%.3f "
                 "display_ms=%.3f retained_upload_ms=%.3f overlay_build_ms=%.3f "
                 "tex_ms=%.3f overlay_tex_ms=%.3f cpu_rebuild=%d retained_reset=%d "
-                "retained_spans=%d retained_cols=%d full_upload=%d tail_upload=%d tail_w=%d "
+                "retained_reset_reason=%s retained_spans=%d retained_cols=%d "
+                "full_upload=%d tail_upload=%d tail_w=%d "
                 "ov=%d fg=%d tg=%d ch=%d pending=%zu cols=%zu bins=%d size=%dx%d\n",
                 profilePaintPath,
                 profileFallbackReason,
@@ -4231,6 +4237,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 profileOverlayTextureUploadMs,
                 profileCpuDisplayImageRebuilt ? 1 : 0,
                 profileRetainedTextureReset ? 1 : 0,
+                profileRetainedResetReason,
                 profileRetainedUploadSpanCount,
                 profileRetainedUploadColumns,
                 profileUsedFullSpectrogramUpload ? 1 : 0,
@@ -5084,6 +5091,23 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedActive = false;
 }
 
+const char *SpectrogramItem::retainedPageResetReasonName(
+    const RetainedPageResetReason reason) {
+    switch (reason) {
+    case RetainedPageResetReason::MissingPage:
+        return "missing-page";
+    case RetainedPageResetReason::PageWidthChanged:
+        return "page-width-change";
+    case RetainedPageResetReason::BinsChanged:
+        return "bins-change";
+    case RetainedPageResetReason::UploadReset:
+        return "upload-reset";
+    case RetainedPageResetReason::None:
+        break;
+    }
+    return "none";
+}
+
 void SpectrogramItem::invalidateLegacyRetainedSourceTextureStateLocked() {
     m_gpuSourceUploadRgba.clear();
     m_gpuSourceUploadSpans.clear();
@@ -5104,6 +5128,7 @@ void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
     m_gpuSourcePageUploadSpanCount = 0;
     m_gpuSourcePageUploadColumns = 0;
     m_gpuSourcePageTextureReset = false;
+    m_gpuSourcePageResetReason = RetainedPageResetReason::None;
 }
 
 void SpectrogramItem::invalidateRenderCachesLocked() {
@@ -5451,11 +5476,15 @@ QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetaine
             m_precomputedTrackToken,
             rollingMode,
             span.pageIndex);
-        const bool resetPage =
-            page == nullptr
-            || page->width != pageWidth
-            || page->binsPerColumn != m_precomputedBinsPerColumn;
-        if (resetPage) {
+        RetainedPageResetReason resetReason = RetainedPageResetReason::None;
+        if (page == nullptr) {
+            resetReason = RetainedPageResetReason::MissingPage;
+        } else if (page->width != pageWidth) {
+            resetReason = RetainedPageResetReason::PageWidthChanged;
+        } else if (page->binsPerColumn != m_precomputedBinsPerColumn) {
+            resetReason = RetainedPageResetReason::BinsChanged;
+        }
+        if (resetReason != RetainedPageResetReason::None) {
             uploads.push_back(RetainedPageUploadSpan{
                 .pageIndex = span.pageIndex,
                 .pageXBegin = span.pageXBegin,
@@ -5463,6 +5492,7 @@ QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetaine
                 .displayLeft = span.displayLeft,
                 .displayRight = span.displayRight,
                 .resetPage = true,
+                .resetReason = resetReason,
             });
             continue;
         }
@@ -5715,6 +5745,7 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
     const qint64 displayRight,
     const qint64 renderableRight,
     const bool rollingMode) {
+    m_gpuSourcePageResetReason = RetainedPageResetReason::None;
     if (window == nullptr
         || m_ringCapacity <= 0
         || m_precomputedBinsPerColumn <= 0
@@ -5781,6 +5812,9 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             page->uploadedDisplayLeft = 0;
             page->uploadedDisplayRight = -1;
             m_gpuSourcePageTextureReset = true;
+            if (m_gpuSourcePageResetReason == RetainedPageResetReason::None) {
+                m_gpuSourcePageResetReason = span.resetReason;
+            }
         }
         const bool hadPageTexture = page->texture.texture() != nullptr;
         if (!page->texture.ensureCreated(window, pageWidth, m_precomputedBinsPerColumn)) {
@@ -5789,6 +5823,11 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
         m_gpuSourcePageTextureReset =
             m_gpuSourcePageTextureReset
             || (!hadPageTexture && page->texture.texture() != nullptr);
+        if (!hadPageTexture
+            && page->texture.texture() != nullptr
+            && m_gpuSourcePageResetReason == RetainedPageResetReason::None) {
+            m_gpuSourcePageResetReason = RetainedPageResetReason::UploadReset;
+        }
         page->width = pageWidth;
         page->binsPerColumn = m_precomputedBinsPerColumn;
 
