@@ -78,6 +78,8 @@ constexpr qint64 kSmoothnessIdleMs = 450;
 const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
 std::atomic<int> g_gpuSpectrogramPaintLogBudget{12};
+std::atomic<int> g_zoomFillRenderLogBudget{80};
+std::atomic<int> g_zoomFillSourceUploadLogBudget{80};
 std::atomic<int> g_gpuDebugStageLogBudget{24};
 std::atomic<int> g_gpuMaterialLogBudget{24};
 
@@ -1865,17 +1867,93 @@ void SpectrogramItem::feedPrecomputedChunk(
             fillMatchesRequestedZoom
             && centeredVisibleColumnsCovered
             && ((ringHasEnoughColumns && ringCoversDisplayRight) || decodeReachedEnd);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         const bool shouldLogZoomFillGate =
             !m_zoomFillDataReady
             && (zoomFillReadyForData
                 || (!centeredVisibleColumnsCovered
                     && (complete || decodeReachedEnd || ringHasEnoughColumns)));
         if (shouldLogZoomFillGate) {
+            struct ColumnPeakStats {
+                qint64 present{0};
+                qint64 missing{0};
+                qint64 zeroPeak{0};
+                qint64 dimPeak{0};
+                qint64 firstDim{-1};
+                qint64 longestDimStart{-1};
+                qint64 longestDimRun{0};
+                int minPeak{255};
+                int maxPeak{0};
+                double averagePeak{0.0};
+            };
+            const auto collectColumnPeakStats =
+                [this](const qint64 displayLeft, const qint64 displayRight) {
+                    ColumnPeakStats stats;
+                    if (displayRight < displayLeft || m_precomputedBinsPerColumn <= 0) {
+                        stats.minPeak = 0;
+                        return stats;
+                    }
+                    qint64 dimRunStart = -1;
+                    qint64 dimRunLength = 0;
+                    double peakSum = 0.0;
+                    for (qint64 displayIndex = displayLeft;
+                         displayIndex <= displayRight;
+                         ++displayIndex) {
+                        const int slot = ringSlotForDisplayIndexLocked(displayIndex, false);
+                        if (slot < 0) {
+                            ++stats.missing;
+                            continue;
+                        }
+                        const int baseOff = slot * m_precomputedBinsPerColumn;
+                        quint8 columnPeak = 0;
+                        for (int bin = 0; bin < m_precomputedBinsPerColumn; ++bin) {
+                            columnPeak = std::max(
+                                columnPeak,
+                                static_cast<quint8>(m_ringBuffer[baseOff + bin]));
+                        }
+                        ++stats.present;
+                        peakSum += static_cast<double>(columnPeak);
+                        stats.minPeak = std::min(stats.minPeak, static_cast<int>(columnPeak));
+                        stats.maxPeak = std::max(stats.maxPeak, static_cast<int>(columnPeak));
+                        if (columnPeak == 0) {
+                            ++stats.zeroPeak;
+                        }
+                        if (columnPeak <= 8) {
+                            ++stats.dimPeak;
+                            if (stats.firstDim < 0) {
+                                stats.firstDim = displayIndex;
+                            }
+                            if (dimRunStart < 0) {
+                                dimRunStart = displayIndex;
+                                dimRunLength = 0;
+                            }
+                            ++dimRunLength;
+                            if (dimRunLength > stats.longestDimRun) {
+                                stats.longestDimRun = dimRunLength;
+                                stats.longestDimStart = dimRunStart;
+                            }
+                        } else {
+                            dimRunStart = -1;
+                            dimRunLength = 0;
+                        }
+                    }
+                    if (stats.present > 0) {
+                        stats.averagePeak = peakSum / static_cast<double>(stats.present);
+                    } else {
+                        stats.minPeak = 0;
+                    }
+                    return stats;
+                };
+            const ColumnPeakStats peakStats = collectColumnPeakStats(
+                displayLeftCol,
+                decodedVisibleRight);
             FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
                 "[ui-spectrogram] zoom_fill_gate ready=%d mode=%d zoom=%.4f render_zoom=%.4f "
                 "hop=%d match=%d display=%lld..%lld decoded_right=%lld missing=%lld "
                 "ring_fill=%lld fill_width=%lld max_col=%d estimate=%d enough=%d covers_right=%d "
-                "decode_end=%d await=%d complete=%d token=%llu gen=%llu\n",
+                "decode_end=%d await=%d complete=%d token=%llu gen=%llu "
+                "payload_present=%lld payload_missing=%lld zero_peak=%lld dim_peak=%lld "
+                "first_dim=%lld longest_dim=%lld@%lld min_peak=%d max_peak=%d avg_peak=%.1f\n",
                 zoomFillReadyForData ? 1 : 0,
                 m_displayMode,
                 m_zoomLevel,
@@ -1896,8 +1974,19 @@ void SpectrogramItem::feedPrecomputedChunk(
                 m_awaitingZoomData ? 1 : 0,
                 complete ? 1 : 0,
                 static_cast<unsigned long long>(m_precomputedTrackToken),
-                static_cast<unsigned long long>(generation));
+                static_cast<unsigned long long>(generation),
+                static_cast<long long>(peakStats.present),
+                static_cast<long long>(peakStats.missing),
+                static_cast<long long>(peakStats.zeroPeak),
+                static_cast<long long>(peakStats.dimPeak),
+                static_cast<long long>(peakStats.firstDim),
+                static_cast<long long>(peakStats.longestDimRun),
+                static_cast<long long>(peakStats.longestDimStart),
+                peakStats.minPeak,
+                peakStats.maxPeak,
+                peakStats.averagePeak);
         }
+#endif
         if (zoomFillReadyForData) {
             // The decoder has enough data, but the final render resource may
             // not be ready yet. Keep showing the frozen frame until
@@ -2802,6 +2891,120 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && (canUseRetainedSourceTextureBody
                     ? retainedTextureCoversVisibleRange
                     : !m_gpuDisplayImage.isNull());
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            if (rendererFreeze && m_zoomFillDataReady && !m_awaitingZoomData) {
+                const int remainingLogs = g_zoomFillRenderLogBudget.fetch_sub(1);
+                if (remainingLogs > 0) {
+                    struct ImageColumnStats {
+                        int columns{-1};
+                        int blackColumns{-1};
+                        int dimColumns{-1};
+                        int longestBlackStart{-1};
+                        int longestBlackRun{-1};
+                        int minPeak{-1};
+                        int maxPeak{-1};
+                    };
+                    const auto collectImageStats = [](const QImage &image) {
+                        ImageColumnStats stats;
+                        if (image.isNull() || image.width() <= 0 || image.height() <= 0) {
+                            return stats;
+                        }
+                        stats.columns = image.width();
+                        stats.blackColumns = 0;
+                        stats.dimColumns = 0;
+                        stats.longestBlackStart = -1;
+                        stats.longestBlackRun = 0;
+                        stats.minPeak = 255;
+                        stats.maxPeak = 0;
+                        int blackRunStart = -1;
+                        int blackRunLength = 0;
+                        for (int x = 0; x < image.width(); ++x) {
+                            int columnPeak = 0;
+                            for (int y = 0; y < image.height(); ++y) {
+                                const QRgb pixel = image.pixel(x, y);
+                                columnPeak = std::max(
+                                    columnPeak,
+                                    std::max(qRed(pixel), std::max(qGreen(pixel), qBlue(pixel))));
+                            }
+                            stats.minPeak = std::min(stats.minPeak, columnPeak);
+                            stats.maxPeak = std::max(stats.maxPeak, columnPeak);
+                            if (columnPeak <= 1) {
+                                ++stats.blackColumns;
+                                if (blackRunStart < 0) {
+                                    blackRunStart = x;
+                                    blackRunLength = 0;
+                                }
+                                ++blackRunLength;
+                                if (blackRunLength > stats.longestBlackRun) {
+                                    stats.longestBlackRun = blackRunLength;
+                                    stats.longestBlackStart = blackRunStart;
+                                }
+                            } else {
+                                blackRunStart = -1;
+                                blackRunLength = 0;
+                            }
+                            if (columnPeak <= 8) {
+                                ++stats.dimColumns;
+                            }
+                        }
+                        return stats;
+                    };
+                    const ImageColumnStats cpuStats = collectImageStats(m_gpuDisplayImage);
+                    const QSize retainedTextureSize =
+                        retainedSourceTexture != nullptr
+                            ? retainedSourceTexture->textureSize()
+                            : QSize();
+                    const qint64 decodedVisibleRight = rollingMode
+                        ? displayRight
+                        : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+                    const auto logSegment = [](const RetainedRenderSegment &segment) {
+                        return QStringLiteral("valid=%1 src=%2+%3 dst=%4+%5")
+                            .arg(segment.valid ? 1 : 0)
+                            .arg(segment.sourceRect.x())
+                            .arg(segment.sourceRect.width())
+                            .arg(segment.targetRect.x(), 0, 'f', 1)
+                            .arg(segment.targetRect.width(), 0, 'f', 1);
+                    };
+                    const QString segment0 = logSegment(retainedTextureSegments[0]);
+                    const QString segment1 = logSegment(retainedTextureSegments[1]);
+                    FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
+                        "[ui-spectrogram] zoom_fill_reveal_gate reveal=%d renderer_freeze=%d "
+                        "can_retained=%d retained_cover=%d retained_segments=%d overflow=%d "
+                        "display=%lld..%lld decoded_right=%lld draw=%d filled=%d ez=%.4f "
+                        "gpu_source_range=%lld..%lld gpu_source_token=%llu current_token=%llu "
+                        "source_tex=%dx%d cpu_image=%dx%d cpu_black=%d cpu_dim=%d "
+                        "cpu_longest_black=%d@%d cpu_peak=%d..%d seg0=\"%s\" seg1=\"%s\"\n",
+                        freezeCanRevealFinalFrame ? 1 : 0,
+                        rendererFreeze ? 1 : 0,
+                        canUseRetainedSourceTextureBody ? 1 : 0,
+                        retainedTextureCoversVisibleRange ? 1 : 0,
+                        haveRetainedTextureSegments ? 1 : 0,
+                        retainedTextureSegmentsOverflowed ? 1 : 0,
+                        static_cast<long long>(displayLeft),
+                        static_cast<long long>(displayRight),
+                        static_cast<long long>(decodedVisibleRight),
+                        drawPixels,
+                        visibleCols,
+                        effectiveZoom,
+                        static_cast<long long>(m_gpuSourceTextureMinColumnIndex),
+                        static_cast<long long>(m_gpuSourceTextureMaxColumnIndex),
+                        static_cast<unsigned long long>(m_gpuSourceTextureTrackToken),
+                        static_cast<unsigned long long>(m_precomputedTrackToken),
+                        retainedTextureSize.width(),
+                        retainedTextureSize.height(),
+                        m_gpuDisplayImage.width(),
+                        m_gpuDisplayImage.height(),
+                        cpuStats.blackColumns,
+                        cpuStats.dimColumns,
+                        cpuStats.longestBlackRun,
+                        cpuStats.longestBlackStart,
+                        cpuStats.minPeak,
+                        cpuStats.maxPeak,
+                        qPrintable(segment0),
+                        qPrintable(segment1));
+                }
+            }
+#endif
             if (freezeCanRevealFinalFrame) {
                 m_zoomFillActive = false;
                 clearZoomFillFrozenCacheLocked();
@@ -5010,6 +5213,54 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
         displayRight,
         rollingMode,
         textureStateChanged);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_zoomFillActive || m_zoomFillDataReady) {
+        const int remainingLogs = g_zoomFillSourceUploadLogBudget.fetch_sub(1);
+        if (remainingLogs > 0) {
+            int spanColumns = 0;
+            int firstSpanBegin = -1;
+            int firstSpanEnd = -1;
+            for (const SpectrogramSourceUploadSpan &span : m_gpuSourceUploadSpans) {
+                if (firstSpanBegin < 0) {
+                    firstSpanBegin = span.xBegin;
+                    firstSpanEnd = span.xEnd;
+                }
+                spanColumns += std::max(0, span.xEnd - span.xBegin + 1);
+            }
+            const qint64 decodedVisibleRight = rollingMode
+                ? displayRight
+                : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+            FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
+                "[ui-spectrogram] source_upload_gate zoom_fill=%d ready=%d texture_reset=%d "
+                "spans=%d span_cols=%d first_span=%d..%d display=%lld..%lld decoded_right=%lld "
+                "gpu_source_range=%lld..%lld gpu_source_token=%llu current_token=%llu "
+                "ring=%lld..%lld max_col=%d texture_size=%dx%d\n",
+                m_zoomFillActive ? 1 : 0,
+                m_zoomFillDataReady ? 1 : 0,
+                textureStateChanged ? 1 : 0,
+                m_gpuSourceUploadSpans.size(),
+                spanColumns,
+                firstSpanBegin,
+                firstSpanEnd,
+                static_cast<long long>(displayLeft),
+                static_cast<long long>(displayRight),
+                static_cast<long long>(decodedVisibleRight),
+                static_cast<long long>(m_gpuSourceTextureMinColumnIndex),
+                static_cast<long long>(m_gpuSourceTextureMaxColumnIndex),
+                static_cast<unsigned long long>(m_gpuSourceTextureTrackToken),
+                static_cast<unsigned long long>(m_precomputedTrackToken),
+                static_cast<long long>(m_ringOldestSeq),
+                static_cast<long long>(m_ringWriteSeq),
+                static_cast<int>(m_precomputedMaxColumnIndex),
+                m_gpuSourceTexture.texture() != nullptr
+                    ? m_gpuSourceTexture.texture()->textureSize().width()
+                    : 0,
+                m_gpuSourceTexture.texture() != nullptr
+                    ? m_gpuSourceTexture.texture()->textureSize().height()
+                    : 0);
+        }
+    }
+#endif
     if (m_gpuSourceUploadSpans.isEmpty()) {
         noteVisibleColumnsUploaded();
         m_gpuSourceTextureDisplayLeft = displayLeft;

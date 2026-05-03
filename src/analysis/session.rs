@@ -859,6 +859,10 @@ fn run_spectrogram_session(
         f64_to_u64_saturating(lookahead_seconds * cols_per_second)
     };
 
+    profile_eprintln!(
+        "[spect-worker] SESSION CONFIG gen={gen} token={track_token} zoom={zoom_level:.4} stft_hop={hop_size} output_interval={output_interval:.4} effective_hop={effective_hop} effective_rate={effective_rate} divisor={divisor} cols_per_s={cols_per_second:.3} est_ref_cols={total_columns} est_output_cols={total_columns_estimate} widget_width={widget_width} lookahead_cols={lookahead_columns} display={display_mode:?}",
+    );
+
     // Rate throttle: 2× realtime for rolling, unlimited for centered.
     let decode_rate_limit = if display_mode == SpectrogramDisplayMode::Rolling {
         std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
