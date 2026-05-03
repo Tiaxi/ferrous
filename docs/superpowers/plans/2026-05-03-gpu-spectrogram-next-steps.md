@@ -336,7 +336,7 @@ git commit -m "feat: plan retained spectrogram source pages"
 - Modify: `ui/src/SpectrogramItem.cpp`
 - Modify: `ui/tests/tst_qml_smoke.cpp`
 
-- [ ] **Step 1: Add upload planner tests**
+- [x] **Step 1: Add upload planner tests**
 
 Add tests:
 
@@ -352,7 +352,7 @@ Expected invariants:
 - token or rolling-mode change resets affected pages
 - page width is `min(2048, GL_MAX_TEXTURE_SIZE)` and never exceeds GPU limit
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```bash
 ./scripts/run-tests.sh --ui-only

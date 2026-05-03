@@ -168,6 +168,15 @@ private:
         qint64 displayRight{-1};
     };
 
+    struct RetainedPageUploadSpan {
+        qint64 pageIndex{0};
+        int pageXBegin{0};
+        int pageXEnd{-1};
+        qint64 displayLeft{0};
+        qint64 displayRight{-1};
+        bool resetPage{false};
+    };
+
     struct RetainedSourcePageKey {
         quint64 trackToken{0};
         bool rollingMode{false};
@@ -231,6 +240,15 @@ private:
         qint64 displayRight,
         qint64 renderableRight,
         bool rollingMode) const;
+    QVector<RetainedPageUploadSpan> collectRetainedPageUploadSpansLocked(
+        qint64 displayLeft,
+        qint64 displayRight,
+        qint64 renderableRight,
+        bool rollingMode) const;
+    RetainedSourcePageState *findRetainedSourcePageLocked(
+        quint64 trackToken,
+        bool rollingMode,
+        qint64 pageIndex) const;
     RetainedRenderPlan buildRetainedRenderPlanLocked(
         qint64 displayLeft,
         qint64 displayRight,
@@ -267,6 +285,7 @@ private:
         const std::array<quint8, 256> &dbRemap,
         const QRgb *palette) const;
     int gpuMaxTextureColumns(QQuickWindow *window) const;
+    int retainedSourcePageWidthForGpuLimit(QQuickWindow *window) const;
     bool retainedSourceTextureFitsGpuLimit(
         QQuickWindow *window,
         int capacityColumns,

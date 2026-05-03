@@ -4982,6 +4982,10 @@ int SpectrogramItem::gpuMaxTextureColumns(QQuickWindow *window) const {
     return kFallbackMaxTextureColumns;
 }
 
+int SpectrogramItem::retainedSourcePageWidthForGpuLimit(QQuickWindow *window) const {
+    return std::max(1, std::min(kRetainedSourcePageWidth, gpuMaxTextureColumns(window)));
+}
+
 bool SpectrogramItem::retainedSourceTextureFitsGpuLimit(
     QQuickWindow *window,
     const int capacityColumns,
@@ -5180,6 +5184,84 @@ QVector<SpectrogramItem::RetainedPageSpan> SpectrogramItem::buildRetainedPageSpa
 
     flushSpan();
     return spans;
+}
+
+SpectrogramItem::RetainedSourcePageState *SpectrogramItem::findRetainedSourcePageLocked(
+    const quint64 trackToken,
+    const bool rollingMode,
+    const qint64 pageIndex) const {
+    for (const auto &page : m_gpuSourcePages) {
+        if (page != nullptr
+            && page->key.trackToken == trackToken
+            && page->key.rollingMode == rollingMode
+            && page->key.pageIndex == pageIndex) {
+            return page.get();
+        }
+    }
+    return nullptr;
+}
+
+QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetainedPageUploadSpansLocked(
+    const qint64 displayLeft,
+    const qint64 displayRight,
+    const qint64 renderableRight,
+    const bool rollingMode) const {
+    QVector<RetainedPageUploadSpan> uploads;
+    const QVector<RetainedPageSpan> pageSpans =
+        buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode);
+    for (const RetainedPageSpan &span : pageSpans) {
+        const RetainedSourcePageState *page = findRetainedSourcePageLocked(
+            m_precomputedTrackToken,
+            rollingMode,
+            span.pageIndex);
+        const bool resetPage =
+            page == nullptr
+            || page->width <= 0
+            || page->binsPerColumn != m_precomputedBinsPerColumn;
+        if (resetPage) {
+            uploads.push_back(RetainedPageUploadSpan{
+                .pageIndex = span.pageIndex,
+                .pageXBegin = span.pageXBegin,
+                .pageXEnd = span.pageXEnd,
+                .displayLeft = span.displayLeft,
+                .displayRight = span.displayRight,
+                .resetPage = true,
+            });
+            continue;
+        }
+
+        if (page->uploadedDisplayLeft <= span.displayLeft
+            && page->uploadedDisplayRight >= span.displayRight) {
+            continue;
+        }
+
+        if (span.displayLeft < page->uploadedDisplayLeft) {
+            const qint64 dirtyRight = std::min(span.displayRight, page->uploadedDisplayLeft - 1);
+            const int dirtyWidth = static_cast<int>(dirtyRight - span.displayLeft + 1);
+            uploads.push_back(RetainedPageUploadSpan{
+                .pageIndex = span.pageIndex,
+                .pageXBegin = span.pageXBegin,
+                .pageXEnd = span.pageXBegin + dirtyWidth - 1,
+                .displayLeft = span.displayLeft,
+                .displayRight = dirtyRight,
+                .resetPage = false,
+            });
+        }
+
+        if (span.displayRight > page->uploadedDisplayRight) {
+            const qint64 dirtyLeft = std::max(span.displayLeft, page->uploadedDisplayRight + 1);
+            const int cleanPrefix = static_cast<int>(dirtyLeft - span.displayLeft);
+            uploads.push_back(RetainedPageUploadSpan{
+                .pageIndex = span.pageIndex,
+                .pageXBegin = span.pageXBegin + cleanPrefix,
+                .pageXEnd = span.pageXEnd,
+                .displayLeft = dirtyLeft,
+                .displayRight = span.displayRight,
+                .resetPage = false,
+            });
+        }
+    }
+    return uploads;
 }
 
 SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLocked(

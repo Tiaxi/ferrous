@@ -1130,6 +1130,9 @@ private slots:
     void spectrogramRetainedPagePlanSplitsSinglePageRange();
     void spectrogramRetainedPagePlanSplitsAcrossPageBoundary();
     void spectrogramRetainedPagePlanSplitsRollingWrap();
+    void spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans();
+    void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
+    void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
     void spectrogramRetainedSourceTextureStartsEmptyAndIsNonCopyable();
     void spectrogramRetainedSourceTextureReleaseSchedulesOwnerWindowCleanup();
     void spectrogramRetainedSourceTextureForeignThreadReleaseMarshalsOwnerCleanup();
@@ -7264,6 +7267,94 @@ void QmlSmokeTest::spectrogramRetainedPagePlanSplitsRollingWrap() {
     QCOMPARE(spans[1].pageXEnd, 3);
     QCOMPARE(spans[1].displayLeft, static_cast<qint64>(8));
     QCOMPARE(spans[1].displayRight, static_cast<qint64>(11));
+}
+
+void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = SpectrogramItem::kRetainedSourcePageWidth + 64;
+    constexpr quint64 trackToken = 41;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, trackToken, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    auto uploadedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+    uploadedPage->key = SpectrogramItem::RetainedSourcePageKey{
+        .trackToken = trackToken,
+        .rollingMode = false,
+        .pageIndex = 0,
+    };
+    uploadedPage->width = SpectrogramItem::kRetainedSourcePageWidth;
+    uploadedPage->binsPerColumn = bins;
+    uploadedPage->uploadedDisplayLeft = 0;
+    uploadedPage->uploadedDisplayRight = SpectrogramItem::kRetainedSourcePageWidth - 1;
+    item.m_gpuSourcePages.push_back(std::move(uploadedPage));
+
+    const QVector<SpectrogramItem::RetainedPageUploadSpan> uploads =
+        item.collectRetainedPageUploadSpansLocked(2040, 2055, 2055, false);
+
+    QCOMPARE(uploads.size(), 1);
+    QCOMPARE(uploads[0].pageIndex, static_cast<qint64>(1));
+    QCOMPARE(uploads[0].pageXBegin, 0);
+    QCOMPARE(uploads[0].pageXEnd, 7);
+    QCOMPARE(uploads[0].displayLeft, static_cast<qint64>(2048));
+    QCOMPARE(uploads[0].displayRight, static_cast<qint64>(2055));
+    QVERIFY(uploads[0].resetPage);
+}
+
+void QmlSmokeTest::spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = 16;
+    constexpr quint64 oldTrackToken = 51;
+    constexpr quint64 newTrackToken = 52;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, newTrackToken, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    auto stalePage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+    stalePage->key = SpectrogramItem::RetainedSourcePageKey{
+        .trackToken = oldTrackToken,
+        .rollingMode = false,
+        .pageIndex = 0,
+    };
+    stalePage->width = SpectrogramItem::kRetainedSourcePageWidth;
+    stalePage->binsPerColumn = bins;
+    stalePage->uploadedDisplayLeft = 0;
+    stalePage->uploadedDisplayRight = columns - 1;
+    item.m_gpuSourcePages.push_back(std::move(stalePage));
+
+    const QVector<SpectrogramItem::RetainedPageUploadSpan> uploads =
+        item.collectRetainedPageUploadSpansLocked(0, columns - 1, columns - 1, false);
+
+    QCOMPARE(uploads.size(), 1);
+    QCOMPARE(uploads[0].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(uploads[0].pageXBegin, 0);
+    QCOMPARE(uploads[0].pageXEnd, columns - 1);
+    QVERIFY(uploads[0].resetPage);
+}
+
+void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth() {
+    SpectrogramItem item;
+    QQuickWindow window;
+
+    item.m_gpuMaxTextureColumns = 1024;
+    QCOMPARE(item.retainedSourcePageWidthForGpuLimit(&window), 1024);
+
+    item.m_gpuMaxTextureColumns = 4096;
+    QCOMPARE(
+        item.retainedSourcePageWidthForGpuLimit(&window),
+        SpectrogramItem::kRetainedSourcePageWidth);
 }
 
 void QmlSmokeTest::spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource() {
