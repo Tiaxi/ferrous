@@ -447,7 +447,7 @@ Expected:
 ./scripts/run-tests.sh --ui-only
 ```
 
-- [ ] **Step 4: Pool scene graph body/tail nodes**
+- [x] **Step 4: Pool scene graph body/tail nodes**
 
 Replace fixed base/tail retained rendering with a node pool:
 - one node per retained segment
@@ -460,14 +460,14 @@ Keep separate handling for:
 - `shader-source-only`
 - `full`
 
-- [ ] **Step 5: Route retained debug modes through page-backed segments**
+- [x] **Step 5: Route retained debug modes through page-backed segments**
 
 Ensure:
 - `FERROUS_GPU_DEBUG_MODE=texture-node` binds page textures directly
 - `FERROUS_GPU_DEBUG_MODE=shader-source-only` samples page source texture directly
 - `FERROUS_GPU_DEBUG_MODE=full` uses source texture + db remap + palette + row LUT
 
-- [ ] **Step 6: Run tests and verify GREEN**
+- [x] **Step 6: Run tests and verify GREEN**
 
 ```bash
 ./scripts/run-tests.sh --ui-only

@@ -188,6 +188,19 @@ struct SpectrogramTailSegment {
     int width{0};
 };
 
+struct RetainedBodySegmentNode {
+    QSGSimpleTextureNode *textureNode{nullptr};
+    QSGGeometryNode *bodySampleNode{nullptr};
+    QSGGeometryNode *sourceSampleNode{nullptr};
+    QSGGeometryNode *stockMaterialNode{nullptr};
+};
+
+struct RetainedBodyDrawSegment {
+    QRectF targetRect;
+    QRect sourceRect;
+    QSGTexture *texture{nullptr};
+};
+
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
         spectrogramTextureDebugMode = SpectrogramGpu::currentDebugMode();
@@ -297,6 +310,7 @@ struct SpectrogramSceneNode final : public QSGNode {
     int spectrogramTextureWidth{0};
     int spectrogramTailTextureWidth{0};
     QVector<SpectrogramTailSegment> spectrogramTailSegments;
+    QVector<RetainedBodySegmentNode> retainedBodySegmentNodes;
     quintptr ownerWindowId{0};
     quint64 generation{0};
 };
@@ -389,6 +403,127 @@ void clearTailSegments(SpectrogramSceneNode *node) {
         }
     }
     node->spectrogramTailSegments.clear();
+}
+
+RetainedBodySegmentNode createRetainedBodySegmentNode(SpectrogramSceneNode *root) {
+    RetainedBodySegmentNode segment;
+    segment.textureNode = new QSGSimpleTextureNode();
+    segment.bodySampleNode = createSpectrogramBodySampleMaterialNode();
+    segment.sourceSampleNode = createSpectrogramSourceSampleMaterialNode();
+    segment.stockMaterialNode = createSpectrogramStockMaterialNode();
+    if (root != nullptr) {
+        root->insertChildNodeBefore(segment.textureNode, root->overlayLines);
+        root->insertChildNodeBefore(segment.bodySampleNode, root->overlayLines);
+        root->insertChildNodeBefore(segment.sourceSampleNode, root->overlayLines);
+        root->insertChildNodeBefore(segment.stockMaterialNode, root->overlayLines);
+    }
+    return segment;
+}
+
+void ensureRetainedBodySegmentNodeCount(SpectrogramSceneNode *node, qsizetype count) {
+    if (node == nullptr) {
+        return;
+    }
+    while (node->retainedBodySegmentNodes.size() < count) {
+        node->retainedBodySegmentNodes.push_back(createRetainedBodySegmentNode(node));
+    }
+}
+
+SpectrogramBodySampleMaterial::State retainedBodySampleStateForSegment(
+    const RetainedBodyDrawSegment &segment,
+    QSGTexture *dbRemapTexture,
+    QSGTexture *paletteTexture,
+    QSGTexture *rowLutTexture,
+    QSGTexture *placeholderTexture) {
+    SpectrogramBodySampleMaterial::State state;
+    state.sourceTexture = segment.texture != nullptr ? segment.texture : placeholderTexture;
+    state.dbRemapTexture = dbRemapTexture != nullptr ? dbRemapTexture : placeholderTexture;
+    state.paletteTexture = paletteTexture != nullptr ? paletteTexture : placeholderTexture;
+    state.rowLutTexture = rowLutTexture != nullptr ? rowLutTexture : placeholderTexture;
+    state.sourceRect = QRectF(segment.sourceRect);
+    state.drawOffset = QPointF();
+    state.sourceTextureSize =
+        segment.texture != nullptr ? segment.texture->textureSize() : QSize();
+    state.effectiveZoom =
+        segment.sourceRect.width() > 0
+            ? static_cast<float>(
+                  segment.targetRect.width()
+                  / static_cast<double>(segment.sourceRect.width()))
+            : 1.0F;
+    state.sourceColumnOffset = static_cast<float>(segment.sourceRect.x());
+    return state;
+}
+
+void syncRetainedBodySegmentNode(
+    const RetainedBodySegmentNode &node,
+    const RetainedBodyDrawSegment *segment,
+    SpectrogramGpu::DebugMode debugMode,
+    QSGTexture *dbRemapTexture,
+    QSGTexture *paletteTexture,
+    QSGTexture *rowLutTexture,
+    QSGTexture *placeholderTexture) {
+    const bool haveSegment =
+        segment != nullptr
+        && segment->texture != nullptr
+        && !segment->targetRect.isEmpty()
+        && !segment->sourceRect.isEmpty();
+    const QRectF targetRect = haveSegment ? segment->targetRect : QRectF();
+    const QRectF sourceRect = haveSegment ? QRectF(segment->sourceRect) : QRectF();
+    const auto textureTransform =
+        QSGSimpleTextureNode::TextureCoordinatesTransformMode(
+            QSGSimpleTextureNode::MirrorVertically);
+
+    if (debugMode == SpectrogramGpu::DebugMode::TextureNode) {
+        configureTextureNode(
+            node.textureNode,
+            haveSegment ? segment->texture : nullptr,
+            targetRect,
+            haveSegment ? segment->sourceRect : QRect(),
+            placeholderTexture,
+            textureTransform);
+    } else {
+        configureTextureNode(
+            node.textureNode,
+            nullptr,
+            QRectF(),
+            QRect(),
+            placeholderTexture);
+    }
+
+    const bool useFull = debugMode == SpectrogramGpu::DebugMode::Full;
+    const bool useSourceOnly = debugMode == SpectrogramGpu::DebugMode::ShaderSourceOnly;
+    const bool useStock = debugMode == SpectrogramGpu::DebugMode::StockMaterial;
+    SpectrogramBodySampleMaterial::State sampleState =
+        haveSegment
+            ? retainedBodySampleStateForSegment(
+                  *segment,
+                  dbRemapTexture,
+                  paletteTexture,
+                  rowLutTexture,
+                  placeholderTexture)
+            : retainedBodySampleStateForSegment(
+                  RetainedBodyDrawSegment{},
+                  dbRemapTexture,
+                  paletteTexture,
+                  rowLutTexture,
+                  placeholderTexture);
+
+    syncSpectrogramBodySampleMaterialNode(
+        node.bodySampleNode,
+        haveSegment && useFull ? targetRect : QRectF(),
+        sampleState);
+    syncSpectrogramSourceSampleMaterialNode(
+        node.sourceSampleNode,
+        haveSegment && useSourceOnly ? targetRect : QRectF(),
+        haveSegment && useSourceOnly ? segment->texture : nullptr,
+        haveSegment && useSourceOnly ? sourceRect : QRectF(),
+        placeholderTexture);
+    syncSpectrogramStockMaterialNode(
+        node.stockMaterialNode,
+        haveSegment && useStock ? targetRect : QRectF(),
+        haveSegment && useStock ? segment->texture : nullptr,
+        haveSegment && useStock ? sourceRect : QRectF(),
+        placeholderTexture);
 }
 
 void configureLineNode(
@@ -1265,7 +1400,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         captureZoomFillFrozenCacheLocked();
         m_zoomFillFrozenRetainedActive =
-            m_zoomFillFrozenRetainedAvailable && m_gpuSourceTexture.texture() != nullptr;
+            m_zoomFillFrozenRetainedAvailable;
         m_zoomFillActive =
             !m_zoomFillFrozenDisplayImage.isNull() || m_zoomFillFrozenRetainedActive;
         m_zoomFillDataReady = false;
@@ -1343,7 +1478,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_zoomFillActive = true;
             m_zoomFillDataReady = false;
             m_zoomFillFrozenRetainedActive =
-                m_zoomFillFrozenRetainedAvailable && m_gpuSourceTexture.texture() != nullptr;
+                m_zoomFillFrozenRetainedAvailable;
         } else {
             m_precomputedReady = false;
             m_precomputedCanvasDisplayLeft = 0;
@@ -2383,6 +2518,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QImage spectrogramNodeImage;
     QSGTexture *retainedSourceTexture{nullptr};
     QVector<RetainedRenderSegment> retainedTextureSegments;
+    QVector<RetainedBodyDrawSegment> retainedBodyDrawSegments;
     bool useRetainedSourceTextureBodyForFrame = false;
     QImage spectrogramDbRemapImage;
     QImage spectrogramPaletteImage;
@@ -2732,10 +2868,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 || gpuDebugMode == SpectrogramGpu::DebugMode::ShaderSourceOnly
                 || gpuDebugMode == SpectrogramGpu::DebugMode::Full;
             const bool retainedSourceTextureFitsGpuLimits =
-                retainedSourceTextureFitsGpuLimit(
-                    currentWindow,
-                    m_ringCapacity,
-                    m_precomputedBinsPerColumn);
+                m_precomputedBinsPerColumn > 0
+                && m_precomputedBinsPerColumn <= gpuMaxTextureColumns(currentWindow)
+                && retainedSourcePageWidthForGpuLimit(currentWindow) > 0;
             const bool canUseRetainedSourceTextureBody =
                 debugModeRequestsRetainedSourceTextureBody
                 && currentWindow != nullptr
@@ -2760,8 +2895,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             const bool retainedFreezeAvailableForFrame =
                 rendererFreeze
                 && canUseRetainedSourceTextureBody
-                && m_zoomFillFrozenRetainedActive
-                && m_gpuSourceTexture.texture() != nullptr;
+                && m_zoomFillFrozenRetainedActive;
             const bool useFrozenRetainedSourceForFrame =
                 retainedFreezeAvailableForFrame && !m_zoomFillDataReady;
             const bool shouldSyncRetainedSourceTexture =
@@ -2828,12 +2962,51 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             bool haveRetainedTextureSegments = false;
             bool retainedTextureSegmentsOverflowed = false;
             bool retainedTextureCoversVisibleRange = false;
+            const auto rebuildRetainedDrawSegments = [&]() {
+                retainedBodyDrawSegments.clear();
+                bool allSegmentsHaveTextures = !retainedTextureSegments.isEmpty();
+                const int pageWidth = retainedSourcePageWidthForGpuLimit(currentWindow);
+                for (const RetainedRenderSegment &segment : retainedTextureSegments) {
+                    if (!segment.valid || segment.sourceRect.isEmpty()) {
+                        allSegmentsHaveTextures = false;
+                        continue;
+                    }
+                    const qint64 pageIndex = pageWidth > 0
+                        ? segment.sourceRect.x() / pageWidth
+                        : 0;
+                    const int pageX = pageWidth > 0
+                        ? segment.sourceRect.x() % pageWidth
+                        : segment.sourceRect.x();
+                    const RetainedSourcePageState *page = findRetainedSourcePageLocked(
+                        m_precomputedTrackToken,
+                        rollingMode,
+                        pageIndex);
+                    QSGTexture *pageTexture =
+                        page != nullptr ? page->texture.texture() : nullptr;
+                    if (pageTexture == nullptr) {
+                        allSegmentsHaveTextures = false;
+                        continue;
+                    }
+                    retainedBodyDrawSegments.push_back(RetainedBodyDrawSegment{
+                        .targetRect = segment.targetRect,
+                        .sourceRect = QRect(
+                            pageX,
+                            segment.sourceRect.y(),
+                            segment.sourceRect.width(),
+                            segment.sourceRect.height()),
+                        .texture = pageTexture,
+                    });
+                }
+                return allSegmentsHaveTextures
+                    && retainedBodyDrawSegments.size() == retainedTextureSegments.size();
+            };
             if (useFrozenRetainedSourceForFrame) {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
                 retainedTextureSegments = m_zoomFillFrozenRetainedSegments;
                 haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
+                const bool retainedPageTexturesReady = rebuildRetainedDrawSegments();
                 retainedTextureCoversVisibleRange =
-                    haveRetainedTextureSegments && retainedSourceTexture != nullptr;
+                    haveRetainedTextureSegments && retainedPageTexturesReady;
             } else if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
                 && currentWindow != nullptr) {
@@ -2862,18 +3035,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     haveRetainedTextureSegments = false;
                     retainedSegmentsCoverVisibleRange = false;
                 }
-                const bool retainedUploadCoversVisibleRange =
-                    rollingMode
-                        ? m_gpuSourceTextureTrackToken == m_precomputedTrackToken
-                        : decodedVisibleRight >= displayLeft
-                            && m_gpuSourceTextureTrackToken == m_precomputedTrackToken
-                            && m_gpuSourceTextureMinColumnIndex <= displayLeft
-                            && m_gpuSourceTextureMaxColumnIndex >= decodedVisibleRight;
+                const bool retainedPageTexturesReady = rebuildRetainedDrawSegments();
                 retainedTextureCoversVisibleRange =
                     retainedSegmentsCoverVisibleRange
-                    && retainedUploadCoversVisibleRange
                     && haveRetainedTextureSegments
-                    && retainedSourceTexture != nullptr;
+                    && retainedPageTexturesReady;
             }
 
             const bool freezeCanRevealFinalFrame =
@@ -3015,7 +3181,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             useRetainedSourceTextureBodyForFrame =
                 canUseRetainedSourceTextureBody
                 && !revealViaWarmedDisplayImage
-                && retainedSourceTexture != nullptr
+                && !retainedBodyDrawSegments.isEmpty()
                 && haveRetainedTextureSegments
                 && (!rendererFreeze || useFrozenRetainedSourceForFrame);
             if (useRetainedSourceTextureBodyForFrame
@@ -3596,16 +3762,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QSGTexture *baseBodyTexture = nullptr;
     QSGTexture *tailBodyTexture = nullptr;
     if (useRetainedSourceTextureBody) {
-        if (!retainedTextureSegments.isEmpty() && retainedTextureSegments[0].valid) {
-            baseTargetRect = retainedTextureSegments[0].targetRect;
-            baseSourceRect = retainedTextureSegments[0].sourceRect;
-            baseBodyTexture = retainedSourceTexture;
-        }
-        if (retainedTextureSegments.size() > 1 && retainedTextureSegments[1].valid) {
-            tailTargetRect = retainedTextureSegments[1].targetRect;
-            tailSourceRect = retainedTextureSegments[1].sourceRect;
-            tailBodyTexture = retainedSourceTexture;
-        }
+        baseTargetRect = QRectF();
+        baseSourceRect = QRect();
+        tailTargetRect = QRectF();
+        tailSourceRect = QRect();
     } else {
         baseTargetRect = spectrogramTargetRect;
         baseTargetRect.translate(-spectrogramSubpixelOffset, 0.0);
@@ -3881,6 +4041,33 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             useSourceOnlySampleBody ? tailBodyTexture : nullptr,
             useSourceOnlySampleBody ? QRectF(tailSourceRect) : QRectF(),
             node->placeholderTexture);
+    }
+
+    if (useRetainedSourceTextureBody) {
+        ensureRetainedBodySegmentNodeCount(node, retainedBodyDrawSegments.size());
+        for (qsizetype i = 0; i < node->retainedBodySegmentNodes.size(); ++i) {
+            const RetainedBodyDrawSegment *segment =
+                i < retainedBodyDrawSegments.size() ? &retainedBodyDrawSegments[i] : nullptr;
+            syncRetainedBodySegmentNode(
+                node->retainedBodySegmentNodes[i],
+                segment,
+                spectrogramImageDebugMode,
+                node->spectrogramDbRemapTextureResource,
+                node->spectrogramPaletteTextureResource,
+                node->spectrogramRowLutTextureResource,
+                node->placeholderTexture);
+        }
+    } else {
+        for (const RetainedBodySegmentNode &segmentNode : node->retainedBodySegmentNodes) {
+            syncRetainedBodySegmentNode(
+                segmentNode,
+                nullptr,
+                spectrogramImageDebugMode,
+                node->spectrogramDbRemapTextureResource,
+                node->spectrogramPaletteTextureResource,
+                node->spectrogramRowLutTextureResource,
+                node->placeholderTexture);
+        }
     }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -4882,7 +5069,7 @@ bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
 }
 
 void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
-    if (!m_zoomFillFrozenRetainedAvailable || m_gpuSourceTexture.texture() == nullptr) {
+    if (!m_zoomFillFrozenRetainedAvailable) {
         ensureZoomFillSnapshotImageLocked();
     }
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
