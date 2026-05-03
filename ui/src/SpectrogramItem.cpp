@@ -5232,13 +5232,13 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
                 : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
             FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
                 "[ui-spectrogram] source_upload_gate zoom_fill=%d ready=%d texture_reset=%d "
-                "spans=%d span_cols=%d first_span=%d..%d display=%lld..%lld decoded_right=%lld "
+                "spans=%lld span_cols=%d first_span=%d..%d display=%lld..%lld decoded_right=%lld "
                 "gpu_source_range=%lld..%lld gpu_source_token=%llu current_token=%llu "
                 "ring=%lld..%lld max_col=%d texture_size=%dx%d\n",
                 m_zoomFillActive ? 1 : 0,
                 m_zoomFillDataReady ? 1 : 0,
                 textureStateChanged ? 1 : 0,
-                m_gpuSourceUploadSpans.size(),
+                static_cast<long long>(m_gpuSourceUploadSpans.size()),
                 spanColumns,
                 firstSpanBegin,
                 firstSpanEnd,
