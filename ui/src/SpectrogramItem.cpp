@@ -2382,7 +2382,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QRect spectrogramSourceRect;
     QImage spectrogramNodeImage;
     QSGTexture *retainedSourceTexture{nullptr};
-    std::array<RetainedRenderSegment, 2> retainedTextureSegments{};
+    QVector<RetainedRenderSegment> retainedTextureSegments;
     bool useRetainedSourceTextureBodyForFrame = false;
     QImage spectrogramDbRemapImage;
     QImage spectrogramPaletteImage;
@@ -2831,8 +2831,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (useFrozenRetainedSourceForFrame) {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
                 retainedTextureSegments = m_zoomFillFrozenRetainedSegments;
-                haveRetainedTextureSegments =
-                    retainedTextureSegments[0].valid || retainedTextureSegments[1].valid;
+                haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
                 retainedTextureCoversVisibleRange =
                     haveRetainedTextureSegments && retainedSourceTexture != nullptr;
             } else if (canUseRetainedSourceTextureBody
@@ -2963,8 +2962,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                             .arg(segment.targetRect.x(), 0, 'f', 1)
                             .arg(segment.targetRect.width(), 0, 'f', 1);
                     };
-                    const QString segment0 = logSegment(retainedTextureSegments[0]);
-                    const QString segment1 = logSegment(retainedTextureSegments[1]);
+                    const QString segment0 = retainedTextureSegments.isEmpty()
+                        ? QStringLiteral("none")
+                        : logSegment(retainedTextureSegments[0]);
+                    const QString segment1 = retainedTextureSegments.size() < 2
+                        ? QStringLiteral("none")
+                        : logSegment(retainedTextureSegments[1]);
                     FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
                         "[ui-spectrogram] zoom_fill_reveal_gate reveal=%d renderer_freeze=%d "
                         "can_retained=%d retained_cover=%d retained_segments=%d overflow=%d "
@@ -3093,7 +3096,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                             ? "retained-texture-node"
                             : "retained-full";
 #endif
-                    spectrogramSourceRect = retainedTextureSegments[0].sourceRect;
+                    spectrogramSourceRect = retainedTextureSegments.front().sourceRect;
                 } else if (rendererFreeze) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profilePaintPath = "frozen-display";
@@ -3593,12 +3596,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QSGTexture *baseBodyTexture = nullptr;
     QSGTexture *tailBodyTexture = nullptr;
     if (useRetainedSourceTextureBody) {
-        if (retainedTextureSegments[0].valid) {
+        if (!retainedTextureSegments.isEmpty() && retainedTextureSegments[0].valid) {
             baseTargetRect = retainedTextureSegments[0].targetRect;
             baseSourceRect = retainedTextureSegments[0].sourceRect;
             baseBodyTexture = retainedSourceTexture;
         }
-        if (retainedTextureSegments[1].valid) {
+        if (retainedTextureSegments.size() > 1 && retainedTextureSegments[1].valid) {
             tailTargetRect = retainedTextureSegments[1].targetRect;
             tailSourceRect = retainedTextureSegments[1].sourceRect;
             tailBodyTexture = retainedSourceTexture;
@@ -5293,75 +5296,38 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
     const double targetScale =
         static_cast<double>(drawPixels)
         / static_cast<double>(std::max<qint64>(1, displayRight - displayLeft + 1));
-    int segmentIndex = 0;
-    qint64 runDisplayLeft = 0;
-    qint64 runDisplayRight = -1;
-    int runSlotLeft = -1;
-    int previousSlot = -2;
     plan.coversRange = true;
-    const auto flushRetainedSegment = [&]() {
-        if (runDisplayRight < runDisplayLeft
-            || runSlotLeft < 0) {
-            runDisplayRight = -1;
-            runSlotLeft = -1;
-            previousSlot = -2;
-            return;
-        }
-        if (segmentIndex >= static_cast<int>(plan.segments.size())) {
-            plan.overflowed = true;
-            runDisplayRight = -1;
-            runSlotLeft = -1;
-            previousSlot = -2;
-            return;
-        }
-        const int runWidth = static_cast<int>(runDisplayRight - runDisplayLeft + 1);
-        const double targetX =
-            drawX + static_cast<double>(runDisplayLeft - displayLeft) * targetScale;
-        plan.segments[static_cast<size_t>(segmentIndex)] = RetainedRenderSegment{
-            QRect(runSlotLeft, 0, runWidth, m_precomputedBinsPerColumn),
-            QRectF(targetX, 0.0, static_cast<double>(runWidth) * targetScale, static_cast<double>(height)),
-            true,
-        };
-        plan.haveSegments = true;
-        segmentIndex += 1;
-        runDisplayRight = -1;
-        runSlotLeft = -1;
-        previousSlot = -2;
-    };
 
-    for (qint64 displayIndex = displayLeft; displayIndex <= scanRight; ++displayIndex) {
-        const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
-        if (slot < 0) {
+    const QVector<RetainedPageSpan> pageSpans =
+        buildRetainedPageSpansLocked(displayLeft, displayRight, scanRight, rollingMode);
+    qint64 expectedDisplayLeft = displayLeft;
+    for (const RetainedPageSpan &span : pageSpans) {
+        if (span.displayLeft > expectedDisplayLeft) {
             plan.coversRange = false;
-            flushRetainedSegment();
+        }
+        const int runWidth = span.pageXEnd - span.pageXBegin + 1;
+        if (runWidth <= 0) {
             continue;
         }
-
-        if (runSlotLeft < 0) {
-            runDisplayLeft = displayIndex;
-            runDisplayRight = displayIndex;
-            runSlotLeft = slot;
-            previousSlot = slot;
-            continue;
-        }
-
-        if (slot == previousSlot + 1) {
-            runDisplayRight = displayIndex;
-            previousSlot = slot;
-            continue;
-        }
-
-        flushRetainedSegment();
-        if (segmentIndex >= static_cast<int>(plan.segments.size())) {
-            plan.overflowed = true;
-            break;
-        }
-        runDisplayLeft = displayIndex;
-        runDisplayRight = displayIndex;
-        runSlotLeft = slot;
-        previousSlot = slot;
+        const int sourceX = static_cast<int>(span.pageIndex * kRetainedSourcePageWidth)
+            + span.pageXBegin;
+        const double targetX =
+            drawX + static_cast<double>(span.displayLeft - displayLeft) * targetScale;
+        plan.segments.push_back(RetainedRenderSegment{
+            QRect(sourceX, 0, runWidth, m_precomputedBinsPerColumn),
+            QRectF(
+                targetX,
+                0.0,
+                static_cast<double>(runWidth) * targetScale,
+                static_cast<double>(height)),
+            true,
+        });
+        plan.haveSegments = true;
+        expectedDisplayLeft = span.displayRight + 1;
     }
-    flushRetainedSegment();
+    if (expectedDisplayLeft <= scanRight) {
+        plan.coversRange = false;
+    }
     return plan;
 }
 

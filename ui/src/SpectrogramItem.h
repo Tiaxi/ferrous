@@ -154,7 +154,7 @@ private:
     };
 
     struct RetainedRenderPlan {
-        std::array<RetainedRenderSegment, 2> segments{};
+        QVector<RetainedRenderSegment> segments;
         bool haveSegments{false};
         bool overflowed{false};
         bool coversRange{false};
@@ -460,7 +460,7 @@ private:
     std::vector<std::unique_ptr<RetainedSourcePageState>> m_gpuSourcePages;
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenDisplayImage;
-    std::array<RetainedRenderSegment, 2> m_zoomFillFrozenRetainedSegments{};
+    QVector<RetainedRenderSegment> m_zoomFillFrozenRetainedSegments;
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;

@@ -399,7 +399,7 @@ git commit -m "feat: upload retained spectrogram source pages"
 - Modify: `ui/src/SpectrogramItem.cpp`
 - Modify: `ui/tests/tst_qml_smoke.cpp`
 
-- [ ] **Step 1: Replace fixed retained segment array**
+- [x] **Step 1: Replace fixed retained segment array**
 
 Replace:
 
@@ -424,7 +424,7 @@ struct RetainedRenderPlan {
 };
 ```
 
-- [ ] **Step 2: Add dynamic segment tests**
+- [x] **Step 2: Add dynamic segment tests**
 
 Add tests:
 
@@ -441,7 +441,7 @@ Expected:
 - crossing two page boundaries produces three segments
 - sparse holes still set `coversRange=false`; CPU fallback remains visible
 
-- [ ] **Step 3: Run tests and verify RED**
+- [x] **Step 3: Run tests and verify RED**
 
 ```bash
 ./scripts/run-tests.sh --ui-only

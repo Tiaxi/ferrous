@@ -1186,6 +1186,10 @@ private slots:
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
+    void spectrogramRetainedRenderPlanCoversOnePage();
+    void spectrogramRetainedRenderPlanCoversTwoPages();
+    void spectrogramRetainedRenderPlanCoversThreePages();
+    void spectrogramRetainedRenderPlanStillFallsBackForSparseOverflow();
     void spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill();
     void spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill();
     void spectrogramFullModeFreezesRetainedBodyDuringZoomFill();
@@ -11585,10 +11589,113 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanAllowsDecodedTailSlack() {
     QVERIFY2(
         plan.coversRange,
         "retained rendering should treat accepted decoded tail slack as covered");
+    QCOMPARE(plan.segments.size(), qsizetype{2});
     QVERIFY(plan.segments[0].valid);
-    QCOMPARE(plan.segments[0].sourceRect, QRect(0, 0, decodedColumns, bins));
-    QVERIFY(!plan.segments[1].valid);
+    QVERIFY(plan.segments[1].valid);
+    QCOMPARE(plan.segments[0].sourceRect, QRect(0, 0, SpectrogramItem::kRetainedSourcePageWidth, bins));
+    QCOMPARE(
+        plan.segments[1].sourceRect,
+        QRect(
+            SpectrogramItem::kRetainedSourcePageWidth,
+            0,
+            decodedColumns - SpectrogramItem::kRetainedSourcePageWidth,
+            bins));
     QVERIFY(plan.segments[0].targetRect.width() < 1183.0);
+}
+
+void QmlSmokeTest::spectrogramRetainedRenderPlanCoversOnePage() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = SpectrogramItem::kRetainedSourcePageWidth;
+    QByteArray data(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 81, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(0, columns - 1, columns - 1, 0.0, columns, 64, false);
+
+    QVERIFY(plan.haveSegments);
+    QVERIFY(!plan.overflowed);
+    QVERIFY(plan.coversRange);
+    QCOMPARE(plan.segments.size(), qsizetype{1});
+    QVERIFY(plan.segments[0].valid);
+    QCOMPARE(plan.segments[0].sourceRect, QRect(0, 0, columns, bins));
+}
+
+void QmlSmokeTest::spectrogramRetainedRenderPlanCoversTwoPages() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = SpectrogramItem::kRetainedSourcePageWidth + 64;
+    QByteArray data(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 82, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(2040, 2055, 2055, 0.0, 16, 64, false);
+
+    QVERIFY(plan.haveSegments);
+    QVERIFY(!plan.overflowed);
+    QVERIFY(plan.coversRange);
+    QCOMPARE(plan.segments.size(), qsizetype{2});
+    QCOMPARE(plan.segments[0].sourceRect, QRect(2040, 0, 8, bins));
+    QCOMPARE(plan.segments[1].sourceRect, QRect(2048, 0, 8, bins));
+}
+
+void QmlSmokeTest::spectrogramRetainedRenderPlanCoversThreePages() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = SpectrogramItem::kRetainedSourcePageWidth * 3;
+    QByteArray data(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 83, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(2040, 4103, 4103, 0.0, 2064, 64, false);
+
+    QVERIFY(plan.haveSegments);
+    QVERIFY(!plan.overflowed);
+    QVERIFY(plan.coversRange);
+    QCOMPARE(plan.segments.size(), qsizetype{3});
+    QCOMPARE(plan.segments[0].sourceRect, QRect(2040, 0, 8, bins));
+    QCOMPARE(plan.segments[1].sourceRect, QRect(2048, 0, 2048, bins));
+    QCOMPARE(plan.segments[2].sourceRect, QRect(4096, 0, 8, bins));
+}
+
+void QmlSmokeTest::spectrogramRetainedRenderPlanStillFallsBackForSparseOverflow() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = 64;
+    QByteArray data(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 84, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    item.m_ringColumnId[static_cast<size_t>(12)] = -1;
+
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(0, 31, 31, 0.0, 32, 64, false);
+
+    QVERIFY(plan.haveSegments);
+    QVERIFY(!plan.coversRange);
 }
 
 void QmlSmokeTest::spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame() {
