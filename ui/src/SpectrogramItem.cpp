@@ -5158,6 +5158,41 @@ bool SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
         && seekAgeMs <= seekDeferralWindowMs;
 }
 
+QVector<SpectrogramItem::RetainedPageUploadSpan>
+SpectrogramItem::retainedPageUploadSpansForPaintBudget(
+    const QVector<RetainedPageUploadSpan> &spans,
+    const int maxColumns,
+    bool *budgetExhausted) {
+    if (budgetExhausted != nullptr) {
+        *budgetExhausted = false;
+    }
+    if (spans.isEmpty() || maxColumns <= 0) {
+        return spans;
+    }
+
+    QVector<RetainedPageUploadSpan> bounded;
+    int uploadedColumns = 0;
+    for (const RetainedPageUploadSpan &span : spans) {
+        const int spanWidth = span.pageXEnd - span.pageXBegin + 1;
+        if (spanWidth <= 0) {
+            continue;
+        }
+        if (!bounded.isEmpty() && uploadedColumns + spanWidth > maxColumns) {
+            if (budgetExhausted != nullptr) {
+                *budgetExhausted = true;
+            }
+            break;
+        }
+        bounded.push_back(span);
+        uploadedColumns += spanWidth;
+    }
+
+    if (bounded.size() < spans.size() && budgetExhausted != nullptr) {
+        *budgetExhausted = true;
+    }
+    return bounded;
+}
+
 const char *SpectrogramItem::retainedPageResetReasonName(
     const RetainedPageResetReason reason) {
     switch (reason) {
@@ -5835,8 +5870,15 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
 
     const QVector<RetainedPageSpan> visiblePages =
         buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
-    const QVector<RetainedPageUploadSpan> uploadSpans =
+    static constexpr int retainedUploadColumnsPerPaint = kRetainedSourcePageWidth;
+    const QVector<RetainedPageUploadSpan> plannedUploadSpans =
         collectRetainedPageUploadSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
+    bool uploadBudgetExhausted = false;
+    const QVector<RetainedPageUploadSpan> uploadSpans =
+        retainedPageUploadSpansForPaintBudget(
+            plannedUploadSpans,
+            retainedUploadColumnsPerPaint,
+            &uploadBudgetExhausted);
     const QVector<qint64> pageIndicesToKeep =
         retainedSourcePageIndicesToKeepLocked(visiblePages, rollingMode, pageWidth);
 
@@ -5952,6 +5994,14 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             page->uploadedDisplayLeft = std::min(page->uploadedDisplayLeft, span.displayLeft);
             page->uploadedDisplayRight = std::max(page->uploadedDisplayRight, span.displayRight);
         }
+    }
+    if (uploadBudgetExhausted) {
+        QMetaObject::invokeMethod(
+            this,
+            [this]() {
+                update();
+            },
+            Qt::QueuedConnection);
     }
 }
 

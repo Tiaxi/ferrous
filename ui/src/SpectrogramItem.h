@@ -223,6 +223,10 @@ private:
         bool rendererFreeze,
         bool retainedPagesCoverVisibleRange,
         qint64 seekAgeMs);
+    static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
+        const QVector<RetainedPageUploadSpan> &spans,
+        int maxColumns,
+        bool *budgetExhausted = nullptr);
     static const char *retainedPageResetReasonName(RetainedPageResetReason reason);
     void invalidateLegacyRetainedSourceTextureStateLocked();
     void invalidateRetainedSourceTextureStateLocked();

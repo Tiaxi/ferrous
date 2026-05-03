@@ -1135,6 +1135,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans();
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerLabelsResetReasons();
+    void spectrogramRetainedPageUploadBudgetLimitsPaintWork();
     void spectrogramRetainedPageTextureExtentBoundsSmallSpans();
     void spectrogramRetainedUploadDefersTinyUncoveredSeekFrames();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
@@ -7466,6 +7467,53 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerLabelsResetReasons() {
     QCOMPARE(
         uploads[0].resetReason,
         SpectrogramItem::RetainedPageResetReason::BinsChanged);
+}
+
+void QmlSmokeTest::spectrogramRetainedPageUploadBudgetLimitsPaintWork() {
+    QVector<SpectrogramItem::RetainedPageUploadSpan> spans = {
+        SpectrogramItem::RetainedPageUploadSpan{
+            .pageIndex = 0,
+            .pageXBegin = 0,
+            .pageXEnd = SpectrogramItem::kRetainedSourcePageWidth - 1,
+            .displayLeft = 0,
+            .displayRight = SpectrogramItem::kRetainedSourcePageWidth - 1,
+            .resetPage = true,
+            .resetReason = SpectrogramItem::RetainedPageResetReason::MissingPage,
+        },
+        SpectrogramItem::RetainedPageUploadSpan{
+            .pageIndex = 1,
+            .pageXBegin = 0,
+            .pageXEnd = SpectrogramItem::kRetainedSourcePageWidth - 1,
+            .displayLeft = SpectrogramItem::kRetainedSourcePageWidth,
+            .displayRight = SpectrogramItem::kRetainedSourcePageWidth * 2 - 1,
+            .resetPage = true,
+            .resetReason = SpectrogramItem::RetainedPageResetReason::MissingPage,
+        },
+        SpectrogramItem::RetainedPageUploadSpan{
+            .pageIndex = 2,
+            .pageXBegin = 0,
+            .pageXEnd = 704,
+            .displayLeft = SpectrogramItem::kRetainedSourcePageWidth * 2,
+            .displayRight = SpectrogramItem::kRetainedSourcePageWidth * 2 + 704,
+            .resetPage = true,
+            .resetReason = SpectrogramItem::RetainedPageResetReason::MissingPage,
+        },
+    };
+
+    bool budgetExhausted = false;
+    const QVector<SpectrogramItem::RetainedPageUploadSpan> bounded =
+        SpectrogramItem::retainedPageUploadSpansForPaintBudget(
+            spans,
+            SpectrogramItem::kRetainedSourcePageWidth,
+            &budgetExhausted);
+
+    QCOMPARE(bounded.size(), 1);
+    QCOMPARE(bounded[0].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(
+        bounded[0].pageXEnd - bounded[0].pageXBegin + 1,
+        SpectrogramItem::kRetainedSourcePageWidth);
+    QVERIFY(bounded[0].resetPage);
+    QVERIFY(budgetExhausted);
 }
 
 void QmlSmokeTest::spectrogramRetainedPageTextureExtentBoundsSmallSpans() {
