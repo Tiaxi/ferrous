@@ -258,7 +258,8 @@ private:
         double drawX,
         int drawPixels,
         int height,
-        bool rollingMode) const;
+        bool rollingMode,
+        int pageWidth = kRetainedSourcePageWidth) const;
     void syncRetainedSourceTextureLocked(
         QQuickWindow *window,
         qint64 displayLeft,

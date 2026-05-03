@@ -3021,7 +3021,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     drawX,
                     drawPixels,
                     h,
-                    rollingMode);
+                    rollingMode,
+                    retainedSourcePageWidthForGpuLimit(currentWindow));
                 retainedTextureSegments = retainedPlan.segments;
                 haveRetainedTextureSegments = retainedPlan.haveSegments;
                 retainedTextureSegmentsOverflowed = retainedPlan.overflowed;
@@ -5470,12 +5471,14 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
     const double drawX,
     const int drawPixels,
     const int height,
-    const bool rollingMode) const {
+    const bool rollingMode,
+    const int pageWidth) const {
     RetainedRenderPlan plan;
     if (displayRight < displayLeft
         || drawPixels <= 0
         || height <= 0
-        || m_precomputedBinsPerColumn <= 0) {
+        || m_precomputedBinsPerColumn <= 0
+        || pageWidth <= 0) {
         return plan;
     }
 
@@ -5490,7 +5493,7 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
     plan.coversRange = true;
 
     const QVector<RetainedPageSpan> pageSpans =
-        buildRetainedPageSpansLocked(displayLeft, displayRight, scanRight, rollingMode);
+        buildRetainedPageSpansLocked(displayLeft, displayRight, scanRight, rollingMode, pageWidth);
     qint64 expectedDisplayLeft = displayLeft;
     for (const RetainedPageSpan &span : pageSpans) {
         if (span.displayLeft > expectedDisplayLeft) {
@@ -5500,7 +5503,7 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
         if (runWidth <= 0) {
             continue;
         }
-        const int sourceX = static_cast<int>(span.pageIndex * kRetainedSourcePageWidth)
+        const int sourceX = static_cast<int>(span.pageIndex * pageWidth)
             + span.pageXBegin;
         const double targetX =
             drawX + static_cast<double>(span.displayLeft - displayLeft) * targetScale;

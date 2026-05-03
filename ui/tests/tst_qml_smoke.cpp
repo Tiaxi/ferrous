@@ -1190,6 +1190,7 @@ private slots:
     void spectrogramRetainedRenderPlanCoversOnePage();
     void spectrogramRetainedRenderPlanCoversTwoPages();
     void spectrogramRetainedRenderPlanCoversThreePages();
+    void spectrogramRetainedRenderPlanUsesClampedPageWidth();
     void spectrogramRetainedRenderPlanStillFallsBackForSparseOverflow();
     void spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill();
     void spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill();
@@ -11700,6 +11701,32 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanCoversThreePages() {
     QCOMPARE(plan.segments[0].sourceRect, QRect(2040, 0, 8, bins));
     QCOMPARE(plan.segments[1].sourceRect, QRect(2048, 0, 2048, bins));
     QCOMPARE(plan.segments[2].sourceRect, QRect(4096, 0, 8, bins));
+}
+
+void QmlSmokeTest::spectrogramRetainedRenderPlanUsesClampedPageWidth() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int pageWidth = 1024;
+    constexpr int columns = pageWidth * 3;
+    QByteArray data(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 86, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(1016, 2055, 2055, 0.0, 1040, 64, false, pageWidth);
+
+    QVERIFY(plan.haveSegments);
+    QVERIFY(!plan.overflowed);
+    QVERIFY(plan.coversRange);
+    QCOMPARE(plan.segments.size(), qsizetype{3});
+    QCOMPARE(plan.segments[0].sourceRect, QRect(1016, 0, 8, bins));
+    QCOMPARE(plan.segments[1].sourceRect, QRect(1024, 0, 1024, bins));
+    QCOMPARE(plan.segments[2].sourceRect, QRect(2048, 0, 8, bins));
 }
 
 void QmlSmokeTest::spectrogramRetainedRenderPlanStillFallsBackForSparseOverflow() {
