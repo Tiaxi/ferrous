@@ -2722,12 +2722,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 gpuDebugMode == SpectrogramGpu::DebugMode::TextureNode
                 || gpuDebugMode == SpectrogramGpu::DebugMode::ShaderSourceOnly
                 || gpuDebugMode == SpectrogramGpu::DebugMode::Full;
+            const bool retainedSourceTextureFitsGpuLimits =
+                retainedSourceTextureFitsGpuLimit(
+                    currentWindow,
+                    m_ringCapacity,
+                    m_precomputedBinsPerColumn);
             const bool canUseRetainedSourceTextureBody =
                 debugModeRequestsRetainedSourceTextureBody
                 && currentWindow != nullptr
                 && currentWindow->rendererInterface() != nullptr
                 && currentWindow->rendererInterface()->graphicsApi()
-                    == QSGRendererInterface::OpenGL;
+                    == QSGRendererInterface::OpenGL
+                && retainedSourceTextureFitsGpuLimits;
             const bool maintainCpuDisplayImage =
                 currentWindow == nullptr
                 || !canUseRetainedSourceTextureBody
@@ -4875,6 +4881,18 @@ int SpectrogramItem::gpuMaxTextureColumns(QQuickWindow *window) const {
     return kFallbackMaxTextureColumns;
 }
 
+bool SpectrogramItem::retainedSourceTextureFitsGpuLimit(
+    QQuickWindow *window,
+    const int capacityColumns,
+    const int binsPerColumn) const {
+    if (capacityColumns <= 0 || binsPerColumn <= 0) {
+        return false;
+    }
+
+    const int maxTextureSize = gpuMaxTextureColumns(window);
+    return capacityColumns <= maxTextureSize && binsPerColumn <= maxTextureSize;
+}
+
 void SpectrogramItem::ensureMapping(int height) {
     if (height <= 0 || m_binsPerColumn <= 0) {
         return;
@@ -5205,6 +5223,13 @@ void SpectrogramItem::syncRetainedSourceTextureLocked(
 
     const SpectrogramRetainedSourceLayout layout =
         buildRetainedSourceLayoutLocked(displayLeft, displayRight, rollingMode);
+    if (!retainedSourceTextureFitsGpuLimit(
+            window,
+            layout.capacityColumns,
+            layout.binsPerColumn)) {
+        invalidateRetainedSourceTextureStateLocked();
+        return;
+    }
     const QSize retainedTextureSize(layout.capacityColumns, layout.binsPerColumn);
     const bool textureStateChanged =
         retainedSourceTextureStateChangedLocked(window, retainedTextureSize, rollingMode);

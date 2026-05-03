@@ -236,6 +236,10 @@ private:
         const std::array<quint8, 256> &dbRemap,
         const QRgb *palette) const;
     int gpuMaxTextureColumns(QQuickWindow *window) const;
+    bool retainedSourceTextureFitsGpuLimit(
+        QQuickWindow *window,
+        int capacityColumns,
+        int binsPerColumn) const;
     int gpuDrawWidthForSourceColumnsLocked(
         int width,
         qint64 displayLeft,

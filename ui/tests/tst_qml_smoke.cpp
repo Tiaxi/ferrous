@@ -1139,6 +1139,7 @@ private slots:
     void spectrogramRetainedSourceTextureCreatesReownsAndCleansUpOnLiveWindow();
     void spectrogramRetainedSourceTextureEnsureCreatedPreservesExistingStateWithoutContext();
     void spectrogramRetainedSourceTextureUploadRejectsInvalidArguments();
+    void spectrogramRetainedSourceTextureRejectsCapacityBeyondGpuLimit();
     void spectrogramGpuTextureNodeDebugUsesRetainedSourceTextureResource();
     void spectrogramGpuLookupAndDisplayImagesUseCompatibleFormats();
     void spectrogramGpuDebugModeParsesEnvironmentValues();
@@ -1794,6 +1795,17 @@ void QmlSmokeTest::spectrogramRetainedSourceTextureUploadRejectsInvalidArguments
     QCOMPARE(texture.m_textureId, 44U);
     QCOMPARE(texture.size(), QSize(8, 4));
     QCOMPARE(texture.pendingUploadSpanCount(), 1);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourceTextureRejectsCapacityBeyondGpuLimit() {
+    SpectrogramItem item;
+    QQuickWindow window;
+
+    item.m_gpuMaxTextureColumns = 16384;
+
+    QVERIFY(item.retainedSourceTextureFitsGpuLimit(&window, 16320, 1025));
+    QVERIFY(!item.retainedSourceTextureFitsGpuLimit(&window, 17820, 1025));
+    QVERIFY(!item.retainedSourceTextureFitsGpuLimit(&window, 16320, 20000));
 }
 
 void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
