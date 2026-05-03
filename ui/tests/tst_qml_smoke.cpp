@@ -1130,6 +1130,8 @@ private slots:
     void spectrogramRetainedPagePlanSplitsSinglePageRange();
     void spectrogramRetainedPagePlanSplitsAcrossPageBoundary();
     void spectrogramRetainedPagePlanSplitsRollingWrap();
+    void spectrogramRetainedPageRetentionKeepsCenteredHalo();
+    void spectrogramRetainedPageRetentionKeepsRollingWrapHalo();
     void spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans();
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
@@ -7276,6 +7278,60 @@ void QmlSmokeTest::spectrogramRetainedPagePlanSplitsRollingWrap() {
     QCOMPARE(spans[1].pageXEnd, 3);
     QCOMPARE(spans[1].displayLeft, static_cast<qint64>(8));
     QCOMPARE(spans[1].displayRight, static_cast<qint64>(11));
+}
+
+void QmlSmokeTest::spectrogramRetainedPageRetentionKeepsCenteredHalo() {
+    SpectrogramItem item;
+
+    QMutexLocker lock(&item.m_stateMutex);
+    item.m_ringCapacity = SpectrogramItem::kRetainedSourcePageWidth * 4;
+
+    const QVector<SpectrogramItem::RetainedPageSpan> visiblePages = {
+        SpectrogramItem::RetainedPageSpan{
+            .pageIndex = 1,
+            .pageXBegin = 16,
+            .pageXEnd = 64,
+            .displayLeft = SpectrogramItem::kRetainedSourcePageWidth + 16,
+            .displayRight = SpectrogramItem::kRetainedSourcePageWidth + 64,
+        },
+    };
+
+    const QVector<qint64> retainedPages =
+        item.retainedSourcePageIndicesToKeepLocked(
+            visiblePages,
+            false,
+            SpectrogramItem::kRetainedSourcePageWidth);
+
+    QCOMPARE(retainedPages, QVector<qint64>({0, 1, 2}));
+}
+
+void QmlSmokeTest::spectrogramRetainedPageRetentionKeepsRollingWrapHalo() {
+    SpectrogramItem item;
+
+    QMutexLocker lock(&item.m_stateMutex);
+    item.m_ringCapacity = 16;
+
+    const QVector<SpectrogramItem::RetainedPageSpan> visiblePages = {
+        SpectrogramItem::RetainedPageSpan{
+            .pageIndex = 3,
+            .pageXBegin = 2,
+            .pageXEnd = 3,
+            .displayLeft = 14,
+            .displayRight = 15,
+        },
+        SpectrogramItem::RetainedPageSpan{
+            .pageIndex = 0,
+            .pageXBegin = 0,
+            .pageXEnd = 1,
+            .displayLeft = 16,
+            .displayRight = 17,
+        },
+    };
+
+    const QVector<qint64> retainedPages =
+        item.retainedSourcePageIndicesToKeepLocked(visiblePages, true, 4);
+
+    QCOMPARE(retainedPages, QVector<qint64>({0, 1, 2, 3}));
 }
 
 void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans() {

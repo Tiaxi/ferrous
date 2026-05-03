@@ -253,6 +253,10 @@ private:
         qint64 renderableRight,
         bool rollingMode,
         int pageWidth = kRetainedSourcePageWidth) const;
+    QVector<qint64> retainedSourcePageIndicesToKeepLocked(
+        const QVector<RetainedPageSpan> &visiblePages,
+        bool rollingMode,
+        int pageWidth) const;
     QVector<RetainedPageUploadSpan> collectRetainedPageUploadSpansLocked(
         qint64 displayLeft,
         qint64 displayRight,

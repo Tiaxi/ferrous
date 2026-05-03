@@ -5402,6 +5402,41 @@ SpectrogramItem::RetainedSourcePageState *SpectrogramItem::findRetainedSourcePag
     return nullptr;
 }
 
+QVector<qint64> SpectrogramItem::retainedSourcePageIndicesToKeepLocked(
+    const QVector<RetainedPageSpan> &visiblePages,
+    const bool rollingMode,
+    const int pageWidth) const {
+    QVector<qint64> pageIndices;
+    if (visiblePages.isEmpty() || pageWidth <= 0 || m_ringCapacity <= 0) {
+        return pageIndices;
+    }
+
+    const qint64 pageCount =
+        (m_ringCapacity + static_cast<qint64>(pageWidth) - 1)
+        / static_cast<qint64>(pageWidth);
+    if (pageCount <= 0) {
+        return pageIndices;
+    }
+
+    const auto appendPage = [&](qint64 pageIndex) {
+        if (rollingMode) {
+            pageIndex = ((pageIndex % pageCount) + pageCount) % pageCount;
+        }
+        if (pageIndex < 0 || pageIndex >= pageCount || pageIndices.contains(pageIndex)) {
+            return;
+        }
+        pageIndices.push_back(pageIndex);
+    };
+
+    for (const RetainedPageSpan &span : visiblePages) {
+        appendPage(span.pageIndex - 1);
+        appendPage(span.pageIndex);
+        appendPage(span.pageIndex + 1);
+    }
+    std::sort(pageIndices.begin(), pageIndices.end());
+    return pageIndices;
+}
+
 QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetainedPageUploadSpansLocked(
     const qint64 displayLeft,
     const qint64 displayRight,
@@ -5700,6 +5735,8 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
         buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
     const QVector<RetainedPageUploadSpan> uploadSpans =
         collectRetainedPageUploadSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
+    const QVector<qint64> pageIndicesToKeep =
+        retainedSourcePageIndicesToKeepLocked(visiblePages, rollingMode, pageWidth);
 
     std::erase_if(m_gpuSourcePages, [&](const auto &page) {
         if (page == nullptr
@@ -5707,9 +5744,7 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             || page->key.rollingMode != rollingMode) {
             return true;
         }
-        return std::none_of(visiblePages.cbegin(), visiblePages.cend(), [&](const RetainedPageSpan &span) {
-            return span.pageIndex == page->key.pageIndex;
-        });
+        return !pageIndicesToKeep.contains(page->key.pageIndex);
     });
 
     const auto ensurePage = [&](const qint64 pageIndex) -> RetainedSourcePageState * {
