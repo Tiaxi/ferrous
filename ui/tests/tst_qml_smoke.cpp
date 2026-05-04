@@ -4019,6 +4019,9 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
+    SpectrogramItem duplicateItem;
+    duplicateItem.setWidth(320);
+    duplicateItem.setHeight(180);
 
     {
         QMutexLocker lock(&item.m_stateMutex);
@@ -4031,6 +4034,9 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
         item.maybeStartSeekProfileLocked(startedAtMs);
         QVERIFY(item.m_seekProfile.active);
 
+        item.noteSeekProfileFrameLocked(startedAtMs + 30, 0.016, false, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 60, 0.016, false, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 90, 0.016, false, false);
         item.noteSeekProfileFrameLocked(startedAtMs + 150, 0.016, false, false);
         QVERIFY(!item.m_seekProfile.active);
 
@@ -4039,6 +4045,15 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
         QCOMPARE(
             item.m_lastFinalizedSeekProfileGeneration,
             SpectrogramSeekTrace::currentGeneration());
+    }
+
+    {
+        QMutexLocker lock(&duplicateItem.m_stateMutex);
+        duplicateItem.m_profileEnabled = true;
+        duplicateItem.m_precomputedCanvasDisplayRight = 96;
+        duplicateItem.m_gpuDisplayWidth = 320;
+        duplicateItem.maybeStartSeekProfileLocked(SpectrogramSeekTrace::startedAtMs() + 180);
+        QVERIFY(!duplicateItem.m_seekProfile.active);
     }
 
     qunsetenv("FERROUS_PROFILE_UI");
@@ -7621,15 +7636,19 @@ void QmlSmokeTest::spectrogramRetainedPageUploadBudgetSplitsOversizedSpan() {
     const QVector<SpectrogramItem::RetainedPageUploadSpan> bounded =
         SpectrogramItem::retainedPageUploadSpansForPaintBudget(
             spans,
-            512,
+            SpectrogramItem::kRetainedUploadColumnsPerPaint,
             &budgetExhausted);
 
     QCOMPARE(bounded.size(), 1);
     QCOMPARE(bounded[0].pageIndex, static_cast<qint64>(2));
     QCOMPARE(bounded[0].pageXBegin, 100);
-    QCOMPARE(bounded[0].pageXEnd, 611);
+    QCOMPARE(
+        bounded[0].pageXEnd,
+        100 + SpectrogramItem::kRetainedUploadColumnsPerPaint - 1);
     QCOMPARE(bounded[0].displayLeft, static_cast<qint64>(2100));
-    QCOMPARE(bounded[0].displayRight, static_cast<qint64>(2611));
+    QCOMPARE(
+        bounded[0].displayRight,
+        static_cast<qint64>(2100 + SpectrogramItem::kRetainedUploadColumnsPerPaint - 1));
     QVERIFY(bounded[0].resetPage);
     QCOMPARE(
         bounded[0].resetReason,

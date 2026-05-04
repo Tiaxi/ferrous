@@ -146,6 +146,7 @@ protected:
 private:
     static constexpr int kGradientTableSize = 2048;
     static constexpr int kRetainedSourcePageWidth = 2048;
+    static constexpr int kRetainedUploadColumnsPerPaint = 384;
 
     struct RetainedRenderSegment {
         QRect sourceRect;
