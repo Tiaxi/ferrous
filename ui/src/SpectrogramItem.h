@@ -230,6 +230,7 @@ private:
     static const char *retainedPageResetReasonName(RetainedPageResetReason reason);
     void invalidateLegacyRetainedSourceTextureStateLocked();
     void invalidateRetainedSourceTextureStateLocked();
+    void invalidateRetainedSourceTextureUploadStateLocked(bool preservePageTextures);
     void invalidateRenderCachesLocked();
     bool reanchorRollingEpochForCurrentDataLocked(
         std::chrono::steady_clock::time_point now);

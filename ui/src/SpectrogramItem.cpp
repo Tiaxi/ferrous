@@ -1451,11 +1451,14 @@ void SpectrogramItem::feedPrecomputedChunk(
                 >= m_precomputedCanvasDisplayLeft
             && m_precomputedTotalColumnsEstimate > 0
             && m_precomputedBinsPerColumn > 0;
-        if (canPreserveCanvasForSeek && m_gpuDisplayImage.isNull()) {
+        if (canPreserveCanvasForSeek
+            && m_gpuDisplayImage.isNull()
+            && !m_zoomFillFrozenRetainedAvailable) {
             ensureZoomFillSnapshotImageLocked();
         }
         const bool preserveCanvasForSeek =
-            canPreserveCanvasForSeek && !m_gpuDisplayImage.isNull();
+            canPreserveCanvasForSeek
+            && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
 
         m_ringWriteSeq = 0;
         m_ringOldestSeq = 0;
@@ -1468,7 +1471,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedMaxColumnIndex = -1;
         m_precomputedCanvasDirty = true;
         m_awaitingWorkerReset = true;
-        invalidateRetainedSourceTextureStateLocked();
+        invalidateRetainedSourceTextureUploadStateLocked(
+            preserveCanvasForSeek && m_zoomFillFrozenRetainedAvailable);
 
         if (preserveCanvasForSeek) {
             // Canvas, m_precomputedReady, and the stored display range
@@ -2829,7 +2833,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 w,
                 static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
 
-            const bool haveFreezeCache = !m_zoomFillFrozenDisplayImage.isNull();
+            const bool haveFreezeCache =
+                !m_zoomFillFrozenDisplayImage.isNull()
+                || m_zoomFillFrozenRetainedActive;
             bool rendererFreeze =
                 m_zoomFillActive
                 && haveFreezeCache
@@ -5108,7 +5114,9 @@ bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
 }
 
 void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
-    ensureZoomFillSnapshotImageLocked();
+    if (!m_zoomFillFrozenRetainedAvailable) {
+        ensureZoomFillSnapshotImageLocked();
+    }
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
     m_zoomFillFrozenDisplayGeneration = m_gpuDisplayGeneration;
 }
@@ -5225,8 +5233,24 @@ void SpectrogramItem::invalidateLegacyRetainedSourceTextureStateLocked() {
 }
 
 void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
+    invalidateRetainedSourceTextureUploadStateLocked(false);
+}
+
+void SpectrogramItem::invalidateRetainedSourceTextureUploadStateLocked(
+    const bool preservePageTextures) {
     invalidateLegacyRetainedSourceTextureStateLocked();
-    m_gpuSourcePages.clear();
+    if (preservePageTextures) {
+        for (const auto &page : m_gpuSourcePages) {
+            if (page == nullptr) {
+                continue;
+            }
+            page->uploadedDisplayLeft = 0;
+            page->uploadedDisplayRight = -1;
+            page->dirtySpans.clear();
+        }
+    } else {
+        m_gpuSourcePages.clear();
+    }
     m_gpuSourcePageUploadSpanCount = 0;
     m_gpuSourcePageUploadColumns = 0;
     m_gpuSourcePageTextureReset = false;

@@ -1208,7 +1208,7 @@ private slots:
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
     void spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectly();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
-    void spectrogramZoomFillBuildsSnapshotEvenWhenRetainedFreezeWasAvailable();
+    void spectrogramZoomFillUsesRetainedFreezeWithoutCpuSnapshot();
     void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
     void spectrogramDataResetInvalidatesRetainedSourceStateDuringFreeze();
@@ -12322,7 +12322,7 @@ void QmlSmokeTest::spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata()
     }
 }
 
-void QmlSmokeTest::spectrogramZoomFillBuildsSnapshotEvenWhenRetainedFreezeWasAvailable() {
+void QmlSmokeTest::spectrogramZoomFillUsesRetainedFreezeWithoutCpuSnapshot() {
     SpectrogramItem item;
     item.setWidth(120);
     item.setHeight(80);
@@ -12358,10 +12358,9 @@ void QmlSmokeTest::spectrogramZoomFillBuildsSnapshotEvenWhenRetainedFreezeWasAva
         item.captureZoomFillFrozenCacheLocked();
 
         QVERIFY2(
-            !item.m_zoomFillFrozenDisplayImage.isNull(),
-            "retained freeze capture must still build a CPU snapshot because retained pages can be invalidated by the reset handoff");
-        QCOMPARE(item.m_zoomFillFrozenDisplayImage.width(), 120);
-        QCOMPARE(item.m_zoomFillFrozenDisplayImage.height(), 80);
+            item.m_zoomFillFrozenDisplayImage.isNull(),
+            "retained freeze capture should not build a CPU snapshot when retained segments can preserve the visible frame");
+        QVERIFY(item.m_zoomFillFrozenRetainedAvailable);
     }
 }
 
@@ -12438,8 +12437,8 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesRetainedSourceStateDuring
         QMutexLocker lock(&item.m_stateMutex);
         item.ensureMapping(80);
         item.syncPrecomputedDisplayImageLocked(
-            120, 80, 0, 119, false, 1.0, true);
-        QVERIFY(!item.m_gpuDisplayImage.isNull());
+            120, 80, 0, 119, false, 1.0, false);
+        QVERIFY(item.m_gpuDisplayImage.isNull());
 
         item.m_gpuSourceTextureDisplayLeft = 0;
         item.m_gpuSourceTextureDisplayRight = 119;
@@ -12449,6 +12448,26 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesRetainedSourceStateDuring
         item.m_gpuSourceTextureRingOldestSeq = item.m_ringOldestSeq;
         item.m_gpuSourceTextureMinColumnIndex = 0;
         item.m_gpuSourceTextureMaxColumnIndex = 119;
+        auto page = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+        page->key = SpectrogramItem::RetainedSourcePageKey{
+            .trackToken = item.m_precomputedTrackToken,
+            .rollingMode = false,
+            .pageIndex = 0,
+        };
+        page->pageXOrigin = 0;
+        page->width = 120;
+        page->binsPerColumn = bins;
+        page->uploadedDisplayLeft = 0;
+        page->uploadedDisplayRight = 119;
+        item.m_gpuSourcePages.push_back(std::move(page));
+        item.m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(0, 0, 120, bins),
+                QRectF(0.0, 0.0, 120.0, 80.0),
+                true,
+            },
+        };
+        item.m_zoomFillFrozenRetainedAvailable = true;
     }
 
     item.feedPrecomputedChunk(
@@ -12459,7 +12478,10 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesRetainedSourceStateDuring
     {
         QMutexLocker lock(&item.m_stateMutex);
         QVERIFY(item.m_zoomFillActive);
-        QVERIFY(!item.m_zoomFillFrozenDisplayImage.isNull());
+        QVERIFY(item.m_zoomFillFrozenDisplayImage.isNull());
+        QCOMPARE(item.m_gpuSourcePages.size(), static_cast<size_t>(1));
+        QVERIFY(item.m_gpuSourcePages.front() != nullptr);
+        QCOMPARE(item.m_gpuSourcePages.front()->uploadedDisplayRight, static_cast<qint64>(-1));
         QCOMPARE(item.m_gpuSourceTextureTrackToken, static_cast<quint64>(0));
         QCOMPARE(item.m_gpuSourceTextureDisplayRight, static_cast<qint64>(-1));
         QVERIFY(item.m_gpuSourceTextureMaxColumnIndex < item.m_gpuSourceTextureMinColumnIndex);
