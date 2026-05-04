@@ -49,6 +49,12 @@ def parse_log(path: Path) -> dict[str, object]:
         "event_stall_ms": [],
         "bridge_poll_ms": [],
         "bridge_precomputed_ms": [],
+        "bridge_precomputed_pop_ms": [],
+        "bridge_precomputed_dispatch_ms": [],
+        "bridge_precomputed_max_frame_ms": [],
+        "precomputed_frame_ms": [],
+        "precomputed_frame_pop_ms": [],
+        "precomputed_frame_dispatch_ms": [],
         "paths": Counter(),
         "fallbacks": Counter(),
         "cpu_rebuilds": 0,
@@ -90,6 +96,21 @@ def parse_log(path: Path) -> dict[str, object]:
         elif "[ui-prof] bridge_poll" in line:
             append_float(metrics["bridge_poll_ms"], fields, "ms")
             append_float(metrics["bridge_precomputed_ms"], fields, "precomputed_ms")
+            append_float(metrics["bridge_precomputed_pop_ms"], fields, "precomputed_pop_ms")
+            append_float(
+                metrics["bridge_precomputed_dispatch_ms"],
+                fields,
+                "precomputed_dispatch_ms",
+            )
+            append_float(
+                metrics["bridge_precomputed_max_frame_ms"],
+                fields,
+                "precomputed_max_frame_ms",
+            )
+        elif "[ui-prof] precomputed_frame" in line:
+            append_float(metrics["precomputed_frame_ms"], fields, "ms")
+            append_float(metrics["precomputed_frame_pop_ms"], fields, "pop_ms")
+            append_float(metrics["precomputed_frame_dispatch_ms"], fields, "dispatch_ms")
 
     return metrics
 
@@ -125,6 +146,12 @@ def summarize(label: str, metrics: dict[str, object]) -> list[str]:
     stalls = list_value(metrics, "event_stall_ms")
     bridge = list_value(metrics, "bridge_poll_ms")
     bridge_precomputed = list_value(metrics, "bridge_precomputed_ms")
+    bridge_precomputed_pop = list_value(metrics, "bridge_precomputed_pop_ms")
+    bridge_precomputed_dispatch = list_value(metrics, "bridge_precomputed_dispatch_ms")
+    bridge_precomputed_frame = list_value(metrics, "bridge_precomputed_max_frame_ms")
+    precomputed_frame = list_value(metrics, "precomputed_frame_ms")
+    precomputed_frame_pop = list_value(metrics, "precomputed_frame_pop_ms")
+    precomputed_frame_dispatch = list_value(metrics, "precomputed_frame_dispatch_ms")
     paths = counter_value(metrics, "paths")
     fallbacks = counter_value(metrics, "fallbacks")
 
@@ -139,6 +166,11 @@ def summarize(label: str, metrics: dict[str, object]) -> list[str]:
         f"  bridge polls count={len(bridge)} p90={percentile(bridge, 0.90):.1f}ms "
         f"max={max(bridge, default=0.0):.1f}ms precomputed avg={avg(bridge_precomputed):.3f}ms "
         f"max={max(bridge_precomputed, default=0.0):.1f}ms",
+        f"  precomputed split pop avg={avg(bridge_precomputed_pop):.3f}ms "
+        f"dispatch avg={avg(bridge_precomputed_dispatch):.3f}ms "
+        f"max-frame p90={percentile(bridge_precomputed_frame, 0.90):.1f}ms "
+        f"slow-frame count={len(precomputed_frame)} pop max={max(precomputed_frame_pop, default=0.0):.1f}ms "
+        f"dispatch max={max(precomputed_frame_dispatch, default=0.0):.1f}ms",
         f"  cpu rebuilds={metrics['cpu_rebuilds']} retained resets={metrics['retained_resets']} "
         f"retained uploaded cols={metrics['retained_upload_cols']}",
         f"  paths={format_counter(paths)}",

@@ -414,6 +414,9 @@ private:
         qsizetype processedPrecomputedBytes{0};
         double analysisMs{0.0};
         double precomputedMs{0.0};
+        double precomputedPopMs{0.0};
+        double precomputedDispatchMs{0.0};
+        double maxPrecomputedFrameMs{0.0};
         double treeMs{0.0};
         double searchMs{0.0};
         double eventMs{0.0};
@@ -440,6 +443,25 @@ private:
                 || searchCapSaturated
                 || eventCapSaturated;
         }
+    };
+
+    struct PrecomputedDispatchStats {
+        bool valid{false};
+        double dispatchMs{0.0};
+        int bins{0};
+        int columns{0};
+        int channelCount{0};
+        int startIndex{0};
+        int totalEstimate{0};
+        int sampleRate{0};
+        int hopSize{0};
+        float coverage{0.0f};
+        bool complete{false};
+        bool bufferReset{false};
+        bool clearHistory{false};
+        quint64 trackToken{0};
+        quint64 generation{0};
+        qsizetype dataBytes{0};
     };
 
     bool startInProcessBridge();
@@ -487,7 +509,7 @@ private:
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
     void processAnalysisBytes(const QByteArray &chunk);
-    void parsePrecomputedSpectrogramFrame(const QByteArray &raw);
+    PrecomputedDispatchStats parsePrecomputedSpectrogramFrame(const QByteArray &raw);
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logProfileDiagnostic(const QString &category, const QString &message) const;

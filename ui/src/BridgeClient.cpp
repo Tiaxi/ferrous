@@ -1585,9 +1585,15 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
             if (markBudgetExhaustedIfNeeded()) {
                 break;
             }
+            QElapsedTimer frameTimer;
+            frameTimer.start();
+            QElapsedTimer popTimer;
+            popTimer.start();
             std::size_t len = 0;
             std::uint8_t *ptr = ferrous_ffi_bridge_pop_precomputed_spectrogram(m_ffiBridge, &len);
+            const double popCallMs = elapsedMs(popTimer);
             if (ptr == nullptr || len == 0) {
+                result.precomputedPopMs += popCallMs;
                 break;
             }
             result.processedPrecomputedFrames++;
@@ -1596,7 +1602,39 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
                 static_cast<qsizetype>(len));
             result.processedPrecomputedBytes += raw.size();
             ferrous_ffi_bridge_free_precomputed_spectrogram(ptr, len);
-            parsePrecomputedSpectrogramFrame(raw);
+            const double framePopMs = elapsedMs(popTimer);
+            result.precomputedPopMs += framePopMs;
+            const PrecomputedDispatchStats stats =
+                parsePrecomputedSpectrogramFrame(raw);
+            result.precomputedDispatchMs += stats.dispatchMs;
+            const double frameMs = elapsedMs(frameTimer);
+            result.maxPrecomputedFrameMs =
+                std::max(result.maxPrecomputedFrameMs, frameMs);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            if (m_profileUiEnabled && frameMs >= 8.0) {
+                FERROUS_PROFILE_LOG_DIAGNOSTIC(
+                    QStringLiteral("ui-prof"),
+                    QStringLiteral(
+                        "precomputed_frame ms=%1 pop_ms=%2 dispatch_ms=%3 raw_kb=%4 data_kb=%5 cols=%6 bins=%7 channels=%8 start=%9 total=%10 hop=%11 reset=%12 clear=%13 complete=%14 token=%15 gen=%16 valid=%17")
+                        .arg(frameMs, 0, 'f', 2)
+                        .arg(framePopMs, 0, 'f', 2)
+                        .arg(stats.dispatchMs, 0, 'f', 2)
+                        .arg(static_cast<double>(raw.size()) / 1024.0, 0, 'f', 1)
+                        .arg(static_cast<double>(stats.dataBytes) / 1024.0, 0, 'f', 1)
+                        .arg(stats.columns)
+                        .arg(stats.bins)
+                        .arg(stats.channelCount)
+                        .arg(stats.startIndex)
+                        .arg(stats.totalEstimate)
+                        .arg(stats.hopSize)
+                        .arg(stats.bufferReset ? 1 : 0)
+                        .arg(stats.clearHistory ? 1 : 0)
+                        .arg(stats.complete ? 1 : 0)
+                        .arg(static_cast<qulonglong>(stats.trackToken))
+                        .arg(static_cast<qulonglong>(stats.generation))
+                        .arg(stats.valid ? 1 : 0));
+            }
+#endif
         }
         result.precomputedMs = elapsedMs(phaseTimer);
     }
@@ -1957,7 +1995,7 @@ void BridgeClient::pollInProcessBridge() {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("ui-prof"),
                 QStringLiteral(
-                    "bridge_poll ms=%1 analysis_frames=%2 analysis_kb=%3 precomputed_frames=%4 precomputed_kb=%5 tree_frames=%6 search_frames=%7 events=%8 analysis_ms=%9 precomputed_ms=%10 tree_ms=%11 search_ms=%12 event_ms=%13 budget_exhausted=%14 saturated=%15 wake_notifier=%16 timer_active=%17")
+                    "bridge_poll ms=%1 analysis_frames=%2 analysis_kb=%3 precomputed_frames=%4 precomputed_kb=%5 tree_frames=%6 search_frames=%7 events=%8 analysis_ms=%9 precomputed_ms=%10 precomputed_pop_ms=%11 precomputed_dispatch_ms=%12 precomputed_max_frame_ms=%13 tree_ms=%14 search_ms=%15 event_ms=%16 budget_exhausted=%17 saturated=%18 wake_notifier=%19 timer_active=%20")
                     .arg(pollMs, 0, 'f', 2)
                     .arg(run.processedAnalysisFrames)
                     .arg(static_cast<double>(run.processedAnalysisBytes) / 1024.0, 0, 'f', 1)
@@ -1968,6 +2006,9 @@ void BridgeClient::pollInProcessBridge() {
                     .arg(run.processedEvents)
                     .arg(run.analysisMs, 0, 'f', 2)
                     .arg(run.precomputedMs, 0, 'f', 2)
+                    .arg(run.precomputedPopMs, 0, 'f', 2)
+                    .arg(run.precomputedDispatchMs, 0, 'f', 2)
+                    .arg(run.maxPrecomputedFrameMs, 0, 'f', 2)
                     .arg(run.treeMs, 0, 'f', 2)
                     .arg(run.searchMs, 0, 'f', 2)
                     .arg(run.eventMs, 0, 'f', 2)
@@ -4098,7 +4139,9 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
 #endif
 }
 
-void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
+BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogramFrame(
+    const QByteArray &raw) {
+    PrecomputedDispatchStats stats;
     // Frame layout (see encode_precomputed_spectrogram_chunk):
     // [0..4]   u32  payload_len
     // [4]      u8   magic = 0xA2
@@ -4118,7 +4161,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [47..]   column_data
     constexpr int kHeaderLen = 47;
     if (raw.size() < kHeaderLen) {
-        return;
+        return stats;
     }
     const auto *d = reinterpret_cast<const quint8 *>(raw.constData());
 
@@ -4146,7 +4189,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // Skip the 4-byte length prefix.
     const int base = 4;
     if (d[base] != 0xA2) {
-        return;
+        return stats;
     }
     const quint64 trackToken = readU64(base + 1);
     const quint64 generation = readU64(base + 9);
@@ -4166,10 +4209,31 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const int expectedDataLen = columns * channelCount * bins;
     const QByteArray columnData = raw.mid(dataOffset, expectedDataLen);
 
+    stats.valid = true;
+    stats.bins = bins;
+    stats.columns = columns;
+    stats.channelCount = channelCount;
+    stats.startIndex = startIndex;
+    stats.totalEstimate = totalEstimate;
+    stats.sampleRate = sampleRate;
+    stats.hopSize = hopSize;
+    stats.coverage = coverage;
+    stats.complete = complete;
+    stats.bufferReset = bufferReset;
+    stats.clearHistory = clearHistory;
+    stats.trackToken = trackToken;
+    stats.generation = generation;
+    stats.dataBytes = columnData.size();
+
+    QElapsedTimer dispatchTimer;
+    dispatchTimer.start();
     emit precomputedSpectrogramChunkReady(
         columnData, bins, channelCount, columns,
         startIndex, totalEstimate, sampleRate, hopSize,
         coverage, complete, bufferReset, clearHistory, trackToken, generation);
+    stats.dispatchMs =
+        static_cast<double>(dispatchTimer.nsecsElapsed()) / 1'000'000.0;
+    return stats;
 }
 
 void BridgeClient::scheduleTrackIdentityChanged() {

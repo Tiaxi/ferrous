@@ -231,9 +231,15 @@ void BridgeClientTest::bridgePollRunResultCountsPrecomputedSpectrogramWork() {
     BridgeClient::BridgePollRunResult result;
     result.processedPrecomputedFrames = 1;
     result.processedPrecomputedBytes = 4096;
+    result.precomputedPopMs = 2.0;
+    result.precomputedDispatchMs = 3.0;
+    result.maxPrecomputedFrameMs = 3.0;
 
     QVERIFY(result.anyWorkProcessed());
     QVERIFY(!result.shouldContinueImmediately());
+    QCOMPARE(result.precomputedPopMs, 2.0);
+    QCOMPARE(result.precomputedDispatchMs, 3.0);
+    QCOMPARE(result.maxPrecomputedFrameMs, 3.0);
 
     result.precomputedCapSaturated = true;
     QVERIFY(result.shouldContinueImmediately());
