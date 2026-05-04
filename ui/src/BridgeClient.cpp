@@ -4289,10 +4289,7 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
         return;
     }
 
-    const qsizetype channelBytes =
-        static_cast<qsizetype>(stats.columns) * stats.bins;
-    const qsizetype frameBytes =
-        static_cast<qsizetype>(stats.channelCount) * stats.bins;
+    const QByteArray rawView = QByteArray::fromRawData(data, dataSize);
     for (const SpectrogramRoute &route : std::as_const(m_spectrogramRoutes)) {
         if (route.item.isNull()
             || route.channelIndex < 0
@@ -4304,28 +4301,10 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
             continue;
         }
 
-        QByteArray channelData;
-        if (stats.columns > 0 && stats.bins > 0 && data != nullptr) {
-            channelData.resize(channelBytes);
-            for (int col = 0; col < stats.columns; ++col) {
-                const qsizetype srcOffset =
-                    static_cast<qsizetype>(col) * frameBytes
-                    + static_cast<qsizetype>(route.channelIndex) * stats.bins;
-                const qsizetype dstOffset =
-                    static_cast<qsizetype>(col) * stats.bins;
-                if (srcOffset + stats.bins > dataSize
-                    || dstOffset + stats.bins > channelData.size()) {
-                    channelData.clear();
-                    break;
-                }
-                memcpy(channelData.data() + dstOffset, data + srcOffset, stats.bins);
-            }
-        }
-
         item->feedPrecomputedChunk(
-            channelData,
+            rawView,
             stats.bins,
-            0,
+            route.channelIndex,
             stats.columns,
             stats.startIndex,
             stats.totalEstimate,
