@@ -418,6 +418,7 @@ private slots:
     void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
+    void spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramRollingGaplessTrackChangePreservesZoom();
@@ -449,6 +450,7 @@ private slots:
     void spectrogramOverlayStalenessDetectsDisplayRangeChange();
     void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
     void spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale();
+    void spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode();
     void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
     void spectrogramLeftClickDoesNotSeek();
     void spectrogramClickToSeekDisabledInRollingMode();
@@ -3326,6 +3328,40 @@ void QmlSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
             .arg(item.m_precomputedCanvasDisplayRight)));
 }
 
+void QmlSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 8;
+    constexpr int decodedColumns = 4'000;
+    constexpr int totalEstimate = 20'000;
+    constexpr int sampleRate = 48'000;
+    constexpr int hop = 1'024;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, totalEstimate,
+        sampleRate, hop, false, true, 1);
+    QByteArray data(decodedColumns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, decodedColumns, 0, totalEstimate,
+        sampleRate, hop, false, false, 1);
+    item.setPositionSeconds(103.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    QVERIFY2(
+        item.m_precomputedCanvasDisplayRight
+            > static_cast<qint64>(item.m_precomputedMaxColumnIndex),
+        qPrintable(QStringLiteral("display range was clamped to lagging decoded tail %1..%2 max=%3")
+            .arg(item.m_precomputedCanvasDisplayLeft)
+            .arg(item.m_precomputedCanvasDisplayRight)
+            .arg(item.m_precomputedMaxColumnIndex)));
+    QVERIFY(item.m_precomputedCanvasDisplayLeft > decodedColumns);
+}
+
 void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
     // Regression: the centered ring resets on every session restart
     // (e.g. zoom change on fullscreen toggle) and recomputes its cap
@@ -4755,6 +4791,52 @@ void QmlSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIs
     QVERIFY2(
         seekSeconds > 100.0,
         qPrintable(QStringLiteral("stale cache produced backward seek target %1")
+            .arg(seekSeconds, 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int decodedColumns = 4'000;
+    constexpr int totalEstimate = 20'000;
+    constexpr int sampleRate = 48'000;
+    constexpr int hopSize = 1'024;
+    QByteArray chunk(decodedColumns * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        chunk,
+        binsPerColumn,
+        0,
+        decodedColumns,
+        0,
+        totalEstimate,
+        sampleRate,
+        hopSize,
+        false,
+        true,
+        42);
+
+    item.setDisplayMode(1);
+    item.setCrosshairEnabled(true);
+    item.setPositionSeconds(103.0);
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress,
+        QPointF(300.0, 90.0),
+        QPointF(300.0, 90.0),
+        Qt::RightButton,
+        Qt::RightButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 1);
+    const double seekSeconds = seekSpy.at(0).at(0).toDouble();
+    QVERIFY2(
+        seekSeconds > 103.0,
+        qPrintable(QStringLiteral("lagging decoded tail produced backward seek target %1")
             .arg(seekSeconds, 0, 'f', 3)));
 }
 

@@ -51,6 +51,18 @@ constexpr qint64 kSmoothnessIdleMs = 450;
 const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
 
+bool centeredDecodedTailLooksFinal(
+    qint64 decodedColumnCount,
+    qint64 estimatedColumnCount,
+    qint64 visibleWindowColumns) {
+    if (decodedColumnCount <= 0 || estimatedColumnCount <= 0) {
+        return false;
+    }
+    const qint64 eofSlackColumns =
+        std::max<qint64>(64, std::max<qint64>(1, visibleWindowColumns));
+    return decodedColumnCount + eofSlackColumns >= estimatedColumnCount;
+}
+
 double linearInterpolate(double y1, double y2, double mu) {
     return y1 * (1.0 - mu) + y2 * mu;
 }
@@ -2062,6 +2074,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             int playheadPixel;
             bool rollingMode;
             qint64 writeHeadSeq = -1;
+            bool centeredDecodedTailLooksFinalForFrame = false;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             qint64 unclampedDisplaySeq = 0;
             qint64 writeHeadHeadroom = 0;
@@ -2122,18 +2135,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // silence counted by container duration but trimmed
                 // during playback).  A fixed 128-column tolerance fails
                 // at high zoom where 128 cols is ~0.2 s and the gap is
-                // typically ~1 s.  Instead, whenever the decoder can't
-                // fill the right half of the centered window — i.e.
-                // maxCol is within one half-window of the playhead —
-                // use maxCol as the hard right edge.  During steady
-                // mid-track playback the decoder parks thousands of
-                // columns ahead of the playhead, so this clause is
-                // inert.  It activates at EOF (decoder stopped growing)
-                // and naturally drives playhead detachment from center
-                // toward the right edge, while keeping the displayed
-                // time axis bounded by real content so the crosshair
-                // never shows positions past the audible end.
-                if (maxColCount > 0
+                // typically ~1 s. Use maxCol as the hard right edge only
+                // when the decoded tail is plausibly at EOF. During rapid far
+                // seeks the decoded tail can lag far behind the optimistic
+                // playhead; clamping in that state makes the viewport race
+                // forward as decode catches up and can map right-edge clicks
+                // backward. The EOF clamp still drives playhead detachment and
+                // keeps the time axis bounded by audible content.
+                const bool decodedTailLooksFinal =
+                    centeredDecodedTailLooksFinal(
+                        maxColCount, estimateCount, visibleWindowCols);
+                centeredDecodedTailLooksFinalForFrame = decodedTailLooksFinal;
+                if (decodedTailLooksFinal
                     && static_cast<qint64>(maxColCount) - 1
                         < static_cast<qint64>(nowCol)
                             + static_cast<qint64>(halfWindowCols)) {
@@ -2289,7 +2302,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         totalColsForScroll > 0
                         && displaySpan * 100 / totalColsForScroll >= 90;
                     const bool eofClampedToDecodedContent =
-                        decodedRightEdge >= 0 && displayRight >= decodedRightEdge;
+                        centeredDecodedTailLooksFinalForFrame
+                        && decodedRightEdge >= 0
+                        && displayRight >= decodedRightEdge;
                     const bool centeredScrolling =
                         !nearFullTrack
                         && displayLeft > 0
@@ -2916,7 +2931,10 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
                 0,
                 displayRight - static_cast<qint64>(visibleWindowCols) + 1);
         }
-        if (maxColCount > 0
+        const bool decodedTailLooksFinal =
+            centeredDecodedTailLooksFinal(
+                maxColCount, estimateCount, visibleWindowCols);
+        if (decodedTailLooksFinal
             && maxColCount - 1
                 < static_cast<qint64>(nowCol) + static_cast<qint64>(halfWindowCols)) {
             displayRight = std::min(displayRight, maxColCount - 1);
@@ -2932,7 +2950,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
             totalColsForScroll > 0
             && displaySpan * 100 / totalColsForScroll >= 90;
         const bool eofClampedToDecodedContent =
-            maxColCount > 0 && displayRight >= maxColCount - 1;
+            decodedTailLooksFinal && maxColCount > 0 && displayRight >= maxColCount - 1;
         const bool centeredScrolling =
             !nearFullTrack
             && displayLeft > 0
