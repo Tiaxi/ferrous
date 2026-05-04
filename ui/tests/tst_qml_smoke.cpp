@@ -448,6 +448,7 @@ private slots:
     void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
     void spectrogramOverlayStalenessDetectsDisplayRangeChange();
     void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
+    void spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale();
     void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
     void spectrogramLeftClickDoesNotSeek();
     void spectrogramClickToSeekDisabledInRollingMode();
@@ -4701,6 +4702,60 @@ void QmlSmokeTest::spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled() {
     // non-negative (valid time).
     QVERIFY(seekSeconds > 0.0);
     QVERIFY(seekSeconds < 5.0);  // Left of center → earlier than playhead
+}
+
+void QmlSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 20'000;
+    constexpr int sampleRate = 48'000;
+    constexpr int hopSize = 1'024;
+    QByteArray chunk(8'000 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        chunk,
+        binsPerColumn,
+        0,
+        8'000,
+        0,
+        totalEstimate,
+        sampleRate,
+        hopSize,
+        false,
+        true,
+        42);
+
+    item.setDisplayMode(1);
+    item.setCrosshairEnabled(true);
+    item.setPositionSeconds(10.0);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_crosshairCachedDisplayLeft = 0;
+        item.m_crosshairCachedDrawX = 0.0;
+        item.m_crosshairCachedRollingMode = false;
+    }
+
+    item.setPositionSeconds(100.0);
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress,
+        QPointF(300.0, 90.0),
+        QPointF(300.0, 90.0),
+        Qt::RightButton,
+        Qt::RightButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 1);
+    const double seekSeconds = seekSpy.at(0).at(0).toDouble();
+    QVERIFY2(
+        seekSeconds > 100.0,
+        qPrintable(QStringLiteral("stale cache produced backward seek target %1")
+            .arg(seekSeconds, 0, 'f', 3)));
 }
 
 void QmlSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {

@@ -2394,7 +2394,20 @@ void BridgeClient::seek(double seconds) {
     m_pendingSeek = true;
     m_pendingSeekTargetSeconds = target;
     m_pendingSeekStartedAtMs = nowMs;
-    m_pendingSeekUntilMs = nowMs + 900;
+    m_pendingSeekUntilMs = nowMs + 3000;
+    const QString targetText = formatSeconds(target);
+    bool playbackSignalChanged = false;
+    if (m_positionText != targetText) {
+        m_positionText = targetText;
+        playbackSignalChanged = true;
+    }
+    if (std::abs(m_positionSeconds - target) >= 0.03) {
+        m_positionSeconds = target;
+        playbackSignalChanged = true;
+    }
+    if (playbackSignalChanged) {
+        schedulePlaybackChanged();
+    }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSeek, target));
 }
 

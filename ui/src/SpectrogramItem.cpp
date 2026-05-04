@@ -2879,13 +2879,76 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         return;
     }
 
+    qint64 displayLeft = m_crosshairCachedDisplayLeft;
+    bool rollingMode = m_crosshairCachedRollingMode;
+    double drawX = m_crosshairCachedDrawX;
+    if (m_displayMode == 1
+        && width() > 0.0
+        && m_precomputedTotalColumnsEstimate > 0) {
+        const double effectiveZoom = effectiveZoomLocked();
+        const int widgetWidth = std::max(1, static_cast<int>(std::floor(width())));
+        const int visibleWindowCols = static_cast<int>(
+            std::ceil(static_cast<double>(widgetWidth) / effectiveZoom));
+        const int halfWindowCols = visibleWindowCols / 2;
+        const auto now = std::chrono::steady_clock::now();
+        const double renderPositionSeconds = currentRenderPositionSecondsLocked(now);
+        const int nowCol = static_cast<int>(std::floor(
+            std::max(0.0, renderPositionSeconds) * columnsPerSecond));
+        const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
+            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+            : static_cast<qint64>(0);
+        const qint64 estimateCount = std::max(
+            static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+            static_cast<qint64>(1));
+        const qint64 estTotalCols = std::max(maxColCount, estimateCount);
+        qint64 displayRight = 0;
+        if (static_cast<qint64>(visibleWindowCols) * 100 / estTotalCols >= 90) {
+            displayLeft = 0;
+            displayRight = estTotalCols - 1;
+        } else {
+            displayLeft = std::max<qint64>(
+                0,
+                static_cast<qint64>(nowCol) - static_cast<qint64>(halfWindowCols));
+            displayRight = std::min(
+                estTotalCols - 1,
+                displayLeft + static_cast<qint64>(visibleWindowCols) - 1);
+            displayLeft = std::max<qint64>(
+                0,
+                displayRight - static_cast<qint64>(visibleWindowCols) + 1);
+        }
+        if (maxColCount > 0
+            && maxColCount - 1
+                < static_cast<qint64>(nowCol) + static_cast<qint64>(halfWindowCols)) {
+            displayRight = std::min(displayRight, maxColCount - 1);
+            displayLeft = std::max<qint64>(
+                0,
+                displayRight - static_cast<qint64>(visibleWindowCols) + 1);
+        }
+        const double columnF = std::max(0.0, renderPositionSeconds) * columnsPerSecond;
+        const double columnPhase = std::clamp(columnF - std::floor(columnF), 0.0, 0.999);
+        const qint64 displaySpan = displayRight - displayLeft + 1;
+        const qint64 totalColsForScroll = std::max(maxColCount, estimateCount);
+        const bool nearFullTrack =
+            totalColsForScroll > 0
+            && displaySpan * 100 / totalColsForScroll >= 90;
+        const bool eofClampedToDecodedContent =
+            maxColCount > 0 && displayRight >= maxColCount - 1;
+        const bool centeredScrolling =
+            !nearFullTrack
+            && displayLeft > 0
+            && !eofClampedToDecodedContent
+            && displayRight < totalColsForScroll - 1;
+        drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
+        rollingMode = false;
+    }
+
     const double seconds = pixelToTimeSeconds(
         event->position().x(),
-        m_crosshairCachedDisplayLeft,
-        m_crosshairCachedRollingMode,
+        displayLeft,
+        rollingMode,
         m_rollingEpoch,
         columnsPerSecond,
-        m_crosshairCachedDrawX,
+        drawX,
         effectiveZoomLocked());
 
     lock.unlock();
