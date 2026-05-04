@@ -5145,16 +5145,14 @@ SpectrogramItem::RetainedPageTextureExtent SpectrogramItem::retainedPageTextureE
         return {};
     }
 
-    static constexpr int minTextureWidth = 256;
     const int clampedBegin = std::clamp(pageXBegin, 0, pageWidth - 1);
     const int clampedEnd = std::clamp(pageXEnd, clampedBegin, pageWidth - 1);
-    const int spanWidth = clampedEnd - clampedBegin + 1;
-    const int textureWidth = std::min(pageWidth, std::max(minTextureWidth, spanWidth));
-    const int maxOrigin = pageWidth - textureWidth;
-    const int origin = std::clamp(clampedBegin, 0, maxOrigin);
+    if (clampedEnd < clampedBegin) {
+        return {};
+    }
     return RetainedPageTextureExtent{
-        .xOrigin = origin,
-        .width = textureWidth,
+        .xOrigin = 0,
+        .width = pageWidth,
     };
 }
 

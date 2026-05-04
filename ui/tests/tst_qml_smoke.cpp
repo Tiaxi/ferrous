@@ -1133,10 +1133,11 @@ private slots:
     void spectrogramRetainedPageRetentionKeepsCenteredHalo();
     void spectrogramRetainedPageRetentionKeepsRollingWrapHalo();
     void spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans();
+    void spectrogramRetainedPageUploadPlannerKeepsTextureForShiftedSpan();
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerLabelsResetReasons();
     void spectrogramRetainedPageUploadBudgetLimitsPaintWork();
-    void spectrogramRetainedPageTextureExtentBoundsSmallSpans();
+    void spectrogramRetainedPageTextureExtentUsesStablePageWidth();
     void spectrogramRetainedUploadDefersTinyUncoveredSeekFrames();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
     void spectrogramRetainedPageUploadPlannerInvalidatesPagesOnReset();
@@ -7380,6 +7381,52 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans
     QVERIFY(uploads[0].resetPage);
 }
 
+void QmlSmokeTest::spectrogramRetainedPageUploadPlannerKeepsTextureForShiftedSpan() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = SpectrogramItem::kRetainedSourcePageWidth;
+    constexpr quint64 trackToken = 42;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, trackToken, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedPageTextureExtent initialExtent =
+        SpectrogramItem::retainedPageTextureExtentForSpan(
+            1800,
+            1831,
+            SpectrogramItem::kRetainedSourcePageWidth);
+    auto uploadedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+    uploadedPage->key = SpectrogramItem::RetainedSourcePageKey{
+        .trackToken = trackToken,
+        .rollingMode = false,
+        .pageIndex = 0,
+    };
+    uploadedPage->pageXOrigin = initialExtent.xOrigin;
+    uploadedPage->width = initialExtent.width;
+    uploadedPage->binsPerColumn = bins;
+    uploadedPage->uploadedDisplayLeft = 1800;
+    uploadedPage->uploadedDisplayRight = 1831;
+    item.m_gpuSourcePages.push_back(std::move(uploadedPage));
+
+    const QVector<SpectrogramItem::RetainedPageUploadSpan> uploads =
+        item.collectRetainedPageUploadSpansLocked(1500, 1531, 1531, false);
+
+    QCOMPARE(uploads.size(), 1);
+    QCOMPARE(uploads[0].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(uploads[0].pageXBegin, 1500);
+    QCOMPARE(uploads[0].pageXEnd, 1531);
+    QCOMPARE(uploads[0].displayLeft, static_cast<qint64>(1500));
+    QCOMPARE(uploads[0].displayRight, static_cast<qint64>(1531));
+    QVERIFY2(
+        !uploads[0].resetPage,
+        "shifted visible spans inside a retained page must upload dirty columns without reallocating the page texture");
+}
+
 void QmlSmokeTest::spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange() {
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
@@ -7519,16 +7566,15 @@ void QmlSmokeTest::spectrogramRetainedPageUploadBudgetLimitsPaintWork() {
     QVERIFY(budgetExhausted);
 }
 
-void QmlSmokeTest::spectrogramRetainedPageTextureExtentBoundsSmallSpans() {
+void QmlSmokeTest::spectrogramRetainedPageTextureExtentUsesStablePageWidth() {
     const SpectrogramItem::RetainedPageTextureExtent singleColumn =
         SpectrogramItem::retainedPageTextureExtentForSpan(
             7,
             7,
             SpectrogramItem::kRetainedSourcePageWidth);
 
-    QCOMPARE(singleColumn.width, 256);
-    QVERIFY(singleColumn.xOrigin <= 7);
-    QVERIFY(singleColumn.xOrigin + singleColumn.width > 7);
+    QCOMPARE(singleColumn.xOrigin, 0);
+    QCOMPARE(singleColumn.width, SpectrogramItem::kRetainedSourcePageWidth);
 
     const SpectrogramItem::RetainedPageTextureExtent rightEdge =
         SpectrogramItem::retainedPageTextureExtentForSpan(
@@ -7536,10 +7582,8 @@ void QmlSmokeTest::spectrogramRetainedPageTextureExtentBoundsSmallSpans() {
             SpectrogramItem::kRetainedSourcePageWidth - 1,
             SpectrogramItem::kRetainedSourcePageWidth);
 
-    QCOMPARE(rightEdge.width, 256);
-    QCOMPARE(
-        rightEdge.xOrigin + rightEdge.width,
-        SpectrogramItem::kRetainedSourcePageWidth);
+    QCOMPARE(rightEdge.xOrigin, 0);
+    QCOMPARE(rightEdge.width, SpectrogramItem::kRetainedSourcePageWidth);
 
     const SpectrogramItem::RetainedPageTextureExtent wide =
         SpectrogramItem::retainedPageTextureExtentForSpan(
