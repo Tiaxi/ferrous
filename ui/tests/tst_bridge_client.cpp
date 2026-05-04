@@ -16,6 +16,7 @@
 #include "../src/CoverImageProvider.h"
 #include "../src/GlobalSearchResultsModel.h"
 #include "../src/MprisController.h"
+#include "../src/SpectrogramItem.h"
 #undef private
 
 #include "../src/FerrousBridgeFfi.h"
@@ -38,6 +39,52 @@ void isolateBridgeClient(BridgeClient &client) {
     client.m_connected = false;
 }
 
+QByteArray makePrecomputedFrame(
+    const int bins,
+    const int channelCount,
+    const int columns,
+    const int startIndex,
+    const int totalEstimate,
+    const quint64 trackToken,
+    const quint64 generation) {
+    constexpr int headerLen = 47;
+    QByteArray raw(headerLen + bins * channelCount * columns, '\0');
+    auto *d = reinterpret_cast<quint8 *>(raw.data());
+
+    const quint32 payloadLen = static_cast<quint32>(raw.size() - 4);
+    memcpy(d, &payloadLen, sizeof(payloadLen));
+    const int base = 4;
+    d[base] = 0xA2;
+    memcpy(d + base + 1, &trackToken, sizeof(trackToken));
+    memcpy(d + base + 9, &generation, sizeof(generation));
+    const quint16 encodedBins = static_cast<quint16>(bins);
+    const quint16 encodedColumns = static_cast<quint16>(columns);
+    memcpy(d + base + 17, &encodedBins, sizeof(encodedBins));
+    memcpy(d + base + 19, &encodedColumns, sizeof(encodedColumns));
+    d[base + 21] = static_cast<quint8>(channelCount);
+    const quint32 encodedStart = static_cast<quint32>(startIndex);
+    const quint32 encodedTotal = static_cast<quint32>(totalEstimate);
+    const quint32 sampleRate = 48000;
+    const quint16 hopSize = 1024;
+    const float coverage = 1.0f;
+    memcpy(d + base + 22, &encodedStart, sizeof(encodedStart));
+    memcpy(d + base + 26, &encodedTotal, sizeof(encodedTotal));
+    memcpy(d + base + 30, &sampleRate, sizeof(sampleRate));
+    memcpy(d + base + 34, &hopSize, sizeof(hopSize));
+    memcpy(d + base + 36, &coverage, sizeof(coverage));
+    d[base + 41] = 1;
+
+    for (int col = 0; col < columns; ++col) {
+        for (int ch = 0; ch < channelCount; ++ch) {
+            for (int bin = 0; bin < bins; ++bin) {
+                const int offset = headerLen + col * channelCount * bins + ch * bins + bin;
+                raw[offset] = static_cast<char>(ch == 0 ? 0x11 : 0x77);
+            }
+        }
+    }
+    return raw;
+}
+
 } // namespace
 
 class BridgeClientTest : public QObject {
@@ -50,6 +97,8 @@ private slots:
     void queuePathFallbackUsesCachedFirstIndex();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
+    void bridgePollRunResultCountsPrecomputedSpectrogramWork();
+    void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
     void diagnosticsWritesBatchOffHotPath();
     void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
@@ -248,6 +297,56 @@ void BridgeClientTest::scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRea
     QVERIFY(!client.m_bridgeWakeNotifier->isEnabled());
 
     isolateBridgeClient(client);
+}
+
+void BridgeClientTest::bridgePollRunResultCountsPrecomputedSpectrogramWork() {
+    BridgeClient::BridgePollRunResult result;
+    result.processedPrecomputedFrames = 1;
+    result.processedPrecomputedBytes = 4096;
+    result.precomputedPopMs = 2.0;
+    result.precomputedDispatchMs = 3.0;
+    result.maxPrecomputedFrameMs = 3.0;
+
+    QVERIFY(result.anyWorkProcessed());
+    QVERIFY(!result.shouldContinueImmediately());
+    QCOMPARE(result.precomputedPopMs, 2.0);
+    QCOMPARE(result.precomputedDispatchMs, 3.0);
+    QCOMPARE(result.maxPrecomputedFrameMs, 3.0);
+
+    result.precomputedCapSaturated = true;
+    QVERIFY(result.shouldContinueImmediately());
+}
+
+void BridgeClientTest::precomputedSpectrogramChunksRouteDirectlyToRegisteredItems() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    SpectrogramItem left;
+    SpectrogramItem right;
+    left.setWidth(320);
+    right.setWidth(320);
+
+    client.registerSpectrogramItem(&left, 0);
+    client.registerSpectrogramItem(&right, 1);
+
+    QSignalSpy legacyPayloadSpy(&client, &BridgeClient::precomputedSpectrogramChunkReady);
+    QSignalSpy channelLayoutSpy(&client, &BridgeClient::precomputedSpectrogramChannelsReady);
+
+    const QByteArray raw = makePrecomputedFrame(4, 2, 3, 0, 12, 42, 7);
+    const BridgeClient::PrecomputedDispatchStats stats =
+        client.parsePrecomputedSpectrogramFrame(raw);
+
+    QVERIFY(stats.valid);
+    QCOMPARE(channelLayoutSpy.count(), 1);
+    QCOMPARE(channelLayoutSpy.takeFirst().at(0).toInt(), 2);
+    QCOMPARE(legacyPayloadSpy.count(), 0);
+
+    QVERIFY(left.m_precomputedReady);
+    QVERIFY(right.m_precomputedReady);
+    QCOMPARE(left.m_ringCapacity > 0, true);
+    QCOMPARE(right.m_ringCapacity > 0, true);
+    QCOMPARE(static_cast<quint8>(left.m_ringBuffer.at(0)), static_cast<quint8>(0x11));
+    QCOMPARE(static_cast<quint8>(right.m_ringBuffer.at(0)), static_cast<quint8>(0x77));
 }
 
 void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {

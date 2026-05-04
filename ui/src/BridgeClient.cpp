@@ -5,6 +5,7 @@
 #include "CoverImageProvider.h"
 #include "DiagnosticsLog.h"
 #include "FerrousBridgeFfi.h"
+#include "SpectrogramItem.h"
 #include "SpectrogramSeekTrace.h"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include <QDateTime>
 #include <QQmlEngine>
@@ -1583,25 +1585,38 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
 
     // Drain precomputed spectrogram chunks.
     constexpr int kMaxPrecomputedPerPass = 4;
-    int precomputedPopped = 0;
     for (int pci = 0; pci < kMaxPrecomputedPerPass; ++pci) {
         if (markBudgetExhaustedIfNeeded()) {
             break;
         }
+        QElapsedTimer frameTimer;
+        frameTimer.start();
         std::size_t len = 0;
         std::uint8_t *ptr = ferrous_ffi_bridge_pop_precomputed_spectrogram(m_ffiBridge, &len);
         if (ptr == nullptr || len == 0) {
             break;
         }
-        precomputedPopped++;
+        result.processedPrecomputedFrames++;
         const QByteArray raw(
             reinterpret_cast<const char *>(ptr),
             static_cast<qsizetype>(len));
+        result.processedPrecomputedBytes += raw.size();
         ferrous_ffi_bridge_free_precomputed_spectrogram(ptr, len);
-        parsePrecomputedSpectrogramFrame(raw);
+        const PrecomputedDispatchStats stats =
+            parsePrecomputedSpectrogramFrame(raw);
+        result.precomputedDispatchMs += stats.dispatchMs;
+        result.maxPrecomputedFrameMs =
+            std::max(
+                result.maxPrecomputedFrameMs,
+                static_cast<double>(frameTimer.nsecsElapsed()) / 1'000'000.0);
     }
-    if (precomputedPopped > 0) {
-        FERROUS_SPECTROGRAM_LOGF(stderr, "[Qt-drain] popped %d precomputed frames\n", precomputedPopped);
+    result.precomputedCapSaturated =
+        result.processedPrecomputedFrames >= kMaxPrecomputedPerPass;
+    if (result.processedPrecomputedFrames > 0) {
+        FERROUS_SPECTROGRAM_LOGF(
+            stderr,
+            "[Qt-drain] popped %d precomputed frames\n",
+            result.processedPrecomputedFrames);
     }
 
     constexpr int kMaxTreeFramesPerPass = 4;
@@ -2588,6 +2603,34 @@ void BridgeClient::setSpectrogramWidgetWidth(int width) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
         BinaryBridgeCodec::CmdSetSpectrogramWidgetWidth,
         static_cast<quint32>(std::max(320, width))));
+}
+
+void BridgeClient::registerSpectrogramItem(QObject *item, int channelIndex) {
+    if (item == nullptr || channelIndex < 0) {
+        return;
+    }
+    m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
+        return route.item.isNull();
+    });
+    for (SpectrogramRoute &route : m_spectrogramRoutes) {
+        if (route.item == item) {
+            route.channelIndex = channelIndex;
+            return;
+        }
+    }
+    m_spectrogramRoutes.push_back(SpectrogramRoute{
+        .item = item,
+        .channelIndex = channelIndex,
+    });
+}
+
+void BridgeClient::unregisterSpectrogramItem(QObject *item) {
+    if (item == nullptr) {
+        return;
+    }
+    m_spectrogramRoutes.removeIf([item](const SpectrogramRoute &route) {
+        return route.item.isNull() || route.item == item;
+    });
 }
 
 void BridgeClient::setSystemMediaControlsEnabled(bool value) {
@@ -4092,7 +4135,9 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
 #endif
 }
 
-void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
+BridgeClient::PrecomputedDispatchStats
+BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
+    PrecomputedDispatchStats stats;
     // Frame layout (see encode_precomputed_spectrogram_chunk):
     // [0..4]   u32  payload_len
     // [4]      u8   magic = 0xA2
@@ -4112,7 +4157,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [47..]   column_data
     constexpr int kHeaderLen = 47;
     if (raw.size() < kHeaderLen) {
-        return;
+        return stats;
     }
     const auto *d = reinterpret_cast<const quint8 *>(raw.constData());
 
@@ -4140,7 +4185,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // Skip the 4-byte length prefix.
     const int base = 4;
     if (d[base] != 0xA2) {
-        return;
+        return stats;
     }
     const quint64 trackToken = readU64(base + 1);
     const quint64 generation = readU64(base + 9);
@@ -4157,13 +4202,86 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const bool clearHistory = d[base + 42] != 0;
 
     const int dataOffset = kHeaderLen;
-    const int expectedDataLen = columns * channelCount * bins;
-    const QByteArray columnData = raw.mid(dataOffset, expectedDataLen);
+    const qint64 expectedDataLen =
+        static_cast<qint64>(columns) * channelCount * bins;
+    if (expectedDataLen < 0 || raw.size() - dataOffset < expectedDataLen) {
+        return stats;
+    }
 
-    emit precomputedSpectrogramChunkReady(
-        columnData, bins, channelCount, columns,
-        startIndex, totalEstimate, sampleRate, hopSize,
-        coverage, complete, bufferReset, clearHistory, trackToken, generation);
+    stats.valid = true;
+    stats.bins = bins;
+    stats.columns = columns;
+    stats.channelCount = channelCount;
+    stats.startIndex = startIndex;
+    stats.totalEstimate = totalEstimate;
+    stats.sampleRate = sampleRate;
+    stats.hopSize = hopSize;
+    stats.coverage = coverage;
+    stats.complete = complete;
+    stats.bufferReset = bufferReset;
+    stats.clearHistory = clearHistory;
+    stats.trackToken = trackToken;
+    stats.generation = generation;
+    stats.dataBytes = static_cast<qsizetype>(expectedDataLen);
+
+    QElapsedTimer dispatchTimer;
+    dispatchTimer.start();
+    routePrecomputedSpectrogramFrame(
+        raw.constData() + dataOffset,
+        static_cast<qsizetype>(expectedDataLen),
+        stats);
+    stats.dispatchMs =
+        static_cast<double>(dispatchTimer.nsecsElapsed()) / 1'000'000.0;
+    return stats;
+}
+
+void BridgeClient::routePrecomputedSpectrogramFrame(
+    const char *data,
+    const qsizetype dataSize,
+    const PrecomputedDispatchStats &stats) {
+    emit precomputedSpectrogramChannelsReady(stats.channelCount, stats.bufferReset);
+
+    m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
+        return route.item.isNull();
+    });
+
+    if (m_spectrogramRoutes.isEmpty()) {
+        const QByteArray columnData(data, dataSize);
+        emit precomputedSpectrogramChunkReady(
+            columnData, stats.bins, stats.channelCount, stats.columns,
+            stats.startIndex, stats.totalEstimate, stats.sampleRate, stats.hopSize,
+            stats.coverage, stats.complete, stats.bufferReset, stats.clearHistory,
+            stats.trackToken, stats.generation);
+        return;
+    }
+
+    const QByteArray rawView = QByteArray::fromRawData(data, dataSize);
+    for (const SpectrogramRoute &route : std::as_const(m_spectrogramRoutes)) {
+        if (route.item.isNull()
+            || route.channelIndex < 0
+            || route.channelIndex >= stats.channelCount) {
+            continue;
+        }
+        auto *item = qobject_cast<SpectrogramItem *>(route.item.data());
+        if (item == nullptr) {
+            continue;
+        }
+
+        item->feedPrecomputedChunk(
+            rawView,
+            stats.bins,
+            route.channelIndex,
+            stats.columns,
+            stats.startIndex,
+            stats.totalEstimate,
+            stats.sampleRate,
+            stats.hopSize,
+            stats.complete,
+            stats.bufferReset,
+            stats.trackToken,
+            stats.clearHistory,
+            stats.generation);
+    }
 }
 
 void BridgeClient::scheduleTrackIdentityChanged() {
