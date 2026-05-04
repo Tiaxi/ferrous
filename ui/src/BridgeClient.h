@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QNetworkAccessManager>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -281,6 +282,8 @@ public:
     Q_INVOKABLE void setSpectrogramZoomEnabled(bool value);
     Q_INVOKABLE void setSpectrogramZoomLevel(float level);
     Q_INVOKABLE void setSpectrogramWidgetWidth(int width);
+    Q_INVOKABLE void registerSpectrogramItem(QObject *item, int channelIndex);
+    Q_INVOKABLE void unregisterSpectrogramItem(QObject *item);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void setLastFmScrobblingEnabled(bool value);
     Q_INVOKABLE void beginLastFmAuth();
@@ -347,6 +350,7 @@ signals:
         int startIndex, int totalEstimate, int sampleRate, int hopSize,
         float coverage, bool complete, bool bufferReset, bool clearHistory,
         quint64 trackToken, quint64 generation);
+    void precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset);
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();
@@ -464,6 +468,11 @@ private:
         qsizetype dataBytes{0};
     };
 
+    struct SpectrogramRoute {
+        QPointer<QObject> item;
+        int channelIndex{0};
+    };
+
     bool startInProcessBridge();
     void startSearchApplyWorker();
     void stopSearchApplyWorker();
@@ -510,6 +519,10 @@ private:
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
     void processAnalysisBytes(const QByteArray &chunk);
     PrecomputedDispatchStats parsePrecomputedSpectrogramFrame(const QByteArray &raw);
+    void routePrecomputedSpectrogramFrame(
+        const char *data,
+        qsizetype dataSize,
+        const PrecomputedDispatchStats &stats);
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logProfileDiagnostic(const QString &category, const QString &message) const;
@@ -682,6 +695,7 @@ private:
     int m_searchApplyDispatchMs{12};
     QTimer m_searchModelApplyTimer;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> m_deferredSearchDisplayRows;
+    QVector<SpectrogramRoute> m_spectrogramRoutes;
     std::thread m_searchApplyThread;
     mutable std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;

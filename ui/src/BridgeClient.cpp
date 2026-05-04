@@ -5,6 +5,7 @@
 #include "CoverImageProvider.h"
 #include "DiagnosticsLog.h"
 #include "FerrousBridgeFfi.h"
+#include "SpectrogramItem.h"
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
 
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include <QDateTime>
 #include <QQmlEngine>
@@ -2644,6 +2646,34 @@ void BridgeClient::setSpectrogramWidgetWidth(int width) {
         static_cast<quint32>(std::max(320, width))));
 }
 
+void BridgeClient::registerSpectrogramItem(QObject *item, int channelIndex) {
+    if (item == nullptr || channelIndex < 0) {
+        return;
+    }
+    m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
+        return route.item.isNull();
+    });
+    for (SpectrogramRoute &route : m_spectrogramRoutes) {
+        if (route.item == item) {
+            route.channelIndex = channelIndex;
+            return;
+        }
+    }
+    m_spectrogramRoutes.push_back(SpectrogramRoute{
+        .item = item,
+        .channelIndex = channelIndex,
+    });
+}
+
+void BridgeClient::unregisterSpectrogramItem(QObject *item) {
+    if (item == nullptr) {
+        return;
+    }
+    m_spectrogramRoutes.removeIf([item](const SpectrogramRoute &route) {
+        return route.item.isNull() || route.item == item;
+    });
+}
+
 void BridgeClient::setSystemMediaControlsEnabled(bool value) {
     if (m_systemMediaControlsEnabled != value) {
         m_systemMediaControlsEnabled = value;
@@ -4206,8 +4236,11 @@ BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogram
     const bool clearHistory = d[base + 42] != 0;
 
     const int dataOffset = kHeaderLen;
-    const int expectedDataLen = columns * channelCount * bins;
-    const QByteArray columnData = raw.mid(dataOffset, expectedDataLen);
+    const qint64 expectedDataLen =
+        static_cast<qint64>(columns) * channelCount * bins;
+    if (expectedDataLen < 0 || raw.size() - dataOffset < expectedDataLen) {
+        return stats;
+    }
 
     stats.valid = true;
     stats.bins = bins;
@@ -4223,17 +4256,87 @@ BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogram
     stats.clearHistory = clearHistory;
     stats.trackToken = trackToken;
     stats.generation = generation;
-    stats.dataBytes = columnData.size();
+    stats.dataBytes = static_cast<qsizetype>(expectedDataLen);
 
     QElapsedTimer dispatchTimer;
     dispatchTimer.start();
-    emit precomputedSpectrogramChunkReady(
-        columnData, bins, channelCount, columns,
-        startIndex, totalEstimate, sampleRate, hopSize,
-        coverage, complete, bufferReset, clearHistory, trackToken, generation);
+    routePrecomputedSpectrogramFrame(
+        raw.constData() + dataOffset,
+        static_cast<qsizetype>(expectedDataLen),
+        stats);
     stats.dispatchMs =
         static_cast<double>(dispatchTimer.nsecsElapsed()) / 1'000'000.0;
     return stats;
+}
+
+void BridgeClient::routePrecomputedSpectrogramFrame(
+    const char *data,
+    const qsizetype dataSize,
+    const PrecomputedDispatchStats &stats) {
+    emit precomputedSpectrogramChannelsReady(stats.channelCount, stats.bufferReset);
+
+    m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
+        return route.item.isNull();
+    });
+
+    if (m_spectrogramRoutes.isEmpty()) {
+        const QByteArray columnData(data, dataSize);
+        emit precomputedSpectrogramChunkReady(
+            columnData, stats.bins, stats.channelCount, stats.columns,
+            stats.startIndex, stats.totalEstimate, stats.sampleRate, stats.hopSize,
+            stats.coverage, stats.complete, stats.bufferReset, stats.clearHistory,
+            stats.trackToken, stats.generation);
+        return;
+    }
+
+    const qsizetype channelBytes =
+        static_cast<qsizetype>(stats.columns) * stats.bins;
+    const qsizetype frameBytes =
+        static_cast<qsizetype>(stats.channelCount) * stats.bins;
+    for (const SpectrogramRoute &route : std::as_const(m_spectrogramRoutes)) {
+        if (route.item.isNull()
+            || route.channelIndex < 0
+            || route.channelIndex >= stats.channelCount) {
+            continue;
+        }
+        auto *item = qobject_cast<SpectrogramItem *>(route.item.data());
+        if (item == nullptr) {
+            continue;
+        }
+
+        QByteArray channelData;
+        if (stats.columns > 0 && stats.bins > 0 && data != nullptr) {
+            channelData.resize(channelBytes);
+            for (int col = 0; col < stats.columns; ++col) {
+                const qsizetype srcOffset =
+                    static_cast<qsizetype>(col) * frameBytes
+                    + static_cast<qsizetype>(route.channelIndex) * stats.bins;
+                const qsizetype dstOffset =
+                    static_cast<qsizetype>(col) * stats.bins;
+                if (srcOffset + stats.bins > dataSize
+                    || dstOffset + stats.bins > channelData.size()) {
+                    channelData.clear();
+                    break;
+                }
+                memcpy(channelData.data() + dstOffset, data + srcOffset, stats.bins);
+            }
+        }
+
+        item->feedPrecomputedChunk(
+            channelData,
+            stats.bins,
+            0,
+            stats.columns,
+            stats.startIndex,
+            stats.totalEstimate,
+            stats.sampleRate,
+            stats.hopSize,
+            stats.complete,
+            stats.bufferReset,
+            stats.trackToken,
+            stats.clearHistory,
+            stats.generation);
+    }
 }
 
 void BridgeClient::scheduleTrackIdentityChanged() {
