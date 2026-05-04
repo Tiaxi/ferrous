@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 
@@ -56,6 +57,24 @@ constexpr qint64 kSmoothnessIdleMs = 450;
 #endif
 const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+std::atomic<quint64> g_lastLoggedSeekProfileIncidentGeneration{0};
+std::atomic<quint64> g_lastLoggedSeekProfileSummaryGeneration{0};
+
+bool claimMonotonicGeneration(std::atomic<quint64> *lastClaimed, quint64 generation) {
+    quint64 previous = lastClaimed->load(std::memory_order_relaxed);
+    while (generation > previous) {
+        if (lastClaimed->compare_exchange_weak(
+                previous,
+                generation,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
 
 bool centeredDecodedTailLooksFinal(
     qint64 decodedColumnCount,
@@ -4896,9 +4915,12 @@ void SpectrogramItem::maybeStartSeekProfileLocked(qint64 nowMs) {
     }
 
     const quint64 generation = SpectrogramSeekTrace::currentGeneration();
+    const quint64 lastLoggedSummary =
+        g_lastLoggedSeekProfileSummaryGeneration.load(std::memory_order_relaxed);
     if (generation == 0
         || generation == m_seekProfile.generation
         || generation == m_lastFinalizedSeekProfileGeneration
+        || generation <= lastLoggedSummary
         || !SpectrogramSeekTrace::isActive(nowMs)) {
         return;
     }
@@ -4972,20 +4994,24 @@ void SpectrogramItem::noteSeekProfileFrameLocked(
         const double rowsPerSecond = targetRowsPerSecondLocked();
         m_seekProfile.incidentDetected = true;
         m_seekProfile.incidentReported = true;
-        FERROUS_SPECTROGRAM_LOGF(
-            stderr,
-            "[ui-spectrogram] seek_hitch_detected gen=%llu target_s=%.3f sample_rate_hz=%d rows_per_second=%.3f gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d advanced=%d\n",
-            static_cast<unsigned long long>(m_seekProfile.generation),
-            m_seekProfile.targetSeconds,
-            m_sampleRateHz,
-            rowsPerSecond,
-            m_seekProfile.gapFrames,
-            m_seekProfile.stallClusters,
-            m_seekProfile.regressionCount,
-            m_seekProfile.maxPendingRows,
-            m_seekProfile.drainPasses,
-            m_seekProfile.drainedColumns,
-            advanced ? 1 : 0);
+        if (claimMonotonicGeneration(
+                &g_lastLoggedSeekProfileIncidentGeneration,
+                m_seekProfile.generation)) {
+            FERROUS_SPECTROGRAM_LOGF(
+                stderr,
+                "[ui-spectrogram] seek_hitch_detected gen=%llu target_s=%.3f sample_rate_hz=%d rows_per_second=%.3f gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d advanced=%d\n",
+                static_cast<unsigned long long>(m_seekProfile.generation),
+                m_seekProfile.targetSeconds,
+                m_sampleRateHz,
+                rowsPerSecond,
+                m_seekProfile.gapFrames,
+                m_seekProfile.stallClusters,
+                m_seekProfile.regressionCount,
+                m_seekProfile.maxPendingRows,
+                m_seekProfile.drainPasses,
+                m_seekProfile.drainedColumns,
+                advanced ? 1 : 0);
+        }
     }
 
     const qint64 seekAgeMs = nowMs - m_seekProfile.startedAtMs;
@@ -5028,23 +5054,27 @@ void SpectrogramItem::finalizeSeekProfileLocked(qint64 nowMs, const char *reason
     summary.insert(QStringLiteral("incidentDetected"), m_seekProfile.incidentDetected);
     m_seekProfile.lastSummary = summary;
 
-    FERROUS_SPECTROGRAM_LOGF(
-        stderr,
-        "[ui-spectrogram] seek_hitch_window gen=%llu target_s=%.3f reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d incident=%d\n",
-        static_cast<unsigned long long>(m_seekProfile.generation),
-        m_seekProfile.targetSeconds,
-        reason,
-        m_sampleRateHz,
-        rowsPerSecond,
-        m_seekProfile.framesObserved,
-        m_seekProfile.pendingFrames,
-        m_seekProfile.gapFrames,
-        m_seekProfile.stallClusters,
-        m_seekProfile.regressionCount,
-        m_seekProfile.drainPasses,
-        m_seekProfile.drainedColumns,
-        m_seekProfile.maxPendingRows,
-        m_seekProfile.incidentDetected ? 1 : 0);
+    if (claimMonotonicGeneration(
+            &g_lastLoggedSeekProfileSummaryGeneration,
+            m_seekProfile.generation)) {
+        FERROUS_SPECTROGRAM_LOGF(
+            stderr,
+            "[ui-spectrogram] seek_hitch_window gen=%llu target_s=%.3f reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d incident=%d\n",
+            static_cast<unsigned long long>(m_seekProfile.generation),
+            m_seekProfile.targetSeconds,
+            reason,
+            m_sampleRateHz,
+            rowsPerSecond,
+            m_seekProfile.framesObserved,
+            m_seekProfile.pendingFrames,
+            m_seekProfile.gapFrames,
+            m_seekProfile.stallClusters,
+            m_seekProfile.regressionCount,
+            m_seekProfile.drainPasses,
+            m_seekProfile.drainedColumns,
+            m_seekProfile.maxPendingRows,
+            m_seekProfile.incidentDetected ? 1 : 0);
+    }
 
     const QVariantMap lastSummary = m_seekProfile.lastSummary;
     m_lastFinalizedSeekProfileGeneration = m_seekProfile.generation;

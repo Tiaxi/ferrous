@@ -3093,6 +3093,9 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
+    SpectrogramItem duplicateItem;
+    duplicateItem.setWidth(320);
+    duplicateItem.setHeight(180);
 
     {
         QMutexLocker lock(&item.m_stateMutex);
@@ -3105,6 +3108,9 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
         item.maybeStartSeekProfileLocked(startedAtMs);
         QVERIFY(item.m_seekProfile.active);
 
+        item.noteSeekProfileFrameLocked(startedAtMs + 30, 0.016, false, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 60, 0.016, false, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 90, 0.016, false, false);
         item.noteSeekProfileFrameLocked(startedAtMs + 150, 0.016, false, false);
         QVERIFY(!item.m_seekProfile.active);
 
@@ -3113,6 +3119,15 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
         QCOMPARE(
             item.m_lastFinalizedSeekProfileGeneration,
             SpectrogramSeekTrace::currentGeneration());
+    }
+
+    {
+        QMutexLocker lock(&duplicateItem.m_stateMutex);
+        duplicateItem.m_profileEnabled = true;
+        duplicateItem.m_precomputedCanvasDisplayRight = 96;
+        duplicateItem.m_gpuDisplayWidth = 320;
+        duplicateItem.maybeStartSeekProfileLocked(SpectrogramSeekTrace::startedAtMs() + 180);
+        QVERIFY(!duplicateItem.m_seekProfile.active);
     }
 
     qunsetenv("FERROUS_PROFILE_UI");
