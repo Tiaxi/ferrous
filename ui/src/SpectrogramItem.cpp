@@ -5105,7 +5105,19 @@ SpectrogramItem::retainedPageUploadSpansForPaintBudget(
         if (spanWidth <= 0) {
             continue;
         }
-        if (!bounded.isEmpty() && uploadedColumns + spanWidth > maxColumns) {
+        const int remainingColumns = maxColumns - uploadedColumns;
+        if (remainingColumns <= 0) {
+            if (budgetExhausted != nullptr) {
+                *budgetExhausted = true;
+            }
+            break;
+        }
+        if (spanWidth > remainingColumns) {
+            RetainedPageUploadSpan clipped = span;
+            clipped.pageXEnd = clipped.pageXBegin + remainingColumns - 1;
+            clipped.displayRight = clipped.displayLeft + remainingColumns - 1;
+            bounded.push_back(clipped);
+            uploadedColumns += remainingColumns;
             if (budgetExhausted != nullptr) {
                 *budgetExhausted = true;
             }
@@ -5814,7 +5826,7 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
 
     const QVector<RetainedPageSpan> visiblePages =
         buildRetainedPageSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
-    static constexpr int retainedUploadColumnsPerPaint = kRetainedSourcePageWidth;
+    static constexpr int retainedUploadColumnsPerPaint = 768;
     const QVector<RetainedPageUploadSpan> plannedUploadSpans =
         collectRetainedPageUploadSpansLocked(displayLeft, displayRight, renderableRight, rollingMode, pageWidth);
     bool uploadBudgetExhausted = false;

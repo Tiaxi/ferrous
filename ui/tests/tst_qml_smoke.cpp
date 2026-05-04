@@ -1137,6 +1137,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
     void spectrogramRetainedPageUploadPlannerLabelsResetReasons();
     void spectrogramRetainedPageUploadBudgetLimitsPaintWork();
+    void spectrogramRetainedPageUploadBudgetSplitsOversizedSpan();
     void spectrogramRetainedPageTextureExtentUsesStablePageWidth();
     void spectrogramRetainedUploadDefersTinyUncoveredSeekFrames();
     void spectrogramRetainedPageUploadPlannerUsesGpuLimitForPageWidth();
@@ -7563,6 +7564,39 @@ void QmlSmokeTest::spectrogramRetainedPageUploadBudgetLimitsPaintWork() {
         bounded[0].pageXEnd - bounded[0].pageXBegin + 1,
         SpectrogramItem::kRetainedSourcePageWidth);
     QVERIFY(bounded[0].resetPage);
+    QVERIFY(budgetExhausted);
+}
+
+void QmlSmokeTest::spectrogramRetainedPageUploadBudgetSplitsOversizedSpan() {
+    QVector<SpectrogramItem::RetainedPageUploadSpan> spans = {
+        SpectrogramItem::RetainedPageUploadSpan{
+            .pageIndex = 2,
+            .pageXBegin = 100,
+            .pageXEnd = 999,
+            .displayLeft = 2100,
+            .displayRight = 2999,
+            .resetPage = true,
+            .resetReason = SpectrogramItem::RetainedPageResetReason::MissingPage,
+        },
+    };
+
+    bool budgetExhausted = false;
+    const QVector<SpectrogramItem::RetainedPageUploadSpan> bounded =
+        SpectrogramItem::retainedPageUploadSpansForPaintBudget(
+            spans,
+            512,
+            &budgetExhausted);
+
+    QCOMPARE(bounded.size(), 1);
+    QCOMPARE(bounded[0].pageIndex, static_cast<qint64>(2));
+    QCOMPARE(bounded[0].pageXBegin, 100);
+    QCOMPARE(bounded[0].pageXEnd, 611);
+    QCOMPARE(bounded[0].displayLeft, static_cast<qint64>(2100));
+    QCOMPARE(bounded[0].displayRight, static_cast<qint64>(2611));
+    QVERIFY(bounded[0].resetPage);
+    QCOMPARE(
+        bounded[0].resetReason,
+        SpectrogramItem::RetainedPageResetReason::MissingPage);
     QVERIFY(budgetExhausted);
 }
 
