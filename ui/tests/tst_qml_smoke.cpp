@@ -424,6 +424,7 @@ private slots:
     void spectrogramRollingGaplessTrackChangePreservesZoom();
     void spectrogramCenteredGaplessTrackChangeResetsZoom();
     void spectrogramRollingResetTrackChangeResetsZoom();
+    void spectrogramTrackChangeMetadataResetClearsOldCenteredFrame();
     void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
     void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
     void spectrogramTrackChangeCancelsPendingZoomDebounce();
@@ -3601,6 +3602,51 @@ void QmlSmokeTest::spectrogramRollingResetTrackChangeResetsZoom() {
     QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
     QCOMPARE(item.zoomLevel(), 1.0);
     QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        48000, 1024, false, true, oldToken, true);
+    QByteArray oldData(320 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        oldData, bins, 0, 320, 0, total,
+        48000, 1024, false, false, oldToken, false);
+    item.setPositionSeconds(72.0);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(180);
+        item.syncPrecomputedDisplayImageLocked(320, 180, 0, 319, false, 1.0);
+    }
+    QVERIFY(item.m_precomputedReady);
+    QVERIFY(!item.m_gpuDisplayImage.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(319));
+    QVERIFY(item.m_positionAnchorSeconds > 70.0);
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        48000, 1024, false, true, newToken, true);
+
+    QVERIFY2(
+        !item.m_precomputedReady,
+        "non-gapless track-change metadata reset must not keep old spectrogram visible");
+    QVERIFY(item.m_gpuDisplayImage.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(-1));
+    QCOMPARE(item.m_precomputedResetPending, false);
+    QCOMPARE(item.m_zoomFillActive, false);
+    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.01);
 }
 
 void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {

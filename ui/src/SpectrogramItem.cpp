@@ -1042,6 +1042,89 @@ void SpectrogramItem::feedPrecomputedChunk(
             preserveCanvasForSeek ? 1 : 0);
         update();
         return;
+    } else if (bufferReset
+        && columns <= 0
+        && clearHistoryOnReset
+        && bins > 0
+        && startIndex == 0
+        && m_displayMode == 1
+        && trackToken != 0
+        && m_precomputedTrackToken != 0
+        && trackToken != m_precomputedTrackToken) {
+        // Non-gapless track changes arrive first as metadata-only reset
+        // chunks.  Deferring these like same-track seeks keeps the previous
+        // track's per-pane render caches alive until the first data chunk,
+        // so one stereo pane can visibly lag behind on track changes.
+        const bool wasReady = m_precomputedReady;
+        const bool qtRenderNotAtDefault =
+            std::abs(m_renderZoomLevel - 1.0) > 0.001;
+        const bool backendNotAtReferenceHop =
+            hopSize > 0 && hopSize != static_cast<int>(kReferenceHopSamples);
+        const bool needsZoomReset =
+            qtRenderNotAtDefault || backendNotAtReferenceHop;
+
+        m_zoomFillActive = false;
+        m_zoomFillDataReady = false;
+        m_zoomFillFrozenRetainedActive = false;
+        clearZoomFillFrozenCacheLocked();
+        applyPrecomputedResetLocked(
+            startIndex, bins, trackToken, generation, clearHistoryOnReset);
+        m_precomputedResetPending = false;
+        m_precomputedPendingResetStartIndex = 0;
+        m_precomputedPendingResetBins = 0;
+        m_precomputedPendingResetTrackToken = 0;
+        m_precomputedPendingResetGeneration = 0;
+        m_precomputedPendingResetClearHistory = false;
+        m_precomputedReady = false;
+        m_precomputedBinsPerColumn = bins;
+        if (totalEstimate > 0) {
+            m_precomputedTotalColumnsEstimate = totalEstimate;
+        }
+        if (sampleRate > 0) {
+            m_precomputedSampleRateHz = sampleRate;
+        }
+        if (hopSize > 0) {
+            m_precomputedHopSize = hopSize;
+        }
+        if (sampleRate > 0 && hopSize > 0) {
+            const double seekPositionSeconds =
+                static_cast<double>(startIndex * hopSize)
+                / static_cast<double>(sampleRate);
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(seekPositionSeconds, Clock::now());
+        }
+        m_precomputedTrackToken = trackToken;
+        m_precomputedLastRightCol = -1;
+        m_precomputedLastDisplaySeq = -1;
+        m_timeGridDirty = true;
+
+        if (needsZoomReset) {
+            m_zoomLevel = 1.0;
+            m_renderZoomLevel = 1.0;
+            m_awaitingZoomData = false;
+            m_pendingBackendZoom = 1.0f;
+            if (m_zoomDebounceTimer) {
+                m_zoomDebounceTimer->stop();
+            }
+            if (qtRenderNotAtDefault) {
+                m_precomputedTotalColumnsEstimate = 0;
+            }
+            m_precomputedCanvasDirty = true;
+            m_crosshairDirty = true;
+            m_timeGridDirty = true;
+        }
+
+        lock.unlock();
+        if (needsZoomReset) {
+            emit zoomLevelChanged();
+            emit zoomResetRequested();
+            emit backendZoomRequested(1.0f);
+        }
+        if (wasReady) {
+            emit precomputedReadyChanged();
+        }
+        update();
+        return;
     } else if (bufferReset && columns <= 0) {
         // Delay the reset handoff until the first data-bearing post-seek
         // chunk arrives. Resetting on the metadata-only frame makes the
