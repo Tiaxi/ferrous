@@ -2021,86 +2021,11 @@ void SpectrogramItem::feedPrecomputedChunk(
                 || (!centeredVisibleColumnsCovered
                     && (complete || decodeReachedEnd || ringHasEnoughColumns)));
         if (shouldLogZoomFillGate) {
-            struct ColumnPeakStats {
-                qint64 present{0};
-                qint64 missing{0};
-                qint64 zeroPeak{0};
-                qint64 dimPeak{0};
-                qint64 firstDim{-1};
-                qint64 longestDimStart{-1};
-                qint64 longestDimRun{0};
-                int minPeak{255};
-                int maxPeak{0};
-                double averagePeak{0.0};
-            };
-            const auto collectColumnPeakStats =
-                [this](const qint64 displayLeft, const qint64 displayRight) {
-                    ColumnPeakStats stats;
-                    if (displayRight < displayLeft || m_precomputedBinsPerColumn <= 0) {
-                        stats.minPeak = 0;
-                        return stats;
-                    }
-                    qint64 dimRunStart = -1;
-                    qint64 dimRunLength = 0;
-                    double peakSum = 0.0;
-                    for (qint64 displayIndex = displayLeft;
-                         displayIndex <= displayRight;
-                         ++displayIndex) {
-                        const int slot = ringSlotForDisplayIndexLocked(displayIndex, false);
-                        if (slot < 0) {
-                            ++stats.missing;
-                            continue;
-                        }
-                        const int baseOff = slot * m_precomputedBinsPerColumn;
-                        quint8 columnPeak = 0;
-                        for (int bin = 0; bin < m_precomputedBinsPerColumn; ++bin) {
-                            columnPeak = std::max(
-                                columnPeak,
-                                static_cast<quint8>(m_ringBuffer[baseOff + bin]));
-                        }
-                        ++stats.present;
-                        peakSum += static_cast<double>(columnPeak);
-                        stats.minPeak = std::min(stats.minPeak, static_cast<int>(columnPeak));
-                        stats.maxPeak = std::max(stats.maxPeak, static_cast<int>(columnPeak));
-                        if (columnPeak == 0) {
-                            ++stats.zeroPeak;
-                        }
-                        if (columnPeak <= 8) {
-                            ++stats.dimPeak;
-                            if (stats.firstDim < 0) {
-                                stats.firstDim = displayIndex;
-                            }
-                            if (dimRunStart < 0) {
-                                dimRunStart = displayIndex;
-                                dimRunLength = 0;
-                            }
-                            ++dimRunLength;
-                            if (dimRunLength > stats.longestDimRun) {
-                                stats.longestDimRun = dimRunLength;
-                                stats.longestDimStart = dimRunStart;
-                            }
-                        } else {
-                            dimRunStart = -1;
-                            dimRunLength = 0;
-                        }
-                    }
-                    if (stats.present > 0) {
-                        stats.averagePeak = peakSum / static_cast<double>(stats.present);
-                    } else {
-                        stats.minPeak = 0;
-                    }
-                    return stats;
-                };
-            const ColumnPeakStats peakStats = collectColumnPeakStats(
-                displayLeftCol,
-                decodedVisibleRight);
             FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
                 "[ui-spectrogram] zoom_fill_gate ready=%d mode=%d zoom=%.4f render_zoom=%.4f "
                 "hop=%d match=%d display=%lld..%lld decoded_right=%lld missing=%lld "
                 "ring_fill=%lld fill_width=%lld max_col=%d estimate=%d enough=%d covers_right=%d "
-                "decode_end=%d await=%d complete=%d token=%llu gen=%llu "
-                "payload_present=%lld payload_missing=%lld zero_peak=%lld dim_peak=%lld "
-                "first_dim=%lld longest_dim=%lld@%lld min_peak=%d max_peak=%d avg_peak=%.1f\n",
+                "decode_end=%d await=%d complete=%d token=%llu gen=%llu\n",
                 zoomFillReadyForData ? 1 : 0,
                 m_displayMode,
                 m_zoomLevel,
@@ -2121,17 +2046,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                 m_awaitingZoomData ? 1 : 0,
                 complete ? 1 : 0,
                 static_cast<unsigned long long>(m_precomputedTrackToken),
-                static_cast<unsigned long long>(generation),
-                static_cast<long long>(peakStats.present),
-                static_cast<long long>(peakStats.missing),
-                static_cast<long long>(peakStats.zeroPeak),
-                static_cast<long long>(peakStats.dimPeak),
-                static_cast<long long>(peakStats.firstDim),
-                static_cast<long long>(peakStats.longestDimRun),
-                static_cast<long long>(peakStats.longestDimStart),
-                peakStats.minPeak,
-                peakStats.maxPeak,
-                peakStats.averagePeak);
+                static_cast<unsigned long long>(generation));
         }
 #endif
         if (zoomFillReadyForData) {
