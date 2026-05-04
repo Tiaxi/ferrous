@@ -408,6 +408,7 @@ private slots:
     void playbackControllerSteadyStateTrimReducesNoticeableLag();
     void playbackControllerFollowsBoundedRecoveryCadenceWithoutBurst();
     void spectrogramSeekProfileFlagsStalledPostSeekWindow();
+    void spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling();
     void spectrogramSmoothnessProfileFlagsGapHeavyWindow();
     void spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals();
     void waveformProgressInvalidatesOnlyTailSpan();
@@ -3079,6 +3080,42 @@ void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
     QVERIFY(state.value("incidentDetected").toBool());
     QCOMPARE(state.value("gapFrames").toInt(), 3);
     QCOMPARE(state.value("maxPendingRows").toInt(), 0);
+#else
+    QSKIP("Seek hitch profiling instrumentation is compiled out");
+#endif
+}
+
+void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    qputenv("FERROUS_PROFILE_UI", "1");
+    SpectrogramSeekTrace::noteSeekIssued(42.0);
+
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_profileEnabled = true;
+        item.m_precomputedCanvasDisplayRight = 96;
+        item.m_gpuDisplayWidth = 320;
+
+        const qint64 startedAtMs = SpectrogramSeekTrace::startedAtMs();
+        QVERIFY(startedAtMs > 0);
+        item.maybeStartSeekProfileLocked(startedAtMs);
+        QVERIFY(item.m_seekProfile.active);
+
+        item.noteSeekProfileFrameLocked(startedAtMs + 150, 0.016, false, false);
+        QVERIFY(!item.m_seekProfile.active);
+
+        item.maybeStartSeekProfileLocked(startedAtMs + 180);
+        QVERIFY(!item.m_seekProfile.active);
+        QCOMPARE(
+            item.m_lastFinalizedSeekProfileGeneration,
+            SpectrogramSeekTrace::currentGeneration());
+    }
+
+    qunsetenv("FERROUS_PROFILE_UI");
 #else
     QSKIP("Seek hitch profiling instrumentation is compiled out");
 #endif

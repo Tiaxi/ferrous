@@ -4896,7 +4896,10 @@ void SpectrogramItem::maybeStartSeekProfileLocked(qint64 nowMs) {
     }
 
     const quint64 generation = SpectrogramSeekTrace::currentGeneration();
-    if (generation == 0 || generation == m_seekProfile.generation || !SpectrogramSeekTrace::isActive(nowMs)) {
+    if (generation == 0
+        || generation == m_seekProfile.generation
+        || generation == m_lastFinalizedSeekProfileGeneration
+        || !SpectrogramSeekTrace::isActive(nowMs)) {
         return;
     }
 
@@ -5044,6 +5047,7 @@ void SpectrogramItem::finalizeSeekProfileLocked(qint64 nowMs, const char *reason
         m_seekProfile.incidentDetected ? 1 : 0);
 
     const QVariantMap lastSummary = m_seekProfile.lastSummary;
+    m_lastFinalizedSeekProfileGeneration = m_seekProfile.generation;
     resetSeekProfileLocked();
     m_seekProfile.lastSummary = lastSummary;
 }

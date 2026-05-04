@@ -467,6 +467,7 @@ private:
     };
 
     qint64 m_lastIncomingRowsAtMs{0};
+    quint64 m_lastFinalizedSeekProfileGeneration{0};
     SmoothnessProfileState m_smoothnessProfile;
     SeekProfileState m_seekProfile;
 #endif
