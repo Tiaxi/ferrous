@@ -397,6 +397,7 @@ private slots:
     void playbackControllerPostSeekHeartbeatSnapsToBackendPosition();
     void playbackControllerPostSeekBehindHeartbeatKeepsVisualClock();
     void playbackControllerPostSeekHeldTargetKeepsVisualClock();
+    void playbackControllerPostSeekTargetEchoKeepsVisualClockActive();
     void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
     void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
     void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
@@ -1632,6 +1633,87 @@ Item {
         qPrintable(QStringLiteral("displayed_before=%1 displayed_on_heartbeat=%2")
             .arg(displayedBeforeHeartbeat, 0, 'f', 6)
             .arg(displayedOnHeartbeat, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerPostSeekTargetEchoKeepsVisualClockActive() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommittedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(48.0)),
+        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("positionSeconds", 48.0);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(2000.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(2240.0))));
+    const double displayedBeforeBackendHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY(displayedBeforeBackendHeartbeat > 48.20);
+
+    bridge->setProperty("positionSeconds", 48.08);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(2240.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedAfterBackendHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        displayedAfterBackendHeartbeat >= displayedBeforeBackendHeartbeat - 0.001,
+        qPrintable(QStringLiteral("displayed_before=%1 displayed_after=%2")
+            .arg(displayedBeforeBackendHeartbeat, 0, 'f', 6)
+            .arg(displayedAfterBackendHeartbeat, 0, 'f', 6)));
 }
 
 void QmlSmokeTest::playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst() {

@@ -125,6 +125,14 @@ QtObject {
                     + " error_ms=" + Math.round(error * 1000))
             return
         }
+        if (root.visualSeekClockActive
+                && clampedPosition <= currentDisplayed + root.visualSeekBackwardToleranceSeconds) {
+            root.applyInterpolatedPosition(currentDisplayed)
+            root.resetInterpolationState(currentDisplayed, nowMs)
+            root.interpolationActive = true
+            root.interpolationRate = 1.0
+            return
+        }
         root.clearVisualSeekClock()
         const action = Math.abs(error) >= root.interpolationSnapThresholdSeconds ? "snap" : "follow"
         root.applyInterpolatedPosition(clampedPosition)
