@@ -237,6 +237,23 @@ QtObject {
         root.seekCommittedAtTime(value, root.currentTimeMs())
     }
 
+    function playAt(index) {
+        if (index < 0) {
+            return
+        }
+
+        const nowMs = root.currentTimeMs()
+        root.clearVisualSeekClock()
+        root.interpolationActive = (root.uiBridge.playbackState || "") === "Playing"
+        root.interpolationRate = 1.0
+        root.applyInterpolatedPosition(0)
+        root.resetInterpolationState(0, nowMs)
+        root.positionSmoothingPrimed = true
+        root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
+
+        root.uiBridge.playAt(index)
+    }
+
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
         const previousState = previousPlaybackState || ""
         const currentState = currentPlaybackState || ""

@@ -106,6 +106,7 @@ Kirigami.ApplicationWindow {
         uiBridge: root.uiBridge
         tagEditorApi: root.tagEditorApi
         openTagEditorDialog: function() { tagEditorDialog.open() }
+        playAt: function(index) { playbackController.playAt(index) }
     }
 
     Controllers.PlaybackController {

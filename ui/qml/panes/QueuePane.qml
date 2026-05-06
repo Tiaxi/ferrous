@@ -259,7 +259,7 @@ Rectangle {
 
                         onDoubleClicked: function(mouse) {
                             if (mouse.button === Qt.LeftButton) {
-                                root.uiBridge.playAt(index)
+                                root.controller.playAt(index)
                             }
                         }
                     }
@@ -285,7 +285,7 @@ Rectangle {
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             if (playlistContextMenu.rowIndex >= 0) {
-                                root.uiBridge.playAt(playlistContextMenu.rowIndex)
+                                root.controller.playAt(playlistContextMenu.rowIndex)
                             }
                         }
                     }
