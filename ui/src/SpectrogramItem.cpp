@@ -1426,7 +1426,8 @@ void SpectrogramItem::feedPrecomputedChunk(
     // zoom-ins and coarser zoom-outs must keep the previous frame visible;
     // otherwise the centered view exposes the worker's partial refill and
     // appears to slide/speed up until the new window is fully decoded.
-    if (hopSize > 0
+    if (columns > 0
+        && hopSize > 0
         && hopSize != m_precomputedHopSize
         && m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {

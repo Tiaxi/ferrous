@@ -1214,6 +1214,7 @@ private slots:
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
     void spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectly();
+    void spectrogramMetadataOnlyZoomResetDefersFreezeSnapshot();
     void spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata();
     void spectrogramZoomFillUsesRetainedFreezeWithoutCpuSnapshot();
     void spectrogramSyntheticClearBuildsFreezeSnapshotFromRetainedMetadata();
@@ -12591,6 +12592,52 @@ void QmlSmokeTest::spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectl
     }
 
     delete node;
+}
+
+void QmlSmokeTest::spectrogramMetadataOnlyZoomResetDefersFreezeSnapshot() {
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int totalColumns = 512;
+    constexpr quint64 trackToken = 23;
+    QByteArray baseline(240 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 240,
+        0, totalColumns, 44100, 1024, false,
+        true, trackToken, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, false);
+        QVERIFY2(
+            item.m_gpuDisplayImage.isNull(),
+            "retained-GPU playback should not keep the CPU display image hot");
+        QCOMPARE(item.m_precomputedHopSize, 1024);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+    }
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0,
+        0, totalColumns * 2, 44100, 512, false,
+        true, trackToken, true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_precomputedResetPending);
+        QVERIFY2(
+            item.m_gpuDisplayImage.isNull(),
+            "metadata-only deferred reset should not build a CPU freeze snapshot");
+        QVERIFY2(
+            !item.m_zoomFillActive,
+            "metadata-only deferred reset should leave zoom-fill capture to the first data chunk");
+    }
 }
 
 void QmlSmokeTest::spectrogramZoomFillBuildsFreezeSnapshotFromRetainedMetadata() {
