@@ -992,10 +992,19 @@ void SpectrogramItem::setPositionSeconds(double value) {
         const bool centeredSeek = m_displayMode == 1
             && clamped >= 1.0
             && !recentCenteredGapless;
-        if (m_centeredSeekFreezeActive
-            && std::abs(clamped - m_centeredSeekFreezeTargetSeconds)
-                > kCenteredSeekFreezeReleaseToleranceSeconds) {
-            m_centeredSeekFreezeActive = false;
+        if (m_centeredSeekFreezeActive) {
+            const double freezeDelta =
+                std::abs(clamped - m_centeredSeekFreezeTargetSeconds);
+            if (now < m_centeredSeekFreezeUntil
+                && freezeDelta < kPositionJumpHoldThresholdSeconds) {
+                return;
+            }
+            if (freezeDelta > kCenteredSeekFreezeReleaseToleranceSeconds
+                || now >= m_centeredSeekFreezeUntil) {
+                m_centeredSeekFreezeActive = false;
+            } else {
+                return;
+            }
         }
         if (largeJump && !centeredSeek) {
             // Update the target position unconditionally, but only stamp the

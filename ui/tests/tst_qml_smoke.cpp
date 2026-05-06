@@ -1033,6 +1033,7 @@ private slots:
     void spectrogramCenteredSmallSeekSnapsWithoutServoSlide();
     void spectrogramCenteredSeekHoldsTargetUntilBackendConfirms();
     void spectrogramEarlyCenteredSeekHoldsTargetBeforePrecomputedReady();
+    void spectrogramCenteredSeekFreezeIgnoresLocalInterpolatedTicks();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
@@ -3673,6 +3674,28 @@ void QmlSmokeTest::spectrogramEarlyCenteredSeekHoldsTargetBeforePrecomputedReady
         std::abs(displayed - seekTarget) < 0.01,
         qPrintable(QStringLiteral(
             "early centered seek should hold target before precomputed ready, target=%1 displayed=%2")
+            .arg(seekTarget, 0, 'f', 3)
+            .arg(displayed, 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramCenteredSeekFreezeIgnoresLocalInterpolatedTicks() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    item.setPositionSeconds(0.6);
+    item.setPlaying(true);
+
+    constexpr double seekTarget = 109.020;
+    item.setPositionSeconds(seekTarget);
+    QTest::qWait(80);
+    item.setPositionSeconds(seekTarget + 0.08);
+
+    const double displayed =
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+    QVERIFY2(
+        std::abs(displayed - seekTarget) < 0.01,
+        qPrintable(QStringLiteral(
+            "centered seek freeze should ignore local interpolation ticks, target=%1 displayed=%2")
             .arg(seekTarget, 0, 'f', 3)
             .arg(displayed, 0, 'f', 3)));
 }
