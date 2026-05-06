@@ -9,10 +9,12 @@
 #include <QSGRendererInterface>
 #include <QQuickStyle>
 #include <QStandardPaths>
+#include <QTimer>
 #include <qqml.h>
 
 #include <atomic>
 #include <array>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -302,7 +304,7 @@ int main(int argc, char *argv[]) {
     case AppInstanceController::StartupResult::ContinuePrimary:
         break;
     }
-    BridgeClient bridge;
+    BridgeClient bridge(nullptr, false);
     instanceController.setOpenHandler([&bridge](const QStringList &paths) {
         bridge.replaceWithPaths(paths);
     });
@@ -327,6 +329,14 @@ int main(int argc, char *argv[]) {
         Qt::QueuedConnection);
 
     engine.loadFromModule("FerrousUi", "Main");
+    auto bridgeStarted = std::make_shared<bool>(false);
+    const auto startBridgeOnce = [&bridge, bridgeStarted]() {
+        if (*bridgeStarted) {
+            return;
+        }
+        *bridgeStarted = true;
+        bridge.startBridge();
+    };
     if (!engine.rootObjects().isEmpty()) {
         if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst())) {
             const QString logPath = DiagnosticsLog::defaultLogPath();
@@ -353,7 +363,18 @@ int main(int argc, char *argv[]) {
                 window,
                 [logRendererState]() { logRendererState("scenegraph-initialized"); },
                 Qt::DirectConnection);
+            QObject::connect(
+                window,
+                &QQuickWindow::frameSwapped,
+                &bridge,
+                startBridgeOnce,
+                Qt::SingleShotConnection);
+            QTimer::singleShot(250, &bridge, startBridgeOnce);
+        } else {
+            QTimer::singleShot(0, &bridge, startBridgeOnce);
         }
+    } else {
+        QTimer::singleShot(0, &bridge, startBridgeOnce);
     }
     return app.exec();
 }

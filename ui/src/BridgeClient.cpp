@@ -751,7 +751,7 @@ QVariant QueueRowsModel::trackNumberAt(int index) const {
     return row->trackNumber;
 }
 
-BridgeClient::BridgeClient(QObject *parent)
+BridgeClient::BridgeClient(QObject *parent, bool autoStartBridge)
     : QObject(parent) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileUiEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
@@ -866,7 +866,9 @@ BridgeClient::BridgeClient(QObject *parent)
     startSearchApplyWorker();
     startCoverLookupWorker();
     startFileBrowserNameDetection();
-    startInProcessBridge();
+    if (autoStartBridge) {
+        startBridge();
+    }
 }
 
 BridgeClient::~BridgeClient() {
@@ -969,6 +971,13 @@ bool BridgeClient::startInProcessBridge() {
     logDiagnostic(QStringLiteral("bridge"), QStringLiteral("in-process bridge created"));
     requestSnapshot();
     return true;
+}
+
+bool BridgeClient::startBridge() {
+    if (m_ffiBridge != nullptr) {
+        return true;
+    }
+    return startInProcessBridge();
 }
 
 void BridgeClient::startSearchApplyWorker() {

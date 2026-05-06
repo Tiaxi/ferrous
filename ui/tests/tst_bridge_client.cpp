@@ -95,6 +95,7 @@ private slots:
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
+    void manualBridgeStartDefersFfiCreationUntilRequested();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
@@ -245,6 +246,22 @@ void BridgeClientTest::queuePathFallbackUsesCachedFirstIndex() {
     QVERIFY(client.processBinarySnapshot(playbackSnapshot));
     QCOMPARE(client.m_playingQueueIndex, 0);
     QCOMPARE(client.currentTrackTitle(), QStringLiteral("Duplicate First"));
+}
+
+void BridgeClientTest::manualBridgeStartDefersFfiCreationUntilRequested() {
+    BridgeClient client(nullptr, false);
+    QVERIFY(client.m_ffiBridge == nullptr);
+    QVERIFY(client.m_bridgeWakeNotifier == nullptr);
+    QCOMPARE(client.m_bridgeWakeFd, -1);
+    QVERIFY(!client.m_connected);
+
+    QVERIFY(client.startBridge());
+    QVERIFY(client.m_ffiBridge != nullptr);
+    QVERIFY(client.m_bridgeWakeFd >= 0);
+    QVERIFY(client.m_bridgeWakeNotifier != nullptr);
+    QVERIFY(client.m_connected);
+
+    isolateBridgeClient(client);
 }
 
 void BridgeClientTest::inProcessBridgeInstallsWakeNotifier() {

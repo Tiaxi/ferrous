@@ -167,8 +167,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool profileLogsEnabled READ profileLogsEnabled CONSTANT)
 
 public:
-    explicit BridgeClient(QObject *parent = nullptr);
+    explicit BridgeClient(QObject *parent = nullptr, bool autoStartBridge = true);
     ~BridgeClient() override;
+
+    Q_INVOKABLE bool startBridge();
 
     QString playbackState() const;
     QString positionText() const;
