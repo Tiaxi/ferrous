@@ -64,6 +64,8 @@ constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
 constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
+constexpr double kCenteredSeekFreezeSeconds = 0.5;
+constexpr double kCenteredSeekFreezeReleaseToleranceSeconds = 0.03;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
@@ -990,6 +992,11 @@ void SpectrogramItem::setPositionSeconds(double value) {
         const bool centeredSeek = m_displayMode == 1
             && clamped >= 1.0
             && !recentCenteredGapless;
+        if (m_centeredSeekFreezeActive
+            && std::abs(clamped - m_centeredSeekFreezeTargetSeconds)
+                > kCenteredSeekFreezeReleaseToleranceSeconds) {
+            m_centeredSeekFreezeActive = false;
+        }
         if (largeJump && !centeredSeek) {
             // Update the target position unconditionally, but only stamp the
             // start time on the *first* activation.  Without this guard, each
@@ -1002,6 +1009,20 @@ void SpectrogramItem::setPositionSeconds(double value) {
                 m_positionJumpHoldActive = true;
                 m_positionJumpHoldStartedAt = now;
             }
+            return;
+        }
+        if (largeJump && centeredSeek) {
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(clamped, now);
+            m_centeredSeekFreezeActive = true;
+            m_centeredSeekFreezeTargetSeconds = clamped;
+            m_centeredSeekFreezeUntil =
+                now + std::chrono::duration_cast<Clock::duration>(
+                          std::chrono::duration<double>(kCenteredSeekFreezeSeconds));
+            changed = true;
+        } else if (m_centeredSeekFreezeActive
+            && std::abs(clamped - m_centeredSeekFreezeTargetSeconds)
+                <= kCenteredSeekFreezeReleaseToleranceSeconds) {
             return;
         }
         // In rolling mode, ignore small backward heartbeat jitter to avoid
@@ -1029,16 +1050,18 @@ void SpectrogramItem::setPositionSeconds(double value) {
             noteSmoothnessServoLocked(error, regressedDuringPlayback);
         }
 #endif
-        const double effectivePosition = regressedDuringPlayback
-            ? currentPosition
-            : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
-        if (m_positionAnchorInitialized
-            && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
-            return;
+        if (!changed) {
+            const double effectivePosition = regressedDuringPlayback
+                ? currentPosition
+                : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
+            if (m_positionAnchorInitialized
+                && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
+                return;
+            }
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(effectivePosition, now);
+            changed = true;
         }
-        m_positionJumpHoldActive = false;
-        setPositionAnchorLocked(effectivePosition, now);
-        changed = true;
     }
     if (changed) {
         emit positionSecondsChanged();
@@ -1066,6 +1089,7 @@ void SpectrogramItem::setPlaying(bool value) {
         m_playing = value;
         if (!m_playing) {
             m_positionJumpHoldActive = false;
+            m_centeredSeekFreezeActive = false;
         }
         changed = true;
     }
@@ -2496,6 +2520,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_renderZoomLevel = m_zoomLevel;
     m_gaplessPositionOffset = 0.0;
     m_positionJumpHoldActive = false;
+    m_centeredSeekFreezeActive = false;
     m_centeredGaplessTransitionAt = {};
     m_timeGridDirty = true;
     const bool wasReady = m_precomputedReady;
@@ -2657,6 +2682,17 @@ double SpectrogramItem::currentRenderPositionSecondsLocked(
         : m_positionSeconds;
     if (!m_playing || !m_positionAnchorInitialized) {
         return std::max(0.0, anchor);
+    }
+    if (m_centeredSeekFreezeActive) {
+        if (now < m_centeredSeekFreezeUntil) {
+            return std::max(0.0, m_centeredSeekFreezeTargetSeconds);
+        }
+        const double elapsedAfterFreezeSeconds =
+            std::chrono::duration<double>(now - m_centeredSeekFreezeUntil).count();
+        return std::max(
+            0.0,
+            m_centeredSeekFreezeTargetSeconds
+                + std::max(0.0, elapsedAfterFreezeSeconds));
     }
     const double elapsedSeconds =
         std::chrono::duration<double>(now - m_positionAnchorUpdatedAt).count();

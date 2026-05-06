@@ -478,6 +478,9 @@ private:
     bool m_positionJumpHoldActive{false};
     double m_positionJumpHoldSeconds{0.0};
     std::chrono::steady_clock::time_point m_positionJumpHoldStartedAt{};
+    bool m_centeredSeekFreezeActive{false};
+    double m_centeredSeekFreezeTargetSeconds{0.0};
+    std::chrono::steady_clock::time_point m_centeredSeekFreezeUntil{};
     bool m_precomputedResetPending{false};
     int m_precomputedPendingResetStartIndex{0};
     int m_precomputedPendingResetBins{0};

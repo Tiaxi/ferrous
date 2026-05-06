@@ -1031,6 +1031,7 @@ private slots:
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramCenteredSmallSeekSnapsWithoutServoSlide();
+    void spectrogramCenteredSeekHoldsTargetUntilBackendConfirms();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
@@ -3630,6 +3631,28 @@ void QmlSmokeTest::spectrogramCenteredSmallSeekSnapsWithoutServoSlide() {
         qPrintable(QStringLiteral(
             "centered small seek should publish target, got position %1")
             .arg(item.m_positionSeconds, 0, 'f', 4)));
+}
+
+void QmlSmokeTest::spectrogramCenteredSeekHoldsTargetUntilBackendConfirms() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    item.m_precomputedReady = true;
+    item.setPositionSeconds(0.5);
+    item.setPlaying(true);
+
+    constexpr double seekTarget = 134.577;
+    item.setPositionSeconds(seekTarget);
+    QTest::qWait(80);
+
+    const double displayed =
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+    QVERIFY2(
+        std::abs(displayed - seekTarget) < 0.01,
+        qPrintable(QStringLiteral(
+            "centered seek should hold target until backend confirms, target=%1 displayed=%2")
+            .arg(seekTarget, 0, 'f', 3)
+            .arg(displayed, 0, 'f', 3)));
 }
 
 void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
