@@ -1032,6 +1032,7 @@ private slots:
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramCenteredSmallSeekSnapsWithoutServoSlide();
     void spectrogramCenteredSeekHoldsTargetUntilBackendConfirms();
+    void spectrogramEarlyCenteredSeekHoldsTargetBeforePrecomputedReady();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
@@ -3651,6 +3652,27 @@ void QmlSmokeTest::spectrogramCenteredSeekHoldsTargetUntilBackendConfirms() {
         std::abs(displayed - seekTarget) < 0.01,
         qPrintable(QStringLiteral(
             "centered seek should hold target until backend confirms, target=%1 displayed=%2")
+            .arg(seekTarget, 0, 'f', 3)
+            .arg(displayed, 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramEarlyCenteredSeekHoldsTargetBeforePrecomputedReady() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    item.setPositionSeconds(0.6);
+    item.setPlaying(true);
+
+    constexpr double seekTarget = 117.079;
+    item.setPositionSeconds(seekTarget);
+    QTest::qWait(80);
+
+    const double displayed =
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+    QVERIFY2(
+        std::abs(displayed - seekTarget) < 0.01,
+        qPrintable(QStringLiteral(
+            "early centered seek should hold target before precomputed ready, target=%1 displayed=%2")
             .arg(seekTarget, 0, 'f', 3)
             .arg(displayed, 0, 'f', 3)));
 }

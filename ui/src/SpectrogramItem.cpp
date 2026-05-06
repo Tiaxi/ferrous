@@ -975,9 +975,9 @@ void SpectrogramItem::setPositionSeconds(double value) {
         QMutexLocker lock(&m_stateMutex);
         const auto now = Clock::now();
         const double currentPosition = currentRenderPositionSecondsLocked(now);
-        const bool largeJump = m_precomputedReady
-            && m_playing
+        const bool largePositionJump = m_playing
             && std::abs(clamped - currentPosition) >= kPositionJumpHoldThresholdSeconds;
+        const bool largeJump = m_precomputedReady && largePositionJump;
         // In centered mode, only hold for gapless transitions (position
         // resets to near zero from deep in the track), not same-track
         // seeks.  Seeks must apply immediately because the full-track
@@ -1011,7 +1011,7 @@ void SpectrogramItem::setPositionSeconds(double value) {
             }
             return;
         }
-        if (largeJump && centeredSeek) {
+        if (largePositionJump && centeredSeek) {
             m_positionJumpHoldActive = false;
             setPositionAnchorLocked(clamped, now);
             m_centeredSeekFreezeActive = true;
