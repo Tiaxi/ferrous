@@ -1144,6 +1144,7 @@ private slots:
     void spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans();
     void spectrogramRetainedPageUploadPlannerKeepsTextureForShiftedSpan();
     void spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange();
+    void spectrogramRollingRetainedPageUploadPlannerKeepsPagesAcrossGaplessTokenChange();
     void spectrogramRetainedPageUploadPlannerLabelsResetReasons();
     void spectrogramRetainedPageUploadBudgetLimitsPaintWork();
     void spectrogramRetainedPageUploadBudgetSplitsOversizedSpan();
@@ -7912,6 +7913,51 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange()
     QCOMPARE(uploads[0].pageXBegin, 0);
     QCOMPARE(uploads[0].pageXEnd, columns - 1);
     QVERIFY(uploads[0].resetPage);
+}
+
+void QmlSmokeTest::spectrogramRollingRetainedPageUploadPlannerKeepsPagesAcrossGaplessTokenChange() {
+    SpectrogramItem item;
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int pageWidth = 16;
+    constexpr int columns = 24;
+    constexpr quint64 oldTrackToken = 61;
+    constexpr quint64 newTrackToken = 62;
+    QByteArray data(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, 128, 48000, 1024, true,
+        true, oldTrackToken, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    item.m_precomputedTrackToken = newTrackToken;
+
+    auto retainedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+    retainedPage->key = SpectrogramItem::RetainedSourcePageKey{
+        .trackToken = oldTrackToken,
+        .rollingMode = true,
+        .pageIndex = 0,
+    };
+    retainedPage->pageXOrigin = 0;
+    retainedPage->width = pageWidth;
+    retainedPage->binsPerColumn = bins;
+    retainedPage->uploadedDisplayLeft = 0;
+    retainedPage->uploadedDisplayRight = 7;
+    item.m_gpuSourcePages.push_back(std::move(retainedPage));
+
+    const QVector<SpectrogramItem::RetainedPageUploadSpan> uploads =
+        item.collectRetainedPageUploadSpansLocked(0, 15, 15, true, pageWidth);
+
+    QCOMPARE(uploads.size(), 1);
+    QCOMPARE(uploads[0].pageIndex, static_cast<qint64>(0));
+    QCOMPARE(uploads[0].pageXBegin, 8);
+    QCOMPARE(uploads[0].pageXEnd, 15);
+    QCOMPARE(uploads[0].displayLeft, static_cast<qint64>(8));
+    QCOMPARE(uploads[0].displayRight, static_cast<qint64>(15));
+    QVERIFY2(
+        !uploads[0].resetPage,
+        "rolling gapless token changes must reuse retained pages for preserved history and upload only newly exposed columns");
 }
 
 void QmlSmokeTest::spectrogramRetainedPageUploadPlannerLabelsResetReasons() {

@@ -5866,8 +5866,8 @@ SpectrogramItem::RetainedSourcePageState *SpectrogramItem::findRetainedSourcePag
     const qint64 pageIndex) const {
     for (const auto &page : m_gpuSourcePages) {
         if (page != nullptr
-            && page->key.trackToken == trackToken
             && page->key.rollingMode == rollingMode
+            && (rollingMode || page->key.trackToken == trackToken)
             && page->key.pageIndex == pageIndex) {
             return page.get();
         }
@@ -6239,8 +6239,10 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
 
     std::erase_if(m_gpuSourcePages, [&](const auto &page) {
         if (page == nullptr
-            || page->key.trackToken != m_precomputedTrackToken
             || page->key.rollingMode != rollingMode) {
+            return true;
+        }
+        if (!rollingMode && page->key.trackToken != m_precomputedTrackToken) {
             return true;
         }
         return !pageIndicesToKeep.contains(page->key.pageIndex);
