@@ -400,6 +400,7 @@ impl SmoothedPlaybackClock {
 
     fn enter_seek_hold(&mut self, target: Duration, now: Instant) {
         self.reset_with_mode(target, now, PlaybackClockMode::SeekHold);
+        self.rate = 0.0;
     }
 
     fn enter_seek_reacquire(&mut self) {
@@ -2792,16 +2793,17 @@ mod tests {
     }
 
     #[test]
-    fn seek_hold_advances_visible_position_from_target() {
+    fn seek_hold_does_not_run_ahead_before_backend_reacquires_position() {
         let base = Instant::now();
+        let target = Duration::from_secs_f64(12.0);
         let mut clock = SmoothedPlaybackClock::new(base);
-        clock.enter_seek_hold(Duration::from_secs_f64(12.0), base);
+        clock.enter_seek_hold(target, base);
 
         let visible = clock.current_position(base + Duration::from_millis(120));
-        assert!(
-            visible > Duration::from_secs_f64(12.10),
-            "seek hold should advance from target, got {:.6}",
-            visible.as_secs_f64()
+
+        assert_eq!(
+            visible, target,
+            "seek hold should keep the requested target stable until GStreamer confirms playback position"
         );
     }
 
