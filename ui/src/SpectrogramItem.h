@@ -213,7 +213,7 @@ private:
     void invalidateMapping();
     void ensureMapping(int height);
     bool ensureZoomFillSnapshotImageLocked();
-    void captureZoomFillFrozenCacheLocked();
+    void captureZoomFillFrozenCacheLocked(bool allowCpuSnapshot = true);
     void clearZoomFillFrozenCacheLocked();
     static RetainedPageTextureExtent retainedPageTextureExtentForSpan(
         int pageXBegin,

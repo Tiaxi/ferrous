@@ -1932,12 +1932,23 @@ fn configure_playbin_buffering(playbin: &gst::Element) {
 fn seek_flags_for_path(path: Option<&Path>) -> gst::SeekFlags {
     if path.is_some_and(is_dts_file) {
         gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+    } else if path.is_some_and(is_flac_file) {
+        // Fast FLAC seeks can leave flacparse in an internally errored state
+        // after rapid synced seeks. Accurate flushed seeks avoid that parser
+        // stall while keeping other formats on the low-latency path.
+        gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     } else {
         // Accurate seeks can force parsers/demuxers to scan large files.
         // Default playback should prefer responsiveness, especially on slow
         // network-backed filesystems.
         gst::SeekFlags::FLUSH
     }
+}
+
+fn is_flac_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("flac"))
 }
 
 /// Check whether gapless playback has rolled over to the next track.
@@ -2968,10 +2979,10 @@ mod tests {
     }
 
     #[test]
-    fn flac_seek_prefers_fast_non_accurate_mode() {
+    fn flac_seek_uses_accurate_mode_to_avoid_parser_stall() {
         let flags = seek_flags_for_path(Some(Path::new("/tmp/test.flac")));
         assert!(flags.contains(gst::SeekFlags::FLUSH));
-        assert!(!flags.contains(gst::SeekFlags::ACCURATE));
+        assert!(flags.contains(gst::SeekFlags::ACCURATE));
         assert!(!flags.contains(gst::SeekFlags::KEY_UNIT));
     }
 

@@ -1508,7 +1508,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         const Clock::time_point freezeStartedAt = Clock::now();
 #endif
-        captureZoomFillFrozenCacheLocked();
+        captureZoomFillFrozenCacheLocked(false);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         profile.freezeMs += std::chrono::duration<double, std::milli>(
                                 Clock::now() - freezeStartedAt)
@@ -1567,11 +1567,6 @@ void SpectrogramItem::feedPrecomputedChunk(
                 >= m_precomputedCanvasDisplayLeft
             && m_precomputedTotalColumnsEstimate > 0
             && m_precomputedBinsPerColumn > 0;
-        if (canPreserveCanvasForSeek
-            && m_gpuDisplayImage.isNull()
-            && !m_zoomFillFrozenRetainedAvailable) {
-            ensureZoomFillSnapshotImageLocked();
-        }
         const bool preserveCanvasForSeek =
             canPreserveCanvasForSeek
             && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
@@ -1594,7 +1589,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             // Canvas, m_precomputedReady, and the stored display range
             // all stay as-is so the paint keeps rendering the old
             // image through canvasFreeze.
-            captureZoomFillFrozenCacheLocked();
+            captureZoomFillFrozenCacheLocked(false);
             m_zoomFillActive = true;
             m_zoomFillDataReady = false;
             m_zoomFillFrozenRetainedActive =
@@ -5405,8 +5400,8 @@ bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
     return !m_gpuDisplayImage.isNull();
 }
 
-void SpectrogramItem::captureZoomFillFrozenCacheLocked() {
-    if (!m_zoomFillFrozenRetainedAvailable) {
+void SpectrogramItem::captureZoomFillFrozenCacheLocked(bool allowCpuSnapshot) {
+    if (!m_zoomFillFrozenRetainedAvailable && allowCpuSnapshot) {
         ensureZoomFillSnapshotImageLocked();
     }
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
