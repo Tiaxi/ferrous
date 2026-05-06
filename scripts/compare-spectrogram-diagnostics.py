@@ -55,6 +55,18 @@ def parse_log(path: Path) -> dict[str, object]:
         "precomputed_frame_ms": [],
         "precomputed_frame_pop_ms": [],
         "precomputed_frame_dispatch_ms": [],
+        "precomputed_feed_total_ms": [],
+        "precomputed_feed_lock_wait_ms": [],
+        "precomputed_feed_freeze_ms": [],
+        "precomputed_feed_reset_ms": [],
+        "precomputed_feed_alloc_ms": [],
+        "precomputed_feed_write_ms": [],
+        "precomputed_feed_ready_ms": [],
+        "precomputed_feed_emit_update_ms": [],
+        "precomputed_feed_reallocs": 0,
+        "precomputed_feed_pending_before": 0,
+        "precomputed_feed_applied_reset": 0,
+        "precomputed_feed_implicit_reset": 0,
         "paths": Counter(),
         "fallbacks": Counter(),
         "cpu_rebuilds": 0,
@@ -111,6 +123,27 @@ def parse_log(path: Path) -> dict[str, object]:
             append_float(metrics["precomputed_frame_ms"], fields, "ms")
             append_float(metrics["precomputed_frame_pop_ms"], fields, "pop_ms")
             append_float(metrics["precomputed_frame_dispatch_ms"], fields, "dispatch_ms")
+        elif "[ui-spectrogram] precomputed_feed_phase" in line:
+            append_float(metrics["precomputed_feed_total_ms"], fields, "total_ms")
+            append_float(metrics["precomputed_feed_lock_wait_ms"], fields, "lock_wait_ms")
+            append_float(metrics["precomputed_feed_freeze_ms"], fields, "freeze_ms")
+            append_float(metrics["precomputed_feed_reset_ms"], fields, "reset_ms")
+            append_float(metrics["precomputed_feed_alloc_ms"], fields, "alloc_ms")
+            append_float(metrics["precomputed_feed_write_ms"], fields, "write_ms")
+            append_float(metrics["precomputed_feed_ready_ms"], fields, "ready_ms")
+            append_float(metrics["precomputed_feed_emit_update_ms"], fields, "emit_update_ms")
+            metrics["precomputed_feed_reallocs"] = int(metrics["precomputed_feed_reallocs"]) + int_value(
+                fields, "realloc"
+            )
+            metrics["precomputed_feed_pending_before"] = int(
+                metrics["precomputed_feed_pending_before"]
+            ) + int_value(fields, "pending_before")
+            metrics["precomputed_feed_applied_reset"] = int(
+                metrics["precomputed_feed_applied_reset"]
+            ) + int_value(fields, "applied_reset")
+            metrics["precomputed_feed_implicit_reset"] = int(
+                metrics["precomputed_feed_implicit_reset"]
+            ) + int_value(fields, "implicit_reset")
 
     return metrics
 
@@ -152,10 +185,18 @@ def summarize(label: str, metrics: dict[str, object]) -> list[str]:
     precomputed_frame = list_value(metrics, "precomputed_frame_ms")
     precomputed_frame_pop = list_value(metrics, "precomputed_frame_pop_ms")
     precomputed_frame_dispatch = list_value(metrics, "precomputed_frame_dispatch_ms")
+    precomputed_feed = list_value(metrics, "precomputed_feed_total_ms")
+    precomputed_feed_lock = list_value(metrics, "precomputed_feed_lock_wait_ms")
+    precomputed_feed_freeze = list_value(metrics, "precomputed_feed_freeze_ms")
+    precomputed_feed_reset = list_value(metrics, "precomputed_feed_reset_ms")
+    precomputed_feed_alloc = list_value(metrics, "precomputed_feed_alloc_ms")
+    precomputed_feed_write = list_value(metrics, "precomputed_feed_write_ms")
+    precomputed_feed_ready = list_value(metrics, "precomputed_feed_ready_ms")
+    precomputed_feed_emit = list_value(metrics, "precomputed_feed_emit_update_ms")
     paths = counter_value(metrics, "paths")
     fallbacks = counter_value(metrics, "fallbacks")
 
-    return [
+    lines = [
         f"{label}:",
         f"  paint samples={len(paint)} avg={avg(paint):.3f}ms p90={percentile(paint, 0.90):.3f}ms "
         f"p99={percentile(paint, 0.99):.3f}ms max={max(paint, default=0.0):.3f}ms",
@@ -176,6 +217,22 @@ def summarize(label: str, metrics: dict[str, object]) -> list[str]:
         f"  paths={format_counter(paths)}",
         f"  fallbacks={format_counter(fallbacks)}",
     ]
+    if precomputed_feed:
+        lines.append(
+            f"  feed phase samples={len(precomputed_feed)} total max={max(precomputed_feed, default=0.0):.1f}ms "
+            f"lock max={max(precomputed_feed_lock, default=0.0):.1f}ms "
+            f"freeze max={max(precomputed_feed_freeze, default=0.0):.1f}ms "
+            f"reset max={max(precomputed_feed_reset, default=0.0):.1f}ms "
+            f"alloc max={max(precomputed_feed_alloc, default=0.0):.1f}ms "
+            f"write max={max(precomputed_feed_write, default=0.0):.1f}ms "
+            f"ready max={max(precomputed_feed_ready, default=0.0):.1f}ms "
+            f"emit max={max(precomputed_feed_emit, default=0.0):.1f}ms "
+            f"reallocs={metrics['precomputed_feed_reallocs']} "
+            f"pending={metrics['precomputed_feed_pending_before']} "
+            f"applied_reset={metrics['precomputed_feed_applied_reset']} "
+            f"implicit_reset={metrics['precomputed_feed_implicit_reset']}"
+        )
+    return lines
 
 
 def list_value(metrics: dict[str, object], key: str) -> list[float]:

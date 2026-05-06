@@ -74,6 +74,7 @@ constexpr double kPositionJumpHoldTimeoutSeconds = 2.0;
 constexpr qint64 kSeekTraceWindowMs = 1800;
 constexpr qint64 kSmoothnessWindowMs = 2000;
 constexpr qint64 kSmoothnessIdleMs = 450;
+constexpr double kPrecomputedFeedPhaseLogThresholdMs = 8.0;
 #endif
 const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
@@ -208,6 +209,58 @@ bool smoothnessLooksIncident(
         || regressionCount > 0
         || paintSpikeCount >= 2;
 }
+
+struct PrecomputedFeedPhaseProfile {
+    using Clock = std::chrono::steady_clock;
+
+    Clock::time_point startedAt{Clock::now()};
+    Clock::time_point phaseStartedAt{startedAt};
+    double lockWaitMs{0.0};
+    double gateMs{0.0};
+    double freezeMs{0.0};
+    double resetMs{0.0};
+    double sessionMs{0.0};
+    double metadataMs{0.0};
+    double allocMs{0.0};
+    double writeMs{0.0};
+    double readyMs{0.0};
+    double zoomResetMs{0.0};
+    double emitUpdateMs{0.0};
+    bool resetPendingBefore{false};
+    bool resetPendingAfter{false};
+    bool zoomFillActiveBefore{false};
+    bool zoomFillActiveAfter{false};
+    bool frozenRetainedBefore{false};
+    bool frozenRetainedAfter{false};
+    bool gpuImageBefore{false};
+    bool gpuImageAfter{false};
+    bool appliedReset{false};
+    bool appliedImplicitReset{false};
+    bool mustRealloc{false};
+    int ringCapacityBefore{0};
+    int ringCapacityAfter{0};
+    qint64 ringBytesBefore{0};
+    qint64 ringBytesAfter{0};
+    int neededCapacity{0};
+    qint64 neededBytes{0};
+    qint64 ringFillAfter{0};
+    int maxColumnAfter{-1};
+    int displayMode{0};
+
+    void mark(double &bucket) {
+        const Clock::time_point now = Clock::now();
+        bucket +=
+            std::chrono::duration<double, std::milli>(now - phaseStartedAt)
+                .count();
+        phaseStartedAt = now;
+    }
+
+    double totalMs() const {
+        return std::chrono::duration<double, std::milli>(
+                   Clock::now() - startedAt)
+            .count();
+    }
+};
 #endif
 
 void bumpImageGeneration(quint64 &generation) {
@@ -1300,7 +1353,25 @@ void SpectrogramItem::feedPrecomputedChunk(
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
     quint64 generation) {
     using Clock = std::chrono::steady_clock;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    PrecomputedFeedPhaseProfile profile;
+    const Clock::time_point lockAttemptAt = Clock::now();
+#endif
     QMutexLocker lock(&m_stateMutex);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.lockWaitMs =
+        std::chrono::duration<double, std::milli>(Clock::now() - lockAttemptAt)
+            .count();
+    profile.phaseStartedAt = Clock::now();
+    const bool profileFeedEnabled = m_profileEnabled;
+    profile.resetPendingBefore = m_precomputedResetPending;
+    profile.zoomFillActiveBefore = m_zoomFillActive;
+    profile.frozenRetainedBefore = m_zoomFillFrozenRetainedAvailable;
+    profile.gpuImageBefore = !m_gpuDisplayImage.isNull();
+    profile.ringCapacityBefore = m_ringCapacity;
+    profile.ringBytesBefore = m_ringBuffer.size();
+    profile.displayMode = m_displayMode;
+#endif
 
     FERROUS_SPECTROGRAM_TRACE_LOGF(stderr,
         "[Qt-feed@%p] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu gen=%llu ready=%d reset=%d clear=%d await=%d complete=%d\n",
@@ -1420,6 +1491,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             return;
         }
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.gateMs);
+#endif
 
     // Early hop change detection: activate the frozen-image path BEFORE any
     // reset processing that might invalidate the render caches. Both finer
@@ -1431,7 +1505,16 @@ void SpectrogramItem::feedPrecomputedChunk(
         && hopSize != m_precomputedHopSize
         && m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        const Clock::time_point freezeStartedAt = Clock::now();
+#endif
         captureZoomFillFrozenCacheLocked();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        profile.freezeMs += std::chrono::duration<double, std::milli>(
+                                Clock::now() - freezeStartedAt)
+                                .count();
+        profile.phaseStartedAt = Clock::now();
+#endif
         m_zoomFillFrozenRetainedActive =
             m_zoomFillFrozenRetainedAvailable;
         m_zoomFillActive =
@@ -1665,6 +1748,11 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetClearHistory = false;
         appliedReset = true;
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.resetMs);
+    profile.appliedReset = appliedReset;
+    profile.appliedImplicitReset = appliedImplicitReset;
+#endif
 
     if (trackToken != 0
         && m_precomputedTrackToken != 0
@@ -1753,6 +1841,9 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (trackToken != 0 && !(bufferReset && columns <= 0)) {
         m_precomputedTrackToken = trackToken;
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.sessionMs);
+#endif
 
     m_precomputedBinsPerColumn = bins;
     // Accept the latest estimate for the active session.  Same-hop
@@ -1848,6 +1939,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             }
         }
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.metadataMs);
+#endif
 
     // Dynamically size the ring buffer based on widget width and display mode.
     if (columns > 0 && bins > 0) {
@@ -1890,6 +1984,11 @@ void SpectrogramItem::feedPrecomputedChunk(
         const bool mustRealloc =
             neededBytes > m_ringBuffer.size()
             || neededCapacity > m_ringCapacity;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        profile.neededCapacity = neededCapacity;
+        profile.neededBytes = neededBytes;
+        profile.mustRealloc = mustRealloc;
+#endif
 
         if (mustRealloc) {
             QByteArray newBuf(static_cast<int>(neededBytes), '\0');
@@ -1942,6 +2041,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_ringCapacity = neededCapacity;
         }
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.allocMs);
+#endif
 
     // Write columns into the ring buffer.
     if (columns > 0 && m_ringCapacity > 0) {
@@ -2015,6 +2117,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             static_cast<long long>(m_ringWriteSeq - m_ringOldestSeq),
             static_cast<int>(m_precomputedMaxColumnIndex));
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.writeMs);
+#endif
 
     const bool wasReady = m_precomputedReady;
     m_precomputedReady =
@@ -2174,6 +2279,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedCanvasDirty = true;
         }
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.readyMs);
+#endif
 
     // Reset zoom to 1.0 on any track change (gapless or user-initiated).
     // Check m_renderZoomLevel (not m_zoomLevel) because in multi-channel
@@ -2236,6 +2344,18 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_crosshairDirty = true;
         m_timeGridDirty = true;
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.zoomResetMs);
+    profile.resetPendingAfter = m_precomputedResetPending;
+    profile.zoomFillActiveAfter = m_zoomFillActive;
+    profile.frozenRetainedAfter = m_zoomFillFrozenRetainedAvailable;
+    profile.gpuImageAfter = !m_gpuDisplayImage.isNull();
+    profile.ringCapacityAfter = m_ringCapacity;
+    profile.ringBytesAfter = m_ringBuffer.size();
+    profile.ringFillAfter =
+        std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq);
+    profile.maxColumnAfter = m_precomputedMaxColumnIndex;
+#endif
 
     const bool readyChanged = m_precomputedReady && !wasReady;
 
@@ -2243,6 +2363,9 @@ void SpectrogramItem::feedPrecomputedChunk(
     // setZoomLevel which re-acquires the mutex.
     lock.unlock();
 
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.phaseStartedAt = Clock::now();
+#endif
     if (needsZoomReset) {
         emit zoomLevelChanged();
         emit zoomResetRequested();
@@ -2257,6 +2380,68 @@ void SpectrogramItem::feedPrecomputedChunk(
         emit precomputedReadyChanged();
     }
     update();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    profile.mark(profile.emitUpdateMs);
+    const double profileTotalMs = profile.totalMs();
+    if (profileFeedEnabled
+        && profileTotalMs >= kPrecomputedFeedPhaseLogThresholdMs) {
+        FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
+            "[ui-spectrogram] precomputed_feed_phase total_ms=%.2f "
+            "lock_wait_ms=%.2f gate_ms=%.2f freeze_ms=%.2f reset_ms=%.2f "
+            "session_ms=%.2f metadata_ms=%.2f alloc_ms=%.2f write_ms=%.2f "
+            "ready_ms=%.2f zoom_reset_ms=%.2f emit_update_ms=%.2f "
+            "cols=%d bins=%d start=%d total=%d hop=%d reset=%d clear=%d "
+            "complete=%d mode=%d pending_before=%d pending_after=%d "
+            "applied_reset=%d implicit_reset=%d zoom_fill_before=%d "
+            "zoom_fill_after=%d retained_before=%d retained_after=%d "
+            "gpu_image_before=%d gpu_image_after=%d ring_cap_before=%d "
+            "ring_cap_after=%d ring_kb_before=%.1f ring_kb_after=%.1f "
+            "needed_cap=%d needed_kb=%.1f realloc=%d ring_fill=%lld "
+            "max_col=%d token=%llu gen=%llu\n",
+            profileTotalMs,
+            profile.lockWaitMs,
+            profile.gateMs,
+            profile.freezeMs,
+            profile.resetMs,
+            profile.sessionMs,
+            profile.metadataMs,
+            profile.allocMs,
+            profile.writeMs,
+            profile.readyMs,
+            profile.zoomResetMs,
+            profile.emitUpdateMs,
+            columns,
+            bins,
+            startIndex,
+            totalEstimate,
+            hopSize,
+            bufferReset ? 1 : 0,
+            clearHistoryOnReset ? 1 : 0,
+            complete ? 1 : 0,
+            profile.displayMode,
+            profile.resetPendingBefore ? 1 : 0,
+            profile.resetPendingAfter ? 1 : 0,
+            profile.appliedReset ? 1 : 0,
+            profile.appliedImplicitReset ? 1 : 0,
+            profile.zoomFillActiveBefore ? 1 : 0,
+            profile.zoomFillActiveAfter ? 1 : 0,
+            profile.frozenRetainedBefore ? 1 : 0,
+            profile.frozenRetainedAfter ? 1 : 0,
+            profile.gpuImageBefore ? 1 : 0,
+            profile.gpuImageAfter ? 1 : 0,
+            profile.ringCapacityBefore,
+            profile.ringCapacityAfter,
+            static_cast<double>(profile.ringBytesBefore) / 1024.0,
+            static_cast<double>(profile.ringBytesAfter) / 1024.0,
+            profile.neededCapacity,
+            static_cast<double>(profile.neededBytes) / 1024.0,
+            profile.mustRealloc ? 1 : 0,
+            static_cast<long long>(profile.ringFillAfter),
+            profile.maxColumnAfter,
+            static_cast<unsigned long long>(trackToken),
+            static_cast<unsigned long long>(generation));
+    }
+#endif
 }
 
 void SpectrogramItem::clearPrecomputed() {
