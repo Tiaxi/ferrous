@@ -1207,6 +1207,7 @@ private slots:
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
+    void spectrogramRollingRetainedRenderPlanPrefillKeepsFixedZoomScale();
     void spectrogramRetainedRenderPlanCoversOnePage();
     void spectrogramRetainedRenderPlanCoversTwoPages();
     void spectrogramRetainedRenderPlanCoversThreePages();
@@ -12473,6 +12474,7 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanAllowsDecodedTailSlack() {
             0.0,
             1183,
             159,
+            1.0,
             false);
 
     QVERIFY(plan.haveSegments);
@@ -12494,6 +12496,40 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanAllowsDecodedTailSlack() {
     QVERIFY(plan.segments[0].targetRect.width() < 1183.0);
 }
 
+void QmlSmokeTest::spectrogramRollingRetainedRenderPlanPrefillKeepsFixedZoomScale() {
+    SpectrogramItem item;
+    item.setWidth(12);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int columns = 4;
+    QByteArray data(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        data, bins, 0, columns,
+        0, 64, 48000, 1024, false,
+        true, 91, false);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(
+            0,
+            columns - 1,
+            columns - 1,
+            0.0,
+            12,
+            6,
+            2.0,
+            true);
+
+    QVERIFY(plan.haveSegments);
+    QVERIFY(!plan.overflowed);
+    QVERIFY(plan.coversRange);
+    QCOMPARE(plan.segments.size(), qsizetype{1});
+    QCOMPARE(plan.segments[0].sourceRect, QRect(0, 0, columns, bins));
+    QCOMPARE(plan.segments[0].targetRect, QRectF(4.0, 0.0, 8.0, 6.0));
+}
+
 void QmlSmokeTest::spectrogramRetainedRenderPlanCoversOnePage() {
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
@@ -12508,7 +12544,7 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanCoversOnePage() {
 
     QMutexLocker lock(&item.m_stateMutex);
     const SpectrogramItem::RetainedRenderPlan plan =
-        item.buildRetainedRenderPlanLocked(0, columns - 1, columns - 1, 0.0, columns, 64, false);
+        item.buildRetainedRenderPlanLocked(0, columns - 1, columns - 1, 0.0, columns, 64, 1.0, false);
 
     QVERIFY(plan.haveSegments);
     QVERIFY(!plan.overflowed);
@@ -12532,7 +12568,7 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanCoversTwoPages() {
 
     QMutexLocker lock(&item.m_stateMutex);
     const SpectrogramItem::RetainedRenderPlan plan =
-        item.buildRetainedRenderPlanLocked(2040, 2055, 2055, 0.0, 16, 64, false);
+        item.buildRetainedRenderPlanLocked(2040, 2055, 2055, 0.0, 16, 64, 1.0, false);
 
     QVERIFY(plan.haveSegments);
     QVERIFY(!plan.overflowed);
@@ -12556,7 +12592,7 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanCoversThreePages() {
 
     QMutexLocker lock(&item.m_stateMutex);
     const SpectrogramItem::RetainedRenderPlan plan =
-        item.buildRetainedRenderPlanLocked(2040, 4103, 4103, 0.0, 2064, 64, false);
+        item.buildRetainedRenderPlanLocked(2040, 4103, 4103, 0.0, 2064, 64, 1.0, false);
 
     QVERIFY(plan.haveSegments);
     QVERIFY(!plan.overflowed);
@@ -12582,7 +12618,7 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanUsesClampedPageWidth() {
 
     QMutexLocker lock(&item.m_stateMutex);
     const SpectrogramItem::RetainedRenderPlan plan =
-        item.buildRetainedRenderPlanLocked(1016, 2055, 2055, 0.0, 1040, 64, false, pageWidth);
+        item.buildRetainedRenderPlanLocked(1016, 2055, 2055, 0.0, 1040, 64, 1.0, false, pageWidth);
 
     QVERIFY(plan.haveSegments);
     QVERIFY(!plan.overflowed);
@@ -12609,7 +12645,7 @@ void QmlSmokeTest::spectrogramRetainedRenderPlanStillFallsBackForSparseOverflow(
     item.m_ringColumnId[static_cast<size_t>(12)] = -1;
 
     const SpectrogramItem::RetainedRenderPlan plan =
-        item.buildRetainedRenderPlanLocked(0, 31, 31, 0.0, 32, 64, false);
+        item.buildRetainedRenderPlanLocked(0, 31, 31, 0.0, 32, 64, 1.0, false);
 
     QVERIFY(plan.haveSegments);
     QVERIFY(!plan.coversRange);

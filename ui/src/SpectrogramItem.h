@@ -305,6 +305,7 @@ private:
         double drawX,
         int drawPixels,
         int height,
+        double effectiveZoom,
         bool rollingMode,
         int pageWidth = kRetainedSourcePageWidth) const;
     void syncRetainedSourceTextureLocked(

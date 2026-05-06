@@ -3308,6 +3308,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     drawX,
                     drawPixels,
                     h,
+                    effectiveZoom,
                     rollingMode,
                     retainedSourcePageWidthForGpuLimit(currentWindow));
                 retainedTextureSegments = retainedPlan.segments;
@@ -5986,6 +5987,7 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
     const double drawX,
     const int drawPixels,
     const int height,
+    const double effectiveZoom,
     const bool rollingMode,
     const int pageWidth) const {
     RetainedRenderPlan plan;
@@ -6002,9 +6004,16 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
         return plan;
     }
 
-    const double targetScale =
-        static_cast<double>(drawPixels)
-        / static_cast<double>(std::max<qint64>(1, displayRight - displayLeft + 1));
+    const qint64 sourceColumns = std::max<qint64>(1, displayRight - displayLeft + 1);
+    const double targetScale = rollingMode
+        ? effectiveZoom
+        : static_cast<double>(drawPixels) / static_cast<double>(sourceColumns);
+    const int filledPixels = rollingMode
+        ? std::min(
+              drawPixels,
+              static_cast<int>(std::ceil(static_cast<double>(sourceColumns) * effectiveZoom)))
+        : drawPixels;
+    const int contentXOffset = rollingMode ? std::max(0, drawPixels - filledPixels) : 0;
     plan.coversRange = true;
 
     const QVector<RetainedPageSpan> pageSpans =
@@ -6021,7 +6030,9 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
         const int sourceX = static_cast<int>(span.pageIndex * pageWidth)
             + span.pageXBegin;
         const double targetX =
-            drawX + static_cast<double>(span.displayLeft - displayLeft) * targetScale;
+            drawX
+            + static_cast<double>(contentXOffset)
+            + static_cast<double>(span.displayLeft - displayLeft) * targetScale;
         plan.segments.push_back(RetainedRenderSegment{
             QRect(sourceX, 0, runWidth, m_precomputedBinsPerColumn),
             QRectF(
