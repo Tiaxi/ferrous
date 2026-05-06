@@ -6321,9 +6321,9 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksPlayhead() {
 
     const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
     QVERIFY(!firstSamples.isEmpty());
-    const auto firstPlayhead = findUniqueLine(firstSamples, 88, true);
+    const auto firstPlayhead = findUniqueLine(firstSamples, 128, true);
     QVERIFY2(firstPlayhead.has_value(), "expected a unique playhead geometry line");
-    const auto firstPlayheadColor = findUniqueLineColor(firstSamples, 88, true);
+    const auto firstPlayheadColor = findUniqueLineColor(firstSamples, 128, true);
     QVERIFY2(firstPlayheadColor.has_value(), "expected a unique playhead geometry color");
     QCOMPARE(firstPlayheadColor->red(), firstPlayheadColor->alpha());
     QCOMPARE(firstPlayheadColor->green(), firstPlayheadColor->alpha());
@@ -6334,7 +6334,7 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksPlayhead() {
     QVERIFY(updatedNode == node);
 
     const QVector<OverlayLineSample> secondSamples = overlayLineSamples(updatedNode);
-    const auto secondPlayhead = findUniqueLine(secondSamples, 88, true);
+    const auto secondPlayhead = findUniqueLine(secondSamples, 128, true);
     QVERIFY2(secondPlayhead.has_value(), "expected a unique moved playhead geometry line");
     QVERIFY(qRound(firstPlayhead->x1()) != qRound(secondPlayhead->x1()));
 
@@ -6372,11 +6372,11 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
     QVERIFY2(overlayNode != nullptr, "overlay lines should be rendered through a public geometry node");
 
     const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
-    const QVector<QLineF> firstCrosshairVertical = findLinesAtCoordinate(firstSamples, 96, true, 60);
-    const QVector<QLineF> firstCrosshairHorizontal = findLinesAtCoordinate(firstSamples, 96, false, 40);
+    const QVector<QLineF> firstCrosshairVertical = findLinesAtCoordinate(firstSamples, 128, true, 60);
+    const QVector<QLineF> firstCrosshairHorizontal = findLinesAtCoordinate(firstSamples, 128, false, 40);
     QCOMPARE(firstCrosshairVertical.isEmpty(), false);
     for (const OverlayLineSample &sample : firstSamples) {
-        if (sample.color.alpha() == 96) {
+        if (sample.color.alpha() == 128) {
             QCOMPARE(sample.color.red(), sample.color.alpha());
             QCOMPARE(sample.color.green(), sample.color.alpha());
             QCOMPARE(sample.color.blue(), sample.color.alpha());
@@ -6402,8 +6402,8 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
     QVERIFY(updatedNode == node);
 
     const QVector<OverlayLineSample> secondSamples = overlayLineSamples(updatedNode);
-    const QVector<QLineF> secondCrosshairVertical = findLinesAtCoordinate(secondSamples, 96, true, 110);
-    const QVector<QLineF> secondCrosshairHorizontal = findLinesAtCoordinate(secondSamples, 96, false, 70);
+    const QVector<QLineF> secondCrosshairVertical = findLinesAtCoordinate(secondSamples, 128, true, 110);
+    const QVector<QLineF> secondCrosshairHorizontal = findLinesAtCoordinate(secondSamples, 128, false, 70);
     QVERIFY2(secondCrosshairVertical.size() > 4, "moved vertical crosshair should remain dotted");
     QVERIFY2(secondCrosshairHorizontal.size() > 4, "moved horizontal crosshair should remain dotted");
     QVERIFY2(longestLineSpan(secondCrosshairVertical, true) <= 3.0, "moved vertical crosshair segments should stay short");
@@ -6436,10 +6436,10 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksSharedCrosshair() {
     QVERIFY(node != nullptr);
 
     const QVector<OverlayLineSample> samples = overlayLineSamples(node);
-    const QVector<QLineF> sharedVertical = findLinesAtCoordinate(samples, 96, true, 90);
+    const QVector<QLineF> sharedVertical = findLinesAtCoordinate(samples, 128, true, 90);
     QVERIFY2(sharedVertical.size() > 4, "shared crosshair should render dotted vertical geometry segments");
     QVERIFY2(longestLineSpan(sharedVertical, true) <= 3.0, "shared crosshair vertical segments should stay short");
-    QVERIFY2(findLinesByOrientation(samples, 96, false).isEmpty(),
+    QVERIFY2(findLinesByOrientation(samples, 128, false).isEmpty(),
              "shared crosshair branch should not draw a horizontal line without local hover");
 
     delete node;

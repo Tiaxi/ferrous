@@ -64,8 +64,8 @@ constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
 constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
-constexpr int kPlayheadLineAlpha = 88;
-constexpr int kCrosshairLineAlpha = 96;
+constexpr int kPlayheadLineAlpha = 128;
+constexpr int kCrosshairLineAlpha = 128;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
