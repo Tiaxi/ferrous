@@ -64,6 +64,8 @@ constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
 constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
+constexpr int kPlayheadLineAlpha = 88;
+constexpr int kCrosshairLineAlpha = 96;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
@@ -664,8 +666,8 @@ void configureLineNode(
     lines.reserve(freqLines.size() + timeLines.size() + 16);
 
     const QColor gridColor(255, 255, 255, 50);
-    const QColor playheadColor(255, 255, 255, 128);
-    const QColor crosshairColor(255, 255, 255, 140);
+    const QColor playheadColor(255, 255, 255, kPlayheadLineAlpha);
+    const QColor crosshairColor(255, 255, 255, kCrosshairLineAlpha);
 
     for (const QLineF &line : freqLines) {
         appendSolidLine(lines, line, gridColor);
@@ -4410,7 +4412,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     if (showPlayhead && !overlayLinesActive) {
         node->playhead->setRect(playheadRect);
-        node->playhead->setColor(QColor(255, 255, 255, 128));
+        node->playhead->setColor(QColor(255, 255, 255, kPlayheadLineAlpha));
     } else {
         node->playhead->setRect(QRectF());
     }
@@ -5064,7 +5066,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     }
 
     if (drawLinePrimitives) {
-        const QColor lineColor(255, 255, 255, 140);
+        const QColor lineColor(255, 255, 255, kCrosshairLineAlpha);
         QPen dotPen(lineColor);
         dotPen.setStyle(Qt::DotLine);
         dotPen.setWidthF(1.0);
