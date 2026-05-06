@@ -26,7 +26,12 @@ QtObject {
     property real interpolationAnchorPosition: 0
     property real interpolationAnchorMs: 0
     property bool interpolationActive: false
+    property real interpolationRate: 1.0
+    property bool visualSeekClockActive: false
     readonly property real interpolationSnapThresholdSeconds: 0.75
+    readonly property real profileHeartbeatLogThresholdSeconds: 0.1
+    readonly property real visualSeekBackwardToleranceSeconds: 0.03
+    readonly property real visualSeekCatchupRate: 0.85
 
     // Timer drives local interpolation at ~60 fps.
     property Timer interpolationTimer: Timer {
@@ -70,13 +75,19 @@ QtObject {
             return root.clampPositionToDuration(root.displayedPositionSeconds)
         }
         const elapsed = Math.max(0, (nowMs - root.interpolationAnchorMs) / 1000.0)
-        return root.clampPositionToDuration(root.interpolationAnchorPosition + elapsed)
+        return root.clampPositionToDuration(
+                    root.interpolationAnchorPosition + elapsed * root.interpolationRate)
     }
 
     function resetInterpolationState(position, nowMs) {
         const clampedPosition = root.clampPositionToDuration(position)
         root.interpolationAnchorPosition = clampedPosition
         root.interpolationAnchorMs = nowMs
+    }
+
+    function clearVisualSeekClock() {
+        root.visualSeekClockActive = false
+        root.interpolationRate = 1.0
     }
 
     function advanceInterpolationClock(nowMs) {
@@ -99,9 +110,23 @@ QtObject {
         const currentDisplayed = root.interpolationActive
             ? root.currentInterpolatedBasePosition(nowMs)
             : root.clampPositionToDuration(root.displayedPositionSeconds)
-        const error = incomingPosition - currentDisplayed
-        const action = Math.abs(error) >= root.interpolationSnapThresholdSeconds ? "snap" : "follow"
         const clampedPosition = root.clampPositionToDuration(incomingPosition)
+        const error = clampedPosition - currentDisplayed
+        if (root.visualSeekClockActive
+                && clampedPosition + root.visualSeekBackwardToleranceSeconds < currentDisplayed) {
+            root.applyInterpolatedPosition(currentDisplayed)
+            root.resetInterpolationState(currentDisplayed, nowMs)
+            root.interpolationActive = true
+            root.interpolationRate = root.visualSeekCatchupRate
+            root.logPlaybackProfile(
+                "post_seek_visual_clock",
+                "incoming=" + clampedPosition.toFixed(3)
+                    + " displayed=" + currentDisplayed.toFixed(3)
+                    + " error_ms=" + Math.round(error * 1000))
+            return
+        }
+        root.clearVisualSeekClock()
+        const action = Math.abs(error) >= root.interpolationSnapThresholdSeconds ? "snap" : "follow"
         root.applyInterpolatedPosition(clampedPosition)
         root.resetInterpolationState(clampedPosition, nowMs)
         root.interpolationActive = true
@@ -189,7 +214,10 @@ QtObject {
     }
 
     function seekCommittedAtTime(value, nowMs) {
-        root.interpolationActive = false
+        root.clearVisualSeekClock()
+        root.interpolationActive = (root.uiBridge.playbackState || "") === "Playing"
+        root.interpolationRate = 1.0
+        root.visualSeekClockActive = root.interpolationActive
         root.applyInterpolatedPosition(value)
         root.resetInterpolationState(value, nowMs)
         root.positionSmoothingPrimed = true
@@ -248,6 +276,7 @@ QtObject {
             if (playbackState === "Stopped") {
                 haltSpectrogram()
             }
+            root.clearVisualSeekClock()
             root.interpolationActive = false
             root.applyInterpolatedPosition(incomingPosition)
             root.resetInterpolationState(incomingPosition, nowMs)
@@ -255,6 +284,7 @@ QtObject {
             root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         } else if (!root.positionSmoothingPrimed || trackChanged) {
             // First update or track change: snap to position, start interpolating.
+            root.clearVisualSeekClock()
             root.applyPlaybackHeartbeat(incomingPosition, nowMs)
             root.positionSmoothingPrimed = true
             root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
@@ -276,6 +306,7 @@ QtObject {
         root.positionSmoothingPrimed = root.uiBridge.playbackState === "Playing"
         root.resetInterpolationState(root.uiBridge.positionSeconds, nowMs)
         root.interpolationActive = root.uiBridge.playbackState === "Playing"
+        root.clearVisualSeekClock()
         root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         root.stoppedSpectrogramTrackPath = root.uiBridge.currentTrackPath || ""
         root.lastSpectrogramPlaybackState = root.uiBridge.playbackState || ""

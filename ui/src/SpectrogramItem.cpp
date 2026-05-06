@@ -513,6 +513,11 @@ void SpectrogramItem::setPositionSeconds(double value) {
             }
             return;
         }
+        if (largePositionJump && centeredSeek) {
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(clamped, now);
+            changed = true;
+        }
         // In rolling mode, ignore small backward heartbeat jitter to avoid
         // scroll stutter.  In centered mode, backward jumps are real seeks
         // that must be applied — the spectrogram stays in the ring buffer.
