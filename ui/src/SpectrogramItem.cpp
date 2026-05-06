@@ -692,23 +692,30 @@ void configureLineNode(
     geometry->setLineWidth(1.0f);
 
     auto *vertices = geometry->vertexDataAsColoredPoint2D();
+    auto premultiplied = [](int channel, int alpha) -> uchar {
+        return static_cast<uchar>((channel * alpha + 127) / 255);
+    };
     int index = 0;
     for (const LineSample &sample : lines) {
         const QColor &color = sample.color;
+        const int alpha = color.alpha();
+        const uchar red = premultiplied(color.red(), alpha);
+        const uchar green = premultiplied(color.green(), alpha);
+        const uchar blue = premultiplied(color.blue(), alpha);
         vertices[index++].set(
             static_cast<float>(sample.line.x1()),
             static_cast<float>(sample.line.y1()),
-            static_cast<uchar>(color.red()),
-            static_cast<uchar>(color.green()),
-            static_cast<uchar>(color.blue()),
-            static_cast<uchar>(color.alpha()));
+            red,
+            green,
+            blue,
+            static_cast<uchar>(alpha));
         vertices[index++].set(
             static_cast<float>(sample.line.x2()),
             static_cast<float>(sample.line.y2()),
-            static_cast<uchar>(color.red()),
-            static_cast<uchar>(color.green()),
-            static_cast<uchar>(color.blue()),
-            static_cast<uchar>(color.alpha()));
+            red,
+            green,
+            blue,
+            static_cast<uchar>(alpha));
     }
 
     geometry->markVertexDataDirty();

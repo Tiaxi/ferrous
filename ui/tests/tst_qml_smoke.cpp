@@ -331,6 +331,27 @@ std::optional<QLineF> findUniqueLine(
     return match;
 }
 
+std::optional<QColor> findUniqueLineColor(
+    const QVector<OverlayLineSample> &samples,
+    int alpha,
+    bool vertical) {
+    std::optional<QColor> match;
+    for (const OverlayLineSample &sample : samples) {
+        if (sample.color.alpha() != alpha) {
+            continue;
+        }
+        const bool sampleVertical = qFuzzyCompare(sample.line.x1() + 1.0, sample.line.x2() + 1.0);
+        if (sampleVertical != vertical) {
+            continue;
+        }
+        if (match.has_value()) {
+            return std::nullopt;
+        }
+        match = sample.color;
+    }
+    return match;
+}
+
 QString gridLineSignature(const QVector<OverlayLineSample> &samples) {
     QStringList encoded;
     for (const OverlayLineSample &sample : samples) {
@@ -6302,6 +6323,11 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksPlayhead() {
     QVERIFY(!firstSamples.isEmpty());
     const auto firstPlayhead = findUniqueLine(firstSamples, 88, true);
     QVERIFY2(firstPlayhead.has_value(), "expected a unique playhead geometry line");
+    const auto firstPlayheadColor = findUniqueLineColor(firstSamples, 88, true);
+    QVERIFY2(firstPlayheadColor.has_value(), "expected a unique playhead geometry color");
+    QCOMPARE(firstPlayheadColor->red(), firstPlayheadColor->alpha());
+    QCOMPARE(firstPlayheadColor->green(), firstPlayheadColor->alpha());
+    QCOMPARE(firstPlayheadColor->blue(), firstPlayheadColor->alpha());
 
     item.setPositionSeconds(2.0);
     QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
@@ -6348,6 +6374,14 @@ void QmlSmokeTest::spectrogramPublicOverlayLineNodeTracksGridAndCrosshair() {
     const QVector<OverlayLineSample> firstSamples = overlayLineSamples(node);
     const QVector<QLineF> firstCrosshairVertical = findLinesAtCoordinate(firstSamples, 96, true, 60);
     const QVector<QLineF> firstCrosshairHorizontal = findLinesAtCoordinate(firstSamples, 96, false, 40);
+    QCOMPARE(firstCrosshairVertical.isEmpty(), false);
+    for (const OverlayLineSample &sample : firstSamples) {
+        if (sample.color.alpha() == 96) {
+            QCOMPARE(sample.color.red(), sample.color.alpha());
+            QCOMPARE(sample.color.green(), sample.color.alpha());
+            QCOMPARE(sample.color.blue(), sample.color.alpha());
+        }
+    }
     QVERIFY2(firstCrosshairVertical.size() > 4, "crosshair vertical line should remain dotted in the public overlay path");
     QVERIFY2(firstCrosshairHorizontal.size() > 4, "crosshair horizontal line should remain dotted in the public overlay path");
     QVERIFY2(longestLineSpan(firstCrosshairVertical, true) <= 3.0, "crosshair vertical line segments should stay short");
