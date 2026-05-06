@@ -64,7 +64,7 @@ constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
 constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
-constexpr double kCenteredSeekFreezeSeconds = 0.5;
+constexpr double kCenteredSeekFreezeSeconds = 0.3;
 constexpr double kCenteredSeekFreezeReleaseToleranceSeconds = 0.03;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
