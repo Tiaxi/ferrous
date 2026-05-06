@@ -96,6 +96,7 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
     void manualBridgeStartDefersFfiCreationUntilRequested();
+    void manualBridgeStartQueuesEarlyCommands();
     void inProcessBridgeInstallsWakeNotifier();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
@@ -260,6 +261,21 @@ void BridgeClientTest::manualBridgeStartDefersFfiCreationUntilRequested() {
     QVERIFY(client.m_bridgeWakeFd >= 0);
     QVERIFY(client.m_bridgeWakeNotifier != nullptr);
     QVERIFY(client.m_connected);
+
+    isolateBridgeClient(client);
+}
+
+void BridgeClientTest::manualBridgeStartQueuesEarlyCommands() {
+    BridgeClient client(nullptr, false);
+    QSignalSpy errorSpy(&client, &BridgeClient::bridgeError);
+
+    client.playAt(3);
+
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(client.m_pendingBridgeCommands.size(), 1);
+
+    QVERIFY(client.startBridge());
+    QCOMPARE(client.m_pendingBridgeCommands.size(), 0);
 
     isolateBridgeClient(client);
 }

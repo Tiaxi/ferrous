@@ -977,7 +977,14 @@ bool BridgeClient::startBridge() {
     if (m_ffiBridge != nullptr) {
         return true;
     }
-    return startInProcessBridge();
+    if (!startInProcessBridge()) {
+        return false;
+    }
+    const QVector<QByteArray> pendingCommands = std::exchange(m_pendingBridgeCommands, {});
+    for (const QByteArray &command : pendingCommands) {
+        sendBinaryCommand(command);
+    }
+    return true;
 }
 
 void BridgeClient::startSearchApplyWorker() {
@@ -4578,8 +4585,7 @@ void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         return;
     }
     if (m_ffiBridge == nullptr) {
-        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command: bridge not initialized"));
-        emit bridgeError(QStringLiteral("bridge is not initialized"));
+        m_pendingBridgeCommands.push_back(payload);
         return;
     }
     const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());

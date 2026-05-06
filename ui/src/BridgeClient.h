@@ -673,6 +673,7 @@ private:
     QString m_pendingAddRootPath;
     qint64 m_pendingAddRootIssuedMs{0};
     bool m_connected{false};
+    QVector<QByteArray> m_pendingBridgeCommands;
     bool m_loggedStartupQueueMissing{false};
     bool m_loggedStartupQueuePresent{false};
     bool m_playbackChangedPending{false};
