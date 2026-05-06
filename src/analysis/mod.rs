@@ -1193,7 +1193,10 @@ impl AnalysisRuntimeState {
     }
 
     fn centered_visible_left_margin_seconds(&self) -> f64 {
-        let full_margin = self.centered_margin_seconds();
+        Self::centered_visible_left_margin_from_full_margin(self.centered_margin_seconds())
+    }
+
+    fn centered_visible_left_margin_from_full_margin(full_margin: f64) -> f64 {
         ((full_margin - 2.0).max(0.0) * 0.5) + 2.0
     }
 
@@ -1242,14 +1245,22 @@ impl AnalysisRuntimeState {
             // session restarts and data loss.
             let current_margin = self.centered_margin_seconds();
             let margin = current_margin.max(self.spectrogram_session_margin);
+            let visible_left_margin = Self::centered_visible_left_margin_from_full_margin(
+                current_margin,
+            )
+            .max(Self::centered_visible_left_margin_from_full_margin(
+                self.spectrogram_session_margin,
+            ));
             let window_seconds = margin * 2.0 + 10.0;
             let window_start = self.spectrogram_session_start;
             let window_end = window_start + window_seconds;
 
-            // The visible left edge can be up to `margin` seconds before
-            // the playhead (full screen width when playhead is at track end).
-            // Check that the entire visible range fits within the window.
-            let visible_left = (position_seconds - margin).max(0.0);
+            // Normal centered playback uses a half-screen left edge.  Keep
+            // the decoded window end conservative above, but check the
+            // retained left edge against the same margin used for fast
+            // restarts so small seeks after a restart can replenish lookahead
+            // instead of restarting repeatedly.
+            let visible_left = (position_seconds - visible_left_margin).max(0.0);
             let retained_window_start = if let (Some(cols_per_second), Some(ring_capacity)) = (
                 self.current_centered_cols_per_second(),
                 self.centered_ring_capacity_columns(),
@@ -2379,7 +2390,7 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
-        let spectrogram_decode_columns_produced = AtomicU64::new(13_000);
+        let spectrogram_decode_columns_produced = AtomicU64::new(15_000);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
@@ -2452,6 +2463,59 @@ mod tests {
             matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
                 if (start_seconds - fast_start).abs() < 0.01 && clear_history_on_reset),
             "centered restart should prioritize the visible-left edge, got {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn centered_seek_after_fast_restart_reuses_replenishing_window() {
+        // Regression from gpu26: after the first seek outside the initial
+        // startup lookahead, every small follow-up seek restarted because
+        // the in-window check still required the full tail-safe margin even
+        // though the restart began from the faster normal visible-left edge.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_session_effective_rate = 48_000;
+        state.fft_size = 2_048;
+        state.hop_size = 256;
+        state.zoom_level = 1.0;
+        state.spectrogram_widget_width = 1_920;
+        state.spectrogram_max_widget_width = 1_920;
+
+        let first_restart_target = 96.975;
+        state.spectrogram_session_start =
+            state.spectrogram_restart_start_seconds(first_restart_target);
+        state.spectrogram_session_margin = state.centered_margin_seconds();
+
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let produced_after_restart = f64_to_u64_saturating(
+            (state.spectrogram_session_start + 35.0)
+                * state.current_centered_cols_per_second().unwrap(),
+        );
+        let spectrogram_decode_columns_produced = AtomicU64::new(produced_after_restart);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.seek_spectrogram_position(107.328, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
+            "small seek after a fast centered restart should reuse the replenishing window, got {cmd:?}"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "in-window seek should not emit a synthetic clear reset"
         );
     }
 
