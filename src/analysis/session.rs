@@ -34,6 +34,9 @@ macro_rules! profile_eprintln {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Keep default 2048-FFT stereo centered chunks at <=64 columns, about 128 KiB.
+const CENTERED_CHUNK_BYTE_BUDGET: usize = 64 * 1_025 * 2;
+
 fn clamp_to_u8(v: usize) -> u8 {
     u8::try_from(v).unwrap_or(u8::MAX)
 }
@@ -361,9 +364,11 @@ fn staging_drain_stft_rows(
             }
             state.chunk_start_index = state.columns_produced;
             state.chunk_columns = 0;
-            state.target_chunk_columns = next_target_chunk_columns(
+            state.target_chunk_columns = next_target_chunk_columns_for_payload(
                 state.target_chunk_columns,
                 SpectrogramDisplayMode::Centered,
+                state.bins_per_column,
+                state.channel_count,
             );
         }
     }
@@ -1598,6 +1603,22 @@ fn next_target_chunk_columns(current: u16, display_mode: SpectrogramDisplayMode)
         .min(max_target_chunk_columns(display_mode))
 }
 
+fn next_target_chunk_columns_for_payload(
+    current: u16,
+    display_mode: SpectrogramDisplayMode,
+    bins_per_column: usize,
+    channel_count: usize,
+) -> u16 {
+    let column_cap = next_target_chunk_columns(current, display_mode);
+    if display_mode != SpectrogramDisplayMode::Centered {
+        return column_cap;
+    }
+
+    let bytes_per_column = bins_per_column.saturating_mul(channel_count).max(1);
+    let payload_cap = CENTERED_CHUNK_BYTE_BUDGET / bytes_per_column;
+    column_cap.min(clamp_to_u16(payload_cap.max(1)))
+}
+
 /// Apply a display-mode change to a live session: update rate limit
 /// and lookahead for the new mode.
 fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDisplayMode) {
@@ -1731,8 +1752,12 @@ fn session_drain_stft_rows(
             session.chunk_columns = 0;
             columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
             // Ramp up chunk size in rolling mode only to a latency-friendly cap.
-            session.target_chunk_columns =
-                next_target_chunk_columns(session.target_chunk_columns, session.display_mode);
+            session.target_chunk_columns = next_target_chunk_columns_for_payload(
+                session.target_chunk_columns,
+                session.display_mode,
+                session.bins_per_column,
+                session.channel_count,
+            );
         }
     }
 }
@@ -2063,6 +2088,22 @@ mod tests {
         assert_eq!(
             next_target_chunk_columns(256, SpectrogramDisplayMode::Centered),
             256
+        );
+    }
+
+    #[test]
+    fn centered_mode_caps_chunk_growth_by_payload_bytes() {
+        // 256 centered columns at 1025 bins and 2 channels is about
+        // 512 KiB, which shows up as UI-thread precomputed dispatch spikes.
+        // Keep centered chunks below a smaller byte budget while preserving
+        // column-based ramping for small payloads.
+        assert_eq!(
+            next_target_chunk_columns_for_payload(128, SpectrogramDisplayMode::Centered, 1_025, 2,),
+            64
+        );
+        assert_eq!(
+            next_target_chunk_columns_for_payload(32, SpectrogramDisplayMode::Centered, 1_025, 2,),
+            64
         );
     }
 
