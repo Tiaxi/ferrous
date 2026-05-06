@@ -1694,6 +1694,23 @@ void SpectrogramItem::feedPrecomputedChunk(
         // chunk arrives. Resetting on the metadata-only frame makes the
         // item repaint against an empty/new timeline before there is any
         // matching data, which shows up as a blank flash on backward seeks.
+        const bool canPreserveSameTrackFrame =
+            clearHistoryOnReset
+            && m_displayMode == 1
+            && trackToken != 0
+            && m_precomputedTrackToken != 0
+            && trackToken == m_precomputedTrackToken
+            && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
+            && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
+        if (canPreserveSameTrackFrame) {
+            captureZoomFillFrozenCacheLocked(false);
+            m_zoomFillFrozenRetainedActive =
+                m_zoomFillFrozenRetainedAvailable;
+            m_zoomFillActive =
+                !m_zoomFillFrozenDisplayImage.isNull()
+                || m_zoomFillFrozenRetainedActive;
+            m_zoomFillDataReady = false;
+        }
         m_precomputedResetPending = true;
         m_precomputedPendingResetStartIndex = startIndex;
         m_precomputedPendingResetBins = bins;
