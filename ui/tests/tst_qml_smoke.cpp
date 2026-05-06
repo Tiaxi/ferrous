@@ -398,6 +398,7 @@ private slots:
     void playbackControllerPostSeekBehindHeartbeatKeepsVisualClock();
     void playbackControllerPostSeekHeldTargetKeepsVisualClock();
     void playbackControllerPostSeekTargetEchoKeepsVisualClockActive();
+    void playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock();
     void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
     void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
     void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
@@ -1714,6 +1715,98 @@ Item {
         qPrintable(QStringLiteral("displayed_before=%1 displayed_after=%2")
             .arg(displayedBeforeBackendHeartbeat, 0, 'f', 6)
             .arg(displayedAfterBackendHeartbeat, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 480.0
+        property string currentTrackPath: "/music/test.flac"
+        property int playingQueueIndex: 0
+        property real volume: 1.0
+        property var playAtCalls: []
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+        function playAt(index) { playAtCalls = playAtCalls.concat([index]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(bridge != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommittedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(410.0)),
+        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(2300.0))));
+    QVERIFY(controller->property("displayedPositionSeconds").toDouble() > 410.20);
+    QVERIFY(controller->property("visualSeekClockActive").toBool());
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "playAt",
+        Q_ARG(QVariant, QVariant::fromValue(0))));
+
+    QCOMPARE(bridge->property("playAtCalls").toList().size(), 1);
+    QCOMPARE(bridge->property("playAtCalls").toList().at(0).toInt(), 0);
+    QVERIFY(!controller->property("visualSeekClockActive").toBool());
+    QVERIFY2(
+        controller->property("displayedPositionSeconds").toDouble() < 0.02,
+        qPrintable(QStringLiteral("displayed=%1")
+            .arg(controller->property("displayedPositionSeconds").toDouble(), 0, 'f', 6)));
+    QVERIFY2(
+        controller->property("spectrogramPositionSeconds").toDouble() < 0.02,
+        qPrintable(QStringLiteral("spectrogram=%1")
+            .arg(controller->property("spectrogramPositionSeconds").toDouble(), 0, 'f', 6)));
+
+    bridge->setProperty("positionSeconds", 0.0);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(2310.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    QVERIFY2(
+        controller->property("displayedPositionSeconds").toDouble() < 0.03,
+        qPrintable(QStringLiteral("displayed_after_heartbeat=%1")
+            .arg(controller->property("displayedPositionSeconds").toDouble(), 0, 'f', 6)));
+    QVERIFY2(
+        controller->property("spectrogramPositionSeconds").toDouble() < 0.03,
+        qPrintable(QStringLiteral("spectrogram_after_heartbeat=%1")
+            .arg(controller->property("spectrogramPositionSeconds").toDouble(), 0, 'f', 6)));
 }
 
 void QmlSmokeTest::playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst() {

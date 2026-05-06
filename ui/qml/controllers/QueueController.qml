@@ -9,6 +9,7 @@ QtObject {
     required property var tagEditorApi
     required property var openTagEditorDialog
 
+    property var playAt: function(index) { root.uiBridge.playAt(index) }
     property var view: null
     property var selectedIndices: []
     property var selectedIndexLookup: ({})
@@ -328,7 +329,7 @@ QtObject {
     function playFirstSelectedTrack() {
         const target = root.firstSelectedIndex()
         if (target >= 0) {
-            root.uiBridge.playAt(target)
+            root.playAt(target)
         }
     }
 

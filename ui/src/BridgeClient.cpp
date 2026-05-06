@@ -2629,6 +2629,22 @@ void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;
     }
+    m_pendingSeek = false;
+    m_pendingSeekTargetSeconds = 0.0;
+    m_pendingSeekStartedAtMs = 0;
+    m_pendingSeekUntilMs = 0;
+    bool playbackSignalChanged = false;
+    if (m_positionText != QStringLiteral("00:00")) {
+        m_positionText = QStringLiteral("00:00");
+        playbackSignalChanged = true;
+    }
+    if (std::abs(m_positionSeconds) >= 0.03) {
+        m_positionSeconds = 0.0;
+        playbackSignalChanged = true;
+    }
+    if (playbackSignalChanged) {
+        schedulePlaybackChanged();
+    }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
         FERROUS_PROFILE_LOG_DIAGNOSTIC(
