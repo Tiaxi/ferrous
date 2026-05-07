@@ -194,8 +194,11 @@ private:
 
     struct SpectrogramLodRenderState {
         QSGTexture *texture{nullptr};
+        QSGTexture *secondaryTexture{nullptr};
         QRectF sourceRect;
+        QRectF secondarySourceRect;
         QSize textureSize;
+        QSize secondaryTextureSize;
         float blend{0.0F};
         int primaryLevel{0};
         int secondaryLevel{0};
@@ -544,8 +547,10 @@ private:
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     SpectrogramSourceTexture m_gpuSourceTexture;
     SpectrogramSourceTexture m_gpuLodSourceTexture;
+    SpectrogramSourceTexture m_gpuSecondaryLodSourceTexture;
     QByteArray m_gpuSourceUploadRgba;
     QByteArray m_gpuLodUploadRgba;
+    QByteArray m_gpuSecondaryLodUploadRgba;
     QVector<SpectrogramSourceUploadSpan> m_gpuSourceUploadSpans;
     int m_gpuSourcePageUploadSpanCount{0};
     int m_gpuSourcePageUploadColumns{0};
@@ -564,6 +569,11 @@ private:
     quint64 m_gpuLodTextureGeneration{0};
     qint64 m_gpuLodTextureStartColumn{0};
     qint64 m_gpuLodTextureEndColumn{-1};
+    int m_gpuSecondaryLodTextureLevel{0};
+    quint64 m_gpuSecondaryLodTextureTrackToken{0};
+    quint64 m_gpuSecondaryLodTextureGeneration{0};
+    qint64 m_gpuSecondaryLodTextureStartColumn{0};
+    qint64 m_gpuSecondaryLodTextureEndColumn{-1};
     std::vector<std::unique_ptr<RetainedSourcePageState>> m_gpuSourcePages;
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenDisplayImage;

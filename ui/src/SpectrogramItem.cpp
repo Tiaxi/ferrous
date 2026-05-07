@@ -4286,8 +4286,20 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     bodySampleState.sourceColumnOffset = static_cast<float>(baseSourceRect.x());
     if (lodRenderState.texture != nullptr && lodRenderState.primaryLevel > 0) {
         bodySampleState.sourceTexture = lodRenderState.texture;
+        bodySampleState.secondarySourceTexture =
+            lodRenderState.secondaryTexture != nullptr
+                ? lodRenderState.secondaryTexture
+                : lodRenderState.texture;
         bodySampleState.sourceRect = lodRenderState.sourceRect;
+        bodySampleState.secondarySourceRect =
+            lodRenderState.secondaryTexture != nullptr
+                ? lodRenderState.secondarySourceRect
+                : lodRenderState.sourceRect;
         bodySampleState.sourceTextureSize = lodRenderState.textureSize;
+        bodySampleState.secondarySourceTextureSize =
+            lodRenderState.secondaryTexture != nullptr
+                ? lodRenderState.secondaryTextureSize
+                : lodRenderState.textureSize;
         bodySampleState.sourceColumnOffset =
             static_cast<float>(lodRenderState.sourceRect.x());
         bodySampleState.lodBlend = lodRenderState.blend;
@@ -4708,6 +4720,7 @@ void SpectrogramItem::releaseResources() {
     QMutexLocker lock(&m_stateMutex);
     m_gpuSourceTexture.release();
     m_gpuLodSourceTexture.release();
+    m_gpuSecondaryLodSourceTexture.release();
     invalidateSpectrogramLodTextureStateLocked();
     m_sceneGraphGeneration += 1;
     m_overlayDirty = true;
@@ -5699,11 +5712,17 @@ void SpectrogramItem::invalidateLegacyRetainedSourceTextureStateLocked() {
 
 void SpectrogramItem::invalidateSpectrogramLodTextureStateLocked() {
     m_gpuLodUploadRgba.clear();
+    m_gpuSecondaryLodUploadRgba.clear();
     m_gpuLodTextureLevel = 0;
     m_gpuLodTextureTrackToken = 0;
     m_gpuLodTextureGeneration = 0;
     m_gpuLodTextureStartColumn = 0;
     m_gpuLodTextureEndColumn = -1;
+    m_gpuSecondaryLodTextureLevel = 0;
+    m_gpuSecondaryLodTextureTrackToken = 0;
+    m_gpuSecondaryLodTextureGeneration = 0;
+    m_gpuSecondaryLodTextureStartColumn = 0;
+    m_gpuSecondaryLodTextureEndColumn = -1;
 }
 
 void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
@@ -6565,48 +6584,56 @@ SpectrogramItem::SpectrogramLodRenderState SpectrogramItem::syncSpectrogramLodTe
         return renderState;
     }
 
-    const SpectrogramLodPage *page = findSpectrogramLodPageLocked(selection.primaryLevel);
-    if (page == nullptr || page->planeCount <= 0 || page->sourceSpan <= 0) {
-        invalidateSpectrogramLodTextureStateLocked();
-        return renderState;
-    }
-
-    const qint64 pageColumns = page->endColumn - page->startColumn + 1;
-    if (pageColumns <= 0 || pageColumns > std::numeric_limits<int>::max()) {
-        invalidateSpectrogramLodTextureStateLocked();
-        return renderState;
-    }
-    const qsizetype expectedBytes =
-        static_cast<qsizetype>(pageColumns)
-        * page->binsPerColumn
-        * page->planeCount;
-    if (page->bytes.size() < expectedBytes) {
-        invalidateSpectrogramLodTextureStateLocked();
-        return renderState;
-    }
-
-    const QSize textureSize(
-        static_cast<int>(pageColumns),
-        page->binsPerColumn * page->planeCount);
-    const bool textureStateChanged =
-        !m_gpuLodSourceTexture.matches(window, textureSize)
-        || m_gpuLodTextureLevel != page->level
-        || m_gpuLodTextureTrackToken != page->trackToken
-        || m_gpuLodTextureGeneration != page->generation
-        || m_gpuLodTextureStartColumn != page->startColumn
-        || m_gpuLodTextureEndColumn != page->endColumn;
-    if (textureStateChanged) {
-        if (!m_gpuLodSourceTexture.ensureCreated(window, textureSize.width(), textureSize.height())) {
-            invalidateSpectrogramLodTextureStateLocked();
-            return renderState;
+    const auto syncPageTexture =
+        [&](const SpectrogramLodPage *page,
+            SpectrogramSourceTexture &texture,
+            QByteArray &uploadRgba,
+            int &cachedLevel,
+            quint64 &cachedTrackToken,
+            quint64 &cachedGeneration,
+            qint64 &cachedStartColumn,
+            qint64 &cachedEndColumn,
+            QSGTexture **outTexture,
+            QSize *outTextureSize,
+            QRectF *outSourceRect,
+            int *outPlaneCount) -> bool {
+        if (page == nullptr || page->planeCount <= 0 || page->sourceSpan <= 0) {
+            return false;
         }
-        m_gpuLodUploadRgba.resize(textureSize.width() * textureSize.height() * 4);
-        m_gpuLodUploadRgba.fill('\0');
+
+        const qint64 pageColumns = page->endColumn - page->startColumn + 1;
+        if (pageColumns <= 0 || pageColumns > std::numeric_limits<int>::max()) {
+            return false;
+        }
+        const qsizetype expectedBytes =
+            static_cast<qsizetype>(pageColumns)
+            * page->binsPerColumn
+            * page->planeCount;
+        if (page->bytes.size() < expectedBytes) {
+            return false;
+        }
+
+        const QSize textureSize(
+            static_cast<int>(pageColumns),
+            page->binsPerColumn * page->planeCount);
+        const bool textureStateChanged =
+            !texture.matches(window, textureSize)
+            || cachedLevel != page->level
+            || cachedTrackToken != page->trackToken
+            || cachedGeneration != page->generation
+            || cachedStartColumn != page->startColumn
+            || cachedEndColumn != page->endColumn;
+        if (textureStateChanged) {
+            if (!texture.ensureCreated(window, textureSize.width(), textureSize.height())) {
+                return false;
+            }
+            uploadRgba.resize(textureSize.width() * textureSize.height() * 4);
+            uploadRgba.fill('\0');
         const auto *source = reinterpret_cast<const quint8 *>(page->bytes.constData());
         for (int plane = 0; plane < page->planeCount; ++plane) {
             for (int bin = 0; bin < page->binsPerColumn; ++bin) {
                 const int textureRow = plane * page->binsPerColumn + bin;
-                uchar *row = reinterpret_cast<uchar *>(m_gpuLodUploadRgba.data())
+                uchar *row = reinterpret_cast<uchar *>(uploadRgba.data())
                     + static_cast<qsizetype>(textureRow) * textureSize.width() * 4;
                 for (int x = 0; x < textureSize.width(); ++x) {
                     const qsizetype sourceOffset =
@@ -6617,21 +6644,20 @@ SpectrogramItem::SpectrogramLodRenderState SpectrogramItem::syncSpectrogramLodTe
                 }
             }
         }
-        if (!m_gpuLodSourceTexture.uploadRgbaColumns(
+        if (!texture.uploadRgbaColumns(
                 window,
                 0,
                 textureSize.width(),
                 textureSize.height(),
-                m_gpuLodUploadRgba)) {
-            invalidateSpectrogramLodTextureStateLocked();
-            return renderState;
+                uploadRgba)) {
+            return false;
         }
-        m_gpuLodTextureLevel = page->level;
-        m_gpuLodTextureTrackToken = page->trackToken;
-        m_gpuLodTextureGeneration = page->generation;
-        m_gpuLodTextureStartColumn = page->startColumn;
-        m_gpuLodTextureEndColumn = page->endColumn;
-    }
+        cachedLevel = page->level;
+        cachedTrackToken = page->trackToken;
+        cachedGeneration = page->generation;
+        cachedStartColumn = page->startColumn;
+        cachedEndColumn = page->endColumn;
+        }
 
     const double lodLeft =
         static_cast<double>(displayLeft) / static_cast<double>(page->sourceSpan)
@@ -6639,11 +6665,63 @@ SpectrogramItem::SpectrogramLodRenderState SpectrogramItem::syncSpectrogramLodTe
     const double lodWidth =
         static_cast<double>(displayRight - displayLeft + 1)
         / static_cast<double>(page->sourceSpan);
-    renderState.texture = m_gpuLodSourceTexture.texture();
-    renderState.textureSize = textureSize;
-    renderState.sourceRect = QRectF(lodLeft, 0.0, lodWidth, page->binsPerColumn);
-    renderState.primaryPlaneCount = page->planeCount;
-    renderState.secondaryPlaneCount = page->planeCount;
+        if (outTexture != nullptr) {
+            *outTexture = texture.texture();
+        }
+        if (outTextureSize != nullptr) {
+            *outTextureSize = textureSize;
+        }
+        if (outSourceRect != nullptr) {
+            *outSourceRect = QRectF(lodLeft, 0.0, lodWidth, page->binsPerColumn);
+        }
+        if (outPlaneCount != nullptr) {
+            *outPlaneCount = page->planeCount;
+        }
+        return true;
+    };
+
+    const SpectrogramLodPage *primaryPage = findSpectrogramLodPageLocked(selection.primaryLevel);
+    if (!syncPageTexture(
+            primaryPage,
+            m_gpuLodSourceTexture,
+            m_gpuLodUploadRgba,
+            m_gpuLodTextureLevel,
+            m_gpuLodTextureTrackToken,
+            m_gpuLodTextureGeneration,
+            m_gpuLodTextureStartColumn,
+            m_gpuLodTextureEndColumn,
+            &renderState.texture,
+            &renderState.textureSize,
+            &renderState.sourceRect,
+            &renderState.primaryPlaneCount)) {
+        invalidateSpectrogramLodTextureStateLocked();
+        return renderState;
+    }
+
+    const SpectrogramLodPage *secondaryPage = findSpectrogramLodPageLocked(selection.secondaryLevel);
+    if (selection.secondaryLevel != selection.primaryLevel
+        && syncPageTexture(
+            secondaryPage,
+            m_gpuSecondaryLodSourceTexture,
+            m_gpuSecondaryLodUploadRgba,
+            m_gpuSecondaryLodTextureLevel,
+            m_gpuSecondaryLodTextureTrackToken,
+            m_gpuSecondaryLodTextureGeneration,
+            m_gpuSecondaryLodTextureStartColumn,
+            m_gpuSecondaryLodTextureEndColumn,
+            &renderState.secondaryTexture,
+            &renderState.secondaryTextureSize,
+            &renderState.secondarySourceRect,
+            &renderState.secondaryPlaneCount)) {
+        return renderState;
+    }
+
+    renderState.secondaryTexture = renderState.texture;
+    renderState.secondaryTextureSize = renderState.textureSize;
+    renderState.secondarySourceRect = renderState.sourceRect;
+    renderState.secondaryLevel = renderState.primaryLevel;
+    renderState.secondaryPlaneCount = renderState.primaryPlaneCount;
+    renderState.blend = 0.0F;
     return renderState;
 }
 

@@ -7,20 +7,26 @@ layout(binding = 0) uniform sampler2D sourceTex;
 layout(binding = 1) uniform sampler2D dbRemapTex;
 layout(binding = 2) uniform sampler2D paletteTex;
 layout(binding = 3) uniform sampler2D rowLutTex;
+layout(binding = 4) uniform sampler2D secondarySourceTex;
 
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     vec4 sourceTextureMetrics;
     vec4 sourceRectMetrics;
+    vec4 secondaryTextureMetrics;
     vec4 lodMetrics;
 };
 
-float sampleSourceValue(float sourceColumn, float sourceBin) {
-    vec2 sourceSize = max(sourceTextureMetrics.xy, vec2(1.0, 1.0));
+float sampleSourceValueFrom(sampler2D tex, vec2 sourceSize, float sourceColumn, float sourceBin) {
     vec2 sampleUv = vec2(
         (clamp(sourceColumn, 0.0, sourceSize.x - 1.0) + 0.5) / sourceSize.x,
         (clamp(sourceBin, 0.0, sourceSize.y - 1.0) + 0.5) / sourceSize.y);
-    return texture(sourceTex, sampleUv).x;
+    return texture(tex, sampleUv).x;
+}
+
+float sampleSourceValue(float sourceColumn, float sourceBin) {
+    vec2 sourceSize = max(sourceTextureMetrics.xy, vec2(1.0, 1.0));
+    return sampleSourceValueFrom(sourceTex, sourceSize, sourceColumn, sourceBin);
 }
 
 float peakHoldWindowValue(float firstColumn, float windowColumns, float sourceBin, float sourceColumnOffset, float sourceRectWidth) {
@@ -49,15 +55,18 @@ float smoothPeakHoldWindowValue(float rangeStart, float columnsPerPixel, float i
     return mix(baseWindowValue, shiftedWindowValue, interpolationT);
 }
 
-float stableLodValue(float sourceColumn, float sourceBin) {
-    float primaryPlaneCount = max(lodMetrics.x, 1.0);
-    if (primaryPlaneCount < 1.5) {
-        return sampleSourceValue(sourceColumn, sourceBin);
+float stableLodValueFrom(sampler2D tex, vec2 textureSize, float planeCount, float rectHeight, float sourceColumn, float sourceBin) {
+    if (planeCount < 1.5) {
+        return sampleSourceValueFrom(tex, textureSize, sourceColumn, sourceBin);
     }
-    float sourceRectHeight = max(sourceRectMetrics.y, 1.0);
-    float peakValue = sampleSourceValue(sourceColumn, sourceBin);
-    float meanValue = sampleSourceValue(sourceColumn, sourceBin + sourceRectHeight);
+    float peakValue = sampleSourceValueFrom(tex, textureSize, sourceColumn, sourceBin);
+    float meanValue = sampleSourceValueFrom(tex, textureSize, sourceColumn + 0.0, sourceBin + rectHeight);
     return mix(meanValue, peakValue, 0.65);
+}
+
+vec4 colorForValue(float value) {
+    float mapped = texture(dbRemapTex, vec2(value, 0.5)).x;
+    return texture(paletteTex, vec2(1.0 - mapped, 0.5));
 }
 
 void main() {
@@ -76,7 +85,30 @@ void main() {
 
     float value = 0.0;
     if (lodMetrics.w > 0.5) {
-        value = stableLodValue(sourceColumn, sourceBin);
+        vec2 primarySize = max(sourceTextureMetrics.xy, vec2(1.0, 1.0));
+        vec2 secondarySize = max(secondaryTextureMetrics.xy, vec2(1.0, 1.0));
+        float primaryValue = stableLodValueFrom(
+            sourceTex,
+            primarySize,
+            max(lodMetrics.x, 1.0),
+            max(sourceRectMetrics.y, 1.0),
+            sourceColumn,
+            sourceBin);
+        float localLodT = sourceRectMetrics.x > 0.0
+            ? clamp((sourceColumn - sourceColumnOffset) / sourceRectMetrics.x, 0.0, 1.0)
+            : 0.0;
+        float secondaryColumn = secondaryTextureMetrics.z + localLodT * max(sourceRectMetrics.z, 1.0);
+        float secondaryValue = stableLodValueFrom(
+            secondarySourceTex,
+            secondarySize,
+            max(lodMetrics.y, 1.0),
+            max(sourceRectMetrics.w, 1.0),
+            secondaryColumn,
+            sourceBin);
+        vec4 primaryColor = colorForValue(primaryValue);
+        vec4 secondaryColor = colorForValue(secondaryValue);
+        fragColor = mix(primaryColor, secondaryColor, clamp(lodMetrics.z, 0.0, 1.0));
+        return;
     } else if (effectiveZoom > 1.001 && interpolationT > 0.001) {
         float leftColumn = sourceColumnOffset + floor(rangeStart);
         float rightColumn = min(leftColumn + 1.0, sourceColumnOffset + sourceRectWidth - 1.0);
@@ -93,7 +125,5 @@ void main() {
             sourceRectWidth);
     }
 
-    float mapped = texture(dbRemapTex, vec2(value, 0.5)).x;
-    vec4 paletteColor = texture(paletteTex, vec2(1.0 - mapped, 0.5));
-    fragColor = paletteColor;
+    fragColor = colorForValue(value);
 }

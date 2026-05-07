@@ -68,11 +68,12 @@ struct SpectrogramBodySampleUniformData {
     std::array<float, 16> matrix{};
     std::array<float, 4> sourceTextureMetrics{};
     std::array<float, 4> sourceRectMetrics{};
+    std::array<float, 4> secondaryTextureMetrics{};
     std::array<float, 4> lodMetrics{};
 };
 
 static_assert(
-    sizeof(SpectrogramBodySampleUniformData) == 112,
+    sizeof(SpectrogramBodySampleUniformData) == 128,
     "Body sample Qt Quick shader UBO must match the baked Qt shader layout");
 
 class SpectrogramBodySampleMaterialShader final : public QSGMaterialShader {
@@ -116,7 +117,15 @@ public:
             const std::array<float, 4> nextSourceRectMetrics{
                 static_cast<float>(std::max(0.0, material->state.sourceRect.width())),
                 static_cast<float>(std::max(0.0, material->state.sourceRect.height())),
-                0.0F,
+                static_cast<float>(std::max(0.0, material->state.secondarySourceRect.width())),
+                static_cast<float>(std::max(0.0, material->state.secondarySourceRect.height())),
+            };
+            const std::array<float, 4> nextSecondaryTextureMetrics{
+                static_cast<float>(std::max(1, material->state.secondarySourceTextureSize.width())),
+                static_cast<float>(std::max(1, material->state.secondarySourceTextureSize.height())),
+                material->state.secondarySourceRect.isNull()
+                    ? material->state.sourceColumnOffset
+                    : static_cast<float>(material->state.secondarySourceRect.x()),
                 0.0F,
             };
             const std::array<float, 4> nextLodMetrics{
@@ -131,6 +140,10 @@ public:
             }
             if (oldMaterial == nullptr || buf->sourceRectMetrics != nextSourceRectMetrics) {
                 buf->sourceRectMetrics = nextSourceRectMetrics;
+                changed = true;
+            }
+            if (oldMaterial == nullptr || buf->secondaryTextureMetrics != nextSecondaryTextureMetrics) {
+                buf->secondaryTextureMetrics = nextSecondaryTextureMetrics;
                 changed = true;
             }
             if (oldMaterial == nullptr || buf->lodMetrics != nextLodMetrics) {
