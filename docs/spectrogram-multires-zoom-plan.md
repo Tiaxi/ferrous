@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a multiresolution spectrogram data path so zoomed-out scrolling, max zoom-out, and zoom transitions use stable pre-aggregated overview data instead of live per-pixel pooling over a single resolution.
+**Goal:** Add a multiresolution preview/overview data path so zoomed-out scrolling, max zoom-out, and zoom transitions stay immediate and stable without replacing native high-detail zoom-in sessions.
 
-**Architecture:** Keep `SpectrogramItem` as the UI state owner and preserve existing rolling/centered semantics. Add explicit spectrogram levels of detail (LOD) alongside the current level-0 stream, first in UI-side structures and then in backend/bridge protocol chunks; the renderer selects and blends levels based on current screen columns-per-pixel.
+**Architecture:** Keep `SpectrogramItem` as the UI state owner and preserve existing rolling/centered semantics. Treat LOD data as an instant preview/overview layer and keep backend native-hop sessions as the refinement/detail layer; the renderer selects and blends available overview levels for zoom-out and temporary zoom previews while swapping to native data when it arrives.
 
 **Tech Stack:** Rust analysis worker and FFI protocol, Qt/C++ bridge and `SpectrogramItem`, public Qt `QSGMaterial` shader path, QtTest UI smoke tests, Rust unit tests.
 
@@ -14,19 +14,23 @@
 
 The branch now has a public Qt GPU body renderer in `full` mode:
 
-- Level-0 source columns are decoded by `src/analysis/session.rs`.
+- Native source columns are decoded by `src/analysis/session.rs` using zoom-dependent hop sizes.
 - Chunks are carried as `PrecomputedSpectrogramChunk` in `src/analysis/mod.rs`.
 - The FFI frame is encoded in `src/frontend_bridge/ffi.rs` with magic `0xA2`.
 - `BridgeClient::parsePrecomputedSpectrogramFrame()` decodes and routes chunks.
 - `SpectrogramItem::feedPrecomputedChunk()` stores the active source data in the ring and page-backed retained textures.
 - `ui/src/shaders/SpectrogramBodySample.frag` samples columns and currently smooths zoomed-out peak-hold by blending adjacent windows.
 
-This is fast, but zoom-out still derives its visible result from one source resolution. At lower zooms, pixels cover multiple source columns, and live max-pooling can shimmer while strict integer windowing can look choppy.
+This is fast, but zoom-out still derives its visible result from one native stream. At lower zooms, pixels cover multiple source columns, and live max-pooling can shimmer while strict integer windowing can look choppy.
+
+For zoom-in, the current implementation is intentionally better than scaling a fixed reference spectrogram: the backend changes hop size and produces genuinely finer temporal detail. The multires plan must preserve that. LOD is not a replacement for native zoom-in detail.
 
 ## Target Behavior
 
-- At normal and zoomed-in levels, level 0 remains the source of truth.
-- At zoomed-out levels, the renderer samples a pre-aggregated LOD level whose column density is near screen density.
+- Zoom interaction is always immediate: after a zoom change, the renderer shows the best currently available data at the new scale without waiting for a backend restart.
+- At normal and zoomed-in levels, the native stream for the current zoom band remains the steady-state source of truth.
+- When zooming in, the UI may temporarily scale an available coarser preview, but native smaller-hop data must replace it as soon as the backend produces it.
+- At zoomed-out levels, the renderer samples a pre-aggregated LOD overview whose column density is near screen density.
 - Adjacent LOD levels cross-fade during zoom to avoid visible popping.
 - The most zoomed-out view can fit the full track when a coarse full-track overview exists.
 - Visible-first decode behavior remains: the current viewport fills first, then overview data extends ahead/behind and eventually across the full track.
@@ -48,9 +52,12 @@ This is fast, but zoom-out still derives its visible result from one source reso
 
 ## LOD Data Model
 
+LOD levels are scoped to the native stream they were derived from or to an explicit full-track overview stream. They do not define a single universal pyramid that is stretched for every zoom level.
+
 Each LOD level has:
 
-- `level`: `0` for current source columns, `1` for 2-column aggregates, `2` for 4-column aggregates, etc.
+- `native_hop_size`: hop size of the source stream that produced this LOD.
+- `level`: `0` for the native source stream, `1` for 2-column aggregates, `2` for 4-column aggregates, etc.
 - `factor`: `1 << level`.
 - `start_column_index`: level-local column index.
 - `source_start_column_index`: original level-0 column index for alignment.
@@ -73,9 +80,23 @@ plane 0 = peak
 plane 1 = mean
 ```
 
-Level 0 can continue using the existing single-plane source format until the shader path supports both layouts.
+Level 0 can continue using the existing single-plane source format. For zoom-in, a new native session with a smaller hop creates a new level-0 stream for that zoom band; the renderer must not stretch an older/coarser level-0 stream as the final zoomed-in representation.
+
+## Native Detail Versus Preview Layer
+
+The UX should feel symmetric even though the internal data sources differ:
+
+- Zoom-out usually resolves from already available overview levels.
+- Zoom-in first renders an instant preview from whatever level is available.
+- The analysis backend still starts the native smaller-hop session for zoom-in.
+- When the native session starts producing data, the renderer switches or blends from preview to native detail.
+- The user should not see a black spectrogram or a hard reset during the refinement.
+
+This is similar to map or image-tile viewers: the viewport reacts instantly, coarse data is allowed briefly, and sharper data streams in without blocking interaction.
 
 ## LOD Selection Rule
+
+Use this rule only for overview/preview selection. If the active native stream's hop size matches the requested zoom band and covers the visible range, prefer native level 0 for steady-state rendering.
 
 For the current render frame:
 
@@ -106,6 +127,22 @@ const double selectedEffectiveZoom =
 ```
 
 The renderer should prefer a level where `selectedEffectiveZoom` is between `0.75` and `1.5` pixels per LOD column. That avoids both excessive live pooling and excessive stretching.
+
+Native detail override:
+
+```cpp
+if (nativeStreamMatchesRequestedZoom && nativeStreamCoversVisibleRange) {
+    return NativeDetailSelection{};
+}
+```
+
+Preview fallback:
+
+```cpp
+if (!nativeStreamCoversVisibleRange) {
+    return selectBestAvailableOverviewOrPreviousNativeStream();
+}
+```
 
 ---
 
@@ -974,7 +1011,151 @@ git commit -m "feat: crossfade spectrogram lod levels"
 
 ---
 
-### Task 8: Use Full-Track Overview For Max Zoom-Out
+### Task 8: Preserve Native Zoom-In Detail With Instant Preview
+
+**Files:**
+- Modify: `ui/src/SpectrogramItem.h`
+- Modify: `ui/src/SpectrogramItem.cpp`
+- Modify: `src/analysis/mod.rs`
+- Modify: `src/analysis/session.rs`
+- Test: `ui/tests/tst_qml_smoke.cpp`
+- Test: `src/analysis/mod.rs`
+
+- [ ] **Step 1: Write failing UI preview/refinement test**
+
+Add:
+
+```cpp
+void QmlSmokeTest::spectrogramZoomInUsesPreviewUntilNativeHopArrives() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(240);
+    item.setDisplayMode(1);
+
+    QByteArray referenceData(64 * 256, '\x30');
+    item.feedPrecomputedChunk(
+        referenceData, 64, 0, 256, 0, 2048, 48000, 1024,
+        false, true, 12, true, 1);
+
+    item.setZoomLevel(4.0);
+
+    const auto previewState = item.spectrogramRenderSourceForTests();
+    QCOMPARE(previewState.kind, SpectrogramItem::RenderSourceKind::Preview);
+    QCOMPARE(previewState.hopSize, 1024);
+    QVERIFY(previewState.scaledToRequestedZoom);
+
+    QByteArray nativeZoomData(64 * 256, '\x70');
+    item.feedPrecomputedChunk(
+        nativeZoomData, 64, 0, 256, 0, 8192, 48000, 256,
+        false, true, 12, true, 2);
+
+    const auto nativeState = item.spectrogramRenderSourceForTests();
+    QCOMPARE(nativeState.kind, SpectrogramItem::RenderSourceKind::NativeDetail);
+    QCOMPARE(nativeState.hopSize, 256);
+    QVERIFY(!nativeState.scaledToRequestedZoom);
+}
+```
+
+- [ ] **Step 2: Run UI tests to verify failure**
+
+Run:
+
+```bash
+./scripts/run-tests.sh --ui-only
+```
+
+Expected: compile failure for missing `RenderSourceKind` and `spectrogramRenderSourceForTests()`.
+
+- [ ] **Step 3: Add render-source state**
+
+Add to `SpectrogramItem.h`:
+
+```cpp
+enum class RenderSourceKind {
+    NativeDetail,
+    Preview,
+    Overview,
+};
+
+struct SpectrogramRenderSourceState {
+    RenderSourceKind kind{RenderSourceKind::NativeDetail};
+    int hopSize{0};
+    bool scaledToRequestedZoom{false};
+};
+
+SpectrogramRenderSourceState spectrogramRenderSourceForTests() const;
+```
+
+Track the requested zoom separately from the currently committed native hop:
+
+```cpp
+double m_requestedRenderZoomLevel{1.0};
+int m_requestedNativeHopSize{1024};
+SpectrogramRenderSourceState m_renderSourceState;
+```
+
+- [ ] **Step 4: Keep preview visible while native zoom data is pending**
+
+When `setZoomLevel()` requests a zoom-in whose expected native hop differs from `m_precomputedHopSize`, do not clear the visible retained frame. Mark the current source as preview:
+
+```cpp
+m_requestedRenderZoomLevel = requestedZoom;
+m_requestedNativeHopSize = expectedHopForZoom(requestedZoom);
+if (m_precomputedHopSize != m_requestedNativeHopSize) {
+    m_renderSourceState = SpectrogramRenderSourceState{
+        .kind = RenderSourceKind::Preview,
+        .hopSize = m_precomputedHopSize,
+        .scaledToRequestedZoom = true,
+    };
+}
+```
+
+When `feedPrecomputedChunk()` receives data whose `hopSize == m_requestedNativeHopSize`, promote it:
+
+```cpp
+m_renderSourceState = SpectrogramRenderSourceState{
+    .kind = RenderSourceKind::NativeDetail,
+    .hopSize = hopSize,
+    .scaledToRequestedZoom = false,
+};
+```
+
+- [ ] **Step 5: Write Rust test for native zoom-in session still being requested**
+
+Add a test in `src/analysis/mod.rs`:
+
+```rust
+#[test]
+fn zoom_in_still_requests_native_smaller_hop_session() {
+    let mut state = test_analysis_state_with_track();
+    state.zoom_level = 4.0;
+    state.hop_size = zoom_hop_size(state.fft_size, state.zoom_level);
+    assert!(state.hop_size < REFERENCE_HOP);
+}
+```
+
+Use existing analysis state test helpers in the file; the invariant is that preview rendering does not remove native zoom-in session generation.
+
+- [ ] **Step 6: Run full suite**
+
+Run:
+
+```bash
+./scripts/run-tests.sh
+```
+
+Expected: full suite passes.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ui/src/SpectrogramItem.h ui/src/SpectrogramItem.cpp ui/tests/tst_qml_smoke.cpp src/analysis/mod.rs src/analysis/session.rs
+git commit -m "feat: keep instant preview during zoom refinement"
+```
+
+---
+
+### Task 9: Use Full-Track Overview For Max Zoom-Out
 
 **Files:**
 - Modify: `ui/src/SpectrogramItem.cpp`
@@ -1055,7 +1236,7 @@ git commit -m "feat: fit long tracks with spectrogram overview lod"
 
 ---
 
-### Task 9: Add Diagnostics And Performance Guards
+### Task 10: Add Diagnostics And Performance Guards
 
 **Files:**
 - Modify: `ui/src/SpectrogramItem.cpp`
@@ -1168,14 +1349,16 @@ git commit -m "chore: add spectrogram lod diagnostics"
 
 ## Rollout Strategy
 
-1. Keep the current level-0 renderer path working throughout.
+1. Keep the current native renderer path working throughout.
 2. Parse and store LOD data before rendering from it.
 3. Render one selected LOD before cross-fading between two.
-4. Enable overview-based max zoom-out only after full-track coarse coverage is available.
-5. Compare before/after logs with `scripts/compare-spectrogram-diagnostics.py`.
-6. Manually validate:
+4. Add instant preview/native refinement behavior before changing max zoom-out.
+5. Enable overview-based max zoom-out only after full-track coarse coverage is available.
+6. Compare before/after logs with `scripts/compare-spectrogram-diagnostics.py`.
+7. Manually validate:
    - rolling mode at several zoomed-out levels
    - centered mode at several zoomed-out levels
+   - zooming in from a coarse overview and watching it refine to native detail
    - max zoom-out on a 10+ minute song
    - seeking after startup
    - natural track transition
@@ -1187,7 +1370,7 @@ git commit -m "chore: add spectrogram lod diagnostics"
   **Mitigation:** emit bounded chunks, cap levels, and track `lod_tex_upload_ms` plus bridge frame sizes.
 
 - **Risk:** peak/mean blending softens transients too much.
-  **Mitigation:** keep peak as a separate plane and tune shader blend; preserve level-0 at zoom-in.
+  **Mitigation:** keep peak as a separate plane and tune shader blend; preserve native smaller-hop data as the final zoom-in source.
 
 - **Risk:** centered and rolling alignment diverge.
   **Mitigation:** store both level-local and source-level column indices; test centered fit and rolling continuity separately.
@@ -1204,5 +1387,6 @@ git commit -m "chore: add spectrogram lod diagnostics"
 - Logs show no new bridge dispatch spikes from LOD frames.
 - Zoomed-out scrolling no longer has obvious low-FPS stepping.
 - Shimmer is lower than the current live peak-hold smoothing path.
+- Zoom-in gives immediate visual feedback, then refines to native smaller-hop detail without a black frame.
 - Max zoom-out can fit the entire `3 Years Older`-class 10-minute track when the overview is complete.
-- If overview is missing, the UI falls back to the current level-0 behavior without black frames or resets.
+- If overview is missing, the UI falls back to the best current native or preview source without black frames or resets.
