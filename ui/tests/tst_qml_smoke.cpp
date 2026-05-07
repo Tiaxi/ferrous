@@ -1064,6 +1064,7 @@ private slots:
     void spectrogramGpuFullModeUsesSampleBodyMaterialNode();
     void spectrogramGpuFullModeShaderSmoothsZoomOutAggregation();
     void spectrogramGpuSampleMaterialsBindSourceTextureAtZero();
+    void spectrogramGpuSampleMaterialNodeBackfillsSecondaryTexture();
     void spectrogramGpuSampleMaterialCompareIncludesSamplingState();
     void spectrogramGpuSampledTexturesCommitPendingUploads();
     void spectrogramGpuSampleMaterialNodesFlipVerticalTextureCoords();
@@ -1166,6 +1167,7 @@ private slots:
     void spectrogramEffectiveZoomMatchesBackendHop();
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
+    void spectrogramZoomPreviewAppliesRenderScaleBeforeBackendData();
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramRapidZoomOutIgnoresIntermediateReset();
     void spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaitingFlag();
@@ -7261,6 +7263,30 @@ void QmlSmokeTest::spectrogramEffectiveZoomDuringTransition() {
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
 }
 
+void QmlSmokeTest::spectrogramZoomPreviewAppliesRenderScaleBeforeBackendData() {
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1);
+
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 500;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns * 2, 48000, 1024, false,
+        true, 1, false);
+
+    item.setZoomLevel(4.0);
+
+    QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
+    QVERIFY(std::abs(item.m_renderZoomLevel - 4.0) < 0.0001);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 4.0) < 0.0001);
+    const auto renderSource = item.spectrogramRenderSourceForTests();
+    QCOMPARE(renderSource.kind, SpectrogramItem::RenderSourceKind::Preview);
+    QVERIFY(renderSource.scaledToRequestedZoom);
+}
+
 void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
     SpectrogramItem item;
     item.setWidth(1920);
@@ -7372,7 +7398,9 @@ void QmlSmokeTest::spectrogramRapidZoomOutIgnoresIntermediateReset() {
     QVERIFY2(item.m_zoomFillActive,
              "intermediate zoom reset should remain hidden behind the frozen frame");
     QCOMPARE(item.m_zoomFillDataReady, false);
-    QVERIFY(std::abs(item.m_renderZoomLevel - 4.0) < 0.001);
+    QVERIFY2(
+        std::abs(item.m_renderZoomLevel - 0.1) < 0.001,
+        "the preview render scale should keep following the latest requested zoom");
 
     item.m_zoomDebounceTimer->stop();
     constexpr int finalColumns = 800;
@@ -12030,6 +12058,37 @@ void QmlSmokeTest::spectrogramGpuSampleMaterialsBindSourceTextureAtZero() {
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 2), bodyState.paletteTexture);
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 3), bodyState.rowLutTexture);
     QCOMPARE(spectrogramBodySampleTextureForBinding(bodyState, 4), nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuSampleMaterialNodeBackfillsSecondaryTexture() {
+    class StubTexture final : public QSGTexture {
+    public:
+        qint64 comparisonKey() const override { return 0x5150; }
+        QSize textureSize() const override { return QSize(64, 32); }
+        bool hasAlphaChannel() const override { return true; }
+        bool hasMipmaps() const override { return false; }
+    };
+
+    StubTexture texture;
+    QScopedPointer<QSGGeometryNode> bodyNode(createSpectrogramBodySampleMaterialNode());
+    SpectrogramBodySampleMaterial::State state;
+    state.sourceTexture = &texture;
+    state.dbRemapTexture = &texture;
+    state.paletteTexture = &texture;
+    state.rowLutTexture = &texture;
+    state.sourceRect = QRectF(0.0, 0.0, 64.0, 32.0);
+    state.sourceTextureSize = texture.textureSize();
+
+    syncSpectrogramBodySampleMaterialNode(
+        bodyNode.data(),
+        QRectF(0.0, 0.0, 64.0, 32.0),
+        state);
+
+    const auto *material =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(bodyNode->material());
+    QVERIFY(material != nullptr);
+    QCOMPARE(spectrogramBodySampleTextureForBinding(material->state, 4), &texture);
+    QCOMPARE(material->state.secondarySourceTextureSize, texture.textureSize());
 }
 
 void QmlSmokeTest::spectrogramGpuSampleMaterialCompareIncludesSamplingState() {

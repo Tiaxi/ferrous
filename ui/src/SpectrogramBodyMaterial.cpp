@@ -552,6 +552,13 @@ void syncSpectrogramBodySampleMaterialNode(
     }
 
     material->state = state;
+    if (material->state.secondarySourceTexture == nullptr) {
+        material->state.secondarySourceTexture = material->state.sourceTexture;
+        material->state.secondarySourceRect = material->state.sourceRect;
+        material->state.secondarySourceTextureSize = material->state.sourceTextureSize;
+        material->state.secondaryLodLevel = material->state.primaryLodLevel;
+        material->state.secondaryPlaneCount = material->state.primaryPlaneCount;
+    }
     const QRectF adjustedTarget = targetRect.translated(state.drawOffset);
     const QRectF geometryRect =
         state.sourceTexture != nullptr && !adjustedTarget.isEmpty()

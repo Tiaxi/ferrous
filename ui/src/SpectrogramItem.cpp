@@ -1456,6 +1456,9 @@ void SpectrogramItem::setZoomLevel(double value) {
     m_requestedRenderZoomLevel = value;
     m_requestedNativeHopSize = expectedNativeHopForZoom(value);
     if (m_precomputedHopSize > 0 && m_precomputedHopSize != m_requestedNativeHopSize) {
+        m_renderZoomLevel = value;
+        m_precomputedCanvasDirty = true;
+        invalidateMapping();
         m_renderSourceState = SpectrogramRenderSourceState{
             .kind = RenderSourceKind::Preview,
             .hopSize = m_precomputedHopSize,
