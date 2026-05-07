@@ -1168,6 +1168,7 @@ private slots:
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramZoomPreviewAppliesRenderScaleBeforeBackendData();
+    void spectrogramZoomPreviewFreezesBeforeBackendReset();
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramRapidZoomOutIgnoresIntermediateReset();
     void spectrogramSameTrackCoarseResetSnapsRenderZoomWithoutAwaitingFlag();
@@ -7285,6 +7286,51 @@ void QmlSmokeTest::spectrogramZoomPreviewAppliesRenderScaleBeforeBackendData() {
     const auto renderSource = item.spectrogramRenderSourceForTests();
     QCOMPARE(renderSource.kind, SpectrogramItem::RenderSourceKind::Preview);
     QVERIFY(renderSource.scaledToRequestedZoom);
+}
+
+void QmlSmokeTest::spectrogramZoomPreviewFreezesBeforeBackendReset() {
+    SpectrogramItem item;
+    item.setWidth(400);
+    item.setHeight(120);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int binsPerColumn = 16;
+    constexpr int columns = 4000;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, false,
+        true, 1, false);
+    item.setPositionSeconds((2000.0 * 1024.0) / 48000.0);
+
+    std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+    QVERIFY(!item.m_gpuDisplayImage.isNull());
+
+    item.setZoomLevel(16.0);
+
+    node.reset(item.updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_zoomFillActive, true);
+    QCOMPARE(item.m_zoomFillDataReady, false);
+    QVERIFY2(
+        !item.m_zoomFillFrozenDisplayImage.isNull(),
+        "zoom preview must freeze the currently rendered frame before "
+        "the backend reset can expose an empty refilling canvas");
+
+    QByteArray partialReset(binsPerColumn * 100, '\x55');
+    item.feedPrecomputedChunk(
+        partialReset, binsPerColumn, 0, 100,
+        0, columns * 16, 48000, 64, false,
+        true, 1, false, 2);
+
+    node.reset(item.updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+    QCOMPARE(item.m_zoomFillActive, true);
+    QVERIFY2(
+        !item.m_zoomFillFrozenDisplayImage.isNull(),
+        "partial native-hop refill must stay behind the frozen zoom preview");
 }
 
 void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {

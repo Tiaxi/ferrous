@@ -1464,12 +1464,22 @@ void SpectrogramItem::setZoomLevel(double value) {
             .hopSize = m_precomputedHopSize,
             .scaledToRequestedZoom = true,
         };
+        const bool canFreezePreview =
+            m_displayMode == 1
+            && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
+            && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
+        if (canFreezePreview) {
+            m_zoomFillActive = true;
+            m_zoomFillDataReady = false;
+            m_zoomFillFreezePending = true;
+        }
     }
 
     if (m_zoomLevel < 0.05 && hasFullTrackOverviewLocked()) {
         m_renderZoomLevel = m_zoomLevel;
         m_pendingBackendZoom = 0.05F;
         m_awaitingZoomData = false;
+        m_zoomFillFreezePending = false;
         m_renderSourceState = SpectrogramRenderSourceState{
             .kind = RenderSourceKind::Overview,
             .hopSize = m_precomputedHopSize,
@@ -3768,6 +3778,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                            ? !m_zoomFillFrozenDisplayImage.isNull()
                            : !m_gpuDisplayImage.isNull());
 
+            if (m_zoomFillFreezePending
+                && !rollingMode
+                && haveSelectedSpectrogramContent
+                && !rendererFreeze) {
+                if (useRetainedSourceTextureBodyForFrame
+                    && !retainedTextureSegments.isEmpty()) {
+                    m_zoomFillFrozenRetainedSegments = retainedTextureSegments;
+                    m_zoomFillFrozenRetainedAvailable = true;
+                }
+                captureZoomFillFrozenCacheLocked(false);
+                m_zoomFillFrozenRetainedActive =
+                    m_zoomFillFrozenRetainedAvailable;
+                m_zoomFillActive =
+                    !m_zoomFillFrozenDisplayImage.isNull()
+                    || m_zoomFillFrozenRetainedActive;
+                m_zoomFillDataReady = false;
+                m_zoomFillFreezePending = false;
+            }
+
             if (haveSelectedSpectrogramContent && drawPixels > 0) {
                 if (maintainCpuDisplayImage && m_gpuDisplayImage.isNull()) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -5741,6 +5770,7 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedSegments = {};
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
+    m_zoomFillFreezePending = false;
 }
 
 SpectrogramItem::RetainedPageTextureExtent SpectrogramItem::retainedPageTextureExtentForSpan(

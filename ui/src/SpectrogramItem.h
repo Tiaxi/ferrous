@@ -644,6 +644,7 @@ private:
     bool m_zoomFillDataReady{false};
     bool m_zoomFillFrozenRetainedAvailable{false};
     bool m_zoomFillFrozenRetainedActive{false};
+    bool m_zoomFillFreezePending{false};
     double m_precomputedCanvasZoomLevel{1.0};
     int m_precomputedCanvasHopSize{0};
     int m_precomputedCanvasTotalColumnsEstimate{0};
