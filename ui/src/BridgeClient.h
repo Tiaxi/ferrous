@@ -467,6 +467,9 @@ private:
         bool clearHistory{false};
         quint64 trackToken{0};
         quint64 generation{0};
+        int lodLevel{0};
+        int lodSourceSpan{1};
+        int lodPlaneCount{1};
         qsizetype dataBytes{0};
     };
 

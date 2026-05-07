@@ -104,6 +104,12 @@ public:
         bool bufferReset, quint64 trackToken = 0,
         bool clearHistoryOnReset = false,
         quint64 generation = 0);
+    Q_INVOKABLE void feedPrecomputedLodChunk(
+        const QByteArray &data, int bins, int channelIndex,
+        int columns, int startIndex, int totalEstimate,
+        int sampleRate, int hopSize, quint64 trackToken,
+        quint64 generation, int lodLevel, int lodSourceSpan,
+        int lodPlaneCount, bool complete);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();

@@ -86,6 +86,46 @@ QByteArray makePrecomputedFrame(
     return raw;
 }
 
+QByteArray makePrecomputedLodFrame() {
+    constexpr int bins = 2;
+    constexpr int channelCount = 1;
+    constexpr int columns = 2;
+    constexpr int planeCount = 2;
+    constexpr int headerLen = 51;
+    QByteArray raw(headerLen + bins * channelCount * columns * planeCount, '\0');
+    auto *d = reinterpret_cast<quint8 *>(raw.data());
+
+    const quint32 payloadLen = static_cast<quint32>(raw.size() - 4);
+    memcpy(d, &payloadLen, sizeof(payloadLen));
+    const int base = 4;
+    d[base] = 0xA3;
+    const quint64 trackToken = 7;
+    const quint64 generation = 11;
+    memcpy(d + base + 1, &trackToken, sizeof(trackToken));
+    memcpy(d + base + 9, &generation, sizeof(generation));
+    const quint16 encodedBins = bins;
+    const quint16 encodedColumns = columns;
+    memcpy(d + base + 17, &encodedBins, sizeof(encodedBins));
+    memcpy(d + base + 19, &encodedColumns, sizeof(encodedColumns));
+    d[base + 21] = channelCount;
+    const quint32 encodedStart = 4;
+    const quint32 encodedTotal = 100;
+    const quint32 sampleRate = 48000;
+    const quint16 hopSize = 4096;
+    const float coverage = 0.1f;
+    memcpy(d + base + 22, &encodedStart, sizeof(encodedStart));
+    memcpy(d + base + 26, &encodedTotal, sizeof(encodedTotal));
+    memcpy(d + base + 30, &sampleRate, sizeof(sampleRate));
+    memcpy(d + base + 34, &hopSize, sizeof(hopSize));
+    memcpy(d + base + 36, &coverage, sizeof(coverage));
+    d[base + 43] = 2;
+    const quint16 lodSpan = 4;
+    memcpy(d + base + 44, &lodSpan, sizeof(lodSpan));
+    d[base + 46] = planeCount;
+
+    return raw;
+}
+
 } // namespace
 
 class BridgeClientTest : public QObject {
@@ -102,6 +142,7 @@ private slots:
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
+    void precomputedSpectrogramLodFrameParsesLevelSpanAndPlanes();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
     void spectrogramProfileSummaryLoggingStaysAvailableWithoutDetailedTrace();
     void diagnosticsWritesBatchOffHotPath();
@@ -383,6 +424,19 @@ void BridgeClientTest::precomputedSpectrogramChunksRouteDirectlyToRegisteredItem
     QCOMPARE(right.m_ringCapacity > 0, true);
     QCOMPARE(static_cast<quint8>(left.m_ringBuffer.at(0)), static_cast<quint8>(0x11));
     QCOMPARE(static_cast<quint8>(right.m_ringBuffer.at(0)), static_cast<quint8>(0x77));
+}
+
+void BridgeClientTest::precomputedSpectrogramLodFrameParsesLevelSpanAndPlanes() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    const BridgeClient::PrecomputedDispatchStats stats =
+        client.parsePrecomputedSpectrogramFrame(makePrecomputedLodFrame());
+
+    QVERIFY(stats.valid);
+    QCOMPARE(stats.lodLevel, 2);
+    QCOMPARE(stats.lodSourceSpan, 4);
+    QCOMPARE(stats.lodPlaneCount, 2);
 }
 
 void BridgeClientTest::spectrogramDetailedTraceLoggingRequiresExplicitOptIn() {

@@ -4219,7 +4219,7 @@ BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogram
     PrecomputedDispatchStats stats;
     // Frame layout (see encode_precomputed_spectrogram_chunk):
     // [0..4]   u32  payload_len
-    // [4]      u8   magic = 0xA2
+    // [4]      u8   magic = 0xA2 or 0xA3
     // [5..13]  u64  track_token
     // [13..21] u64  generation
     // [21..23] u16  bins_per_column
@@ -4233,7 +4233,11 @@ BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogram
     // [44]     u8   complete
     // [45]     u8   buffer_reset
     // [46]     u8   clear_history
-    // [47..]   column_data
+    // [47..]   column_data for 0xA2
+    // [47]     u8   lod_level for 0xA3
+    // [48..50] u16  lod_source_span for 0xA3
+    // [50]     u8   lod_plane_count for 0xA3
+    // [51..]   column_data for 0xA3
     constexpr int kHeaderLen = 47;
     if (raw.size() < kHeaderLen) {
         return stats;
@@ -4263,7 +4267,12 @@ BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogram
 
     // Skip the 4-byte length prefix.
     const int base = 4;
-    if (d[base] != 0xA2) {
+    const bool isLegacy = d[base] == 0xA2;
+    const bool isLod = d[base] == 0xA3;
+    if (!isLegacy && !isLod) {
+        return stats;
+    }
+    if (isLod && raw.size() < 51) {
         return stats;
     }
     const quint64 trackToken = readU64(base + 1);
@@ -4279,10 +4288,14 @@ BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogram
     const bool complete = d[base + 40] != 0;
     const bool bufferReset = d[base + 41] != 0;
     const bool clearHistory = d[base + 42] != 0;
+    const int metadataOffset = isLod ? base + 43 : -1;
+    const int lodLevel = isLod ? d[metadataOffset] : 0;
+    const int lodSourceSpan = isLod ? readU16(metadataOffset + 1) : 1;
+    const int lodPlaneCount = isLod ? d[metadataOffset + 3] : 1;
 
-    const int dataOffset = kHeaderLen;
+    const int dataOffset = isLod ? 51 : kHeaderLen;
     const qint64 expectedDataLen =
-        static_cast<qint64>(columns) * channelCount * bins;
+        static_cast<qint64>(columns) * channelCount * bins * lodPlaneCount;
     if (expectedDataLen < 0 || raw.size() - dataOffset < expectedDataLen) {
         return stats;
     }
@@ -4301,6 +4314,9 @@ BridgeClient::PrecomputedDispatchStats BridgeClient::parsePrecomputedSpectrogram
     stats.clearHistory = clearHistory;
     stats.trackToken = trackToken;
     stats.generation = generation;
+    stats.lodLevel = lodLevel;
+    stats.lodSourceSpan = lodSourceSpan;
+    stats.lodPlaneCount = lodPlaneCount;
     stats.dataBytes = static_cast<qsizetype>(expectedDataLen);
 
     QElapsedTimer dispatchTimer;
@@ -4325,6 +4341,9 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
     });
 
     if (m_spectrogramRoutes.isEmpty()) {
+        if (stats.lodLevel != 0) {
+            return;
+        }
         const QByteArray columnData(data, dataSize);
         emit precomputedSpectrogramChunkReady(
             columnData, stats.bins, stats.channelCount, stats.columns,
@@ -4346,20 +4365,38 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
             continue;
         }
 
-        item->feedPrecomputedChunk(
-            rawView,
-            stats.bins,
-            route.channelIndex,
-            stats.columns,
-            stats.startIndex,
-            stats.totalEstimate,
-            stats.sampleRate,
-            stats.hopSize,
-            stats.complete,
-            stats.bufferReset,
-            stats.trackToken,
-            stats.clearHistory,
-            stats.generation);
+        if (stats.lodLevel == 0) {
+            item->feedPrecomputedChunk(
+                rawView,
+                stats.bins,
+                route.channelIndex,
+                stats.columns,
+                stats.startIndex,
+                stats.totalEstimate,
+                stats.sampleRate,
+                stats.hopSize,
+                stats.complete,
+                stats.bufferReset,
+                stats.trackToken,
+                stats.clearHistory,
+                stats.generation);
+        } else {
+            item->feedPrecomputedLodChunk(
+                rawView,
+                stats.bins,
+                route.channelIndex,
+                stats.columns,
+                stats.startIndex,
+                stats.totalEstimate,
+                stats.sampleRate,
+                stats.hopSize,
+                stats.trackToken,
+                stats.generation,
+                stats.lodLevel,
+                stats.lodSourceSpan,
+                stats.lodPlaneCount,
+                stats.complete);
+        }
     }
 }
 

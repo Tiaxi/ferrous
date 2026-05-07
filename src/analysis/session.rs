@@ -338,6 +338,9 @@ impl StagingChunkState {
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         })
     }
 }
@@ -418,6 +421,9 @@ fn staging_drain_stft_rows(
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                lod_level: 0,
+                lod_source_span: 1,
+                lod_plane_count: 1,
             };
             if tx.send(chunk).is_err() {
                 return false; // receiver dropped
@@ -1014,6 +1020,9 @@ fn run_spectrogram_session(
             complete: false,
             buffer_reset: emit_initial_reset,
             clear_history: emit_initial_reset && clear_history_on_reset,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         },
     ));
 
@@ -1621,6 +1630,9 @@ fn handle_session_seek(
             complete: false,
             buffer_reset: true,
             clear_history: false,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         },
     ));
 
@@ -1806,6 +1818,9 @@ fn session_drain_stft_rows(
                     complete: false,
                     buffer_reset: false,
                     clear_history: false,
+                    lod_level: 0,
+                    lod_source_span: 1,
+                    lod_plane_count: 1,
                 },
             ));
             session.chunk_start_index = session.columns_produced;
@@ -1966,6 +1981,9 @@ fn session_flush_chunk(
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                lod_level: 0,
+                lod_source_span: 1,
+                lod_plane_count: 1,
             },
         ));
         session.chunk_columns = 0;
@@ -2005,6 +2023,9 @@ fn session_flush_token(
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         },
     ));
 }
@@ -2046,6 +2067,9 @@ fn session_emit_finalize_chunk(
             complete: true,
             buffer_reset: false,
             clear_history: false,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         },
     ));
 }
@@ -3031,6 +3055,9 @@ mod tests {
                     complete: false,
                     buffer_reset: false,
                     clear_history: false,
+                    lod_level: 0,
+                    lod_source_span: 1,
+                    lod_plane_count: 1,
                 });
                 chunk_start_index = columns_produced;
                 chunk_columns = 0;

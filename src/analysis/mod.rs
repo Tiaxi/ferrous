@@ -184,6 +184,9 @@ pub struct PrecomputedSpectrogramChunk {
     /// When true, the UI should discard previous-track history instead of
     /// preserving rolling continuity across the reset handoff.
     pub clear_history: bool,
+    pub lod_level: u8,
+    pub lod_source_span: u16,
+    pub lod_plane_count: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -778,6 +781,9 @@ impl AnalysisRuntimeState {
                     complete: true,
                     buffer_reset: false,
                     clear_history: false,
+                    lod_level: 0,
+                    lod_source_span: 1,
+                    lod_plane_count: 1,
                 },
             ));
     }
@@ -1315,6 +1321,9 @@ impl AnalysisRuntimeState {
                             complete: false,
                             buffer_reset: true,
                             clear_history: true,
+                            lod_level: 0,
+                            lod_source_span: 1,
+                            lod_plane_count: 1,
                         },
                     ));
                 // Suppress the next PositionUpdate to prevent a race: the
@@ -3192,6 +3201,9 @@ mod tests {
                         complete: false,
                         buffer_reset: false,
                         clear_history: false,
+                        lod_level: 0,
+                        lod_source_span: 1,
+                        lod_plane_count: 1,
                     });
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -3214,6 +3226,9 @@ mod tests {
                     complete: false,
                     buffer_reset: false,
                     clear_history: false,
+                    lod_level: 0,
+                    lod_source_span: 1,
+                    lod_plane_count: 1,
                 });
             })
             .unwrap();
@@ -3250,6 +3265,9 @@ mod tests {
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                lod_level: 0,
+                lod_source_span: 1,
+                lod_plane_count: 1,
             });
         }
         drop(tx);

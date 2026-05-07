@@ -868,6 +868,9 @@ mod tests {
             complete: true,
             buffer_reset: false,
             clear_history: false,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         };
         note_precomputed_spectrogram_chunk(&mut state, &chunk);
     }

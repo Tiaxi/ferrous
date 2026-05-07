@@ -2512,6 +2512,37 @@ void SpectrogramItem::feedPrecomputedChunk(
 #endif
 }
 
+void SpectrogramItem::feedPrecomputedLodChunk(
+    const QByteArray &data,
+    int bins,
+    int channelIndex,
+    int columns,
+    int startIndex,
+    int totalEstimate,
+    int sampleRate,
+    int hopSize,
+    quint64 trackToken,
+    quint64 generation,
+    int lodLevel,
+    int lodSourceSpan,
+    int lodPlaneCount,
+    bool complete) {
+    Q_UNUSED(data);
+    Q_UNUSED(bins);
+    Q_UNUSED(channelIndex);
+    Q_UNUSED(columns);
+    Q_UNUSED(startIndex);
+    Q_UNUSED(totalEstimate);
+    Q_UNUSED(sampleRate);
+    Q_UNUSED(hopSize);
+    Q_UNUSED(trackToken);
+    Q_UNUSED(generation);
+    Q_UNUSED(lodLevel);
+    Q_UNUSED(lodSourceSpan);
+    Q_UNUSED(lodPlaneCount);
+    Q_UNUSED(complete);
+}
+
 void SpectrogramItem::clearPrecomputed() {
     FERROUS_SPECTROGRAM_TRACE_LOGF(stderr, "[Qt-clearPrecomputed] ringCap=%d ready=%d\n",
         m_ringCapacity, m_precomputedReady ? 1 : 0);

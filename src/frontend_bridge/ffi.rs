@@ -24,6 +24,7 @@ use crate::tag_editor;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const PRECOMPUTED_SPECTROGRAM_MAGIC: u8 = 0xA2;
+const PRECOMPUTED_SPECTROGRAM_LOD_MAGIC: u8 = 0xA3;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_WAVEFORM_COMPLETE: u8 = 0x08;
 const MAX_PENDING_BINARY_EVENTS: usize = 12;
@@ -2078,16 +2079,27 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [41]     u8   buffer_reset (0 or 1)
 /// [42]     u8   clear_history (0 or 1)
 /// [43..]   column_data (column_count × channel_count × bins_per_column bytes)
+///
+/// LOD chunks use magic `0xA3` and append these fields before column data:
+/// [43]     u8   lod_level
+/// [44..46] u16  lod_source_span
+/// [46]     u8   lod_plane_count
+/// [47..]   column_data
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 43;
+    let is_lod = chunk.lod_level > 0;
+    let header_len = if is_lod { 47 } else { 43 };
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
     let mut out = Vec::with_capacity(4 + total_len);
     // Frame length prefix (excluding the 4-byte length itself).
     out.extend_from_slice(&clamp_u32(total_len).to_le_bytes());
-    out.push(PRECOMPUTED_SPECTROGRAM_MAGIC);
+    out.push(if is_lod {
+        PRECOMPUTED_SPECTROGRAM_LOD_MAGIC
+    } else {
+        PRECOMPUTED_SPECTROGRAM_MAGIC
+    });
     out.extend_from_slice(&chunk.track_token.to_le_bytes());
     out.extend_from_slice(&chunk.generation.to_le_bytes());
     out.extend_from_slice(&chunk.bins_per_column.to_le_bytes());
@@ -2101,6 +2113,11 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.push(u8::from(chunk.complete));
     out.push(u8::from(chunk.buffer_reset));
     out.push(u8::from(chunk.clear_history));
+    if is_lod {
+        out.push(chunk.lod_level);
+        out.extend_from_slice(&chunk.lod_source_span.to_le_bytes());
+        out.push(chunk.lod_plane_count);
+    }
     out.extend_from_slice(&chunk.columns_u8);
     out
 }
@@ -2828,6 +2845,9 @@ mod tests {
             complete: false,
             buffer_reset: start_column_index == 0,
             clear_history: start_column_index == 0,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         }
     }
 
@@ -2861,6 +2881,9 @@ mod tests {
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
         };
 
         let frame = encode_precomputed_spectrogram_chunk(&chunk);
@@ -2886,6 +2909,35 @@ mod tests {
         assert_eq!(frame[offset + 2], 1);
         offset += 3;
         assert_eq!(&frame[offset..], chunk.columns_u8.as_slice());
+    }
+
+    #[test]
+    fn precomputed_lod_frame_includes_level_span_and_planes() {
+        let chunk = PrecomputedSpectrogramChunk {
+            track_token: 7,
+            generation: 11,
+            columns_u8: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            bins_per_column: 2,
+            column_count: 2,
+            channel_count: 1,
+            start_column_index: 4,
+            total_columns_estimate: 100,
+            sample_rate_hz: 48_000,
+            hop_size: 2048,
+            coverage_seconds: 0.1,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+            lod_level: 1,
+            lod_source_span: 2,
+            lod_plane_count: 2,
+        };
+
+        let frame = encode_precomputed_spectrogram_chunk(&chunk);
+        assert_eq!(frame[4], PRECOMPUTED_SPECTROGRAM_LOD_MAGIC);
+        assert_eq!(frame[47], 1);
+        assert_eq!(u16::from_le_bytes([frame[48], frame[49]]), 2);
+        assert_eq!(frame[50], 2);
     }
 
     #[cfg(unix)]
