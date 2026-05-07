@@ -2768,6 +2768,9 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         && m_precomputedBinsPerColumn > 0
         && bins == m_precomputedBinsPerColumn;
     if (!preserveRollingHistory) {
+        const bool preserveZoomFillCache =
+            m_zoomFillActive
+            && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
         m_ringOldestSeq = 0;
         m_ringWriteSeq = 0;
         m_trackEpochSeq = 0;
@@ -2788,7 +2791,8 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_trackColumnToSeqByToken.clear();
         m_spectrogramLodPages.clear();
         m_ringCapacity = 0;
-        invalidateRetainedSourceTextureStateLocked();
+        invalidateRetainedSourceTextureUploadStateLocked(
+            preserveZoomFillCache && m_zoomFillFrozenRetainedAvailable);
     } else {
         // Preserve only the history that has actually been shown on screen.
         // Any speculative lookahead beyond the current playback head is stale
@@ -2804,10 +2808,12 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_timeGridDirty = true;
     // During a zoom fill, preserve the old canvas so updatePaintNode
     // can keep showing it while the ring refills at the new hop.
-    if (m_zoomFillActive && !m_gpuDisplayImage.isNull()) {
+    if (m_zoomFillActive
+        && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable)) {
         // Keep the last GPU cache alive while the ring refills. The
         // next paint freezes against this cached image until the new
         // session covers the visible display.
+        m_zoomFillFrozenRetainedActive = m_zoomFillFrozenRetainedAvailable;
     } else {
         invalidateRenderCachesLocked();
     }
@@ -3416,8 +3422,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 profileLodMissingReason = rollingMode ? "rolling" : "debug-mode";
 #endif
             }
-            const bool useFrozenRetainedSourceForFrame =
-                retainedFreezeAvailableForFrame && !m_zoomFillDataReady;
             const qint64 retainedRenderableRight = rollingMode
                 ? displayRight
                 : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
@@ -3512,7 +3516,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             bool haveRetainedTextureSegments = false;
             bool retainedTextureSegmentsOverflowed = false;
-            bool retainedTextureCoversVisibleRange = false;
             const auto rebuildRetainedDrawSegments = [&]() {
                 retainedBodyDrawSegments.clear();
                 bool allSegmentsHaveTextures = !retainedTextureSegments.isEmpty();
@@ -3554,54 +3557,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 return allSegmentsHaveTextures
                     && retainedBodyDrawSegments.size() == retainedTextureSegments.size();
             };
-            if (useFrozenRetainedSourceForFrame) {
-                retainedSourceTexture = m_gpuSourceTexture.texture();
-                retainedTextureSegments = m_zoomFillFrozenRetainedSegments;
-                haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
-                const bool retainedPageTexturesReady = rebuildRetainedDrawSegments();
-                retainedTextureCoversVisibleRange =
-                    haveRetainedTextureSegments && retainedPageTexturesReady;
-            } else if (canUseRetainedSourceTextureBody
-                && drawPixels > 0
-                && currentWindow != nullptr) {
-                retainedSourceTexture = m_gpuSourceTexture.texture();
-                const qint64 decodedVisibleRight = rollingMode
-                    ? displayRight
-                    : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
-                const RetainedRenderPlan retainedPlan = buildRetainedRenderPlanLocked(
+            const bool finalRetainedTextureCoversVisibleRange =
+                canUseRetainedSourceTextureBody
+                && retainedSourcePagesCoverDisplayRangeLocked(
                     displayLeft,
                     displayRight,
-                    decodedVisibleRight,
-                    drawX,
-                    drawPixels,
-                    h,
-                    effectiveZoom,
+                    retainedRenderableRight,
                     rollingMode,
-                    retainedSourcePageWidthForGpuLimit(currentWindow));
-                retainedTextureSegments = retainedPlan.segments;
-                haveRetainedTextureSegments = retainedPlan.haveSegments;
-                retainedTextureSegmentsOverflowed = retainedPlan.overflowed;
-                bool retainedSegmentsCoverVisibleRange = retainedPlan.coversRange;
-                if (retainedTextureSegmentsOverflowed) {
-                    // Sparse centered windows can contain more than two visible
-                    // runs when evicted columns leave holes inside the viewport.
-                    // Fall back to the warmed CPU display image for this frame.
-                    retainedTextureSegments = {};
-                    retainedSourceTexture = nullptr;
-                    haveRetainedTextureSegments = false;
-                    retainedSegmentsCoverVisibleRange = false;
-                }
-                const bool retainedPageTexturesReady = rebuildRetainedDrawSegments();
-                retainedTextureCoversVisibleRange =
-                    retainedSegmentsCoverVisibleRange
-                    && haveRetainedTextureSegments
-                    && retainedPageTexturesReady;
-            }
-
+                    retainedPageWidth,
+                    true);
             const bool retainedSourceReadyForReveal =
                 retainedSourceReadyForZoomReveal(
                     canUseRetainedSourceTextureBody,
-                    retainedTextureCoversVisibleRange,
+                    finalRetainedTextureCoversVisibleRange,
                     !m_gpuDisplayImage.isNull(),
                     m_gpuSourcePageUploadColumns,
                     m_gpuSourcePageTextureReset);
@@ -3613,8 +3581,46 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             const bool revealViaWarmedDisplayImage =
                 freezeCanRevealFinalFrame
                 && gpuDebugMode == SpectrogramGpu::DebugMode::Full
-                && !retainedTextureCoversVisibleRange
+                && !finalRetainedTextureCoversVisibleRange
                 && !m_gpuDisplayImage.isNull();
+            const bool useFrozenRetainedSourceForFrame =
+                shouldDrawFrozenRetainedSourceForZoomFill(
+                    rendererFreeze,
+                    retainedFreezeAvailableForFrame,
+                    freezeCanRevealFinalFrame);
+
+            if (useFrozenRetainedSourceForFrame) {
+                retainedSourceTexture = m_gpuSourceTexture.texture();
+                retainedTextureSegments = m_zoomFillFrozenRetainedSegments;
+                haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
+                rebuildRetainedDrawSegments();
+            } else if (canUseRetainedSourceTextureBody
+                && drawPixels > 0
+                && currentWindow != nullptr) {
+                retainedSourceTexture = m_gpuSourceTexture.texture();
+                const RetainedRenderPlan retainedPlan = buildRetainedRenderPlanLocked(
+                    displayLeft,
+                    displayRight,
+                    retainedRenderableRight,
+                    drawX,
+                    drawPixels,
+                    h,
+                    effectiveZoom,
+                    rollingMode,
+                    retainedSourcePageWidthForGpuLimit(currentWindow));
+                retainedTextureSegments = retainedPlan.segments;
+                haveRetainedTextureSegments = retainedPlan.haveSegments;
+                retainedTextureSegmentsOverflowed = retainedPlan.overflowed;
+                if (retainedTextureSegmentsOverflowed) {
+                    // Sparse centered windows can contain more than two visible
+                    // runs when evicted columns leave holes inside the viewport.
+                    // Fall back to the warmed CPU display image for this frame.
+                    retainedTextureSegments = {};
+                    retainedSourceTexture = nullptr;
+                    haveRetainedTextureSegments = false;
+                }
+                rebuildRetainedDrawSegments();
+            }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             if (rendererFreeze && m_zoomFillDataReady && !m_awaitingZoomData) {
                 const int remainingLogs = g_zoomFillRenderLogBudget.fetch_sub(1);
@@ -3705,7 +3711,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         freezeCanRevealFinalFrame ? 1 : 0,
                         rendererFreeze ? 1 : 0,
                         canUseRetainedSourceTextureBody ? 1 : 0,
-                        retainedTextureCoversVisibleRange ? 1 : 0,
+                        finalRetainedTextureCoversVisibleRange ? 1 : 0,
                         haveRetainedTextureSegments ? 1 : 0,
                         retainedTextureSegmentsOverflowed ? 1 : 0,
                         static_cast<long long>(displayLeft),
@@ -5824,6 +5830,15 @@ bool SpectrogramItem::retainedSourceReadyForZoomReveal(
     return retainedTextureCoversVisibleRange
         && retainedUploadColumns <= 0
         && !retainedTextureReset;
+}
+
+bool SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
+    const bool rendererFreeze,
+    const bool retainedFreezeAvailableForFrame,
+    const bool freezeCanRevealFinalFrame) {
+    return rendererFreeze
+        && retainedFreezeAvailableForFrame
+        && !freezeCanRevealFinalFrame;
 }
 
 QVector<SpectrogramItem::RetainedPageUploadSpan>

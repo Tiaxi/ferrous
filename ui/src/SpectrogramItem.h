@@ -290,6 +290,10 @@ private:
         bool gpuDisplayImageAvailable,
         int retainedUploadColumns,
         bool retainedTextureReset);
+    static bool shouldDrawFrozenRetainedSourceForZoomFill(
+        bool rendererFreeze,
+        bool retainedFreezeAvailableForFrame,
+        bool freezeCanRevealFinalFrame);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,
