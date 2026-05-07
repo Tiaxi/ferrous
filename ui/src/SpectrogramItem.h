@@ -294,9 +294,19 @@ private:
         bool rendererFreeze,
         bool retainedFreezeAvailableForFrame,
         bool freezeCanRevealFinalFrame);
+    static bool shouldDrawCachedRetainedSourceForFrame(
+        bool rendererFreeze,
+        bool retainedFreezeAvailableForFrame,
+        bool freezeCanRevealFinalFrame,
+        bool currentRetainedSourceReadyForFrame,
+        bool cachedRetainedAvailable);
+    static double monotonicFrozenRetainedSourceColumnDelta(
+        double requestedColumnDelta,
+        double previousColumnDelta);
     static QVector<RetainedRenderSegment> scrollFrozenRetainedSegmentsForZoomFill(
         const QVector<RetainedRenderSegment> &segments,
-        double sourceColumnDelta);
+        double sourceColumnDelta,
+        int pageWidth = 0);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,
@@ -610,6 +620,7 @@ private:
     QVector<RetainedRenderSegment> m_zoomFillFrozenRetainedSegments;
     double m_zoomFillFrozenRetainedPositionSeconds{0.0};
     double m_zoomFillFrozenRetainedColumnsPerSecond{0.0};
+    double m_zoomFillFrozenRetainedLastColumnDelta{0.0};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;

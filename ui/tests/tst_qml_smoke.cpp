@@ -1259,6 +1259,8 @@ private slots:
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence();
     void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
+    void spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections();
+    void spectrogramZoomFillRetainedPreviewCoversPostRevealUploadGaps();
     void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
     void spectrogramRollingRetainedRenderPlanPrefillKeepsFixedZoomScale();
     void spectrogramRetainedRenderPlanCoversOnePage();
@@ -13025,6 +13027,56 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock() 
     QCOMPARE(scrolled[0].sourceRect, QRect(103, 0, 40, 16));
     QCOMPARE(scrolled[0].targetRect, QRectF(9.5, 0.0, 80.0, 32.0));
     QVERIFY(scrolled[0].valid);
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> boundarySegments{
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(2038, 0, 20, 16),
+            QRectF(0.0, 0.0, 40.0, 32.0),
+            true,
+        },
+    };
+    const QVector<SpectrogramItem::RetainedRenderSegment> boundaryScrolled =
+        SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+            boundarySegments,
+            5.25,
+            2048);
+
+    QCOMPARE(boundaryScrolled.size(), 2);
+    QCOMPARE(boundaryScrolled[0].sourceRect, QRect(2043, 0, 5, 16));
+    QCOMPARE(boundaryScrolled[0].targetRect, QRectF(-0.5, 0.0, 10.0, 32.0));
+    QCOMPARE(boundaryScrolled[1].sourceRect, QRect(2048, 0, 15, 16));
+    QCOMPARE(boundaryScrolled[1].targetRect, QRectF(9.5, 0.0, 30.0, 32.0));
+}
+
+void QmlSmokeTest::spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections() {
+    QCOMPARE(
+        SpectrogramItem::monotonicFrozenRetainedSourceColumnDelta(10.25, 11.5),
+        11.5);
+    QCOMPARE(
+        SpectrogramItem::monotonicFrozenRetainedSourceColumnDelta(12.0, 11.5),
+        12.0);
+    QCOMPARE(
+        SpectrogramItem::monotonicFrozenRetainedSourceColumnDelta(-2.0, 0.0),
+        0.0);
+}
+
+void QmlSmokeTest::spectrogramZoomFillRetainedPreviewCoversPostRevealUploadGaps() {
+    QVERIFY2(
+        SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
+            true, true, false, false, false),
+        "a retained freeze should keep drawing cached retained pixels until the reveal frame is ready");
+    QVERIFY2(
+        !SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
+            true, true, true, false, false),
+        "the cached retained zoom frame should stand down on the reveal frame");
+    QVERIFY2(
+        SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
+            false, false, false, false, true),
+        "after reveal, a cached retained frame should cover transient upload gaps instead of painting black");
+    QVERIFY2(
+        !SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
+            false, false, false, true, true),
+        "current retained pages should be preferred whenever they can render the viewport");
 }
 
 void QmlSmokeTest::spectrogramRetainedRenderPlanAllowsDecodedTailSlack() {

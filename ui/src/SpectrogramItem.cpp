@@ -3557,6 +3557,41 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 return allSegmentsHaveTextures
                     && retainedBodyDrawSegments.size() == retainedTextureSegments.size();
             };
+            const auto retainedScrollColumnsPerSecond = [this]() {
+                return m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0
+                    ? static_cast<double>(m_precomputedSampleRateHz)
+                        / static_cast<double>(m_precomputedHopSize)
+                    : 0.0;
+            };
+            const auto anchorCachedRetainedSourceForCurrentFrame = [&]() {
+                m_zoomFillFrozenRetainedPositionSeconds = renderPositionSeconds;
+                m_zoomFillFrozenRetainedColumnsPerSecond =
+                    retainedScrollColumnsPerSecond();
+                m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
+            };
+            const auto useCachedRetainedSourceSegments = [&]() {
+                retainedSourceTexture = m_gpuSourceTexture.texture();
+                const double requestedSourceColumnDelta =
+                    m_zoomFillFrozenRetainedColumnsPerSecond > 0.0
+                        ? (renderPositionSeconds
+                              - m_zoomFillFrozenRetainedPositionSeconds)
+                            * m_zoomFillFrozenRetainedColumnsPerSecond
+                        : 0.0;
+                const double frozenSourceColumnDelta =
+                    monotonicFrozenRetainedSourceColumnDelta(
+                        requestedSourceColumnDelta,
+                        m_zoomFillFrozenRetainedLastColumnDelta);
+                m_zoomFillFrozenRetainedLastColumnDelta =
+                    frozenSourceColumnDelta;
+                retainedTextureSegments =
+                    scrollFrozenRetainedSegmentsForZoomFill(
+                        m_zoomFillFrozenRetainedSegments,
+                        frozenSourceColumnDelta,
+                        retainedPageWidth);
+                retainedTextureSegmentsOverflowed = false;
+                haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
+                rebuildRetainedDrawSegments();
+            };
             const bool finalRetainedTextureCoversVisibleRange =
                 canUseRetainedSourceTextureBody
                 && retainedSourcePagesCoverDisplayRangeLocked(
@@ -3590,19 +3625,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     freezeCanRevealFinalFrame);
 
             if (useFrozenRetainedSourceForFrame) {
-                retainedSourceTexture = m_gpuSourceTexture.texture();
-                const double frozenSourceColumnDelta =
-                    m_zoomFillFrozenRetainedColumnsPerSecond > 0.0
-                        ? (renderPositionSeconds
-                              - m_zoomFillFrozenRetainedPositionSeconds)
-                            * m_zoomFillFrozenRetainedColumnsPerSecond
-                        : 0.0;
-                retainedTextureSegments =
-                    scrollFrozenRetainedSegmentsForZoomFill(
-                        m_zoomFillFrozenRetainedSegments,
-                        frozenSourceColumnDelta);
-                haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
-                rebuildRetainedDrawSegments();
+                useCachedRetainedSourceSegments();
             } else if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
                 && currentWindow != nullptr) {
@@ -3629,6 +3652,24 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     haveRetainedTextureSegments = false;
                 }
                 rebuildRetainedDrawSegments();
+            }
+            bool retainedSourceReadyForFrame =
+                !retainedBodyDrawSegments.isEmpty()
+                && haveRetainedTextureSegments;
+            const bool usePostRevealCachedRetainedSourceForFrame =
+                !useFrozenRetainedSourceForFrame
+                && canUseRetainedSourceTextureBody
+                && shouldDrawCachedRetainedSourceForFrame(
+                    rendererFreeze,
+                    retainedFreezeAvailableForFrame,
+                    freezeCanRevealFinalFrame,
+                    retainedSourceReadyForFrame,
+                    m_zoomFillFrozenRetainedAvailable);
+            if (usePostRevealCachedRetainedSourceForFrame) {
+                useCachedRetainedSourceSegments();
+                retainedSourceReadyForFrame =
+                    !retainedBodyDrawSegments.isEmpty()
+                    && haveRetainedTextureSegments;
             }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             if (rendererFreeze && m_zoomFillDataReady && !m_awaitingZoomData) {
@@ -3757,14 +3798,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             useRetainedSourceTextureBodyForFrame =
                 canUseRetainedSourceTextureBody
                 && !revealViaWarmedDisplayImage
-                && !retainedBodyDrawSegments.isEmpty()
-                && haveRetainedTextureSegments
+                && retainedSourceReadyForFrame
                 && (!rendererFreeze || useFrozenRetainedSourceForFrame);
             if (useRetainedSourceTextureBodyForFrame
                 && !rendererFreeze
                 && retainedSourceTexture == m_gpuSourceTexture.texture()) {
                 m_zoomFillFrozenRetainedSegments = retainedTextureSegments;
                 m_zoomFillFrozenRetainedAvailable = true;
+                anchorCachedRetainedSourceForCurrentFrame();
             }
             if (!useRetainedSourceTextureBodyForFrame
                 && retainedTextureSegmentsOverflowed
@@ -5788,6 +5829,7 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(bool allowCpuSnapshot) {
             ? static_cast<double>(m_precomputedSampleRateHz)
                 / static_cast<double>(m_precomputedHopSize)
             : 0.0;
+    m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
 }
 
 void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
@@ -5797,6 +5839,7 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedSegments = {};
     m_zoomFillFrozenRetainedPositionSeconds = 0.0;
     m_zoomFillFrozenRetainedColumnsPerSecond = 0.0;
+    m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
     m_zoomFillFreezePending = false;
@@ -5859,10 +5902,38 @@ bool SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
         && !freezeCanRevealFinalFrame;
 }
 
+bool SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
+    const bool rendererFreeze,
+    const bool retainedFreezeAvailableForFrame,
+    const bool freezeCanRevealFinalFrame,
+    const bool currentRetainedSourceReadyForFrame,
+    const bool cachedRetainedAvailable) {
+    if (rendererFreeze) {
+        return shouldDrawFrozenRetainedSourceForZoomFill(
+            true,
+            retainedFreezeAvailableForFrame,
+            freezeCanRevealFinalFrame);
+    }
+    return cachedRetainedAvailable && !currentRetainedSourceReadyForFrame;
+}
+
+double SpectrogramItem::monotonicFrozenRetainedSourceColumnDelta(
+    const double requestedColumnDelta,
+    const double previousColumnDelta) {
+    const double clampedPrevious = std::isfinite(previousColumnDelta)
+        ? std::max(0.0, previousColumnDelta)
+        : 0.0;
+    if (!std::isfinite(requestedColumnDelta)) {
+        return clampedPrevious;
+    }
+    return std::max(clampedPrevious, std::max(0.0, requestedColumnDelta));
+}
+
 QVector<SpectrogramItem::RetainedRenderSegment>
 SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
     const QVector<RetainedRenderSegment> &segments,
-    const double sourceColumnDelta) {
+    const double sourceColumnDelta,
+    const int pageWidth) {
     if (segments.isEmpty() || !std::isfinite(sourceColumnDelta)) {
         return segments;
     }
@@ -5884,17 +5955,63 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
             && !segment.targetRect.isEmpty()) {
             const qint64 shiftedX =
                 static_cast<qint64>(segment.sourceRect.x()) + integerShift;
-            shifted.sourceRect.moveLeft(static_cast<int>(std::clamp(
-                shiftedX,
-                static_cast<qint64>(std::numeric_limits<int>::min()),
-                static_cast<qint64>(std::numeric_limits<int>::max()))));
 
             const double sourceWidth =
                 static_cast<double>(segment.sourceRect.width());
             const double targetScale = sourceWidth > 0.0
                 ? segment.targetRect.width() / sourceWidth
                 : 0.0;
-            shifted.targetRect.translate(-fractionalShift * targetScale, 0.0);
+            const double shiftedTargetX =
+                segment.targetRect.x() - fractionalShift * targetScale;
+            if (pageWidth <= 0) {
+                shifted.sourceRect.moveLeft(static_cast<int>(std::clamp(
+                    shiftedX,
+                    static_cast<qint64>(std::numeric_limits<int>::min()),
+                    static_cast<qint64>(std::numeric_limits<int>::max()))));
+                shifted.targetRect.moveLeft(shiftedTargetX);
+                scrolled.push_back(shifted);
+                continue;
+            }
+
+            qint64 chunkX = shiftedX;
+            qint64 remainingWidth = segment.sourceRect.width();
+            while (remainingWidth > 0) {
+                const qint64 pageIndex = chunkX >= 0
+                    ? chunkX / pageWidth
+                    : (chunkX - pageWidth + 1) / pageWidth;
+                const qint64 pageEnd =
+                    (pageIndex + 1) * static_cast<qint64>(pageWidth) - 1;
+                const qint64 chunkWidth64 =
+                    std::min(remainingWidth, pageEnd - chunkX + 1);
+                if (chunkWidth64 <= 0) {
+                    break;
+                }
+                const int chunkWidth = static_cast<int>(std::clamp(
+                    chunkWidth64,
+                    static_cast<qint64>(1),
+                    static_cast<qint64>(std::numeric_limits<int>::max())));
+
+                RetainedRenderSegment chunk = segment;
+                chunk.sourceRect = QRect(
+                    static_cast<int>(std::clamp(
+                        chunkX,
+                        static_cast<qint64>(std::numeric_limits<int>::min()),
+                        static_cast<qint64>(std::numeric_limits<int>::max()))),
+                    segment.sourceRect.y(),
+                    chunkWidth,
+                    segment.sourceRect.height());
+                chunk.targetRect = QRectF(
+                    shiftedTargetX
+                        + static_cast<double>(chunkX - shiftedX) * targetScale,
+                    segment.targetRect.y(),
+                    static_cast<double>(chunkWidth) * targetScale,
+                    segment.targetRect.height());
+                scrolled.push_back(chunk);
+
+                chunkX += chunkWidth64;
+                remainingWidth -= chunkWidth64;
+            }
+            continue;
         }
         scrolled.push_back(shifted);
     }
@@ -6675,8 +6792,28 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             plannedUploadSpans,
             kRetainedUploadColumnsPerPaint,
             &uploadBudgetExhausted);
-    const QVector<qint64> pageIndicesToKeep =
+    QVector<qint64> pageIndicesToKeep =
         retainedSourcePageIndicesToKeepLocked(visiblePages, rollingMode, pageWidth);
+    if (m_zoomFillFrozenRetainedAvailable && pageWidth > 0) {
+        const auto keepPageIndex = [&](const qint64 pageIndex) {
+            if (pageIndex < 0 || pageIndicesToKeep.contains(pageIndex)) {
+                return;
+            }
+            pageIndicesToKeep.push_back(pageIndex);
+        };
+        for (const RetainedRenderSegment &segment : m_zoomFillFrozenRetainedSegments) {
+            if (!segment.valid || segment.sourceRect.isEmpty()) {
+                continue;
+            }
+            const qint64 sourceLeft = segment.sourceRect.x();
+            const qint64 sourceRight =
+                static_cast<qint64>(segment.sourceRect.x())
+                + segment.sourceRect.width() - 1;
+            keepPageIndex(sourceLeft / pageWidth);
+            keepPageIndex(sourceRight / pageWidth);
+        }
+        std::sort(pageIndicesToKeep.begin(), pageIndicesToKeep.end());
+    }
 
     std::erase_if(m_gpuSourcePages, [&](const auto &page) {
         if (page == nullptr
