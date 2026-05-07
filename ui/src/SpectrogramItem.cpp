@@ -1677,16 +1677,23 @@ void SpectrogramItem::feedPrecomputedChunk(
         && hopSize != m_precomputedHopSize
         && m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
+        const bool shouldCaptureFreeze =
+            shouldCaptureZoomFillFreezeForHopChange(
+                m_zoomFillActive,
+                !m_zoomFillFrozenDisplayImage.isNull(),
+                m_zoomFillFrozenRetainedAvailable);
+        if (shouldCaptureFreeze) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        const Clock::time_point freezeStartedAt = Clock::now();
+            const Clock::time_point freezeStartedAt = Clock::now();
 #endif
-        captureZoomFillFrozenCacheLocked(false);
+            captureZoomFillFrozenCacheLocked(false);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        profile.freezeMs += std::chrono::duration<double, std::milli>(
-                                Clock::now() - freezeStartedAt)
-                                .count();
-        profile.phaseStartedAt = Clock::now();
+            profile.freezeMs += std::chrono::duration<double, std::milli>(
+                                    Clock::now() - freezeStartedAt)
+                                    .count();
+            profile.phaseStartedAt = Clock::now();
 #endif
+        }
         m_zoomFillFrozenRetainedActive =
             m_zoomFillFrozenRetainedAvailable;
         m_zoomFillActive =
@@ -3567,6 +3574,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 m_zoomFillFrozenRetainedPositionSeconds = renderPositionSeconds;
                 m_zoomFillFrozenRetainedColumnsPerSecond =
                     retainedScrollColumnsPerSecond();
+                m_zoomFillFrozenRetainedPixelsPerSecond =
+                    m_zoomFillFrozenRetainedColumnsPerSecond
+                    * std::max(0.001, effectiveZoom);
+                m_zoomFillFrozenRetainedAnchorX =
+                    playheadPixel >= 0
+                        ? static_cast<double>(
+                              std::clamp(playheadPixel, 0, std::max(0, w - 1)))
+                        : (width() > 0.0 ? width() * 0.5 : 0.0);
                 m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
             };
             const auto useCachedRetainedSourceSegments = [&]() {
@@ -3583,11 +3598,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         m_zoomFillFrozenRetainedLastColumnDelta);
                 m_zoomFillFrozenRetainedLastColumnDelta =
                     frozenSourceColumnDelta;
+                const double currentRetainedPixelsPerSecond =
+                    retainedScrollColumnsPerSecond() * std::max(0.001, effectiveZoom);
+                const double frozenTargetScale =
+                    m_zoomFillFrozenRetainedPixelsPerSecond > 0.0
+                        && std::isfinite(m_zoomFillFrozenRetainedPixelsPerSecond)
+                    ? currentRetainedPixelsPerSecond
+                        / m_zoomFillFrozenRetainedPixelsPerSecond
+                    : 1.0;
                 retainedTextureSegments =
                     scrollFrozenRetainedSegmentsForZoomFill(
                         m_zoomFillFrozenRetainedSegments,
                         frozenSourceColumnDelta,
-                        retainedPageWidth);
+                        retainedPageWidth,
+                        frozenTargetScale,
+                        m_zoomFillFrozenRetainedAnchorX);
                 retainedTextureSegmentsOverflowed = false;
                 haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
                 rebuildRetainedDrawSegments();
@@ -3848,7 +3873,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     m_zoomFillFrozenRetainedSegments = retainedTextureSegments;
                     m_zoomFillFrozenRetainedAvailable = true;
                 }
-                captureZoomFillFrozenCacheLocked(false);
+                captureZoomFillFrozenCacheLocked(
+                    false,
+                    effectiveZoom,
+                    playheadPixel >= 0 ? static_cast<double>(playheadPixel) : -1.0);
                 m_zoomFillFrozenRetainedActive =
                     m_zoomFillFrozenRetainedAvailable;
                 m_zoomFillActive =
@@ -5816,7 +5844,10 @@ bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
     return !m_gpuDisplayImage.isNull();
 }
 
-void SpectrogramItem::captureZoomFillFrozenCacheLocked(bool allowCpuSnapshot) {
+void SpectrogramItem::captureZoomFillFrozenCacheLocked(
+    bool allowCpuSnapshot,
+    double effectiveZoom,
+    double anchorX) {
     if (!m_zoomFillFrozenRetainedAvailable && allowCpuSnapshot) {
         ensureZoomFillSnapshotImageLocked();
     }
@@ -5829,6 +5860,15 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(bool allowCpuSnapshot) {
             ? static_cast<double>(m_precomputedSampleRateHz)
                 / static_cast<double>(m_precomputedHopSize)
             : 0.0;
+    if (!std::isfinite(effectiveZoom) || effectiveZoom <= 0.0) {
+        effectiveZoom = effectiveZoomLocked();
+    }
+    if (!std::isfinite(anchorX) || anchorX < 0.0) {
+        anchorX = width() > 0.0 ? width() * 0.5 : 0.0;
+    }
+    m_zoomFillFrozenRetainedPixelsPerSecond =
+        m_zoomFillFrozenRetainedColumnsPerSecond * std::max(0.001, effectiveZoom);
+    m_zoomFillFrozenRetainedAnchorX = anchorX;
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
 }
 
@@ -5839,6 +5879,8 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedSegments = {};
     m_zoomFillFrozenRetainedPositionSeconds = 0.0;
     m_zoomFillFrozenRetainedColumnsPerSecond = 0.0;
+    m_zoomFillFrozenRetainedPixelsPerSecond = 0.0;
+    m_zoomFillFrozenRetainedAnchorX = 0.0;
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
@@ -5917,6 +5959,14 @@ bool SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
     return cachedRetainedAvailable && !currentRetainedSourceReadyForFrame;
 }
 
+bool SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(
+    const bool zoomFillActive,
+    const bool frozenDisplayAvailable,
+    const bool frozenRetainedAvailable) {
+    return !zoomFillActive
+        || (!frozenDisplayAvailable && !frozenRetainedAvailable);
+}
+
 double SpectrogramItem::monotonicFrozenRetainedSourceColumnDelta(
     const double requestedColumnDelta,
     const double previousColumnDelta) {
@@ -5933,13 +5983,37 @@ QVector<SpectrogramItem::RetainedRenderSegment>
 SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
     const QVector<RetainedRenderSegment> &segments,
     const double sourceColumnDelta,
-    const int pageWidth) {
-    if (segments.isEmpty() || !std::isfinite(sourceColumnDelta)) {
+    const int pageWidth,
+    const double targetScaleFactor,
+    const double targetAnchorX) {
+    if (segments.isEmpty()) {
         return segments;
     }
 
-    const double integerShiftDouble = std::floor(sourceColumnDelta);
-    const double fractionalShift = sourceColumnDelta - integerShiftDouble;
+    const double safeSourceColumnDelta =
+        std::isfinite(sourceColumnDelta) ? sourceColumnDelta : 0.0;
+    const double safeTargetScaleFactor =
+        std::isfinite(targetScaleFactor) && targetScaleFactor > 0.0
+            ? targetScaleFactor
+            : 1.0;
+    const double safeTargetAnchorX =
+        std::isfinite(targetAnchorX) ? targetAnchorX : 0.0;
+    const auto scaleTargetRect = [&](const QRectF &targetRect) {
+        if (std::abs(safeTargetScaleFactor - 1.0) < 0.0001) {
+            return targetRect;
+        }
+        const double scaledX =
+            safeTargetAnchorX
+            + (targetRect.x() - safeTargetAnchorX) * safeTargetScaleFactor;
+        return QRectF(
+            scaledX,
+            targetRect.y(),
+            targetRect.width() * safeTargetScaleFactor,
+            targetRect.height());
+    };
+
+    const double integerShiftDouble = std::floor(safeSourceColumnDelta);
+    const double fractionalShift = safeSourceColumnDelta - integerShiftDouble;
     const qint64 integerShift =
         static_cast<qint64>(std::clamp(
             integerShiftDouble,
@@ -5958,17 +6032,18 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
 
             const double sourceWidth =
                 static_cast<double>(segment.sourceRect.width());
-            const double targetScale = sourceWidth > 0.0
+            const double sourceToTargetScale = sourceWidth > 0.0
                 ? segment.targetRect.width() / sourceWidth
                 : 0.0;
             const double shiftedTargetX =
-                segment.targetRect.x() - fractionalShift * targetScale;
+                segment.targetRect.x() - fractionalShift * sourceToTargetScale;
             if (pageWidth <= 0) {
                 shifted.sourceRect.moveLeft(static_cast<int>(std::clamp(
                     shiftedX,
                     static_cast<qint64>(std::numeric_limits<int>::min()),
                     static_cast<qint64>(std::numeric_limits<int>::max()))));
                 shifted.targetRect.moveLeft(shiftedTargetX);
+                shifted.targetRect = scaleTargetRect(shifted.targetRect);
                 scrolled.push_back(shifted);
                 continue;
             }
@@ -6002,10 +6077,12 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
                     segment.sourceRect.height());
                 chunk.targetRect = QRectF(
                     shiftedTargetX
-                        + static_cast<double>(chunkX - shiftedX) * targetScale,
+                        + static_cast<double>(chunkX - shiftedX)
+                            * sourceToTargetScale,
                     segment.targetRect.y(),
-                    static_cast<double>(chunkWidth) * targetScale,
+                    static_cast<double>(chunkWidth) * sourceToTargetScale,
                     segment.targetRect.height());
+                chunk.targetRect = scaleTargetRect(chunk.targetRect);
                 scrolled.push_back(chunk);
 
                 chunkX += chunkWidth64;

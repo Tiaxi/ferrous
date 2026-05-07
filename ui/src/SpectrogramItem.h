@@ -273,7 +273,10 @@ private:
     void invalidateMapping();
     void ensureMapping(int height);
     bool ensureZoomFillSnapshotImageLocked();
-    void captureZoomFillFrozenCacheLocked(bool allowCpuSnapshot = true);
+    void captureZoomFillFrozenCacheLocked(
+        bool allowCpuSnapshot = true,
+        double effectiveZoom = 0.0,
+        double anchorX = -1.0);
     void clearZoomFillFrozenCacheLocked();
     static RetainedPageTextureExtent retainedPageTextureExtentForSpan(
         int pageXBegin,
@@ -300,13 +303,19 @@ private:
         bool freezeCanRevealFinalFrame,
         bool currentRetainedSourceReadyForFrame,
         bool cachedRetainedAvailable);
+    static bool shouldCaptureZoomFillFreezeForHopChange(
+        bool zoomFillActive,
+        bool frozenDisplayAvailable,
+        bool frozenRetainedAvailable);
     static double monotonicFrozenRetainedSourceColumnDelta(
         double requestedColumnDelta,
         double previousColumnDelta);
     static QVector<RetainedRenderSegment> scrollFrozenRetainedSegmentsForZoomFill(
         const QVector<RetainedRenderSegment> &segments,
         double sourceColumnDelta,
-        int pageWidth = 0);
+        int pageWidth = 0,
+        double targetScaleFactor = 1.0,
+        double targetAnchorX = 0.0);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,
@@ -620,6 +629,8 @@ private:
     QVector<RetainedRenderSegment> m_zoomFillFrozenRetainedSegments;
     double m_zoomFillFrozenRetainedPositionSeconds{0.0};
     double m_zoomFillFrozenRetainedColumnsPerSecond{0.0};
+    double m_zoomFillFrozenRetainedPixelsPerSecond{0.0};
+    double m_zoomFillFrozenRetainedAnchorX{0.0};
     double m_zoomFillFrozenRetainedLastColumnDelta{0.0};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;

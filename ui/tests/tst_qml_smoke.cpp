@@ -13007,6 +13007,19 @@ void QmlSmokeTest::spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence() {
         true, true, false, 0, false));
     QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
         false, false, true, 384, true));
+
+    QVERIFY2(
+        !SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(
+            true, true, false),
+        "intermediate zoom resets must not replace an active frozen display");
+    QVERIFY2(
+        !SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(
+            true, false, true),
+        "intermediate zoom resets must not replace an active frozen retained source");
+    QVERIFY(SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(
+        true, false, false));
+    QVERIFY(SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(
+        false, true, true));
 }
 
 void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock() {
@@ -13027,6 +13040,19 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock() 
     QCOMPARE(scrolled[0].sourceRect, QRect(103, 0, 40, 16));
     QCOMPARE(scrolled[0].targetRect, QRectF(9.5, 0.0, 80.0, 32.0));
     QVERIFY(scrolled[0].valid);
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> zoomedOut =
+        SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+            frozenSegments,
+            3.25,
+            0,
+            0.5,
+            50.0);
+
+    QCOMPARE(zoomedOut.size(), 1);
+    QCOMPARE(zoomedOut[0].sourceRect, QRect(103, 0, 40, 16));
+    QCOMPARE(zoomedOut[0].targetRect, QRectF(29.75, 0.0, 40.0, 32.0));
+    QVERIFY(zoomedOut[0].valid);
 
     const QVector<SpectrogramItem::RetainedRenderSegment> boundarySegments{
         SpectrogramItem::RetainedRenderSegment{
