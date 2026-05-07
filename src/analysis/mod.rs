@@ -3306,6 +3306,7 @@ mod tests {
         assert_eq!(zoom_hop_size(8192, 16.0), 64);
         assert_eq!(zoom_hop_size(8192, 32.0), 64);
         assert_eq!(zoom_hop_size(8192, 0.5), 1024);
+        assert_eq!(zoom_hop_size(8192, 0.005), REFERENCE_HOP);
     }
 
     #[test]

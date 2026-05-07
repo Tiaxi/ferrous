@@ -1283,6 +1283,42 @@ double SpectrogramItem::effectiveZoomLocked() const {
            / kReferenceHopSamples;
 }
 
+qint64 SpectrogramItem::referenceTrackColumnsAtLevelZeroLocked() const {
+    const qint64 totalCols = std::max(
+        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+        m_precomputedMaxColumnIndex >= 0
+            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+            : static_cast<qint64>(0));
+    if (totalCols <= 0) {
+        return 0;
+    }
+    return m_precomputedHopSize > 0
+        ? totalCols * static_cast<qint64>(m_precomputedHopSize)
+              / static_cast<qint64>(kReferenceHopSamples)
+        : totalCols;
+}
+
+bool SpectrogramItem::hasFullTrackOverviewLocked() const {
+    const qint64 referenceCols = referenceTrackColumnsAtLevelZeroLocked();
+    if (referenceCols <= 0 || m_precomputedTrackToken == 0) {
+        return false;
+    }
+    for (const SpectrogramLodPage &page : m_spectrogramLodPages) {
+        if (page.trackToken != m_precomputedTrackToken
+            || page.sourceSpan <= 1
+            || page.startColumn > 0
+            || page.endColumn < page.startColumn) {
+            continue;
+        }
+        const qint64 coveredReferenceColumns =
+            (page.endColumn + 1) * static_cast<qint64>(page.sourceSpan);
+        if (coveredReferenceColumns >= referenceCols) {
+            return true;
+        }
+    }
+    return false;
+}
+
 double SpectrogramItem::minimumZoomLevelLocked() const {
     const int w = static_cast<int>(width());
     if (w <= 0) {
@@ -1292,25 +1328,17 @@ double SpectrogramItem::minimumZoomLevelLocked() const {
     // the first chunk (set from file metadata) and doesn't shift as
     // decoding progresses.  Fall back to maxColumnIndex for streams
     // where the estimate may lag behind actual content.
-    const qint64 totalCols = std::max(
-        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-        m_precomputedMaxColumnIndex >= 0
-            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-            : static_cast<qint64>(0));
-    if (totalCols <= 0) {
+    const qint64 referenceCols = referenceTrackColumnsAtLevelZeroLocked();
+    if (referenceCols <= 0) {
         return 1.0;
     }
-    // Normalize to reference-hop columns.  With zoom-adapted decimation
-    // the backend reports fewer columns at sub-1.0 zoom (larger hop).
-    // Without normalization, the minimum zoom tightens as you zoom out,
-    // preventing full-song view.  The product totalCols × hop is the
-    // track's sample count and stays constant across zoom levels.
-    const qint64 referenceCols = m_precomputedHopSize > 0
-        ? totalCols * static_cast<qint64>(m_precomputedHopSize)
-              / static_cast<qint64>(kReferenceHopSamples)
-        : totalCols;
     if (referenceCols <= static_cast<qint64>(w)) {
         return 1.0;
+    }
+    const double trackFit =
+        static_cast<double>(w) / static_cast<double>(referenceCols);
+    if (hasFullTrackOverviewLocked()) {
+        return std::max(trackFit, 0.005);
     }
     // Mirror the Rust-side clamp in AnalysisCommand::SetSpectrogramZoomLevel
     // (`.clamp(0.05, 16.0)`).  If Qt lets the user request a zoom below
@@ -1320,8 +1348,6 @@ double SpectrogramItem::minimumZoomLevelLocked() const {
     // re-send gets clamped the same way — the user sees their zoom-out
     // attempts "restart the same zoom level over and over".
     constexpr double kBackendMinZoom = 0.05;
-    const double trackFit =
-        static_cast<double>(w) / static_cast<double>(referenceCols);
     return std::max(trackFit, kBackendMinZoom);
 }
 
@@ -1407,6 +1433,18 @@ SpectrogramItem::SpectrogramRenderSourceState SpectrogramItem::spectrogramRender
     return m_renderSourceState;
 }
 
+int SpectrogramItem::centeredVisibleCoveragePercentForTests() const {
+    QMutexLocker lock(&m_stateMutex);
+    const qint64 referenceCols = referenceTrackColumnsAtLevelZeroLocked();
+    if (referenceCols <= 0 || width() <= 0.0) {
+        return 0;
+    }
+    const qint64 visibleColumns = static_cast<qint64>(
+        std::ceil(width() / std::max(0.001, m_zoomLevel)));
+    const qint64 covered = std::min(referenceCols, visibleColumns);
+    return static_cast<int>((covered * 100) / referenceCols);
+}
+
 void SpectrogramItem::setZoomLevel(double value) {
     QMutexLocker lock(&m_stateMutex);
     const double minZoom = minimumZoomLevelLocked();
@@ -1423,6 +1461,21 @@ void SpectrogramItem::setZoomLevel(double value) {
             .hopSize = m_precomputedHopSize,
             .scaledToRequestedZoom = true,
         };
+    }
+
+    if (m_zoomLevel < 0.05 && hasFullTrackOverviewLocked()) {
+        m_renderZoomLevel = m_zoomLevel;
+        m_pendingBackendZoom = 0.05F;
+        m_awaitingZoomData = false;
+        m_renderSourceState = SpectrogramRenderSourceState{
+            .kind = RenderSourceKind::Overview,
+            .hopSize = m_precomputedHopSize,
+            .scaledToRequestedZoom = true,
+        };
+        lock.unlock();
+        emit zoomLevelChanged();
+        update();
+        return;
     }
 
     // All zoom changes go through the backend: zoom-in needs a finer hop,

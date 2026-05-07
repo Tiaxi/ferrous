@@ -219,6 +219,7 @@ private:
     };
 
     SpectrogramRenderSourceState spectrogramRenderSourceForTests() const;
+    int centeredVisibleCoveragePercentForTests() const;
 
     struct RetainedPageSpan {
         qint64 pageIndex{0};
@@ -441,6 +442,8 @@ private:
     std::optional<QLineF> buildCrosshairHorizontalLineLocked(int width, int height) const;
     double effectiveZoomLocked() const;
     double minimumZoomLevelLocked() const;
+    bool hasFullTrackOverviewLocked() const;
+    qint64 referenceTrackColumnsAtLevelZeroLocked() const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
     void bindWindowFpsTracking(QQuickWindow *window);

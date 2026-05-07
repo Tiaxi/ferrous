@@ -1162,6 +1162,7 @@ private slots:
     void spectrogramFullModeBindsSelectedLodTextureWhenZoomedOut();
     void spectrogramFullModeBindsAdjacentLodTexturesForCrossFade();
     void spectrogramZoomInUsesPreviewUntilNativeHopArrives();
+    void spectrogramMaxZoomOutUsesOverviewToFitLongTrack();
     void spectrogramEffectiveZoomMatchesBackendHop();
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
@@ -7142,6 +7143,29 @@ void QmlSmokeTest::spectrogramZoomInUsesPreviewUntilNativeHopArrives() {
     QCOMPARE(nativeState.kind, SpectrogramItem::RenderSourceKind::NativeDetail);
     QCOMPARE(nativeState.hopSize, 256);
     QVERIFY(!nativeState.scaledToRequestedZoom);
+}
+
+void QmlSmokeTest::spectrogramMaxZoomOutUsesOverviewToFitLongTrack() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(240);
+    item.setDisplayMode(1);
+
+    QByteArray level0(64 * 2000, '\x20');
+    item.feedPrecomputedChunk(
+        level0, 64, 0, 2000,
+        0, 30000, 48000, 1024,
+        false, true, 5, true, 1);
+
+    QByteArray level5(64 * 938 * 2, '\x20');
+    item.feedPrecomputedLodChunk(
+        level5, 64, 0, 938,
+        0, 938, 48000, 32768, 5, 1,
+        5, 32, 2, false);
+
+    QVERIFY(item.minimumZoomLevel() < 0.05);
+    item.setZoomLevel(item.minimumZoomLevel());
+    QCOMPARE(item.centeredVisibleCoveragePercentForTests(), 100);
 }
 
 void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {
