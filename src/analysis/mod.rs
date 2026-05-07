@@ -3309,6 +3309,13 @@ mod tests {
     }
 
     #[test]
+    fn zoom_in_still_requests_native_smaller_hop_session() {
+        let hop = zoom_hop_size(8192, 4.0);
+        assert!(hop < REFERENCE_HOP);
+        assert_eq!(hop, 256);
+    }
+
+    #[test]
     fn set_widget_width_growth_notifies_worker_to_extend_lookahead() {
         // Regression for the fullscreen-regression-after-unchanged-zoom
         // skip: a widget-width increase (e.g. fullscreen toggle) must

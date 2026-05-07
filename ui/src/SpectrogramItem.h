@@ -206,6 +206,20 @@ private:
         int secondaryPlaneCount{1};
     };
 
+    enum class RenderSourceKind {
+        NativeDetail,
+        Preview,
+        Overview,
+    };
+
+    struct SpectrogramRenderSourceState {
+        RenderSourceKind kind{RenderSourceKind::NativeDetail};
+        int hopSize{0};
+        bool scaledToRequestedZoom{false};
+    };
+
+    SpectrogramRenderSourceState spectrogramRenderSourceForTests() const;
+
     struct RetainedPageSpan {
         qint64 pageIndex{0};
         int pageXBegin{0};
@@ -615,6 +629,9 @@ private:
     int m_gpuMaxTextureColumns{std::numeric_limits<int>::max()};
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};
+    double m_requestedRenderZoomLevel{1.0};
+    int m_requestedNativeHopSize{1024};
+    SpectrogramRenderSourceState m_renderSourceState;
     bool m_zoomEnabled{false};
     // Canvas freeze during zoom transition.  Independent of
     // m_awaitingZoomData (which controls the zoom snap).  Set when a

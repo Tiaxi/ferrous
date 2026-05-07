@@ -157,14 +157,18 @@ DebugFrameStats analyzeDebugFrame(const QImage &image) {
     return stats;
 }
 
+int expectedNativeHopForZoom(const double zoomLevel) {
+    const double clampedZoom = std::clamp(zoomLevel, 0.05, 16.0);
+    const double zoomOutOversample = clampedZoom < 0.999 ? 2.0 : 1.0;
+    return static_cast<int>(
+        std::llround(kReferenceHopSamples / (clampedZoom * zoomOutOversample)));
+}
+
 bool effectiveHopMatchesZoom(int hopSize, double zoomLevel) {
     if (hopSize <= 0) {
         return false;
     }
-    const double clampedZoom = std::clamp(zoomLevel, 0.05, 16.0);
-    const double zoomOutOversample = clampedZoom < 0.999 ? 2.0 : 1.0;
-    const int expectedHop = static_cast<int>(
-        std::llround(kReferenceHopSamples / (clampedZoom * zoomOutOversample)));
+    const int expectedHop = expectedNativeHopForZoom(zoomLevel);
     const int tolerance = std::max(2, static_cast<int>(std::ceil(
         static_cast<double>(expectedHop) * 0.01)));
     return std::abs(hopSize - expectedHop) <= tolerance;
@@ -1391,6 +1395,18 @@ int SpectrogramItem::spectrogramLodPlaneCountForTests(const int level) const {
     return level == 0 ? 1 : 0;
 }
 
+SpectrogramItem::SpectrogramRenderSourceState SpectrogramItem::spectrogramRenderSourceForTests() const {
+    QMutexLocker lock(&m_stateMutex);
+    if (m_precomputedHopSize > 0 && m_precomputedHopSize == m_requestedNativeHopSize) {
+        return SpectrogramRenderSourceState{
+            .kind = RenderSourceKind::NativeDetail,
+            .hopSize = m_precomputedHopSize,
+            .scaledToRequestedZoom = false,
+        };
+    }
+    return m_renderSourceState;
+}
+
 void SpectrogramItem::setZoomLevel(double value) {
     QMutexLocker lock(&m_stateMutex);
     const double minZoom = minimumZoomLevelLocked();
@@ -1399,6 +1415,15 @@ void SpectrogramItem::setZoomLevel(double value) {
         return;
     }
     m_zoomLevel = value;
+    m_requestedRenderZoomLevel = value;
+    m_requestedNativeHopSize = expectedNativeHopForZoom(value);
+    if (m_precomputedHopSize > 0 && m_precomputedHopSize != m_requestedNativeHopSize) {
+        m_renderSourceState = SpectrogramRenderSourceState{
+            .kind = RenderSourceKind::Preview,
+            .hopSize = m_precomputedHopSize,
+            .scaledToRequestedZoom = true,
+        };
+    }
 
     // All zoom changes go through the backend: zoom-in needs a finer hop,
     // zoom-out needs coarser decimation.  The visual update is deferred
@@ -1730,6 +1755,20 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
         if (hopSize > 0) {
             m_precomputedHopSize = hopSize;
+            if (hopSize == m_requestedNativeHopSize) {
+                m_renderSourceState = SpectrogramRenderSourceState{
+                    .kind = RenderSourceKind::NativeDetail,
+                    .hopSize = hopSize,
+                    .scaledToRequestedZoom = false,
+                };
+            } else if (m_renderSourceState.kind == RenderSourceKind::NativeDetail
+                || m_renderSourceState.hopSize == 0) {
+                m_renderSourceState = SpectrogramRenderSourceState{
+                    .kind = RenderSourceKind::NativeDetail,
+                    .hopSize = hopSize,
+                    .scaledToRequestedZoom = false,
+                };
+            }
         }
         if (sampleRate > 0 && hopSize > 0) {
             const double seekPositionSeconds =
@@ -2613,6 +2652,9 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
     m_precomputedTrackToken = 0;
+    m_requestedRenderZoomLevel = m_zoomLevel;
+    m_requestedNativeHopSize = expectedNativeHopForZoom(m_zoomLevel);
+    m_renderSourceState = SpectrogramRenderSourceState{};
     m_awaitingZoomData = false;
     m_zoomFillActive = false;
     m_zoomFillDataReady = false;
