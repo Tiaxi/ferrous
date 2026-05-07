@@ -45,6 +45,66 @@ fn clamp_to_u16(v: usize) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Task 5 wires this test-covered helper into worker emission.
+#[allow(dead_code)]
+pub(super) struct AggregatedLodColumns {
+    pub(super) bytes: Vec<u8>,
+    pub(super) column_count: u16,
+    pub(super) plane_count: u8,
+}
+
+// Task 5 wires this test-covered helper into worker emission.
+#[allow(dead_code)]
+pub(super) fn aggregate_lod_columns_peak_mean(
+    input: &[u8],
+    bins_per_column: usize,
+    channel_count: usize,
+    source_span_columns: usize,
+) -> AggregatedLodColumns {
+    if bins_per_column == 0 || channel_count == 0 || source_span_columns == 0 {
+        return AggregatedLodColumns {
+            bytes: Vec::new(),
+            column_count: 0,
+            plane_count: 2,
+        };
+    }
+    let bytes_per_column = bins_per_column.saturating_mul(channel_count);
+    let input_columns = input.len() / bytes_per_column;
+    let output_columns = input_columns / source_span_columns;
+    let mut bytes = Vec::with_capacity(output_columns * bytes_per_column * 2);
+    for out_col in 0..output_columns {
+        let source_start = out_col * source_span_columns;
+        for plane in 0..2 {
+            for channel in 0..channel_count {
+                for bin in 0..bins_per_column {
+                    let mut peak = 0u8;
+                    let mut sum = 0u32;
+                    for source_delta in 0..source_span_columns {
+                        let source_col = source_start + source_delta;
+                        let idx = source_col * bytes_per_column + channel * bins_per_column + bin;
+                        let value = input[idx];
+                        peak = peak.max(value);
+                        sum += u32::from(value);
+                    }
+                    let mean = (sum + u32::try_from(source_span_columns / 2).unwrap_or(0))
+                        / u32::try_from(source_span_columns).unwrap_or(1);
+                    bytes.push(if plane == 0 {
+                        peak
+                    } else {
+                        u8::try_from(mean).unwrap_or(u8::MAX)
+                    });
+                }
+            }
+        }
+    }
+    AggregatedLodColumns {
+        bytes,
+        column_count: clamp_to_u16(output_columns),
+        plane_count: 2,
+    }
+}
+
 /// Saturating conversion from `f64` to `u32`, clamping to `[0, u32::MAX]`.
 #[allow(dead_code)]
 fn f64_to_u32_saturating(v: f64) -> u32 {
@@ -2104,6 +2164,30 @@ mod tests {
         assert_eq!(
             next_target_chunk_columns_for_payload(32, SpectrogramDisplayMode::Centered, 1_025, 2,),
             64
+        );
+    }
+
+    #[test]
+    fn lod_aggregation_preserves_peak_and_mean_per_bin() {
+        let input = vec![
+            10, 20, 30, 40, // column 0, bins 0..3
+            30, 10, 90, 50, // column 1
+            70, 80, 20, 10, // column 2
+            90, 60, 40, 30, // column 3
+        ];
+
+        let aggregated = aggregate_lod_columns_peak_mean(&input, 4, 1, 2);
+
+        assert_eq!(aggregated.column_count, 2);
+        assert_eq!(aggregated.plane_count, 2);
+        assert_eq!(
+            aggregated.bytes,
+            vec![
+                30, 20, 90, 50, // output column 0 peak
+                20, 15, 60, 45, // output column 0 mean
+                90, 80, 40, 30, // output column 1 peak
+                80, 70, 30, 20, // output column 1 mean
+            ]
         );
     }
 
