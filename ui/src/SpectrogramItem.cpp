@@ -1366,6 +1366,31 @@ SpectrogramItem::SpectrogramLodSelection SpectrogramItem::selectSpectrogramLodLe
     };
 }
 
+QVector<int> SpectrogramItem::availableSpectrogramLodLevelsForTests() const {
+    QMutexLocker lock(&m_stateMutex);
+    QVector<int> levels;
+    if (m_precomputedReady || m_ringCapacity > 0) {
+        levels.push_back(0);
+    }
+    for (const SpectrogramLodPage &page : m_spectrogramLodPages) {
+        if (!levels.contains(page.level)) {
+            levels.push_back(page.level);
+        }
+    }
+    std::sort(levels.begin(), levels.end());
+    return levels;
+}
+
+int SpectrogramItem::spectrogramLodPlaneCountForTests(const int level) const {
+    QMutexLocker lock(&m_stateMutex);
+    for (const SpectrogramLodPage &page : m_spectrogramLodPages) {
+        if (page.level == level) {
+            return page.planeCount;
+        }
+    }
+    return level == 0 ? 1 : 0;
+}
+
 void SpectrogramItem::setZoomLevel(double value) {
     QMutexLocker lock(&m_stateMutex);
     const double minZoom = minimumZoomLevelLocked();
@@ -2527,20 +2552,32 @@ void SpectrogramItem::feedPrecomputedLodChunk(
     int lodSourceSpan,
     int lodPlaneCount,
     bool complete) {
-    Q_UNUSED(data);
-    Q_UNUSED(bins);
     Q_UNUSED(channelIndex);
-    Q_UNUSED(columns);
-    Q_UNUSED(startIndex);
     Q_UNUSED(totalEstimate);
     Q_UNUSED(sampleRate);
     Q_UNUSED(hopSize);
-    Q_UNUSED(trackToken);
-    Q_UNUSED(generation);
-    Q_UNUSED(lodLevel);
-    Q_UNUSED(lodSourceSpan);
-    Q_UNUSED(lodPlaneCount);
     Q_UNUSED(complete);
+    QMutexLocker lock(&m_stateMutex);
+    if (lodLevel <= 0 || columns <= 0 || bins <= 0 || lodPlaneCount <= 0) {
+        return;
+    }
+    if (m_precomputedTrackToken != 0 && trackToken != m_precomputedTrackToken) {
+        return;
+    }
+    if (m_precomputedSessionGeneration != 0 && generation < m_precomputedSessionGeneration) {
+        return;
+    }
+    m_spectrogramLodPages.push_back(SpectrogramLodPage{
+        .trackToken = trackToken,
+        .generation = generation,
+        .level = lodLevel,
+        .binsPerColumn = bins,
+        .planeCount = lodPlaneCount,
+        .sourceSpan = std::max(1, lodSourceSpan),
+        .startColumn = startIndex,
+        .endColumn = static_cast<qint64>(startIndex) + columns - 1,
+        .bytes = data,
+    });
 }
 
 void SpectrogramItem::clearPrecomputed() {
@@ -2552,6 +2589,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_ringSequenceId.clear();
     m_ringTrackToken.clear();
     m_trackColumnToSeqByToken.clear();
+    m_spectrogramLodPages.clear();
     m_ringCapacity = 0;
     m_ringOldestSeq = 0;
     m_ringWriteSeq = 0;
@@ -2640,6 +2678,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_ringSequenceId.clear();
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
+        m_spectrogramLodPages.clear();
         m_ringCapacity = 0;
         invalidateRetainedSourceTextureStateLocked();
     } else {

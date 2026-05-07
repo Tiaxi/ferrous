@@ -1158,6 +1158,7 @@ private slots:
     void spectrogramZoomLimitsWithTrackData();
     void spectrogramZoomOutBlockedWhenSongFits();
     void spectrogramLodSelectionChoosesLevelNearScreenDensity();
+    void spectrogramStoresLodChunksSeparatelyFromLevelZero();
     void spectrogramEffectiveZoomMatchesBackendHop();
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
@@ -6967,6 +6968,21 @@ void QmlSmokeTest::spectrogramLodSelectionChoosesLevelNearScreenDensity() {
         item.selectSpectrogramLodLevelForTests(0.125, QVector<int>{0, 1, 2, 3});
     QCOMPARE(levelAtFarZoom.primaryLevel, 3);
     QCOMPARE(levelAtFarZoom.secondaryLevel, 3);
+}
+
+void QmlSmokeTest::spectrogramStoresLodChunksSeparatelyFromLevelZero() {
+    SpectrogramItem item;
+    item.setWidth(400);
+    item.setHeight(120);
+
+    QByteArray level0(8, '\x10');
+    item.feedPrecomputedChunk(level0, 4, 0, 2, 0, 64, 48000, 1024, false, true, 9, true, 1);
+
+    QByteArray level1(16, '\x20'); // 2 cols x 1 channel x 4 bins x 2 planes
+    item.feedPrecomputedLodChunk(level1, 4, 0, 2, 0, 32, 48000, 2048, 9, 1, 1, 2, 2, false);
+
+    QCOMPARE(item.availableSpectrogramLodLevelsForTests(), QVector<int>({0, 1}));
+    QCOMPARE(item.spectrogramLodPlaneCountForTests(1), 2);
 }
 
 void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {

@@ -177,6 +177,20 @@ private:
     SpectrogramLodSelection selectSpectrogramLodLevelForTests(
         double effectiveZoom,
         const QVector<int> &availableLevels) const;
+    QVector<int> availableSpectrogramLodLevelsForTests() const;
+    int spectrogramLodPlaneCountForTests(int level) const;
+
+    struct SpectrogramLodPage {
+        quint64 trackToken{0};
+        quint64 generation{0};
+        int level{0};
+        int binsPerColumn{0};
+        int planeCount{1};
+        int sourceSpan{1};
+        qint64 startColumn{0};
+        qint64 endColumn{-1};
+        QByteArray bytes;
+    };
 
     struct RetainedPageSpan {
         qint64 pageIndex{0};
@@ -461,6 +475,7 @@ private:
     std::vector<qint64> m_ringSequenceId; // per slot: write sequence stored there, or -1
     std::vector<quint64> m_ringTrackToken; // per slot: track token stored there, or 0
     QHash<quint64, QHash<qint32, qint64>> m_trackColumnToSeqByToken;
+    QVector<SpectrogramLodPage> m_spectrogramLodPages;
     int m_ringCapacity{0};            // number of column slots
     // Max widget width ever observed ACROSS ALL SpectrogramItem
     // instances (static).  The Rust-side max-widget-width tracker that
