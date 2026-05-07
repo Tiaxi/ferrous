@@ -284,6 +284,12 @@ private:
         bool rendererFreeze,
         bool retainedPagesCoverVisibleRange,
         qint64 seekAgeMs);
+    static bool retainedSourceReadyForZoomReveal(
+        bool canUseRetainedSourceTextureBody,
+        bool retainedTextureCoversVisibleRange,
+        bool gpuDisplayImageAvailable,
+        int retainedUploadColumns,
+        bool retainedTextureReset);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,

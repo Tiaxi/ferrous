@@ -3598,13 +3598,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     && retainedPageTexturesReady;
             }
 
+            const bool retainedSourceReadyForReveal =
+                retainedSourceReadyForZoomReveal(
+                    canUseRetainedSourceTextureBody,
+                    retainedTextureCoversVisibleRange,
+                    !m_gpuDisplayImage.isNull(),
+                    m_gpuSourcePageUploadColumns,
+                    m_gpuSourcePageTextureReset);
             const bool freezeCanRevealFinalFrame =
                 rendererFreeze
                 && m_zoomFillDataReady
                 && !m_awaitingZoomData
-                && (canUseRetainedSourceTextureBody
-                    ? retainedTextureCoversVisibleRange
-                    : !m_gpuDisplayImage.isNull());
+                && retainedSourceReadyForReveal;
             const bool revealViaWarmedDisplayImage =
                 freezeCanRevealFinalFrame
                 && gpuDebugMode == SpectrogramGpu::DebugMode::Full
@@ -5805,6 +5810,20 @@ bool SpectrogramItem::shouldDeferTinyRetainedUploadDuringSeek(
         && !retainedPagesCoverVisibleRange
         && seekAgeMs >= 0
         && seekAgeMs <= seekDeferralWindowMs;
+}
+
+bool SpectrogramItem::retainedSourceReadyForZoomReveal(
+    const bool canUseRetainedSourceTextureBody,
+    const bool retainedTextureCoversVisibleRange,
+    const bool gpuDisplayImageAvailable,
+    const int retainedUploadColumns,
+    const bool retainedTextureReset) {
+    if (!canUseRetainedSourceTextureBody) {
+        return gpuDisplayImageAvailable;
+    }
+    return retainedTextureCoversVisibleRange
+        && retainedUploadColumns <= 0
+        && !retainedTextureReset;
 }
 
 QVector<SpectrogramItem::RetainedPageUploadSpan>

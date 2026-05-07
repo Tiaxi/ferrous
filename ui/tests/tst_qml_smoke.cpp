@@ -1257,6 +1257,7 @@ private slots:
     void spectrogramZoomFillWaitsForZoomOutVisibleColumns();
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence();
     void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
     void spectrogramRollingRetainedRenderPlanPrefillKeepsFixedZoomScale();
     void spectrogramRetainedRenderPlanCoversOnePage();
@@ -12974,6 +12975,22 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     QCOMPARE(item.m_zoomFillActive, false);
     QCOMPARE(item.m_zoomFillDataReady, false);
     delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence() {
+    QVERIFY2(
+        !SpectrogramItem::retainedSourceReadyForZoomReveal(
+            true, true, false, 384, false),
+        "zoom-fill must not reveal the retained-source path on the same frame "
+        "that is still uploading newly decoded columns");
+    QVERIFY2(
+        !SpectrogramItem::retainedSourceReadyForZoomReveal(
+            true, true, false, 0, true),
+        "zoom-fill must not reveal while the retained texture was recreated");
+    QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
+        true, true, false, 0, false));
+    QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
+        false, false, true, 384, true));
 }
 
 void QmlSmokeTest::spectrogramRetainedRenderPlanAllowsDecodedTailSlack() {
