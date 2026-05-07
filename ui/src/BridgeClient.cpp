@@ -1633,7 +1633,7 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
                 FERROUS_PROFILE_LOG_DIAGNOSTIC(
                     QStringLiteral("ui-prof"),
                     QStringLiteral(
-                        "precomputed_frame ms=%1 pop_ms=%2 dispatch_ms=%3 raw_kb=%4 data_kb=%5 cols=%6 bins=%7 channels=%8 start=%9 total=%10 hop=%11 reset=%12 clear=%13 complete=%14 token=%15 gen=%16 valid=%17")
+                        "precomputed_frame ms=%1 pop_ms=%2 dispatch_ms=%3 raw_kb=%4 data_kb=%5 cols=%6 bins=%7 channels=%8 start=%9 total=%10 hop=%11 reset=%12 clear=%13 complete=%14 token=%15 gen=%16 valid=%17 lod_level=%18 lod_span=%19 lod_planes=%20")
                         .arg(frameMs, 0, 'f', 2)
                         .arg(framePopMs, 0, 'f', 2)
                         .arg(stats.dispatchMs, 0, 'f', 2)
@@ -1650,7 +1650,10 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
                         .arg(stats.complete ? 1 : 0)
                         .arg(static_cast<qulonglong>(stats.trackToken))
                         .arg(static_cast<qulonglong>(stats.generation))
-                        .arg(stats.valid ? 1 : 0));
+                        .arg(stats.valid ? 1 : 0)
+                        .arg(stats.lodLevel)
+                        .arg(stats.lodSourceSpan)
+                        .arg(stats.lodPlaneCount));
             }
 #endif
         }

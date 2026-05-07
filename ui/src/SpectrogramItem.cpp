@@ -3024,9 +3024,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     double profileRetainedUploadMs = 0.0;
     double profileOverlayBuildMs = 0.0;
     double profileSpectrogramTextureUploadMs = 0.0;
+    double profileLodTextureUploadMs = 0.0;
     double profileOverlayTextureUploadMs = 0.0;
     const char *profilePaintPath = "empty";
     const char *profileFallbackReason = "none";
+    const char *profileLodMissingReason = "native";
     const char *profileRetainedResetReason = "none";
     bool profileCpuDisplayImageRebuilt = false;
     bool profileRetainedTextureReset = false;
@@ -3034,6 +3036,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     int profileRetainedUploadColumns = 0;
     bool profileUsedFullSpectrogramUpload = false;
     bool profileUsedTailSpectrogramUpload = false;
+    bool profileLodAvailable = false;
+    int profileLodPrimaryLevel = 0;
+    int profileLodSecondaryLevel = 0;
+    float profileLodBlend = 0.0F;
     int profileTailUploadWidth = 0;
     bool profileOverlayTextureUploaded = false;
     bool profileFreqGridTextureUploaded = false;
@@ -3365,13 +3371,37 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && canUseRetainedSourceTextureBody
                 && m_zoomFillFrozenRetainedActive;
             if (!rollingMode && gpuDebugMode == SpectrogramGpu::DebugMode::Full) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                const auto lodUploadStart = std::chrono::steady_clock::now();
+#endif
                 lodRenderState = syncSpectrogramLodTextureLocked(
                     currentWindow,
                     displayLeft,
                     displayRight,
                     effectiveZoom);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileLodTextureUploadMs =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - lodUploadStart)
+                        .count();
+                profileLodAvailable =
+                    lodRenderState.texture != nullptr && lodRenderState.primaryLevel > 0;
+                profileLodPrimaryLevel = lodRenderState.primaryLevel;
+                profileLodSecondaryLevel = lodRenderState.secondaryLevel;
+                profileLodBlend = lodRenderState.blend;
+                if (profileLodAvailable) {
+                    profileLodMissingReason = "none";
+                } else if (lodRenderState.primaryLevel > 0) {
+                    profileLodMissingReason = "missing-page";
+                } else {
+                    profileLodMissingReason = "native";
+                }
+#endif
             } else {
                 invalidateSpectrogramLodTextureStateLocked();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileLodMissingReason = rollingMode ? "rolling" : "debug-mode";
+#endif
             }
             const bool useFrozenRetainedSourceForFrame =
                 retainedFreezeAvailableForFrame && !m_zoomFillDataReady;
@@ -4753,7 +4783,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 stderr,
                 "[ui-spectrogram] paint_spike path=%s fallback=%s ms=%.3f cache_ms=%.3f "
                 "display_ms=%.3f retained_upload_ms=%.3f overlay_build_ms=%.3f "
-                "tex_ms=%.3f overlay_tex_ms=%.3f cpu_rebuild=%d retained_reset=%d "
+                "tex_ms=%.3f lod_tex_upload_ms=%.3f overlay_tex_ms=%.3f "
+                "lod_primary=%d lod_secondary=%d lod_blend=%.3f lod_available=%d "
+                "lod_missing_reason=%s cpu_rebuild=%d retained_reset=%d "
                 "retained_reset_reason=%s retained_spans=%d retained_cols=%d "
                 "full_upload=%d tail_upload=%d tail_w=%d "
                 "ov=%d fg=%d tg=%d ch=%d pending=%zu cols=%zu bins=%d size=%dx%d\n",
@@ -4765,7 +4797,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 profileRetainedUploadMs,
                 profileOverlayBuildMs,
                 profileSpectrogramTextureUploadMs,
+                profileLodTextureUploadMs,
                 profileOverlayTextureUploadMs,
+                profileLodPrimaryLevel,
+                profileLodSecondaryLevel,
+                static_cast<double>(profileLodBlend),
+                profileLodAvailable ? 1 : 0,
+                profileLodMissingReason,
                 profileCpuDisplayImageRebuilt ? 1 : 0,
                 profileRetainedTextureReset ? 1 : 0,
                 profileRetainedResetReason,
@@ -4790,7 +4828,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 stderr,
                 "[ui-spectrogram] paints/s=%llu paint_ms/s=%.2f avg_ms=%.3f "
                 "last_path=%s last_fallback=%s last_display_ms=%.3f "
-                "last_retained_upload_ms=%.3f last_retained_cols=%d cols=%zu bins=%d\n",
+                "last_retained_upload_ms=%.3f last_lod_primary=%d "
+                "last_lod_secondary=%d last_lod_blend=%.3f "
+                "last_lod_tex_upload_ms=%.3f last_lod_available=%d "
+                "last_lod_missing_reason=%s last_retained_cols=%d cols=%zu bins=%d\n",
                 static_cast<unsigned long long>(m_profilePaints),
                 m_profilePaintMs,
                 m_profilePaints > 0 ? (m_profilePaintMs / static_cast<double>(m_profilePaints)) : 0.0,
@@ -4798,6 +4839,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 profileFallbackReason,
                 profileDisplayImageBuildMs,
                 profileRetainedUploadMs,
+                profileLodPrimaryLevel,
+                profileLodSecondaryLevel,
+                static_cast<double>(profileLodBlend),
+                profileLodTextureUploadMs,
+                profileLodAvailable ? 1 : 0,
+                profileLodMissingReason,
                 profileRetainedUploadColumns,
                 profileColumnCount,
                 profileBinsPerColumn);
