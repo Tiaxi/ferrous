@@ -1157,6 +1157,7 @@ private slots:
     void spectrogramZoomProperty();
     void spectrogramZoomLimitsWithTrackData();
     void spectrogramZoomOutBlockedWhenSongFits();
+    void spectrogramLodSelectionChoosesLevelNearScreenDensity();
     void spectrogramEffectiveZoomMatchesBackendHop();
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
@@ -6941,6 +6942,31 @@ void QmlSmokeTest::spectrogramZoomOutBlockedWhenSongFits() {
     // Zoom-in still works.
     item.setZoomLevel(2.0);
     QVERIFY(std::abs(item.zoomLevel() - 2.0) < 0.0001);
+}
+
+void QmlSmokeTest::spectrogramLodSelectionChoosesLevelNearScreenDensity() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(240);
+    item.setDisplayMode(1);
+
+    const auto levelAtHalfPixel =
+        item.selectSpectrogramLodLevelForTests(0.5, QVector<int>{0, 1, 2, 3});
+    QCOMPARE(levelAtHalfPixel.primaryLevel, 1);
+    QCOMPARE(levelAtHalfPixel.secondaryLevel, 2);
+    QVERIFY(levelAtHalfPixel.blend >= 0.0);
+    QVERIFY(levelAtHalfPixel.blend <= 1.0);
+
+    const auto levelAtOnePixel =
+        item.selectSpectrogramLodLevelForTests(1.0, QVector<int>{0, 1, 2, 3});
+    QCOMPARE(levelAtOnePixel.primaryLevel, 0);
+    QCOMPARE(levelAtOnePixel.secondaryLevel, 1);
+    QVERIFY(levelAtOnePixel.blend < 0.001);
+
+    const auto levelAtFarZoom =
+        item.selectSpectrogramLodLevelForTests(0.125, QVector<int>{0, 1, 2, 3});
+    QCOMPARE(levelAtFarZoom.primaryLevel, 3);
+    QCOMPARE(levelAtFarZoom.secondaryLevel, 3);
 }
 
 void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {

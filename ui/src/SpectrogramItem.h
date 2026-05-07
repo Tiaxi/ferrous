@@ -13,6 +13,7 @@
 #include <QRectF>
 #include <QString>
 #include <QTimer>
+#include <QVector>
 
 #include "SpectrogramSourceTexture.h"
 
@@ -160,6 +161,16 @@ private:
         bool overflowed{false};
         bool coversRange{false};
     };
+
+    struct SpectrogramLodSelection {
+        int primaryLevel{0};
+        int secondaryLevel{0};
+        double blend{0.0};
+    };
+
+    SpectrogramLodSelection selectSpectrogramLodLevelForTests(
+        double effectiveZoom,
+        const QVector<int> &availableLevels) const;
 
     struct RetainedPageSpan {
         qint64 pageIndex{0};

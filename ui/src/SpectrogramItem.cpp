@@ -1326,6 +1326,46 @@ double SpectrogramItem::minimumZoomLevel() const {
     return minimumZoomLevelLocked();
 }
 
+SpectrogramItem::SpectrogramLodSelection SpectrogramItem::selectSpectrogramLodLevelForTests(
+    const double effectiveZoom,
+    const QVector<int> &availableLevels) const {
+    if (availableLevels.isEmpty()) {
+        return {};
+    }
+    const double columnsPerPixel = 1.0 / std::max(0.001, effectiveZoom);
+    const double desiredFactor = std::max(1.0, columnsPerPixel);
+    const int desiredLevel = static_cast<int>(std::floor(std::log2(desiredFactor)));
+    int lowerLevel = std::clamp(desiredLevel, availableLevels.front(), availableLevels.back());
+    int upperLevel = std::min(lowerLevel + 1, availableLevels.back());
+    if (!availableLevels.contains(lowerLevel)) {
+        lowerLevel = availableLevels.front();
+        for (const int level : availableLevels) {
+            if (level <= desiredLevel) {
+                lowerLevel = level;
+            }
+        }
+    }
+    if (!availableLevels.contains(upperLevel)) {
+        upperLevel = lowerLevel;
+        for (const int level : availableLevels) {
+            if (level > lowerLevel) {
+                upperLevel = level;
+                break;
+            }
+        }
+    }
+    const double lowerFactor = static_cast<double>(1 << lowerLevel);
+    const double upperFactor = static_cast<double>(1 << upperLevel);
+    const double blend = upperLevel == lowerLevel
+        ? 0.0
+        : std::clamp((desiredFactor - lowerFactor) / (upperFactor - lowerFactor), 0.0, 1.0);
+    return SpectrogramLodSelection{
+        .primaryLevel = lowerLevel,
+        .secondaryLevel = upperLevel,
+        .blend = blend,
+    };
+}
+
 void SpectrogramItem::setZoomLevel(double value) {
     QMutexLocker lock(&m_stateMutex);
     const double minZoom = minimumZoomLevelLocked();
