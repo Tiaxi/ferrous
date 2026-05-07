@@ -192,6 +192,17 @@ private:
         QByteArray bytes;
     };
 
+    struct SpectrogramLodRenderState {
+        QSGTexture *texture{nullptr};
+        QRectF sourceRect;
+        QSize textureSize;
+        float blend{0.0F};
+        int primaryLevel{0};
+        int secondaryLevel{0};
+        int primaryPlaneCount{1};
+        int secondaryPlaneCount{1};
+    };
+
     struct RetainedPageSpan {
         qint64 pageIndex{0};
         int pageXBegin{0};
@@ -261,6 +272,7 @@ private:
         bool *budgetExhausted = nullptr);
     static const char *retainedPageResetReasonName(RetainedPageResetReason reason);
     void invalidateLegacyRetainedSourceTextureStateLocked();
+    void invalidateSpectrogramLodTextureStateLocked();
     void invalidateRetainedSourceTextureStateLocked();
     void invalidateRetainedSourceTextureUploadStateLocked(bool preservePageTextures);
     void invalidateRenderCachesLocked();
@@ -344,6 +356,12 @@ private:
         qint64 displayLeft,
         qint64 displayRight,
         bool rollingMode);
+    const SpectrogramLodPage *findSpectrogramLodPageLocked(int level) const;
+    SpectrogramLodRenderState syncSpectrogramLodTextureLocked(
+        QQuickWindow *window,
+        qint64 displayLeft,
+        qint64 displayRight,
+        double effectiveZoom);
     void syncRetainedSourcePagesLocked(
         QQuickWindow *window,
         qint64 displayLeft,
@@ -525,7 +543,9 @@ private:
     bool m_precomputedCanvasDirty{true};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     SpectrogramSourceTexture m_gpuSourceTexture;
+    SpectrogramSourceTexture m_gpuLodSourceTexture;
     QByteArray m_gpuSourceUploadRgba;
+    QByteArray m_gpuLodUploadRgba;
     QVector<SpectrogramSourceUploadSpan> m_gpuSourceUploadSpans;
     int m_gpuSourcePageUploadSpanCount{0};
     int m_gpuSourcePageUploadColumns{0};
@@ -539,6 +559,11 @@ private:
     qint64 m_gpuSourceTextureRingOldestSeq{-1};
     qint64 m_gpuSourceTextureMinColumnIndex{0};
     qint64 m_gpuSourceTextureMaxColumnIndex{-1};
+    int m_gpuLodTextureLevel{0};
+    quint64 m_gpuLodTextureTrackToken{0};
+    quint64 m_gpuLodTextureGeneration{0};
+    qint64 m_gpuLodTextureStartColumn{0};
+    qint64 m_gpuLodTextureEndColumn{-1};
     std::vector<std::unique_ptr<RetainedSourcePageState>> m_gpuSourcePages;
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenDisplayImage;

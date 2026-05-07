@@ -12,6 +12,7 @@ layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     vec4 sourceTextureMetrics;
     vec4 sourceRectMetrics;
+    vec4 lodMetrics;
 };
 
 float sampleSourceValue(float sourceColumn, float sourceBin) {
@@ -48,6 +49,17 @@ float smoothPeakHoldWindowValue(float rangeStart, float columnsPerPixel, float i
     return mix(baseWindowValue, shiftedWindowValue, interpolationT);
 }
 
+float stableLodValue(float sourceColumn, float sourceBin) {
+    float primaryPlaneCount = max(lodMetrics.x, 1.0);
+    if (primaryPlaneCount < 1.5) {
+        return sampleSourceValue(sourceColumn, sourceBin);
+    }
+    float sourceRectHeight = max(sourceRectMetrics.y, 1.0);
+    float peakValue = sampleSourceValue(sourceColumn, sourceBin);
+    float meanValue = sampleSourceValue(sourceColumn, sourceBin + sourceRectHeight);
+    return mix(meanValue, peakValue, 0.65);
+}
+
 void main() {
     vec2 sourceSize = max(sourceTextureMetrics.xy, vec2(1.0, 1.0));
     float effectiveZoom = max(sourceTextureMetrics.z, 0.001);
@@ -63,7 +75,9 @@ void main() {
     float sourceBin = rowSample.x * 255.0 + rowSample.y * 65280.0;
 
     float value = 0.0;
-    if (effectiveZoom > 1.001 && interpolationT > 0.001) {
+    if (lodMetrics.w > 0.5) {
+        value = stableLodValue(sourceColumn, sourceBin);
+    } else if (effectiveZoom > 1.001 && interpolationT > 0.001) {
         float leftColumn = sourceColumnOffset + floor(rangeStart);
         float rightColumn = min(leftColumn + 1.0, sourceColumnOffset + sourceRectWidth - 1.0);
         float leftValue = sampleSourceValue(leftColumn, sourceBin);

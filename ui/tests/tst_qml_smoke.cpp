@@ -1159,6 +1159,7 @@ private slots:
     void spectrogramZoomOutBlockedWhenSongFits();
     void spectrogramLodSelectionChoosesLevelNearScreenDensity();
     void spectrogramStoresLodChunksSeparatelyFromLevelZero();
+    void spectrogramFullModeBindsSelectedLodTextureWhenZoomedOut();
     void spectrogramEffectiveZoomMatchesBackendHop();
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
@@ -6983,6 +6984,64 @@ void QmlSmokeTest::spectrogramStoresLodChunksSeparatelyFromLevelZero() {
 
     QCOMPARE(item.availableSpectrogramLodLevelsForTests(), QVector<int>({0, 1}));
     QCOMPARE(item.spectrogramLodPlaneCountForTests(1), 2);
+}
+
+void QmlSmokeTest::spectrogramFullModeBindsSelectedLodTextureWhenZoomedOut() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(320, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+    item.setPlaying(false);
+
+    constexpr int bins = 64;
+    constexpr int totalColumns = 1024;
+    QByteArray levelZero(totalColumns * bins, '\x30');
+    item.feedPrecomputedChunk(
+        levelZero, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, false,
+        true, 37, false, 1);
+
+    constexpr int lodLevel = 2;
+    constexpr int lodColumns = totalColumns >> lodLevel;
+    constexpr int lodPlanes = 2;
+    QByteArray lod(lodColumns * bins * lodPlanes, '\x60');
+    item.feedPrecomputedLodChunk(
+        lod, bins, 0, lodColumns,
+        0, lodColumns, 48000, 4096, 37, 1,
+        lodLevel, 1 << lodLevel, lodPlanes, false);
+    item.setZoomLevel(0.25);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained full-mode LOD material test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+    QCoreApplication::processEvents();
+
+    std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node.get());
+    QVERIFY(sampleNode != nullptr);
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    QCOMPARE(sampleMaterial->state.primaryLodLevel, lodLevel);
+    QCOMPARE(sampleMaterial->state.primaryPlaneCount, lodPlanes);
 }
 
 void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {

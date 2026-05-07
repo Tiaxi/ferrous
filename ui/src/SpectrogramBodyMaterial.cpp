@@ -26,6 +26,8 @@ QSGTexture *spectrogramBodySampleTextureForBinding(
         return state.paletteTexture;
     case 3:
         return state.rowLutTexture;
+    case 4:
+        return state.secondarySourceTexture;
     default:
         return nullptr;
     }
@@ -66,10 +68,11 @@ struct SpectrogramBodySampleUniformData {
     std::array<float, 16> matrix{};
     std::array<float, 4> sourceTextureMetrics{};
     std::array<float, 4> sourceRectMetrics{};
+    std::array<float, 4> lodMetrics{};
 };
 
 static_assert(
-    sizeof(SpectrogramBodySampleUniformData) == 96,
+    sizeof(SpectrogramBodySampleUniformData) == 112,
     "Body sample Qt Quick shader UBO must match the baked Qt shader layout");
 
 class SpectrogramBodySampleMaterialShader final : public QSGMaterialShader {
@@ -116,12 +119,22 @@ public:
                 0.0F,
                 0.0F,
             };
+            const std::array<float, 4> nextLodMetrics{
+                static_cast<float>(std::max(1, material->state.primaryPlaneCount)),
+                static_cast<float>(std::max(1, material->state.secondaryPlaneCount)),
+                material->state.lodBlend,
+                static_cast<float>(std::max(0, material->state.primaryLodLevel)),
+            };
             if (oldMaterial == nullptr || buf->sourceTextureMetrics != nextMetrics) {
                 buf->sourceTextureMetrics = nextMetrics;
                 changed = true;
             }
             if (oldMaterial == nullptr || buf->sourceRectMetrics != nextSourceRectMetrics) {
                 buf->sourceRectMetrics = nextSourceRectMetrics;
+                changed = true;
+            }
+            if (oldMaterial == nullptr || buf->lodMetrics != nextLodMetrics) {
+                buf->lodMetrics = nextLodMetrics;
                 changed = true;
             }
         }
@@ -393,17 +406,19 @@ int SpectrogramBodySampleMaterial::compare(const QSGMaterial *other) const {
         return 1;
     }
     const auto *otherMaterial = static_cast<const SpectrogramBodySampleMaterial *>(other);
-    const std::array<qint64, 4> keys{
+    const std::array<qint64, 5> keys{
         textureComparisonKey(state.sourceTexture),
         textureComparisonKey(state.dbRemapTexture),
         textureComparisonKey(state.paletteTexture),
         textureComparisonKey(state.rowLutTexture),
+        textureComparisonKey(state.secondarySourceTexture),
     };
-    const std::array<qint64, 4> otherKeys{
+    const std::array<qint64, 5> otherKeys{
         textureComparisonKey(otherMaterial->state.sourceTexture),
         textureComparisonKey(otherMaterial->state.dbRemapTexture),
         textureComparisonKey(otherMaterial->state.paletteTexture),
         textureComparisonKey(otherMaterial->state.rowLutTexture),
+        textureComparisonKey(otherMaterial->state.secondarySourceTexture),
     };
     for (size_t i = 0; i < keys.size(); ++i) {
         if (keys[i] != otherKeys[i]) {
@@ -414,9 +429,21 @@ int SpectrogramBodySampleMaterial::compare(const QSGMaterial *other) const {
         cmp != 0) {
         return cmp;
     }
+    if (const int cmp = compareRect(
+            state.secondarySourceRect,
+            otherMaterial->state.secondarySourceRect);
+        cmp != 0) {
+        return cmp;
+    }
     if (const int cmp = compareSize(
             state.sourceTextureSize,
             otherMaterial->state.sourceTextureSize);
+        cmp != 0) {
+        return cmp;
+    }
+    if (const int cmp = compareSize(
+            state.secondarySourceTextureSize,
+            otherMaterial->state.secondarySourceTextureSize);
         cmp != 0) {
         return cmp;
     }
@@ -431,6 +458,22 @@ int SpectrogramBodySampleMaterial::compare(const QSGMaterial *other) const {
             otherMaterial->state.sourceColumnOffset);
         cmp != 0) {
         return cmp;
+    }
+    if (const int cmp = compareFloat(state.lodBlend, otherMaterial->state.lodBlend);
+        cmp != 0) {
+        return cmp;
+    }
+    if (state.primaryLodLevel != otherMaterial->state.primaryLodLevel) {
+        return state.primaryLodLevel < otherMaterial->state.primaryLodLevel ? -1 : 1;
+    }
+    if (state.secondaryLodLevel != otherMaterial->state.secondaryLodLevel) {
+        return state.secondaryLodLevel < otherMaterial->state.secondaryLodLevel ? -1 : 1;
+    }
+    if (state.primaryPlaneCount != otherMaterial->state.primaryPlaneCount) {
+        return state.primaryPlaneCount < otherMaterial->state.primaryPlaneCount ? -1 : 1;
+    }
+    if (state.secondaryPlaneCount != otherMaterial->state.secondaryPlaneCount) {
+        return state.secondaryPlaneCount < otherMaterial->state.secondaryPlaneCount ? -1 : 1;
     }
     return 0;
 }

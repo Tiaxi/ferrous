@@ -16,14 +16,22 @@ class SpectrogramBodySampleMaterial final : public QSGMaterial {
 public:
     struct State {
         QSGTexture *sourceTexture{nullptr};
+        QSGTexture *secondarySourceTexture{nullptr};
         QSGTexture *dbRemapTexture{nullptr};
         QSGTexture *paletteTexture{nullptr};
         QSGTexture *rowLutTexture{nullptr};
         QRectF sourceRect;
+        QRectF secondarySourceRect;
         QPointF drawOffset;
         QSize sourceTextureSize;
+        QSize secondarySourceTextureSize;
         float effectiveZoom{1.0F};
         float sourceColumnOffset{0.0F};
+        float lodBlend{0.0F};
+        int primaryLodLevel{0};
+        int secondaryLodLevel{0};
+        int primaryPlaneCount{1};
+        int secondaryPlaneCount{1};
     };
 
     SpectrogramBodySampleMaterial();

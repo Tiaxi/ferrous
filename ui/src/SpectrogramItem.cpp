@@ -2885,6 +2885,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QSGTexture *retainedSourceTexture{nullptr};
     QVector<RetainedRenderSegment> retainedTextureSegments;
     QVector<RetainedBodyDrawSegment> retainedBodyDrawSegments;
+    SpectrogramLodRenderState lodRenderState;
     bool useRetainedSourceTextureBodyForFrame = false;
     QImage spectrogramDbRemapImage;
     QImage spectrogramPaletteImage;
@@ -3268,6 +3269,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 rendererFreeze
                 && canUseRetainedSourceTextureBody
                 && m_zoomFillFrozenRetainedActive;
+            if (!rollingMode && gpuDebugMode == SpectrogramGpu::DebugMode::Full) {
+                lodRenderState = syncSpectrogramLodTextureLocked(
+                    currentWindow,
+                    displayLeft,
+                    displayRight,
+                    effectiveZoom);
+            } else {
+                invalidateSpectrogramLodTextureStateLocked();
+            }
             const bool useFrozenRetainedSourceForFrame =
                 retainedFreezeAvailableForFrame && !m_zoomFillDataReady;
             const qint64 retainedRenderableRight = rollingMode
@@ -4274,6 +4284,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                   / static_cast<double>(baseSourceRect.width()))
             : 1.0F;
     bodySampleState.sourceColumnOffset = static_cast<float>(baseSourceRect.x());
+    if (lodRenderState.texture != nullptr && lodRenderState.primaryLevel > 0) {
+        bodySampleState.sourceTexture = lodRenderState.texture;
+        bodySampleState.sourceRect = lodRenderState.sourceRect;
+        bodySampleState.sourceTextureSize = lodRenderState.textureSize;
+        bodySampleState.sourceColumnOffset =
+            static_cast<float>(lodRenderState.sourceRect.x());
+        bodySampleState.lodBlend = lodRenderState.blend;
+        bodySampleState.primaryLodLevel = lodRenderState.primaryLevel;
+        bodySampleState.secondaryLodLevel = lodRenderState.secondaryLevel;
+        bodySampleState.primaryPlaneCount = lodRenderState.primaryPlaneCount;
+        bodySampleState.secondaryPlaneCount = lodRenderState.secondaryPlaneCount;
+    }
     if (useStockMaterialBody) {
         syncSpectrogramStockMaterialNode(
             node->spectrogramStockMaterialNode,
@@ -4685,6 +4707,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 void SpectrogramItem::releaseResources() {
     QMutexLocker lock(&m_stateMutex);
     m_gpuSourceTexture.release();
+    m_gpuLodSourceTexture.release();
+    invalidateSpectrogramLodTextureStateLocked();
     m_sceneGraphGeneration += 1;
     m_overlayDirty = true;
     m_freqGridDirty = true;
@@ -5673,6 +5697,15 @@ void SpectrogramItem::invalidateLegacyRetainedSourceTextureStateLocked() {
     m_gpuSourceTexture.clearPendingSpans();
 }
 
+void SpectrogramItem::invalidateSpectrogramLodTextureStateLocked() {
+    m_gpuLodUploadRgba.clear();
+    m_gpuLodTextureLevel = 0;
+    m_gpuLodTextureTrackToken = 0;
+    m_gpuLodTextureGeneration = 0;
+    m_gpuLodTextureStartColumn = 0;
+    m_gpuLodTextureEndColumn = -1;
+}
+
 void SpectrogramItem::invalidateRetainedSourceTextureStateLocked() {
     invalidateRetainedSourceTextureUploadStateLocked(false);
 }
@@ -5743,6 +5776,7 @@ void SpectrogramItem::invalidateRenderCachesLocked() {
     m_gpuDisplayLastUpdatedColumns = 0;
     m_gpuDisplaySubpixelOffset = 0.0;
     invalidateRetainedSourceTextureStateLocked();
+    invalidateSpectrogramLodTextureStateLocked();
     m_gpuDbRemapBins = 0;
     m_gpuDbRemapDbRange = 132.0;
     m_gpuPaletteMuted = false;
@@ -6479,6 +6513,138 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             },
             Qt::QueuedConnection);
     }
+}
+
+const SpectrogramItem::SpectrogramLodPage *SpectrogramItem::findSpectrogramLodPageLocked(
+    const int level) const {
+    if (level <= 0 || m_precomputedTrackToken == 0) {
+        return nullptr;
+    }
+    const SpectrogramLodPage *selected = nullptr;
+    for (const SpectrogramLodPage &page : m_spectrogramLodPages) {
+        if (page.level != level
+            || page.trackToken != m_precomputedTrackToken
+            || page.binsPerColumn != m_precomputedBinsPerColumn
+            || page.startColumn > page.endColumn
+            || page.bytes.isEmpty()) {
+            continue;
+        }
+        if (selected == nullptr || page.generation >= selected->generation) {
+            selected = &page;
+        }
+    }
+    return selected;
+}
+
+SpectrogramItem::SpectrogramLodRenderState SpectrogramItem::syncSpectrogramLodTextureLocked(
+    QQuickWindow *window,
+    const qint64 displayLeft,
+    const qint64 displayRight,
+    const double effectiveZoom) {
+    SpectrogramLodRenderState renderState;
+    if (window == nullptr || displayRight < displayLeft || m_precomputedBinsPerColumn <= 0) {
+        invalidateSpectrogramLodTextureStateLocked();
+        return renderState;
+    }
+
+    QVector<int> availableLevels;
+    availableLevels.push_back(0);
+    for (const SpectrogramLodPage &page : m_spectrogramLodPages) {
+        if (!availableLevels.contains(page.level)) {
+            availableLevels.push_back(page.level);
+        }
+    }
+    std::sort(availableLevels.begin(), availableLevels.end());
+    const SpectrogramLodSelection selection =
+        selectSpectrogramLodLevelForTests(effectiveZoom, availableLevels);
+    renderState.primaryLevel = selection.primaryLevel;
+    renderState.secondaryLevel = selection.secondaryLevel;
+    renderState.blend = static_cast<float>(selection.blend);
+    if (selection.primaryLevel <= 0) {
+        invalidateSpectrogramLodTextureStateLocked();
+        return renderState;
+    }
+
+    const SpectrogramLodPage *page = findSpectrogramLodPageLocked(selection.primaryLevel);
+    if (page == nullptr || page->planeCount <= 0 || page->sourceSpan <= 0) {
+        invalidateSpectrogramLodTextureStateLocked();
+        return renderState;
+    }
+
+    const qint64 pageColumns = page->endColumn - page->startColumn + 1;
+    if (pageColumns <= 0 || pageColumns > std::numeric_limits<int>::max()) {
+        invalidateSpectrogramLodTextureStateLocked();
+        return renderState;
+    }
+    const qsizetype expectedBytes =
+        static_cast<qsizetype>(pageColumns)
+        * page->binsPerColumn
+        * page->planeCount;
+    if (page->bytes.size() < expectedBytes) {
+        invalidateSpectrogramLodTextureStateLocked();
+        return renderState;
+    }
+
+    const QSize textureSize(
+        static_cast<int>(pageColumns),
+        page->binsPerColumn * page->planeCount);
+    const bool textureStateChanged =
+        !m_gpuLodSourceTexture.matches(window, textureSize)
+        || m_gpuLodTextureLevel != page->level
+        || m_gpuLodTextureTrackToken != page->trackToken
+        || m_gpuLodTextureGeneration != page->generation
+        || m_gpuLodTextureStartColumn != page->startColumn
+        || m_gpuLodTextureEndColumn != page->endColumn;
+    if (textureStateChanged) {
+        if (!m_gpuLodSourceTexture.ensureCreated(window, textureSize.width(), textureSize.height())) {
+            invalidateSpectrogramLodTextureStateLocked();
+            return renderState;
+        }
+        m_gpuLodUploadRgba.resize(textureSize.width() * textureSize.height() * 4);
+        m_gpuLodUploadRgba.fill('\0');
+        const auto *source = reinterpret_cast<const quint8 *>(page->bytes.constData());
+        for (int plane = 0; plane < page->planeCount; ++plane) {
+            for (int bin = 0; bin < page->binsPerColumn; ++bin) {
+                const int textureRow = plane * page->binsPerColumn + bin;
+                uchar *row = reinterpret_cast<uchar *>(m_gpuLodUploadRgba.data())
+                    + static_cast<qsizetype>(textureRow) * textureSize.width() * 4;
+                for (int x = 0; x < textureSize.width(); ++x) {
+                    const qsizetype sourceOffset =
+                        (static_cast<qsizetype>(x) * page->binsPerColumn + bin)
+                        * page->planeCount
+                        + plane;
+                    writeRgba8888GrayPixel(row, x, source[sourceOffset]);
+                }
+            }
+        }
+        if (!m_gpuLodSourceTexture.uploadRgbaColumns(
+                window,
+                0,
+                textureSize.width(),
+                textureSize.height(),
+                m_gpuLodUploadRgba)) {
+            invalidateSpectrogramLodTextureStateLocked();
+            return renderState;
+        }
+        m_gpuLodTextureLevel = page->level;
+        m_gpuLodTextureTrackToken = page->trackToken;
+        m_gpuLodTextureGeneration = page->generation;
+        m_gpuLodTextureStartColumn = page->startColumn;
+        m_gpuLodTextureEndColumn = page->endColumn;
+    }
+
+    const double lodLeft =
+        static_cast<double>(displayLeft) / static_cast<double>(page->sourceSpan)
+        - static_cast<double>(page->startColumn);
+    const double lodWidth =
+        static_cast<double>(displayRight - displayLeft + 1)
+        / static_cast<double>(page->sourceSpan);
+    renderState.texture = m_gpuLodSourceTexture.texture();
+    renderState.textureSize = textureSize;
+    renderState.sourceRect = QRectF(lodLeft, 0.0, lodWidth, page->binsPerColumn);
+    renderState.primaryPlaneCount = page->planeCount;
+    renderState.secondaryPlaneCount = page->planeCount;
+    return renderState;
 }
 
 void SpectrogramItem::syncRetainedSourceTextureLocked(
