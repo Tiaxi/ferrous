@@ -22,6 +22,32 @@ float sampleSourceValue(float sourceColumn, float sourceBin) {
     return texture(sourceTex, sampleUv).x;
 }
 
+float peakHoldWindowValue(float firstColumn, float windowColumns, float sourceBin, float sourceColumnOffset, float sourceRectWidth) {
+    float lastColumn = min(firstColumn + windowColumns - 1.0, sourceColumnOffset + sourceRectWidth - 1.0);
+    float value = 0.0;
+    for (float column = firstColumn; column <= lastColumn; column += 1.0) {
+        value = max(value, sampleSourceValue(column, sourceBin));
+    }
+    return value;
+}
+
+float smoothPeakHoldWindowValue(float rangeStart, float columnsPerPixel, float interpolationT, float sourceBin, float sourceColumnOffset, float sourceRectWidth) {
+    float windowColumns = max(1.0, ceil(columnsPerPixel));
+    float firstColumn = clamp(
+        sourceColumnOffset + floor(rangeStart),
+        sourceColumnOffset,
+        sourceColumnOffset + sourceRectWidth - 1.0);
+    float shiftedFirstColumn = clamp(
+        firstColumn + 1.0,
+        sourceColumnOffset,
+        sourceColumnOffset + sourceRectWidth - 1.0);
+    float baseWindowValue = peakHoldWindowValue(
+        firstColumn, windowColumns, sourceBin, sourceColumnOffset, sourceRectWidth);
+    float shiftedWindowValue = peakHoldWindowValue(
+        shiftedFirstColumn, windowColumns, sourceBin, sourceColumnOffset, sourceRectWidth);
+    return mix(baseWindowValue, shiftedWindowValue, interpolationT);
+}
+
 void main() {
     vec2 sourceSize = max(sourceTextureMetrics.xy, vec2(1.0, 1.0));
     float effectiveZoom = max(sourceTextureMetrics.z, 0.001);
@@ -44,13 +70,13 @@ void main() {
         float rightValue = sampleSourceValue(rightColumn, sourceBin);
         value = mix(leftValue, rightValue, interpolationT);
     } else {
-        float firstColumn = sourceColumnOffset + floor(rangeStart);
-        float lastColumn = sourceColumnOffset + ceil(rangeStart + columnsPerPixel - 1.0);
-        firstColumn = clamp(firstColumn, sourceColumnOffset, sourceColumnOffset + sourceRectWidth - 1.0);
-        lastColumn = clamp(lastColumn, firstColumn, sourceColumnOffset + sourceRectWidth - 1.0);
-        for (float column = firstColumn; column <= lastColumn; column += 1.0) {
-            value = max(value, sampleSourceValue(column, sourceBin));
-        }
+        value = smoothPeakHoldWindowValue(
+            rangeStart,
+            columnsPerPixel,
+            interpolationT,
+            sourceBin,
+            sourceColumnOffset,
+            sourceRectWidth);
     }
 
     float mapped = texture(dbRemapTex, vec2(value, 0.5)).x;

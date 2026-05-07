@@ -964,6 +964,24 @@ void assertFragmentShaderInvertsPaletteLookup() {
         "full-mode fragment shader should invert the remapped palette lookup to match the CPU renderer");
 }
 
+void assertFragmentShaderSmoothsZoomOutAggregation() {
+    const QString shaderPath = QFileInfo(QString::fromUtf8(__FILE__))
+        .dir()
+        .absoluteFilePath(QStringLiteral("../src/shaders/SpectrogramBodySample.frag"));
+    QFile shaderFile(shaderPath);
+    QVERIFY2(
+        shaderFile.open(QIODevice::ReadOnly | QIODevice::Text),
+        qPrintable(QStringLiteral("failed to open fragment shader source %1").arg(shaderPath)));
+    QString shaderSource = QString::fromUtf8(shaderFile.readAll());
+    shaderSource.remove(QRegularExpression(QStringLiteral("\\s+")));
+    QVERIFY2(
+        shaderSource.contains(QStringLiteral("smoothPeakHoldWindowValue")),
+        "zoomed-out full-mode shader should use a dedicated smooth peak-hold aggregation path");
+    QVERIFY2(
+        shaderSource.contains(QStringLiteral("mix(baseWindowValue,shiftedWindowValue,interpolationT)")),
+        "zoomed-out full-mode shader should blend adjacent peak-hold windows across fractional scroll phases");
+}
+
 void clearCapturedMessages() {
     QMutexLocker locker(&capturedMessageMutex());
     capturedMessages().clear();
@@ -1044,6 +1062,7 @@ private slots:
     void spectrogramGpuSparseCenteredWindowUsesDisplayImageWithoutRetainedSourceTexture();
     void spectrogramGpuStockMaterialDebugModeUsesStockTextureMaterialNode();
     void spectrogramGpuFullModeUsesSampleBodyMaterialNode();
+    void spectrogramGpuFullModeShaderSmoothsZoomOutAggregation();
     void spectrogramGpuSampleMaterialsBindSourceTextureAtZero();
     void spectrogramGpuSampleMaterialCompareIncludesSamplingState();
     void spectrogramGpuSampledTexturesCommitPendingUploads();
@@ -11764,6 +11783,10 @@ void QmlSmokeTest::spectrogramGpuFullModeUsesSampleBodyMaterialNode() {
         dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
     QVERIFY(sampleMaterial != nullptr);
     QVERIFY(sampleMaterial->state.rowLutTexture != nullptr);
+}
+
+void QmlSmokeTest::spectrogramGpuFullModeShaderSmoothsZoomOutAggregation() {
+    assertFragmentShaderSmoothsZoomOutAggregation();
 }
 
 void QmlSmokeTest::spectrogramGpuSampleMaterialsBindSourceTextureAtZero() {
