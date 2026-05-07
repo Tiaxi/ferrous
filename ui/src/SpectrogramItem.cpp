@@ -3591,7 +3591,16 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (useFrozenRetainedSourceForFrame) {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
-                retainedTextureSegments = m_zoomFillFrozenRetainedSegments;
+                const double frozenSourceColumnDelta =
+                    m_zoomFillFrozenRetainedColumnsPerSecond > 0.0
+                        ? (renderPositionSeconds
+                              - m_zoomFillFrozenRetainedPositionSeconds)
+                            * m_zoomFillFrozenRetainedColumnsPerSecond
+                        : 0.0;
+                retainedTextureSegments =
+                    scrollFrozenRetainedSegmentsForZoomFill(
+                        m_zoomFillFrozenRetainedSegments,
+                        frozenSourceColumnDelta);
                 haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
                 rebuildRetainedDrawSegments();
             } else if (canUseRetainedSourceTextureBody
@@ -5772,6 +5781,13 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(bool allowCpuSnapshot) {
     }
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
     m_zoomFillFrozenDisplayGeneration = m_gpuDisplayGeneration;
+    m_zoomFillFrozenRetainedPositionSeconds =
+        currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+    m_zoomFillFrozenRetainedColumnsPerSecond =
+        m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0
+            ? static_cast<double>(m_precomputedSampleRateHz)
+                / static_cast<double>(m_precomputedHopSize)
+            : 0.0;
 }
 
 void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
@@ -5779,6 +5795,8 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenDisplayGeneration = 0;
     m_zoomFillDataReady = false;
     m_zoomFillFrozenRetainedSegments = {};
+    m_zoomFillFrozenRetainedPositionSeconds = 0.0;
+    m_zoomFillFrozenRetainedColumnsPerSecond = 0.0;
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
     m_zoomFillFreezePending = false;
@@ -5839,6 +5857,48 @@ bool SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
     return rendererFreeze
         && retainedFreezeAvailableForFrame
         && !freezeCanRevealFinalFrame;
+}
+
+QVector<SpectrogramItem::RetainedRenderSegment>
+SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+    const QVector<RetainedRenderSegment> &segments,
+    const double sourceColumnDelta) {
+    if (segments.isEmpty() || !std::isfinite(sourceColumnDelta)) {
+        return segments;
+    }
+
+    const double integerShiftDouble = std::floor(sourceColumnDelta);
+    const double fractionalShift = sourceColumnDelta - integerShiftDouble;
+    const qint64 integerShift =
+        static_cast<qint64>(std::clamp(
+            integerShiftDouble,
+            static_cast<double>(std::numeric_limits<qint64>::min()),
+            static_cast<double>(std::numeric_limits<qint64>::max())));
+
+    QVector<RetainedRenderSegment> scrolled;
+    scrolled.reserve(segments.size());
+    for (const RetainedRenderSegment &segment : segments) {
+        RetainedRenderSegment shifted = segment;
+        if (segment.valid
+            && !segment.sourceRect.isEmpty()
+            && !segment.targetRect.isEmpty()) {
+            const qint64 shiftedX =
+                static_cast<qint64>(segment.sourceRect.x()) + integerShift;
+            shifted.sourceRect.moveLeft(static_cast<int>(std::clamp(
+                shiftedX,
+                static_cast<qint64>(std::numeric_limits<int>::min()),
+                static_cast<qint64>(std::numeric_limits<int>::max()))));
+
+            const double sourceWidth =
+                static_cast<double>(segment.sourceRect.width());
+            const double targetScale = sourceWidth > 0.0
+                ? segment.targetRect.width() / sourceWidth
+                : 0.0;
+            shifted.targetRect.translate(-fractionalShift * targetScale, 0.0);
+        }
+        scrolled.push_back(shifted);
+    }
+    return scrolled;
 }
 
 QVector<SpectrogramItem::RetainedPageUploadSpan>

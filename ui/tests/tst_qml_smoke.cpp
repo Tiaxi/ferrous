@@ -1258,6 +1258,7 @@ private slots:
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence();
+    void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
     void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
     void spectrogramRollingRetainedRenderPlanPrefillKeepsFixedZoomScale();
     void spectrogramRetainedRenderPlanCoversOnePage();
@@ -13004,6 +13005,26 @@ void QmlSmokeTest::spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence() {
         true, true, false, 0, false));
     QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
         false, false, true, 384, true));
+}
+
+void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock() {
+    const QVector<SpectrogramItem::RetainedRenderSegment> frozenSegments{
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(100, 0, 40, 16),
+            QRectF(10.0, 0.0, 80.0, 32.0),
+            true,
+        },
+    };
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> scrolled =
+        SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+            frozenSegments,
+            3.25);
+
+    QCOMPARE(scrolled.size(), 1);
+    QCOMPARE(scrolled[0].sourceRect, QRect(103, 0, 40, 16));
+    QCOMPARE(scrolled[0].targetRect, QRectF(9.5, 0.0, 80.0, 32.0));
+    QVERIFY(scrolled[0].valid);
 }
 
 void QmlSmokeTest::spectrogramRetainedRenderPlanAllowsDecodedTailSlack() {

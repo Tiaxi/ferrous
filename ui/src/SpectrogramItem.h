@@ -294,6 +294,9 @@ private:
         bool rendererFreeze,
         bool retainedFreezeAvailableForFrame,
         bool freezeCanRevealFinalFrame);
+    static QVector<RetainedRenderSegment> scrollFrozenRetainedSegmentsForZoomFill(
+        const QVector<RetainedRenderSegment> &segments,
+        double sourceColumnDelta);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,
@@ -605,6 +608,8 @@ private:
     QImage m_gpuDisplayImage;
     QImage m_zoomFillFrozenDisplayImage;
     QVector<RetainedRenderSegment> m_zoomFillFrozenRetainedSegments;
+    double m_zoomFillFrozenRetainedPositionSeconds{0.0};
+    double m_zoomFillFrozenRetainedColumnsPerSecond{0.0};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;
