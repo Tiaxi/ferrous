@@ -46,16 +46,12 @@ fn clamp_to_u16(v: usize) -> u16 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-// Task 5 wires this test-covered helper into worker emission.
-#[allow(dead_code)]
 pub(super) struct AggregatedLodColumns {
     pub(super) bytes: Vec<u8>,
     pub(super) column_count: u16,
     pub(super) plane_count: u8,
 }
 
-// Task 5 wires this test-covered helper into worker emission.
-#[allow(dead_code)]
 pub(super) fn aggregate_lod_columns_peak_mean(
     input: &[u8],
     bins_per_column: usize,
@@ -798,6 +794,8 @@ struct SpectrogramSessionState {
     chunk_columns: u16,
     chunk_start_index: u64,
     target_chunk_columns: u16,
+    lod_pending_columns: Vec<u8>,
+    lod_max_level: u8,
     total_covered_samples: u64,
 
     // Rate throttling
@@ -991,6 +989,8 @@ fn run_spectrogram_session(
         chunk_columns: 0,
         chunk_start_index: start_column,
         target_chunk_columns: 1, // Start with 1 for fastest first-pixel
+        lod_pending_columns: Vec::new(),
+        lod_max_level: 6,
         total_covered_samples: 0,
         session_start_time: std::time::Instant::now(),
         post_reset_unthrottled_columns: post_reset_unthrottled_columns(display_mode),
@@ -1577,6 +1577,7 @@ fn handle_session_seek(
     // makes the UI paint old-timeline columns just before the reset arrives.
     session.chunk_buf.clear();
     session.chunk_columns = 0;
+    session.lod_pending_columns.clear();
 
     // Pre-seek warmup.
     let fft_warmup_seconds =
@@ -1608,6 +1609,7 @@ fn handle_session_seek(
     session.chunk_columns = 0;
     session.chunk_start_index = new_column;
     session.target_chunk_columns = 1; // Fast first-pixel after seek
+    session.lod_pending_columns.clear();
     session.total_covered_samples = 0;
     session.session_start_time = std::time::Instant::now();
     session.post_reset_unthrottled_columns = post_reset_unthrottled_columns(session.display_mode);
@@ -1732,6 +1734,68 @@ fn post_reset_window_active(session: &SpectrogramSessionState) -> bool {
         < u64::from(session.post_reset_unthrottled_columns)
 }
 
+fn send_level_zero_and_lod_chunks(
+    session: &mut SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+    chunk: &PrecomputedSpectrogramChunk,
+) {
+    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(chunk.clone()));
+    if chunk.lod_level != 0 || chunk.column_count == 0 || chunk.columns_u8.is_empty() {
+        session.lod_pending_columns.clear();
+        return;
+    }
+
+    session.lod_pending_columns.clear();
+    session
+        .lod_pending_columns
+        .extend_from_slice(&chunk.columns_u8);
+
+    let max_level = session.lod_max_level.min(15);
+    for level in 1..=max_level {
+        let Some(source_span_columns) = 1usize.checked_shl(u32::from(level)) else {
+            continue;
+        };
+        let lod = aggregate_lod_columns_peak_mean(
+            &session.lod_pending_columns,
+            usize::from(chunk.bins_per_column),
+            usize::from(chunk.channel_count),
+            source_span_columns,
+        );
+        if lod.column_count == 0 {
+            continue;
+        }
+        let lod_source_span = u16::try_from(source_span_columns).unwrap_or(u16::MAX);
+        let total_columns_estimate = chunk
+            .total_columns_estimate
+            .div_ceil(u32::from(lod_source_span));
+        let hop_size =
+            u16::try_from(u32::from(chunk.hop_size).saturating_mul(u32::from(lod_source_span)))
+                .unwrap_or(u16::MAX);
+        let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+            PrecomputedSpectrogramChunk {
+                track_token: chunk.track_token,
+                generation: chunk.generation,
+                columns_u8: lod.bytes,
+                bins_per_column: chunk.bins_per_column,
+                column_count: lod.column_count,
+                channel_count: chunk.channel_count,
+                start_column_index: chunk.start_column_index >> level,
+                total_columns_estimate,
+                sample_rate_hz: chunk.sample_rate_hz,
+                hop_size,
+                coverage_seconds: chunk.coverage_seconds,
+                complete: false,
+                buffer_reset: false,
+                clear_history: false,
+                lod_level: level,
+                lod_source_span,
+                lod_plane_count: lod.plane_count,
+            },
+        ));
+    }
+    session.lod_pending_columns.clear();
+}
+
 // ---------------------------------------------------------------------------
 // STFT row draining / chunk emission
 // ---------------------------------------------------------------------------
@@ -1802,27 +1866,26 @@ fn session_drain_stft_rows(
                 u64::from(session.effective_rate),
             );
             let start_col_u32 = u64_to_u32_saturating(session.chunk_start_index);
-            let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
-                PrecomputedSpectrogramChunk {
-                    track_token: session.track_token,
-                    generation: session.gen,
-                    columns_u8: std::mem::take(&mut session.chunk_buf),
-                    bins_per_column: clamp_to_u16(session.bins_per_column),
-                    column_count: session.chunk_columns,
-                    channel_count: clamp_to_u8(session.channel_count),
-                    start_column_index: start_col_u32,
-                    total_columns_estimate: session.total_columns_estimate,
-                    sample_rate_hz: session.effective_rate,
-                    hop_size: clamp_to_u16(session.effective_hop),
-                    coverage_seconds: coverage,
-                    complete: false,
-                    buffer_reset: false,
-                    clear_history: false,
-                    lod_level: 0,
-                    lod_source_span: 1,
-                    lod_plane_count: 1,
-                },
-            ));
+            let chunk = PrecomputedSpectrogramChunk {
+                track_token: session.track_token,
+                generation: session.gen,
+                columns_u8: std::mem::take(&mut session.chunk_buf),
+                bins_per_column: clamp_to_u16(session.bins_per_column),
+                column_count: session.chunk_columns,
+                channel_count: clamp_to_u8(session.channel_count),
+                start_column_index: start_col_u32,
+                total_columns_estimate: session.total_columns_estimate,
+                sample_rate_hz: session.effective_rate,
+                hop_size: clamp_to_u16(session.effective_hop),
+                coverage_seconds: coverage,
+                complete: false,
+                buffer_reset: false,
+                clear_history: false,
+                lod_level: 0,
+                lod_source_span: 1,
+                lod_plane_count: 1,
+            };
+            send_level_zero_and_lod_chunks(session, event_tx, &chunk);
             session.chunk_start_index = session.columns_produced;
             session.chunk_columns = 0;
             columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
@@ -1965,27 +2028,26 @@ fn session_flush_chunk(
             u64::from(session.effective_rate),
         );
         let start_col_u32 = u64_to_u32_saturating(session.chunk_start_index);
-        let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
-            PrecomputedSpectrogramChunk {
-                track_token: session.track_token,
-                generation: session.gen,
-                columns_u8: std::mem::take(&mut session.chunk_buf),
-                bins_per_column: clamp_to_u16(session.bins_per_column),
-                column_count: session.chunk_columns,
-                channel_count: clamp_to_u8(session.channel_count),
-                start_column_index: start_col_u32,
-                total_columns_estimate: session.total_columns_estimate,
-                sample_rate_hz: session.effective_rate,
-                hop_size: clamp_to_u16(session.effective_hop),
-                coverage_seconds: coverage,
-                complete: false,
-                buffer_reset: false,
-                clear_history: false,
-                lod_level: 0,
-                lod_source_span: 1,
-                lod_plane_count: 1,
-            },
-        ));
+        let chunk = PrecomputedSpectrogramChunk {
+            track_token: session.track_token,
+            generation: session.gen,
+            columns_u8: std::mem::take(&mut session.chunk_buf),
+            bins_per_column: clamp_to_u16(session.bins_per_column),
+            column_count: session.chunk_columns,
+            channel_count: clamp_to_u8(session.channel_count),
+            start_column_index: start_col_u32,
+            total_columns_estimate: session.total_columns_estimate,
+            sample_rate_hz: session.effective_rate,
+            hop_size: clamp_to_u16(session.effective_hop),
+            coverage_seconds: coverage,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
+        };
+        send_level_zero_and_lod_chunks(session, event_tx, &chunk);
         session.chunk_columns = 0;
         session.chunk_start_index = session.columns_produced;
     }
@@ -2126,6 +2188,8 @@ mod tests {
             chunk_columns: 0,
             chunk_start_index: 256,
             target_chunk_columns: 1,
+            lod_pending_columns: Vec::new(),
+            lod_max_level: 6,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
             post_reset_unthrottled_columns: 0,
@@ -2216,6 +2280,53 @@ mod tests {
     }
 
     #[test]
+    fn lod_emission_sends_level_one_after_level_zero_chunk() {
+        let (event_tx, event_rx) = unbounded();
+        let mut session = make_test_session();
+        session.lod_max_level = 1;
+        let chunk = PrecomputedSpectrogramChunk {
+            track_token: 3,
+            generation: 5,
+            columns_u8: vec![
+                10, 20, 30, 40, // column 0
+                30, 10, 90, 50, // column 1
+            ],
+            bins_per_column: 4,
+            column_count: 2,
+            channel_count: 1,
+            start_column_index: 8,
+            total_columns_estimate: 64,
+            sample_rate_hz: 48_000,
+            hop_size: 1024,
+            coverage_seconds: 0.05,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+            lod_level: 0,
+            lod_source_span: 1,
+            lod_plane_count: 1,
+        };
+
+        send_level_zero_and_lod_chunks(&mut session, &event_tx, &chunk);
+
+        let events: Vec<_> = event_rx.try_iter().collect();
+        assert_eq!(events.len(), 2);
+        let AnalysisEvent::PrecomputedSpectrogramChunk(level0) = &events[0] else {
+            panic!("expected level-zero chunk first");
+        };
+        assert_eq!(level0.lod_level, 0);
+        let AnalysisEvent::PrecomputedSpectrogramChunk(lod) = &events[1] else {
+            panic!("expected lod chunk second");
+        };
+        assert_eq!(lod.lod_level, 1);
+        assert_eq!(lod.lod_source_span, 2);
+        assert_eq!(lod.lod_plane_count, 2);
+        assert_eq!(lod.hop_size, 2048);
+        assert_eq!(lod.start_column_index, 4);
+        assert_eq!(lod.column_count, 1);
+    }
+
+    #[test]
     fn post_reset_unthrottled_columns_cover_first_rolling_full_chunk() {
         assert_eq!(
             post_reset_unthrottled_columns(SpectrogramDisplayMode::Rolling),
@@ -2256,6 +2367,8 @@ mod tests {
             chunk_columns: 0,
             chunk_start_index: 400,
             target_chunk_columns: 1,
+            lod_pending_columns: Vec::new(),
+            lod_max_level: 6,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
             post_reset_unthrottled_columns: post_reset_unthrottled_columns(
@@ -2307,6 +2420,8 @@ mod tests {
             chunk_columns: 1,
             chunk_start_index: 256,
             target_chunk_columns: 1,
+            lod_pending_columns: Vec::new(),
+            lod_max_level: 6,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
             post_reset_unthrottled_columns: 0,
@@ -2367,6 +2482,8 @@ mod tests {
             chunk_columns: 1,
             chunk_start_index: 256,
             target_chunk_columns: 64,
+            lod_pending_columns: Vec::new(),
+            lod_max_level: 6,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
             post_reset_unthrottled_columns: 0,
@@ -2418,6 +2535,8 @@ mod tests {
             chunk_columns: 1,
             chunk_start_index: 256,
             target_chunk_columns: 64,
+            lod_pending_columns: Vec::new(),
+            lod_max_level: 6,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
             post_reset_unthrottled_columns: 0,
@@ -2478,6 +2597,8 @@ mod tests {
             chunk_columns: 0,
             chunk_start_index: 256,
             target_chunk_columns: 1,
+            lod_pending_columns: Vec::new(),
+            lod_max_level: 6,
             total_covered_samples: 0,
             session_start_time: std::time::Instant::now(),
             post_reset_unthrottled_columns: 0,
