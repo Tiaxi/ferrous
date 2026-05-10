@@ -1259,7 +1259,7 @@ private slots:
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence();
     void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
-    void spectrogramZoomFillRetainedPreviewDoesNotScrollCenteredViewport();
+    void spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport();
     void spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame();
     void spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections();
     void spectrogramZoomFillRetainedPreviewCoversPostRevealUploadGaps();
@@ -13149,7 +13149,7 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock() 
     QCOMPARE(boundaryScrolled[1].targetRect, QRectF(9.5, 0.0, 30.0, 32.0));
 }
 
-void QmlSmokeTest::spectrogramZoomFillRetainedPreviewDoesNotScrollCenteredViewport() {
+void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport() {
     QCOMPARE(
         SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(5.25, 0.0, false, false),
         0.0);
@@ -13158,7 +13158,10 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewDoesNotScrollCenteredViewpo
         2.0);
     QCOMPARE(
         SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(5.25, 0.0, false, true),
-        0.0);
+        5.25);
+    QCOMPARE(
+        SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(4.0, 5.25, false, true),
+        5.25);
     QCOMPARE(
         SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(5.25, 0.0, true, false),
         5.25);

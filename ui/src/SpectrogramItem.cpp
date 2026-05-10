@@ -5990,13 +5990,14 @@ double SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(
     const double requestedColumnDelta,
     const double previousColumnDelta,
     const bool rollingMode,
-    const bool /*centeredViewportScrollsWithPlayback*/) {
+    const bool centeredViewportScrollsWithPlayback) {
     const double clampedPrevious = std::isfinite(previousColumnDelta)
         ? std::max(0.0, previousColumnDelta)
         : 0.0;
-    // Centered zoom-fill swaps source coordinate systems at reveal, so keep the
-    // retained source sample anchored even when the final centered viewport scrolls.
-    if (!rollingMode) {
+    // Centered zoom-fill swaps source coordinate systems at reveal. Keep
+    // stationary centered views pinned, but let playback-scrolling centered
+    // views advance so the preview does not halt before the final reveal.
+    if (!rollingMode && !centeredViewportScrollsWithPlayback) {
         return clampedPrevious;
     }
     return monotonicFrozenRetainedSourceColumnDelta(
