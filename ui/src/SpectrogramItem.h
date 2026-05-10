@@ -320,7 +320,8 @@ private:
         double sourceColumnDelta,
         int pageWidth = 0,
         double targetScaleFactor = 1.0,
-        double targetAnchorX = 0.0);
+        double targetAnchorX = 0.0,
+        bool keepSourceColumns = false);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,

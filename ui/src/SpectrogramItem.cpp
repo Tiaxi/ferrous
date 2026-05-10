@@ -3619,7 +3619,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         frozenSourceColumnDelta,
                         retainedPageWidth,
                         frozenTargetScale,
-                        m_zoomFillFrozenRetainedAnchorX);
+                        m_zoomFillFrozenRetainedAnchorX,
+                        !rollingMode && centeredViewportScrollsWithPlayback);
                 retainedTextureSegmentsOverflowed = false;
                 haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
                 rebuildRetainedDrawSegments();
@@ -6011,7 +6012,8 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
     const double sourceColumnDelta,
     const int pageWidth,
     const double targetScaleFactor,
-    const double targetAnchorX) {
+    const double targetAnchorX,
+    const bool keepSourceColumns) {
     if (segments.isEmpty()) {
         return segments;
     }
@@ -6053,14 +6055,23 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
         if (segment.valid
             && !segment.sourceRect.isEmpty()
             && !segment.targetRect.isEmpty()) {
-            const qint64 shiftedX =
-                static_cast<qint64>(segment.sourceRect.x()) + integerShift;
-
             const double sourceWidth =
                 static_cast<double>(segment.sourceRect.width());
             const double sourceToTargetScale = sourceWidth > 0.0
                 ? segment.targetRect.width() / sourceWidth
                 : 0.0;
+            if (keepSourceColumns) {
+                shifted.targetRect.moveLeft(
+                    segment.targetRect.x()
+                    - safeSourceColumnDelta * sourceToTargetScale);
+                shifted.targetRect = scaleTargetRect(shifted.targetRect);
+                scrolled.push_back(shifted);
+                continue;
+            }
+
+            const qint64 shiftedX =
+                static_cast<qint64>(segment.sourceRect.x()) + integerShift;
+
             const double shiftedTargetX =
                 segment.targetRect.x() - fractionalShift * sourceToTargetScale;
             if (pageWidth <= 0) {

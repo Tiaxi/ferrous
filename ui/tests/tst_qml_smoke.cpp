@@ -13188,6 +13188,19 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenter
     QCOMPARE(centeredUnmoved.size(), 1);
     QCOMPARE(centeredUnmoved[0].sourceRect, QRect(100, 0, 40, 16));
     QCOMPARE(centeredUnmoved[0].targetRect, QRectF(10.0, 0.0, 80.0, 32.0));
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> movingCentered =
+        SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+            frozenSegments,
+            3.25,
+            0,
+            1.0,
+            0.0,
+            true);
+
+    QCOMPARE(movingCentered.size(), 1);
+    QCOMPARE(movingCentered[0].sourceRect, QRect(100, 0, 40, 16));
+    QCOMPARE(movingCentered[0].targetRect, QRectF(3.5, 0.0, 80.0, 32.0));
 }
 
 void QmlSmokeTest::spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame() {
