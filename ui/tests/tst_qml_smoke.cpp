@@ -1259,6 +1259,8 @@ private slots:
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence();
     void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
+    void spectrogramZoomFillRetainedPreviewDoesNotScrollCenteredViewport();
+    void spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame();
     void spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections();
     void spectrogramZoomFillRetainedPreviewCoversPostRevealUploadGaps();
     void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
@@ -1271,6 +1273,7 @@ private slots:
     void spectrogramRetainedTextureNodeFreezesRetainedBodyDuringZoomFill();
     void spectrogramRetainedSourceOnlyFreezesRetainedBodyDuringZoomFill();
     void spectrogramFullModeFreezesRetainedBodyDuringZoomFill();
+    void spectrogramFullModeZoomFillDoesNotScrollPinnedCenteredFreeze();
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
     void spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectly();
@@ -12920,6 +12923,78 @@ void QmlSmokeTest::spectrogramFullModeFreezesRetainedBodyDuringZoomFill() {
     QCOMPARE(sampleMaterial->state.sourceRect, initialSourceRect);
 }
 
+void QmlSmokeTest::spectrogramFullModeZoomFillDoesNotScrollPinnedCenteredFreeze() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(240, 120);
+
+    SpectrogramItem item;
+    item.setWidth(window.width());
+    item.setHeight(window.height());
+    item.setParentItem(window.contentItem());
+    item.setDisplayMode(1);
+    item.setGridEnabled(false);
+    item.setCrosshairEnabled(false);
+    item.setShowFpsOverlay(false);
+    item.setPlaying(true);
+    item.setPositionSeconds(0.0);
+
+    constexpr int bins = 32;
+    constexpr int totalColumns = 4096;
+    QByteArray baseline(512 * bins, '\x40');
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained full-mode pinned zoom-fill test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    item.feedPrecomputedChunk(
+        baseline, bins, 0, 512,
+        0, totalColumns, 48000, 1024, false, true, 1, false);
+
+    QCoreApplication::processEvents();
+
+    std::unique_ptr<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node != nullptr);
+
+    item.setZoomLevel(1.25);
+    node.reset(item.updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+
+    auto *sampleNode = spectrogramBodySampleMaterialNode(node.get());
+    QVERIFY(sampleNode != nullptr);
+    auto *sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    const QRectF frozenSourceRect = sampleMaterial->state.sourceRect;
+    const QRectF frozenBounds = geometryBounds(sampleNode);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY(item.m_zoomFillFrozenRetainedActive);
+        item.m_positionAnchorUpdatedAt -= std::chrono::milliseconds(120);
+    }
+
+    node.reset(item.updatePaintNode(node.release(), nullptr));
+    QVERIFY(node != nullptr);
+    sampleNode = spectrogramBodySampleMaterialNode(node.get());
+    QVERIFY(sampleNode != nullptr);
+    sampleMaterial =
+        dynamic_cast<SpectrogramBodySampleMaterial *>(sampleNode->material());
+    QVERIFY(sampleMaterial != nullptr);
+    QCOMPARE(sampleMaterial->state.sourceRect, frozenSourceRect);
+    QCOMPARE(geometryBounds(sampleNode), frozenBounds);
+}
+
 void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     // Regression: at max zoom-out in a wide fullscreen canvas the
     // STFT windowing leaves the decoder a few columns short of the
@@ -13072,6 +13147,95 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock() 
     QCOMPARE(boundaryScrolled[0].targetRect, QRectF(-0.5, 0.0, 10.0, 32.0));
     QCOMPARE(boundaryScrolled[1].sourceRect, QRect(2048, 0, 15, 16));
     QCOMPARE(boundaryScrolled[1].targetRect, QRectF(9.5, 0.0, 30.0, 32.0));
+}
+
+void QmlSmokeTest::spectrogramZoomFillRetainedPreviewDoesNotScrollCenteredViewport() {
+    QCOMPARE(
+        SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(5.25, 0.0, false, false),
+        0.0);
+    QCOMPARE(
+        SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(5.25, 2.0, false, false),
+        2.0);
+    QCOMPARE(
+        SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(5.25, 0.0, false, true),
+        0.0);
+    QCOMPARE(
+        SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(5.25, 0.0, true, false),
+        5.25);
+    QCOMPARE(
+        SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(4.0, 5.25, true, false),
+        5.25);
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> frozenSegments{
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(100, 0, 40, 16),
+            QRectF(10.0, 0.0, 80.0, 32.0),
+            true,
+        },
+    };
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> centeredUnmoved =
+        SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+            frozenSegments,
+            0.0,
+            0,
+            1.0,
+            0.0);
+
+    QCOMPARE(centeredUnmoved.size(), 1);
+    QCOMPARE(centeredUnmoved[0].sourceRect, QRect(100, 0, 40, 16));
+    QCOMPARE(centeredUnmoved[0].targetRect, QRectF(10.0, 0.0, 80.0, 32.0));
+}
+
+void QmlSmokeTest::spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame() {
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 240;
+    constexpr quint64 trackToken = 53;
+    QByteArray chunk(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, 1024, 44100, 1024, false,
+        true, trackToken, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_precomputedCanvasDisplayLeft = 0;
+        item.m_precomputedCanvasDisplayRight = 119;
+        item.m_precomputedCanvasZoomLevel = 1.0;
+        item.m_precomputedCanvasHopSize = 1024;
+        item.m_precomputedCanvasTotalColumnsEstimate = 1024;
+        item.m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(0, 0, 120, bins),
+                QRectF(0.0, 0.0, 120.0, 80.0),
+                true,
+            },
+        };
+        item.m_zoomFillFrozenRetainedAvailable = true;
+        item.m_zoomFillFrozenRetainedActive = false;
+        item.m_zoomFillActive = false;
+        item.m_zoomFillFreezePending = false;
+    }
+
+    item.setZoomLevel(1.25);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY2(
+            !item.m_zoomFillFrozenRetainedActive,
+            "retained-only full mode must not freeze the previous zoom before the first scaled preview frame is rendered");
+        QVERIFY2(
+            item.m_zoomFillFreezePending,
+            "the first post-zoom paint must capture the retained preview after m_renderZoomLevel has changed");
+        QCOMPARE(item.m_renderZoomLevel, 1.25);
+    }
 }
 
 void QmlSmokeTest::spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections() {

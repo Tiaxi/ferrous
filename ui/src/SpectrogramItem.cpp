@@ -1456,6 +1456,10 @@ void SpectrogramItem::setZoomLevel(double value) {
     m_requestedRenderZoomLevel = value;
     m_requestedNativeHopSize = expectedNativeHopForZoom(value);
     if (m_precomputedHopSize > 0 && m_precomputedHopSize != m_requestedNativeHopSize) {
+        const bool canFreezePreview =
+            m_displayMode == 1
+            && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
+            && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
         m_renderZoomLevel = value;
         m_precomputedCanvasDirty = true;
         invalidateMapping();
@@ -1464,11 +1468,10 @@ void SpectrogramItem::setZoomLevel(double value) {
             .hopSize = m_precomputedHopSize,
             .scaledToRequestedZoom = true,
         };
-        const bool canFreezePreview =
-            m_displayMode == 1
-            && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
-            && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
         if (canFreezePreview) {
+            m_zoomFillFrozenDisplayImage = QImage();
+            m_zoomFillFrozenDisplayGeneration = 0;
+            m_zoomFillFrozenRetainedActive = false;
             m_zoomFillActive = true;
             m_zoomFillDataReady = false;
             m_zoomFillFreezePending = true;
@@ -3168,6 +3171,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             qint64 displayLeft, displayRight;
             int playheadPixel;
             bool rollingMode;
+            bool centeredViewportScrollsWithPlayback = false;
             qint64 writeHeadSeq = -1;
             bool centeredDecodedTailLooksFinalForFrame = false;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -3358,6 +3362,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     && displayLeft > 0
                     && !eofClampedToDecodedContent
                     && displayRight < totalColsForScroll - 1;
+                centeredViewportScrollsWithPlayback = centeredScrolling;
                 drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
                 drawPixels = gpuDrawWidthForSourceColumnsLocked(
                     w, displayLeft, displayRight, effectiveZoom);
@@ -3593,9 +3598,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                             * m_zoomFillFrozenRetainedColumnsPerSecond
                         : 0.0;
                 const double frozenSourceColumnDelta =
-                    monotonicFrozenRetainedSourceColumnDelta(
+                    frozenRetainedSourceColumnDeltaForZoomFill(
                         requestedSourceColumnDelta,
-                        m_zoomFillFrozenRetainedLastColumnDelta);
+                        m_zoomFillFrozenRetainedLastColumnDelta,
+                        rollingMode,
+                        centeredViewportScrollsWithPlayback);
                 m_zoomFillFrozenRetainedLastColumnDelta =
                     frozenSourceColumnDelta;
                 const double currentRetainedPixelsPerSecond =
@@ -5977,6 +5984,24 @@ double SpectrogramItem::monotonicFrozenRetainedSourceColumnDelta(
         return clampedPrevious;
     }
     return std::max(clampedPrevious, std::max(0.0, requestedColumnDelta));
+}
+
+double SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(
+    const double requestedColumnDelta,
+    const double previousColumnDelta,
+    const bool rollingMode,
+    const bool /*centeredViewportScrollsWithPlayback*/) {
+    const double clampedPrevious = std::isfinite(previousColumnDelta)
+        ? std::max(0.0, previousColumnDelta)
+        : 0.0;
+    // Centered zoom-fill swaps source coordinate systems at reveal, so keep the
+    // retained source sample anchored even when the final centered viewport scrolls.
+    if (!rollingMode) {
+        return clampedPrevious;
+    }
+    return monotonicFrozenRetainedSourceColumnDelta(
+        requestedColumnDelta,
+        clampedPrevious);
 }
 
 QVector<SpectrogramItem::RetainedRenderSegment>

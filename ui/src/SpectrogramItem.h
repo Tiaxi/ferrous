@@ -310,6 +310,11 @@ private:
     static double monotonicFrozenRetainedSourceColumnDelta(
         double requestedColumnDelta,
         double previousColumnDelta);
+    static double frozenRetainedSourceColumnDeltaForZoomFill(
+        double requestedColumnDelta,
+        double previousColumnDelta,
+        bool rollingMode,
+        bool centeredViewportScrollsWithPlayback);
     static QVector<RetainedRenderSegment> scrollFrozenRetainedSegmentsForZoomFill(
         const QVector<RetainedRenderSegment> &segments,
         double sourceColumnDelta,
