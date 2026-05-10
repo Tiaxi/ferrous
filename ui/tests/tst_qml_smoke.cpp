@@ -1254,6 +1254,7 @@ private slots:
     void spectrogramCenteredGpuCacheSurvivesRingEvictionAtSameView();
     void spectrogramCenteredGpuMetadataOnlyScrollAvoidsCpuDisplayImage();
     void spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns();
+    void spectrogramRetainedSourcePagesAreScopedToDecodeGeneration();
     void spectrogramZoomFillWaitsForZoomOutVisibleColumns();
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
@@ -8264,6 +8265,7 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerUploadsOnlyDirtyPageSpans
     auto uploadedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
     uploadedPage->key = SpectrogramItem::RetainedSourcePageKey{
         .trackToken = trackToken,
+        .generation = item.m_precomputedSessionGeneration,
         .rollingMode = false,
         .pageIndex = 0,
     };
@@ -8307,6 +8309,7 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerKeepsTextureForShiftedSpa
     auto uploadedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
     uploadedPage->key = SpectrogramItem::RetainedSourcePageKey{
         .trackToken = trackToken,
+        .generation = item.m_precomputedSessionGeneration,
         .rollingMode = false,
         .pageIndex = 0,
     };
@@ -8349,6 +8352,7 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerResetsPageOnTokenChange()
     auto stalePage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
     stalePage->key = SpectrogramItem::RetainedSourcePageKey{
         .trackToken = oldTrackToken,
+        .generation = item.m_precomputedSessionGeneration,
         .rollingMode = false,
         .pageIndex = 0,
     };
@@ -8389,6 +8393,7 @@ void QmlSmokeTest::spectrogramRollingRetainedPageUploadPlannerKeepsPagesAcrossGa
     auto retainedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
     retainedPage->key = SpectrogramItem::RetainedSourcePageKey{
         .trackToken = oldTrackToken,
+        .generation = item.m_precomputedSessionGeneration,
         .rollingMode = true,
         .pageIndex = 0,
     };
@@ -8439,6 +8444,7 @@ void QmlSmokeTest::spectrogramRetainedPageUploadPlannerLabelsResetReasons() {
     auto wrongWidthPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
     wrongWidthPage->key = SpectrogramItem::RetainedSourcePageKey{
         .trackToken = trackToken,
+        .generation = item.m_precomputedSessionGeneration,
         .rollingMode = false,
         .pageIndex = 0,
     };
@@ -8664,6 +8670,7 @@ void QmlSmokeTest::spectrogramRetainedPageSyncKeepsPagesWhenVisibleRangeUndecode
     auto retainedPage = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
     retainedPage->key = SpectrogramItem::RetainedSourcePageKey{
         .trackToken = trackToken,
+        .generation = item.m_precomputedSessionGeneration,
         .rollingMode = false,
         .pageIndex = 0,
     };
@@ -12543,6 +12550,56 @@ void QmlSmokeTest::spectrogramCenteredRetainedSourceScrollUploadsOnlyNewColumns(
     QCOMPARE(bidirectionalMissingSpans[0].xEnd, 99);
     QCOMPARE(bidirectionalMissingSpans[1].xBegin, 201);
     QCOMPARE(bidirectionalMissingSpans[1].xEnd, 204);
+}
+
+void QmlSmokeTest::spectrogramRetainedSourcePagesAreScopedToDecodeGeneration() {
+    SpectrogramItem item;
+    item.setWidth(128);
+    item.setHeight(64);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int columns = 128;
+    constexpr quint64 trackToken = 47;
+    QByteArray chunk(columns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 44100, 1024, false,
+        true, trackToken, true, 1);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    auto page = std::make_unique<SpectrogramItem::RetainedSourcePageState>();
+    page->key = SpectrogramItem::RetainedSourcePageKey{
+        .trackToken = item.m_precomputedTrackToken,
+        .generation = item.m_precomputedSessionGeneration,
+        .rollingMode = false,
+        .pageIndex = 0,
+    };
+    page->pageXOrigin = 0;
+    page->width = columns;
+    page->binsPerColumn = bins;
+    page->uploadedDisplayLeft = 0;
+    page->uploadedDisplayRight = columns - 1;
+    item.m_gpuSourcePages.push_back(std::move(page));
+
+    QVERIFY(item.retainedSourcePagesCoverDisplayRangeLocked(
+        0, columns - 1, columns - 1, false, 2048, false));
+
+    item.m_precomputedSessionGeneration = 2;
+    QVERIFY2(
+        !item.retainedSourcePagesCoverDisplayRangeLocked(
+            0, columns - 1, columns - 1, false, 2048, false),
+        "retained pages uploaded for an older decode generation must not "
+        "make the new zoom generation look renderable");
+
+    const QVector<SpectrogramItem::RetainedPageUploadSpan> uploads =
+        item.collectRetainedPageUploadSpansLocked(
+            0, columns - 1, columns - 1, false, 2048);
+    QCOMPARE(uploads.size(), 1);
+    QVERIFY(uploads[0].resetPage);
+    QCOMPARE(
+        uploads[0].resetReason,
+        SpectrogramItem::RetainedPageResetReason::MissingPage);
 }
 
 void QmlSmokeTest::spectrogramZoomFillWaitsForZoomOutVisibleColumns() {

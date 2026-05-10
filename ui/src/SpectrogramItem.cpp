@@ -3528,6 +3528,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             bool haveRetainedTextureSegments = false;
             bool retainedTextureSegmentsOverflowed = false;
+            quint64 retainedSourcePageGeneration = m_precomputedSessionGeneration;
             const auto rebuildRetainedDrawSegments = [&]() {
                 retainedBodyDrawSegments.clear();
                 bool allSegmentsHaveTextures = !retainedTextureSegments.isEmpty();
@@ -3545,6 +3546,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         : segment.sourceRect.x();
                     const RetainedSourcePageState *page = findRetainedSourcePageLocked(
                         m_precomputedTrackToken,
+                        retainedSourcePageGeneration,
                         rollingMode,
                         pageIndex);
                     QSGTexture *pageTexture =
@@ -3588,9 +3590,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                               std::clamp(playheadPixel, 0, std::max(0, w - 1)))
                         : (width() > 0.0 ? width() * 0.5 : 0.0);
                 m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
+                m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
             };
             const auto useCachedRetainedSourceSegments = [&]() {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
+                retainedSourcePageGeneration = m_zoomFillFrozenRetainedGeneration;
                 const double requestedSourceColumnDelta =
                     m_zoomFillFrozenRetainedColumnsPerSecond > 0.0
                         ? (renderPositionSeconds
@@ -3663,6 +3667,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && drawPixels > 0
                 && currentWindow != nullptr) {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
+                retainedSourcePageGeneration = m_precomputedSessionGeneration;
                 const RetainedRenderPlan retainedPlan = buildRetainedRenderPlanLocked(
                     displayLeft,
                     displayRight,
@@ -5878,6 +5883,7 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
         m_zoomFillFrozenRetainedColumnsPerSecond * std::max(0.001, effectiveZoom);
     m_zoomFillFrozenRetainedAnchorX = anchorX;
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
+    m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
 }
 
 void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
@@ -5890,6 +5896,7 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedPixelsPerSecond = 0.0;
     m_zoomFillFrozenRetainedAnchorX = 0.0;
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
+    m_zoomFillFrozenRetainedGeneration = 0;
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
     m_zoomFillFreezePending = false;
@@ -6534,11 +6541,13 @@ QVector<SpectrogramItem::RetainedPageSpan> SpectrogramItem::buildRetainedPageSpa
 
 SpectrogramItem::RetainedSourcePageState *SpectrogramItem::findRetainedSourcePageLocked(
     const quint64 trackToken,
+    const quint64 generation,
     const bool rollingMode,
     const qint64 pageIndex) const {
     for (const auto &page : m_gpuSourcePages) {
         if (page != nullptr
             && page->key.rollingMode == rollingMode
+            && page->key.generation == generation
             && (rollingMode || page->key.trackToken == trackToken)
             && page->key.pageIndex == pageIndex) {
             return page.get();
@@ -6594,6 +6603,7 @@ QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetaine
     for (const RetainedPageSpan &span : pageSpans) {
         const RetainedSourcePageState *page = findRetainedSourcePageLocked(
             m_precomputedTrackToken,
+            m_precomputedSessionGeneration,
             rollingMode,
             span.pageIndex);
         RetainedPageResetReason resetReason = RetainedPageResetReason::None;
@@ -6752,6 +6762,7 @@ bool SpectrogramItem::retainedSourcePagesCoverDisplayRangeLocked(
         }
         const RetainedSourcePageState *page = findRetainedSourcePageLocked(
             m_precomputedTrackToken,
+            m_precomputedSessionGeneration,
             rollingMode,
             span.pageIndex);
         if (page == nullptr
@@ -6906,14 +6917,15 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             plannedUploadSpans,
             kRetainedUploadColumnsPerPaint,
             &uploadBudgetExhausted);
-    QVector<qint64> pageIndicesToKeep =
+    const QVector<qint64> currentPageIndicesToKeep =
         retainedSourcePageIndicesToKeepLocked(visiblePages, rollingMode, pageWidth);
+    QVector<qint64> frozenPageIndicesToKeep;
     if (m_zoomFillFrozenRetainedAvailable && pageWidth > 0) {
         const auto keepPageIndex = [&](const qint64 pageIndex) {
-            if (pageIndex < 0 || pageIndicesToKeep.contains(pageIndex)) {
+            if (pageIndex < 0 || frozenPageIndicesToKeep.contains(pageIndex)) {
                 return;
             }
-            pageIndicesToKeep.push_back(pageIndex);
+            frozenPageIndicesToKeep.push_back(pageIndex);
         };
         for (const RetainedRenderSegment &segment : m_zoomFillFrozenRetainedSegments) {
             if (!segment.valid || segment.sourceRect.isEmpty()) {
@@ -6926,7 +6938,7 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             keepPageIndex(sourceLeft / pageWidth);
             keepPageIndex(sourceRight / pageWidth);
         }
-        std::sort(pageIndicesToKeep.begin(), pageIndicesToKeep.end());
+        std::sort(frozenPageIndicesToKeep.begin(), frozenPageIndicesToKeep.end());
     }
 
     std::erase_if(m_gpuSourcePages, [&](const auto &page) {
@@ -6937,12 +6949,20 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
         if (!rollingMode && page->key.trackToken != m_precomputedTrackToken) {
             return true;
         }
-        return !pageIndicesToKeep.contains(page->key.pageIndex);
+        const bool currentGenerationPage =
+            page->key.generation == m_precomputedSessionGeneration
+            && currentPageIndicesToKeep.contains(page->key.pageIndex);
+        const bool frozenGenerationPage =
+            m_zoomFillFrozenRetainedAvailable
+            && page->key.generation == m_zoomFillFrozenRetainedGeneration
+            && frozenPageIndicesToKeep.contains(page->key.pageIndex);
+        return !currentGenerationPage && !frozenGenerationPage;
     });
 
     const auto ensurePage = [&](const qint64 pageIndex) -> RetainedSourcePageState * {
         if (RetainedSourcePageState *existing = findRetainedSourcePageLocked(
                 m_precomputedTrackToken,
+                m_precomputedSessionGeneration,
                 rollingMode,
                 pageIndex)) {
             return existing;
@@ -6950,6 +6970,7 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
         auto page = std::make_unique<RetainedSourcePageState>();
         page->key = RetainedSourcePageKey{
             .trackToken = m_precomputedTrackToken,
+            .generation = m_precomputedSessionGeneration,
             .rollingMode = rollingMode,
             .pageIndex = pageIndex,
         };

@@ -254,6 +254,7 @@ private:
 
     struct RetainedSourcePageKey {
         quint64 trackToken{0};
+        quint64 generation{0};
         bool rollingMode{false};
         qint64 pageIndex{0};
     };
@@ -395,6 +396,7 @@ private:
         int pageWidth = kRetainedSourcePageWidth) const;
     RetainedSourcePageState *findRetainedSourcePageLocked(
         quint64 trackToken,
+        quint64 generation,
         bool rollingMode,
         qint64 pageIndex) const;
     RetainedRenderPlan buildRetainedRenderPlanLocked(
@@ -638,6 +640,7 @@ private:
     double m_zoomFillFrozenRetainedPixelsPerSecond{0.0};
     double m_zoomFillFrozenRetainedAnchorX{0.0};
     double m_zoomFillFrozenRetainedLastColumnDelta{0.0};
+    quint64 m_zoomFillFrozenRetainedGeneration{0};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;
