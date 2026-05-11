@@ -277,7 +277,8 @@ private:
     void captureZoomFillFrozenCacheLocked(
         bool allowCpuSnapshot = true,
         double effectiveZoom = 0.0,
-        double anchorX = -1.0);
+        double anchorX = -1.0,
+        std::optional<bool> centeredViewportScrollsWithPlayback = std::nullopt);
     void clearZoomFillFrozenCacheLocked();
     static RetainedPageTextureExtent retainedPageTextureExtentForSpan(
         int pageXBegin,
@@ -305,6 +306,18 @@ private:
         bool freezeCanRevealFinalFrame,
         bool currentRetainedSourceReadyForFrame,
         bool cachedRetainedAvailable);
+    static bool zoomFillFrozenRetainedScrollsWithPlayback(
+        bool rollingMode,
+        bool currentCenteredViewportScrollsWithPlayback,
+        bool frozenRetainedActive,
+        bool frozenRetainedViewportScrollsWithPlayback);
+    static int zoomFillPlayheadPixelForFrame(
+        int computedPlayheadPixel,
+        int width,
+        bool rollingMode,
+        bool rendererFreeze,
+        bool frozenRetainedActive,
+        double frozenAnchorX);
     static bool shouldCaptureZoomFillFreezeForHopChange(
         bool zoomFillActive,
         bool frozenDisplayAvailable,
@@ -648,6 +661,7 @@ private:
     double m_zoomFillFrozenRetainedLastColumnDelta{0.0};
     quint64 m_zoomFillFrozenRetainedGeneration{0};
     qint64 m_zoomFillFrozenRetainedRollingEpoch{0};
+    bool m_zoomFillFrozenRetainedViewportScrollsWithPlayback{false};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;
@@ -698,6 +712,7 @@ private:
     bool m_zoomFillFrozenRetainedAvailable{false};
     bool m_zoomFillFrozenRetainedActive{false};
     bool m_zoomFillFreezePending{false};
+    bool m_zoomFillSeekActive{false};
     double m_precomputedCanvasZoomLevel{1.0};
     int m_precomputedCanvasHopSize{0};
     int m_precomputedCanvasTotalColumnsEstimate{0};

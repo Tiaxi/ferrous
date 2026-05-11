@@ -1484,6 +1484,7 @@ void SpectrogramItem::setZoomLevel(double value) {
             m_zoomFillFrozenRetainedActive = false;
             m_zoomFillActive = true;
             m_zoomFillDataReady = false;
+            m_zoomFillSeekActive = false;
             m_zoomFillFreezePending = true;
             m_zoomWiggleTraceProbeSeconds = zoomTraceProbeSeconds;
         }
@@ -1512,6 +1513,7 @@ void SpectrogramItem::setZoomLevel(double value) {
     m_awaitingZoomData = true;
     if (m_zoomFillActive) {
         m_zoomFillDataReady = false;
+        m_zoomFillSeekActive = false;
     }
     m_zoomDebounceTimer->start(); // restarts the 150ms timer
 
@@ -1714,6 +1716,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_zoomFillActive =
             !m_zoomFillFrozenDisplayImage.isNull() || m_zoomFillFrozenRetainedActive;
         m_zoomFillDataReady = false;
+        m_zoomFillSeekActive = false;
     }
 
     if (shouldDropStaleSameTrackZoomChunk) {
@@ -1786,9 +1789,11 @@ void SpectrogramItem::feedPrecomputedChunk(
             captureZoomFillFrozenCacheLocked(false);
             m_zoomFillActive = true;
             m_zoomFillDataReady = false;
+            m_zoomFillSeekActive = true;
             m_zoomFillFrozenRetainedActive =
                 m_zoomFillFrozenRetainedAvailable;
         } else {
+            m_zoomFillSeekActive = false;
             m_precomputedReady = false;
             m_precomputedCanvasDisplayLeft = 0;
             m_precomputedCanvasDisplayRight = -1;
@@ -2397,7 +2402,9 @@ void SpectrogramItem::feedPrecomputedChunk(
                 / static_cast<double>(m_precomputedHopSize)
             : 1.0;
         const qint64 nowCol = static_cast<qint64>(
-            std::floor(std::max(0.0, m_positionSeconds) * cps));
+            std::floor(
+                std::max(0.0, currentRenderPositionSecondsLocked(Clock::now()))
+                * cps));
         qint64 displayLeftCol = 0;
         qint64 displayRightCol;
         const qint64 halfWindowCols = visibleWindowCols / 2;
@@ -2458,10 +2465,17 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_displayMode != 1
             || (decodedVisibleRight >= displayLeftCol
                 && firstMissingVisibleColumn < 0);
+        const bool seekFillHasVisibleColumns =
+            m_zoomFillSeekActive
+            && m_displayMode == 1
+            && decodedVisibleRight >= displayLeftCol
+            && firstMissingVisibleColumn < 0;
         const bool zoomFillReadyForData =
             fillMatchesRequestedZoom
             && centeredVisibleColumnsCovered
-            && ((ringHasEnoughColumns && ringCoversDisplayRight) || decodeReachedEnd);
+            && (seekFillHasVisibleColumns
+                || (ringHasEnoughColumns && ringCoversDisplayRight)
+                || decodeReachedEnd);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         const bool shouldLogZoomFillGate =
             !m_zoomFillDataReady
@@ -2473,7 +2487,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                 "[ui-spectrogram] zoom_fill_gate ready=%d mode=%d zoom=%.4f render_zoom=%.4f "
                 "hop=%d match=%d display=%lld..%lld decoded_right=%lld missing=%lld "
                 "ring_fill=%lld fill_width=%lld max_col=%d estimate=%d enough=%d covers_right=%d "
-                "decode_end=%d await=%d complete=%d token=%llu gen=%llu\n",
+                "seek_visible=%d decode_end=%d await=%d complete=%d token=%llu gen=%llu\n",
                 zoomFillReadyForData ? 1 : 0,
                 m_displayMode,
                 m_zoomLevel,
@@ -2490,6 +2504,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                 m_precomputedTotalColumnsEstimate,
                 ringHasEnoughColumns ? 1 : 0,
                 ringCoversDisplayRight ? 1 : 0,
+                seekFillHasVisibleColumns ? 1 : 0,
                 decodeReachedEnd ? 1 : 0,
                 m_awaitingZoomData ? 1 : 0,
                 complete ? 1 : 0,
@@ -3620,6 +3635,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
                 m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
                 m_zoomFillFrozenRetainedRollingEpoch = m_rollingEpoch;
+                m_zoomFillFrozenRetainedViewportScrollsWithPlayback =
+                    centeredViewportScrollsWithPlayback;
             };
             const auto useCachedRetainedSourceSegments = [&]() {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
@@ -3635,7 +3652,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         requestedSourceColumnDelta,
                         m_zoomFillFrozenRetainedLastColumnDelta,
                         rollingMode,
-                        centeredViewportScrollsWithPlayback);
+                        zoomFillFrozenRetainedScrollsWithPlayback(
+                            rollingMode,
+                            centeredViewportScrollsWithPlayback,
+                            m_zoomFillFrozenRetainedActive,
+                            m_zoomFillFrozenRetainedViewportScrollsWithPlayback));
                 m_zoomFillFrozenRetainedLastColumnDelta =
                     frozenSourceColumnDelta;
                 const double currentRetainedPixelsPerSecond =
@@ -3670,6 +3691,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     rollingMode,
                     retainedPageWidth,
                     true);
+            const bool seekRetainedTextureCoversVisibleRange =
+                m_zoomFillSeekActive
+                && canUseRetainedSourceTextureBody
+                && !rollingMode
+                && retainedRenderableRight >= displayLeft
+                && retainedSourcePagesCoverDisplayRangeLocked(
+                    displayLeft,
+                    retainedRenderableRight,
+                    retainedRenderableRight,
+                    rollingMode,
+                    retainedPageWidth,
+                    true);
             const bool retainedSourceReadyForReveal =
                 retainedSourceReadyForZoomReveal(
                     canUseRetainedSourceTextureBody,
@@ -3677,7 +3710,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     !m_gpuDisplayImage.isNull(),
                     m_gpuSourcePageUploadColumns,
                     m_gpuSourcePageTextureReset,
-                    centeredViewportScrollsWithPlayback);
+                    centeredViewportScrollsWithPlayback)
+                || (m_zoomFillSeekActive
+                    && seekRetainedTextureCoversVisibleRange
+                    && !m_gpuSourcePageTextureReset);
             const bool freezeCanRevealFinalFrame =
                 rendererFreeze
                 && m_zoomFillDataReady
@@ -4085,7 +4121,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 captureZoomFillFrozenCacheLocked(
                     false,
                     effectiveZoom,
-                    playheadPixel >= 0 ? static_cast<double>(playheadPixel) : -1.0);
+                    playheadPixel >= 0 ? static_cast<double>(playheadPixel) : -1.0,
+                    centeredViewportScrollsWithPlayback);
                 m_zoomFillFrozenRetainedActive =
                     m_zoomFillFrozenRetainedAvailable;
                 m_zoomFillActive =
@@ -4205,6 +4242,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
 #endif
             }
+
+            playheadPixel = zoomFillPlayheadPixelForFrame(
+                playheadPixel,
+                w,
+                rollingMode,
+                rendererFreeze,
+                m_zoomFillFrozenRetainedActive,
+                m_zoomFillFrozenRetainedAnchorX);
 
             if (!rollingMode && playheadPixel >= 0) {
                 showPlayhead = true;
@@ -6056,7 +6101,8 @@ bool SpectrogramItem::ensureZoomFillSnapshotImageLocked() {
 void SpectrogramItem::captureZoomFillFrozenCacheLocked(
     bool allowCpuSnapshot,
     double effectiveZoom,
-    double anchorX) {
+    double anchorX,
+    std::optional<bool> centeredViewportScrollsWithPlayback) {
     if (!m_zoomFillFrozenRetainedAvailable && allowCpuSnapshot) {
         ensureZoomFillSnapshotImageLocked();
     }
@@ -6081,6 +6127,10 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
     m_zoomFillFrozenRetainedRollingEpoch = m_rollingEpoch;
+    if (centeredViewportScrollsWithPlayback.has_value()) {
+        m_zoomFillFrozenRetainedViewportScrollsWithPlayback =
+            *centeredViewportScrollsWithPlayback;
+    }
     m_zoomWiggleTraceProbeSeconds = m_zoomFillFrozenRetainedPositionSeconds;
 }
 
@@ -6096,9 +6146,11 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedGeneration = 0;
     m_zoomFillFrozenRetainedRollingEpoch = 0;
+    m_zoomFillFrozenRetainedViewportScrollsWithPlayback = false;
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
     m_zoomFillFreezePending = false;
+    m_zoomFillSeekActive = false;
     m_zoomWiggleTraceProbeSeconds = 0.0;
 }
 
@@ -6173,6 +6225,40 @@ bool SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
             freezeCanRevealFinalFrame);
     }
     return cachedRetainedAvailable && !currentRetainedSourceReadyForFrame;
+}
+
+bool SpectrogramItem::zoomFillFrozenRetainedScrollsWithPlayback(
+    const bool rollingMode,
+    const bool currentCenteredViewportScrollsWithPlayback,
+    const bool frozenRetainedActive,
+    const bool frozenRetainedViewportScrollsWithPlayback) {
+    if (rollingMode) {
+        return true;
+    }
+    return frozenRetainedActive
+        ? frozenRetainedViewportScrollsWithPlayback
+        : currentCenteredViewportScrollsWithPlayback;
+}
+
+int SpectrogramItem::zoomFillPlayheadPixelForFrame(
+    const int computedPlayheadPixel,
+    const int width,
+    const bool rollingMode,
+    const bool rendererFreeze,
+    const bool frozenRetainedActive,
+    const double frozenAnchorX) {
+    if (rollingMode
+        || !rendererFreeze
+        || !frozenRetainedActive
+        || !std::isfinite(frozenAnchorX)
+        || frozenAnchorX < 0.0
+        || width <= 0) {
+        return computedPlayheadPixel;
+    }
+    return std::clamp(
+        static_cast<int>(std::round(frozenAnchorX)),
+        0,
+        width - 1);
 }
 
 bool SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(

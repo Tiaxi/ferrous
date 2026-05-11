@@ -1263,6 +1263,8 @@ private slots:
     void spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads();
     void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
     void spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport();
+    void spectrogramZoomFillRetainedPreviewUsesFrozenScrollMode();
+    void spectrogramZoomFillPlayheadUsesFrozenAnchorDuringFreeze();
     void spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX();
     void spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame();
     void spectrogramZoomFillMetadataResetKeepsActiveRetainedFreezeScroll();
@@ -1291,6 +1293,7 @@ private slots:
     void spectrogramDataResetInvalidatesRetainedSourceStateDuringFreeze();
     void spectrogramDataResetPreservesRetainedFreezePagesDuringZoomFill();
     void spectrogramSyntheticClearPreservesGpuCacheDuringSeek();
+    void spectrogramSeekFillRevealsAfterFirstVisibleColumns();
     void spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent();
 };
 
@@ -13341,6 +13344,43 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenter
     QCOMPARE(longMovingCentered[0].targetRect, QRectF(9.5, 0.0, 80.0, 32.0));
 }
 
+void QmlSmokeTest::spectrogramZoomFillRetainedPreviewUsesFrozenScrollMode() {
+    QVERIFY2(
+        SpectrogramItem::zoomFillFrozenRetainedScrollsWithPlayback(
+            false, false, true, true),
+        "a frozen retained preview captured while centered playback was "
+        "scrolling must keep scrolling even if the new not-yet-ready geometry "
+        "currently looks pinned");
+    QVERIFY2(
+        !SpectrogramItem::zoomFillFrozenRetainedScrollsWithPlayback(
+            false, true, true, false),
+        "a frozen retained preview captured while centered playback was pinned "
+        "must stay pinned even if the replacement geometry is scrolling");
+    QVERIFY(SpectrogramItem::zoomFillFrozenRetainedScrollsWithPlayback(
+        false, true, false, false));
+    QVERIFY(SpectrogramItem::zoomFillFrozenRetainedScrollsWithPlayback(
+        true, false, true, false));
+}
+
+void QmlSmokeTest::spectrogramZoomFillPlayheadUsesFrozenAnchorDuringFreeze() {
+    QCOMPARE(
+        SpectrogramItem::zoomFillPlayheadPixelForFrame(
+            1810, 1920, false, true, true, 960.4),
+        960);
+    QCOMPARE(
+        SpectrogramItem::zoomFillPlayheadPixelForFrame(
+            1810, 1920, false, true, true, 2500.0),
+        1919);
+    QCOMPARE(
+        SpectrogramItem::zoomFillPlayheadPixelForFrame(
+            1810, 1920, false, true, false, 960.4),
+        1810);
+    QCOMPARE(
+        SpectrogramItem::zoomFillPlayheadPixelForFrame(
+            -1, 1920, true, true, true, 960.4),
+        -1);
+}
+
 void QmlSmokeTest::spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX() {
     const QVector<SpectrogramItem::RetainedRenderSegment> segments{
         SpectrogramItem::RetainedRenderSegment{
@@ -14390,6 +14430,69 @@ void QmlSmokeTest::spectrogramSyntheticClearPreservesGpuCacheDuringSeek() {
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(1919));
     QVERIFY(item.m_precomputedReady);
     QCOMPARE(item.m_zoomFillActive, true);
+}
+
+void QmlSmokeTest::spectrogramSeekFillRevealsAfterFirstVisibleColumns() {
+    // Long same-track seeks restart the worker before the target viewport.
+    // Once the new sequential decode reaches the left edge of that viewport,
+    // the spectrogram should move to the seek location immediately instead of
+    // freezing on the old location until the whole viewport is computed.
+    SpectrogramItem item;
+    item.setWidth(1920);
+    item.setHeight(400);
+    item.setDisplayMode(1);
+
+    constexpr int bins = 4;
+    constexpr quint64 trackToken = 7;
+    constexpr quint64 generation = 42;
+    constexpr int hop = 4337;
+    constexpr int totalColumns = 6838;
+    constexpr double zoom = 0.1181;
+    constexpr double seekSeconds = 248.743;
+    constexpr int restartColumn = 810;
+    constexpr int firstVisibleColumn = 833;
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = zoom;
+        item.m_renderZoomLevel = zoom;
+        item.m_requestedNativeHopSize = hop;
+        item.m_precomputedBinsPerColumn = bins;
+        item.m_precomputedTotalColumnsEstimate = totalColumns;
+        item.m_precomputedSampleRateHz = 48000;
+        item.m_precomputedHopSize = hop;
+        item.m_precomputedTrackToken = trackToken;
+        item.m_precomputedReady = true;
+        item.m_precomputedCanvasDisplayLeft = 0;
+        item.m_precomputedCanvasDisplayRight = 1919;
+        item.m_gpuDisplayImage = QImage(16, 16, QImage::Format_RGBA8888);
+        item.m_gpuDisplayImage.fill(QColor(32, 32, 32));
+        item.setPositionAnchorLocked(seekSeconds, std::chrono::steady_clock::now());
+    }
+
+    item.feedPrecomputedChunk(
+        QByteArray(), 0, 0, 0,
+        0, 0, 0, 0, false,
+        true, trackToken, true);
+    QVERIFY(item.m_zoomFillActive);
+    QVERIFY(!item.m_zoomFillDataReady);
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0,
+        restartColumn, totalColumns, 48000, hop, false,
+        true, trackToken, true, generation);
+
+    const int decodedColumns = firstVisibleColumn - restartColumn + 32;
+    QByteArray visiblePrefix(decodedColumns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        visiblePrefix, bins, 0, decodedColumns,
+        restartColumn, totalColumns, 48000, hop, false,
+        false, trackToken, false, generation);
+
+    QVERIFY2(
+        item.m_zoomFillDataReady,
+        "seek fill should reveal as soon as newly decoded data reaches the "
+        "target viewport instead of waiting for full viewport coverage");
 }
 
 void QmlSmokeTest::spectrogramSyntheticClearInvalidatesGpuCacheWhenNoOldContent() {
