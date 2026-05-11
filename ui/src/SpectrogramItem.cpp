@@ -6260,11 +6260,34 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
             const double sourceToTargetScale = sourceWidth > 0.0
                 ? segment.targetRect.width() / sourceWidth
                 : 0.0;
-            const qint64 shiftedX =
+            qint64 shiftedX =
                 static_cast<qint64>(segment.sourceRect.x()) + integerShift;
 
-            const double shiftedTargetX =
+            double shiftedTargetX =
                 segment.targetRect.x() - fractionalShift * sourceToTargetScale;
+            if (sourceToTargetScale > 0.0
+                && std::isfinite(sourceToTargetScale)
+                && std::isfinite(shiftedTargetX)
+                && shiftedTargetX <= -sourceToTargetScale) {
+                // Whole source columns that have scrolled fully offscreen
+                // should live in sourceRect.x(), not as an ever-more-negative
+                // target phase. Otherwise the native reveal snaps back by a
+                // column even though the frozen preview scrolled smoothly.
+                const double offscreenColumnsDouble =
+                    std::floor((-shiftedTargetX) / sourceToTargetScale);
+                const qint64 maxOffscreenColumns =
+                    std::max<qint64>(
+                        0,
+                        static_cast<qint64>(segment.sourceRect.width()) - 1);
+                const qint64 offscreenColumns = static_cast<qint64>(
+                    std::clamp(
+                        offscreenColumnsDouble,
+                        0.0,
+                        static_cast<double>(maxOffscreenColumns)));
+                shiftedX += offscreenColumns;
+                shiftedTargetX += static_cast<double>(offscreenColumns)
+                    * sourceToTargetScale;
+            }
             if (pageWidth <= 0) {
                 shifted.sourceRect.moveLeft(static_cast<int>(std::clamp(
                     shiftedX,

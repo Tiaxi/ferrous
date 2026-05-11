@@ -13224,6 +13224,22 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock() 
     QCOMPARE(boundaryScrolled[0].targetRect, QRectF(-0.5, 0.0, 10.0, 32.0));
     QCOMPARE(boundaryScrolled[1].sourceRect, QRect(2048, 0, 15, 16));
     QCOMPARE(boundaryScrolled[1].targetRect, QRectF(9.5, 0.0, 30.0, 32.0));
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> offscreenPhaseSegments{
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(100, 0, 10, 16),
+            QRectF(-1.5, 0.0, 20.0, 32.0),
+            true,
+        },
+    };
+    const QVector<SpectrogramItem::RetainedRenderSegment> normalizedPhase =
+        SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+            offscreenPhaseSegments,
+            3.75);
+
+    QCOMPARE(normalizedPhase.size(), 1);
+    QCOMPARE(normalizedPhase[0].sourceRect, QRect(104, 0, 10, 16));
+    QCOMPARE(normalizedPhase[0].targetRect, QRectF(-1.0, 0.0, 20.0, 32.0));
 }
 
 void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport() {
