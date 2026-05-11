@@ -1269,6 +1269,7 @@ private slots:
     void spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX();
     void spectrogramZoomFillRetainedPreviewKeepsRightScrollHalo();
     void spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame();
+    void spectrogramZoomFillStackedZoomKeepsActiveRetainedFreeze();
     void spectrogramZoomFillMetadataResetKeepsActiveRetainedFreezeScroll();
     void spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections();
     void spectrogramZoomFillRetainedPreviewCoversPostRevealUploadGaps();
@@ -13636,6 +13637,71 @@ void QmlSmokeTest::spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFram
             "the first post-zoom paint must capture the retained preview after m_renderZoomLevel has changed");
         QCOMPARE(item.m_renderZoomLevel, 1.25);
     }
+}
+
+void QmlSmokeTest::spectrogramZoomFillStackedZoomKeepsActiveRetainedFreeze() {
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 512;
+    constexpr quint64 trackToken = 55;
+    QByteArray chunk(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, 200000, 48000, 100, false,
+        true, trackToken, false, 17);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 10.24;
+        item.m_renderZoomLevel = 10.24;
+        item.m_requestedRenderZoomLevel = 10.24;
+        item.m_requestedNativeHopSize = 100;
+        item.m_precomputedCanvasDisplayLeft = 66000;
+        item.m_precomputedCanvasDisplayRight = 68100;
+        item.m_precomputedCanvasZoomLevel = item.effectiveZoomLocked();
+        item.m_precomputedCanvasHopSize = 100;
+        item.m_precomputedCanvasTotalColumnsEstimate = 200000;
+        item.m_zoomFillActive = true;
+        item.m_zoomFillDataReady = false;
+        item.m_zoomFillFrozenRetainedAvailable = true;
+        item.m_zoomFillFrozenRetainedActive = true;
+        item.m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(2600, 0, 1600, bins),
+                QRectF(-1.0, 0.0, 120.0, 80.0),
+                true,
+            },
+        };
+        item.m_zoomFillFrozenRetainedPositionSeconds = 140.316;
+        item.m_zoomFillFrozenRetainedColumnsPerSecond = 48000.0 / 100.0;
+        item.m_zoomFillFrozenRetainedPixelsPerSecond =
+            item.m_zoomFillFrozenRetainedColumnsPerSecond
+            * item.effectiveZoomLocked();
+        item.m_zoomFillFrozenRetainedGeneration = 17;
+        item.m_zoomFillFreezePending = false;
+        item.m_gpuDisplayImage = QImage();
+    }
+
+    item.setZoomLevel(6.5536);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    QVERIFY(item.m_zoomFillActive);
+    QVERIFY2(
+        item.m_zoomFillFrozenRetainedActive,
+        "a stacked zoom must keep the active retained freeze instead of "
+        "dropping to an empty display frame while the next generation fills");
+    QVERIFY2(
+        !item.m_zoomFillFreezePending,
+        "reusing an active retained freeze should not wait for a fresh "
+        "scaled preview that may not be renderable yet");
+    QCOMPARE(item.m_zoomFillDataReady, false);
+    QVERIFY(item.m_awaitingZoomData);
+    QVERIFY(std::abs(item.m_renderZoomLevel - 6.5536) < 0.001);
 }
 
 void QmlSmokeTest::spectrogramZoomFillMetadataResetKeepsActiveRetainedFreezeScroll() {

@@ -1464,6 +1464,11 @@ void SpectrogramItem::setZoomLevel(double value) {
     m_requestedRenderZoomLevel = value;
     m_requestedNativeHopSize = expectedNativeHopForZoom(value);
     if (m_precomputedHopSize > 0 && m_precomputedHopSize != m_requestedNativeHopSize) {
+        const bool hasActiveZoomFreeze =
+            m_zoomFillActive
+            && (!m_zoomFillFrozenDisplayImage.isNull()
+                || (m_zoomFillFrozenRetainedAvailable
+                    && m_zoomFillFrozenRetainedActive));
         const bool canFreezePreview =
             m_displayMode == 1
             && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
@@ -1479,13 +1484,15 @@ void SpectrogramItem::setZoomLevel(double value) {
             .scaledToRequestedZoom = true,
         };
         if (canFreezePreview) {
-            m_zoomFillFrozenDisplayImage = QImage();
-            m_zoomFillFrozenDisplayGeneration = 0;
-            m_zoomFillFrozenRetainedActive = false;
+            if (!hasActiveZoomFreeze) {
+                m_zoomFillFrozenDisplayImage = QImage();
+                m_zoomFillFrozenDisplayGeneration = 0;
+                m_zoomFillFrozenRetainedActive = false;
+            }
             m_zoomFillActive = true;
             m_zoomFillDataReady = false;
             m_zoomFillSeekActive = false;
-            m_zoomFillFreezePending = true;
+            m_zoomFillFreezePending = !hasActiveZoomFreeze;
             m_zoomWiggleTraceProbeSeconds = zoomTraceProbeSeconds;
         }
     }
