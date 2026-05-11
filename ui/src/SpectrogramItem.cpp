@@ -1703,7 +1703,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             const Clock::time_point freezeStartedAt = Clock::now();
 #endif
-            captureZoomFillFrozenCacheLocked(false);
+            captureZoomFillFrozenCacheLocked(m_zoomFillFrozenRetainedAvailable);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             profile.freezeMs += std::chrono::duration<double, std::milli>(
                                     Clock::now() - freezeStartedAt)
@@ -1922,7 +1922,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                     !m_zoomFillFrozenDisplayImage.isNull(),
                     m_zoomFillFrozenRetainedAvailable);
             if (shouldCaptureFreeze) {
-                captureZoomFillFrozenCacheLocked(false);
+                captureZoomFillFrozenCacheLocked(m_zoomFillFrozenRetainedAvailable);
             }
             m_zoomFillFrozenRetainedActive =
                 m_zoomFillFrozenRetainedAvailable;
@@ -3724,7 +3724,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && gpuDebugMode == SpectrogramGpu::DebugMode::Full
                 && !finalRetainedTextureCoversVisibleRange
                 && !m_gpuDisplayImage.isNull();
-            const bool useFrozenRetainedSourceForFrame =
+            bool useFrozenRetainedSourceForFrame =
                 shouldDrawFrozenRetainedSourceForZoomFill(
                     rendererFreeze,
                     retainedFreezeAvailableForFrame,
@@ -3732,6 +3732,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (useFrozenRetainedSourceForFrame) {
                 useCachedRetainedSourceSegments();
+                const bool frozenRetainedCoversViewport =
+                    retainedSegmentsCoverViewportForZoomFill(
+                        retainedTextureSegments,
+                        w);
+                if (!shouldDrawFrozenRetainedSourceForZoomFill(
+                        rendererFreeze,
+                        retainedFreezeAvailableForFrame,
+                        freezeCanRevealFinalFrame,
+                        frozenRetainedCoversViewport,
+                        !m_zoomFillFrozenDisplayImage.isNull())) {
+                    useFrozenRetainedSourceForFrame = false;
+                    retainedSourceTexture = nullptr;
+                    retainedTextureSegments.clear();
+                    retainedBodyDrawSegments.clear();
+                    haveRetainedTextureSegments = false;
+                }
             } else if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
                 && currentWindow != nullptr) {
@@ -4119,7 +4135,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     m_zoomFillFrozenRetainedAvailable = true;
                 }
                 captureZoomFillFrozenCacheLocked(
-                    false,
+                    m_zoomFillFrozenRetainedAvailable,
                     effectiveZoom,
                     playheadPixel >= 0 ? static_cast<double>(playheadPixel) : -1.0,
                     centeredViewportScrollsWithPlayback);
@@ -6103,7 +6119,13 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
     double effectiveZoom,
     double anchorX,
     std::optional<bool> centeredViewportScrollsWithPlayback) {
-    if (!m_zoomFillFrozenRetainedAvailable && allowCpuSnapshot) {
+    const int viewportWidth = std::max(1, static_cast<int>(std::round(width())));
+    const bool retainedFreezeCoversViewport =
+        m_zoomFillFrozenRetainedAvailable
+        && retainedSegmentsCoverViewportForZoomFill(
+            m_zoomFillFrozenRetainedSegments,
+            viewportWidth);
+    if (allowCpuSnapshot && !retainedFreezeCoversViewport) {
         ensureZoomFillSnapshotImageLocked();
     }
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;
@@ -6206,10 +6228,63 @@ bool SpectrogramItem::retainedSourceReadyForZoomReveal(
 bool SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
     const bool rendererFreeze,
     const bool retainedFreezeAvailableForFrame,
-    const bool freezeCanRevealFinalFrame) {
-    return rendererFreeze
+    const bool freezeCanRevealFinalFrame,
+    const bool frozenRetainedCoversViewport,
+    const bool frozenDisplayImageAvailable) {
+    const bool wantsFrozenRetained = rendererFreeze
         && retainedFreezeAvailableForFrame
         && !freezeCanRevealFinalFrame;
+    if (!wantsFrozenRetained) {
+        return false;
+    }
+    return frozenRetainedCoversViewport || !frozenDisplayImageAvailable;
+}
+
+bool SpectrogramItem::retainedSegmentsCoverViewportForZoomFill(
+    const QVector<RetainedRenderSegment> &segments,
+    const int viewportWidth) {
+    if (viewportWidth <= 0 || segments.isEmpty()) {
+        return false;
+    }
+
+    QVector<QPair<double, double>> spans;
+    spans.reserve(segments.size());
+    const double viewportRight = static_cast<double>(viewportWidth);
+    for (const RetainedRenderSegment &segment : segments) {
+        if (!segment.valid || segment.targetRect.isEmpty()) {
+            continue;
+        }
+        const double left = std::max(0.0, segment.targetRect.left());
+        const double right = std::min(viewportRight, segment.targetRect.right());
+        if (!std::isfinite(left)
+            || !std::isfinite(right)
+            || right <= 0.0
+            || left >= viewportRight
+            || right <= left) {
+            continue;
+        }
+        spans.push_back(qMakePair(left, right));
+    }
+    if (spans.isEmpty()) {
+        return false;
+    }
+
+    std::sort(spans.begin(), spans.end(), [](const auto &lhs, const auto &rhs) {
+        return lhs.first < rhs.first;
+    });
+
+    constexpr double toleratedGapPixels = 1.0;
+    double coveredRight = 0.0;
+    for (const auto &span : spans) {
+        if (span.first > coveredRight + toleratedGapPixels) {
+            return false;
+        }
+        coveredRight = std::max(coveredRight, span.second);
+        if (coveredRight >= viewportRight - toleratedGapPixels) {
+            return true;
+        }
+    }
+    return coveredRight >= viewportRight - toleratedGapPixels;
 }
 
 bool SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(

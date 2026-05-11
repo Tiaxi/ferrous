@@ -13166,16 +13166,48 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
 
 void QmlSmokeTest::spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads() {
     QVERIFY(SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
-        true, true, false));
+        true, true, false, true, false));
     QVERIFY2(
         !SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
-            true, true, true),
+            true, true, true, true, false),
         "zoom-fill should stop drawing the frozen retained source only when "
         "the final retained source is ready to reveal");
     QVERIFY(!SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
-        false, true, false));
+        false, true, false, true, false));
     QVERIFY(!SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
-        true, false, false));
+        true, false, false, true, false));
+    QVERIFY2(
+        !SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
+            true, true, false, false, true),
+        "partial frozen retained segments must not paint over a complete "
+        "frozen image fallback because the uncovered right edge would be black");
+    QVERIFY2(
+        SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
+            true, true, false, false, false),
+        "without a complete frozen image fallback, a partial retained preview "
+        "is still the least-bad available freeze source");
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> partialSegments{
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(1602, 0, 257, 16),
+            QRectF(-0.2, 0.0, 500.1, 32.0),
+            true,
+        },
+    };
+    QVERIFY2(
+        !SpectrogramItem::retainedSegmentsCoverViewportForZoomFill(
+            partialSegments, 1183),
+        "the gpu51 zoom trace drew only the left ~500px of an 1183px viewport");
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> fullSegments{
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(0, 0, 1184, 16),
+            QRectF(-0.8, 0.0, 1183.0, 32.0),
+            true,
+        },
+    };
+    QVERIFY(SpectrogramItem::retainedSegmentsCoverViewportForZoomFill(
+        fullSegments, 1183));
 
     QVERIFY2(
         !SpectrogramItem::retainedSourceReadyForZoomReveal(

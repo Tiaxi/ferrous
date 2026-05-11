@@ -299,7 +299,12 @@ private:
     static bool shouldDrawFrozenRetainedSourceForZoomFill(
         bool rendererFreeze,
         bool retainedFreezeAvailableForFrame,
-        bool freezeCanRevealFinalFrame);
+        bool freezeCanRevealFinalFrame,
+        bool frozenRetainedCoversViewport = true,
+        bool frozenDisplayImageAvailable = false);
+    static bool retainedSegmentsCoverViewportForZoomFill(
+        const QVector<RetainedRenderSegment> &segments,
+        int viewportWidth);
     static bool shouldDrawCachedRetainedSourceForFrame(
         bool rendererFreeze,
         bool retainedFreezeAvailableForFrame,
