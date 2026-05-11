@@ -2431,8 +2431,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             displayLeftCol = std::max<qint64>(0, displayRightCol - visibleWindowCols + 1);
         }
         const bool ringCoversDisplayRight =
-            static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 16
-            >= displayRightCol + 1;
+            static_cast<qint64>(m_precomputedMaxColumnIndex) >= displayRightCol;
 
         // Decode tail-end: the STFT window truncates the last few
         // columns so maxCol+1 stops short of the estimate by ~20–30

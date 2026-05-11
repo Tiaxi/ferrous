@@ -1260,6 +1260,7 @@ private slots:
     void spectrogramZoomFillWaitsForZoomOutVisibleColumns();
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramZoomFillWaitsForDecodedRightEdgeAtOuterZoom();
     void spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads();
     void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
     void spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport();
@@ -13162,6 +13163,75 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     QCOMPARE(item.m_zoomFillActive, false);
     QCOMPARE(item.m_zoomFillDataReady, false);
     delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomFillWaitsForDecodedRightEdgeAtOuterZoom() {
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(400);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int sampleRate = 48000;
+    constexpr int hop = 640;
+    constexpr int totalEstimate = 46336;
+    constexpr qint64 nowCol = 24602;
+    constexpr int displayLeft = 23419;
+    constexpr int displayRight = 25784;
+    constexpr int decodedMaxCol = 25770;
+    constexpr int decodedCols = decodedMaxCol - displayLeft + 1;
+
+    item.setPositionSeconds((static_cast<double>(nowCol) + 0.25)
+        / (static_cast<double>(sampleRate) / static_cast<double>(hop)));
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 0.8;
+        item.m_renderZoomLevel = 0.8;
+        item.m_requestedNativeHopSize = hop;
+        item.m_precomputedSampleRateHz = sampleRate;
+        item.m_precomputedHopSize = hop;
+        item.m_precomputedBinsPerColumn = bins;
+        item.m_precomputedTotalColumnsEstimate = totalEstimate;
+        item.m_precomputedReady = true;
+        item.m_precomputedCanvasDisplayLeft = 0;
+        item.m_precomputedCanvasDisplayRight = 1182;
+        item.m_zoomFillActive = true;
+        item.m_zoomFillDataReady = false;
+        item.m_zoomFillSeekActive = false;
+        item.m_awaitingZoomData = false;
+    }
+
+    QByteArray partialViewport(decodedCols * bins, '\x55');
+    item.feedPrecomputedChunk(
+        partialViewport, bins, 0, decodedCols,
+        displayLeft, totalEstimate, sampleRate, hop,
+        false, true, 3, true, 28);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, decodedMaxCol);
+
+    const double effectiveZoom = std::max(0.001, item.effectiveZoomLocked());
+    const qint64 visibleWindowCols = std::max<qint64>(
+        1,
+        static_cast<qint64>(std::ceil(item.width() / effectiveZoom)));
+    QCOMPARE(visibleWindowCols, static_cast<qint64>(displayRight - displayLeft + 1));
+
+    const qint64 actualNowCol = static_cast<qint64>(std::floor(
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now())
+        * (static_cast<double>(sampleRate) / static_cast<double>(hop))));
+    QCOMPARE(actualNowCol, nowCol);
+    QCOMPARE(actualNowCol - visibleWindowCols / 2, static_cast<qint64>(displayLeft));
+    QCOMPARE(displayLeft + visibleWindowCols - 1, static_cast<qint64>(displayRight));
+
+    QVERIFY2(
+        item.m_precomputedMaxColumnIndex < displayRight,
+        "test must model the gpu52 case where decoded data is short of the visible right edge");
+    QVERIFY2(
+        !item.m_zoomFillDataReady,
+        "zoom-fill must not reveal while the decoded data is still short of "
+        "the visible right edge; otherwise the retained texture exposes a "
+        "black strip at outer zoom levels");
 }
 
 void QmlSmokeTest::spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads() {
