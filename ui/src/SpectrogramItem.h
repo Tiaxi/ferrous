@@ -278,7 +278,8 @@ private:
         bool allowCpuSnapshot = true,
         double effectiveZoom = 0.0,
         double anchorX = -1.0,
-        std::optional<bool> centeredViewportScrollsWithPlayback = std::nullopt);
+        std::optional<bool> centeredViewportScrollsWithPlayback = std::nullopt,
+        std::optional<bool> retainedFreezeCoversViewport = std::nullopt);
     void clearZoomFillFrozenCacheLocked();
     static RetainedPageTextureExtent retainedPageTextureExtentForSpan(
         int pageXBegin,
@@ -305,6 +306,10 @@ private:
     static bool retainedSegmentsCoverViewportForZoomFill(
         const QVector<RetainedRenderSegment> &segments,
         int viewportWidth);
+    static bool retainedSourceSegmentsReadyForZoomFill(
+        const QVector<RetainedRenderSegment> &segments,
+        int viewportWidth,
+        bool allSegmentsHaveTextures);
     static bool shouldDrawCachedRetainedSourceForFrame(
         bool rendererFreeze,
         bool retainedFreezeAvailableForFrame,

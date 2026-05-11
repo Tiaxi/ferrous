@@ -13280,6 +13280,18 @@ void QmlSmokeTest::spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads(
         fullSegments, 1183));
 
     QVERIFY2(
+        !SpectrogramItem::retainedSourceSegmentsReadyForZoomFill(
+            fullSegments,
+            1183,
+            false),
+        "a retained zoom-fill preview is not ready when its planned viewport "
+        "segments refer to page textures that are not resident yet");
+    QVERIFY(SpectrogramItem::retainedSourceSegmentsReadyForZoomFill(
+        fullSegments,
+        1183,
+        true));
+
+    QVERIFY2(
         !SpectrogramItem::retainedSourceReadyForZoomReveal(
             true, true, false, 384, false, false),
         "zoom-fill must not reveal the retained-source path on the same frame "

@@ -3564,6 +3564,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             bool haveRetainedTextureSegments = false;
             bool retainedTextureSegmentsOverflowed = false;
+            bool allRetainedTextureSegmentsDrawable = false;
             quint64 retainedSourcePageGeneration = m_precomputedSessionGeneration;
             const auto rebuildRetainedDrawSegments = [&]() {
                 retainedBodyDrawSegments.clear();
@@ -3604,8 +3605,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         .texture = pageTexture,
                     });
                 }
-                return allSegmentsHaveTextures
+                allRetainedTextureSegmentsDrawable = allSegmentsHaveTextures
                     && retainedBodyDrawSegments.size() == retainedTextureSegments.size();
+                return allRetainedTextureSegmentsDrawable;
+            };
+            const auto retainedSourceSegmentsReadyForFrame = [&]() {
+                return retainedSourceSegmentsReadyForZoomFill(
+                    retainedTextureSegments,
+                    w,
+                    allRetainedTextureSegmentsDrawable);
             };
             const auto retainedScrollColumnsPerSecond = [this]() {
                 return m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0
@@ -3679,6 +3687,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         m_zoomFillFrozenRetainedAnchorX);
                 retainedTextureSegmentsOverflowed = false;
                 haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
+                allRetainedTextureSegmentsDrawable = false;
                 rebuildRetainedDrawSegments();
             };
             const bool finalRetainedTextureCoversVisibleRange =
@@ -3732,9 +3741,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (useFrozenRetainedSourceForFrame) {
                 useCachedRetainedSourceSegments();
                 const bool frozenRetainedCoversViewport =
-                    retainedSegmentsCoverViewportForZoomFill(
-                        retainedTextureSegments,
-                        w);
+                    retainedSourceSegmentsReadyForFrame();
                 if (!shouldDrawFrozenRetainedSourceForZoomFill(
                         rendererFreeze,
                         retainedFreezeAvailableForFrame,
@@ -3746,6 +3753,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     retainedTextureSegments.clear();
                     retainedBodyDrawSegments.clear();
                     haveRetainedTextureSegments = false;
+                    allRetainedTextureSegmentsDrawable = false;
                 }
             } else if (canUseRetainedSourceTextureBody
                 && drawPixels > 0
@@ -3765,6 +3773,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 retainedTextureSegments = retainedPlan.segments;
                 haveRetainedTextureSegments = retainedPlan.haveSegments;
                 retainedTextureSegmentsOverflowed = retainedPlan.overflowed;
+                allRetainedTextureSegmentsDrawable = false;
                 if (retainedTextureSegmentsOverflowed) {
                     // Sparse centered windows can contain more than two visible
                     // runs when evicted columns leave holes inside the viewport.
@@ -3776,10 +3785,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 rebuildRetainedDrawSegments();
             }
             bool retainedSourceReadyForFrame =
-                !retainedBodyDrawSegments.isEmpty()
-                && haveRetainedTextureSegments;
+                retainedSourceSegmentsReadyForFrame();
             const bool usePostRevealCachedRetainedSourceForFrame =
                 !useFrozenRetainedSourceForFrame
+                && !m_zoomFillFreezePending
                 && canUseRetainedSourceTextureBody
                 && shouldDrawCachedRetainedSourceForFrame(
                     rendererFreeze,
@@ -3790,8 +3799,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (usePostRevealCachedRetainedSourceForFrame) {
                 useCachedRetainedSourceSegments();
                 retainedSourceReadyForFrame =
-                    !retainedBodyDrawSegments.isEmpty()
-                    && haveRetainedTextureSegments;
+                    retainedSourceSegmentsReadyForFrame();
             }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             const bool zoomWiggleTraceActive =
@@ -4092,11 +4100,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 m_zoomFillFrozenRetainedAvailable = true;
                 anchorCachedRetainedSourceForCurrentFrame();
             }
+            const bool retainedSourceMissingViewportCoverage =
+                haveRetainedTextureSegments
+                && !retainedSourceReadyForFrame;
             if (!useRetainedSourceTextureBodyForFrame
-                && retainedTextureSegmentsOverflowed
+                && (retainedTextureSegmentsOverflowed
+                    || (m_zoomFillFreezePending
+                        && retainedSourceMissingViewportCoverage))
                 && m_gpuDisplayImage.isNull()) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-                profileFallbackReason = "retained-segment-overflow";
+                profileFallbackReason = retainedTextureSegmentsOverflowed
+                    ? "retained-segment-overflow"
+                    : "retained-preview-incomplete";
                 const auto displayStart = std::chrono::steady_clock::now();
                 const quint64 displayGenerationBefore = m_gpuDisplayGeneration;
 #endif
@@ -4128,16 +4143,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && !rollingMode
                 && haveSelectedSpectrogramContent
                 && !rendererFreeze) {
-                if (useRetainedSourceTextureBodyForFrame
+                const bool retainedFreezeCoversViewport =
+                    retainedSourceSegmentsReadyForFrame();
+                if (haveRetainedTextureSegments
                     && !retainedTextureSegments.isEmpty()) {
                     m_zoomFillFrozenRetainedSegments = retainedTextureSegments;
                     m_zoomFillFrozenRetainedAvailable = true;
+                } else if (!m_gpuDisplayImage.isNull()) {
+                    m_zoomFillFrozenRetainedSegments = {};
+                    m_zoomFillFrozenRetainedAvailable = false;
                 }
                 captureZoomFillFrozenCacheLocked(
                     m_zoomFillFrozenRetainedAvailable,
                     effectiveZoom,
                     playheadPixel >= 0 ? static_cast<double>(playheadPixel) : -1.0,
-                    centeredViewportScrollsWithPlayback);
+                    centeredViewportScrollsWithPlayback,
+                    retainedFreezeCoversViewport);
                 m_zoomFillFrozenRetainedActive =
                     m_zoomFillFrozenRetainedAvailable;
                 m_zoomFillActive =
@@ -6117,13 +6138,15 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
     bool allowCpuSnapshot,
     double effectiveZoom,
     double anchorX,
-    std::optional<bool> centeredViewportScrollsWithPlayback) {
+    std::optional<bool> centeredViewportScrollsWithPlayback,
+    std::optional<bool> retainedFreezeCoversViewportOverride) {
     const int viewportWidth = std::max(1, static_cast<int>(std::round(width())));
     const bool retainedFreezeCoversViewport =
-        m_zoomFillFrozenRetainedAvailable
-        && retainedSegmentsCoverViewportForZoomFill(
-            m_zoomFillFrozenRetainedSegments,
-            viewportWidth);
+        retainedFreezeCoversViewportOverride.value_or(
+            m_zoomFillFrozenRetainedAvailable
+            && retainedSegmentsCoverViewportForZoomFill(
+                m_zoomFillFrozenRetainedSegments,
+                viewportWidth));
     if (allowCpuSnapshot && !retainedFreezeCoversViewport) {
         ensureZoomFillSnapshotImageLocked();
     }
@@ -6284,6 +6307,14 @@ bool SpectrogramItem::retainedSegmentsCoverViewportForZoomFill(
         }
     }
     return coveredRight >= viewportRight - toleratedGapPixels;
+}
+
+bool SpectrogramItem::retainedSourceSegmentsReadyForZoomFill(
+    const QVector<RetainedRenderSegment> &segments,
+    const int viewportWidth,
+    const bool allSegmentsHaveTextures) {
+    return allSegmentsHaveTextures
+        && retainedSegmentsCoverViewportForZoomFill(segments, viewportWidth);
 }
 
 bool SpectrogramItem::shouldDrawCachedRetainedSourceForFrame(
