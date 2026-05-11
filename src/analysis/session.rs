@@ -189,6 +189,46 @@ fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
     Duration::new(secs, nanos).as_secs_f32()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PreseekWarmupPlan {
+    actual_seek_seconds: f64,
+    warmup_columns: u64,
+    first_output_column: u64,
+}
+
+fn preseek_warmup_plan(
+    position_seconds: f64,
+    fft_size: usize,
+    effective_rate: u32,
+    effective_hop: usize,
+    cols_per_second: f64,
+) -> PreseekWarmupPlan {
+    if effective_rate == 0 || effective_hop == 0 || cols_per_second <= 0.0 {
+        return PreseekWarmupPlan {
+            actual_seek_seconds: position_seconds.max(0.0),
+            warmup_columns: 0,
+            first_output_column: 0,
+        };
+    }
+
+    let fft_warmup_seconds = usize_to_f64_approx(fft_size) / f64::from(effective_rate);
+    let actual_seek_seconds = (position_seconds - fft_warmup_seconds).max(0.0);
+    let warmup_columns = if position_seconds > fft_warmup_seconds {
+        u64::try_from(fft_size / effective_hop).unwrap_or(u64::MAX)
+    } else {
+        0
+    };
+    let first_output_column =
+        f64_to_u64_saturating((actual_seek_seconds * cols_per_second).floor())
+            .saturating_add(warmup_columns);
+
+    PreseekWarmupPlan {
+        actual_seek_seconds,
+        warmup_columns,
+        first_output_column,
+    }
+}
+
 const PRECOMPUTED_DB_RANGE: f32 = 132.0;
 
 /// Compute the expected peak power dB for a full-scale sine in a
@@ -942,21 +982,23 @@ fn run_spectrogram_session(
         f64::INFINITY
     };
 
-    // Pre-seek warmup: seek fft_size samples earlier so the STFT produces
-    // its first output at exactly the requested position.
-    let fft_warmup_seconds = usize_to_f64_approx(fft_size) / f64::from(effective_rate);
-    let actual_seek_seconds = (start_seconds - fft_warmup_seconds).max(0.0);
-    let warmup_columns = if start_seconds > fft_warmup_seconds {
-        f64_to_u64_saturating((start_seconds - actual_seek_seconds) * cols_per_second)
-    } else {
-        0
-    };
+    // Pre-seek warmup: seek one FFT window earlier and label the first
+    // emitted column by its actual post-warmup time.  Non-divisible
+    // FFT/hop pairs otherwise shift by a hop-dependent remainder during
+    // zoom reveals.
+    let warmup_plan = preseek_warmup_plan(
+        start_seconds,
+        fft_size,
+        effective_rate,
+        effective_hop,
+        cols_per_second,
+    );
 
-    if actual_seek_seconds > 0.0 {
-        source.seek(actual_seek_seconds, native_sample_rate);
+    if warmup_plan.actual_seek_seconds > 0.0 {
+        source.seek(warmup_plan.actual_seek_seconds, native_sample_rate);
     }
 
-    let start_column = f64_to_u64_saturating((start_seconds * cols_per_second).floor());
+    let start_column = warmup_plan.first_output_column;
 
     let mut session = SpectrogramSessionState {
         track_token,
@@ -1026,7 +1068,7 @@ fn run_spectrogram_session(
         },
     ));
 
-    let mut warmup_remaining = warmup_columns;
+    let mut warmup_remaining = warmup_plan.warmup_columns;
 
     loop {
         let result = session_decode_loop(
@@ -1580,14 +1622,18 @@ fn handle_session_seek(
     session.lod_pending_columns.clear();
 
     // Pre-seek warmup.
-    let fft_warmup_seconds =
-        usize_to_f64_approx(session.fft_size) / f64::from(session.effective_rate);
-    let actual_seek_seconds = (position_seconds - fft_warmup_seconds).max(0.0);
+    let warmup_plan = preseek_warmup_plan(
+        position_seconds,
+        session.fft_size,
+        session.effective_rate,
+        session.effective_hop,
+        session.cols_per_second,
+    );
 
     // Compute native rate from effective rate × divisor.
     let native_rate =
         u64::from(session.effective_rate) * u64::try_from(session.divisor).unwrap_or(1);
-    source.seek(actual_seek_seconds, native_rate);
+    source.seek(warmup_plan.actual_seek_seconds, native_rate);
 
     // Reset STFT state.
     let output_interval = if session.zoom_level > 1.0 {
@@ -1602,7 +1648,7 @@ fn handle_session_seek(
         .map(|_| PeakHoldResampler::new(output_interval))
         .collect();
 
-    let new_column = f64_to_u64_saturating((position_seconds * session.cols_per_second).floor());
+    let new_column = warmup_plan.first_output_column;
     session.columns_produced = new_column;
     session.session_start_column = new_column;
     session.chunk_buf.clear();
@@ -1638,11 +1684,7 @@ fn handle_session_seek(
         },
     ));
 
-    *warmup_remaining = if position_seconds > fft_warmup_seconds {
-        f64_to_u64_saturating((position_seconds - actual_seek_seconds) * session.cols_per_second)
-    } else {
-        0
-    };
+    *warmup_remaining = warmup_plan.warmup_columns;
 
     // Continue decode loop from new position.
     session_decode_loop(
@@ -2939,6 +2981,46 @@ mod tests {
         // zoom-out est would be ≈ reference_est (i.e. inflated).
         let expected_scaled = scale_columns_estimate(reference_est, 6_104);
         assert_eq!(zoom_out_est, expected_scaled);
+    }
+
+    #[test]
+    fn preseek_warmup_plan_indexes_first_emitted_column_time() {
+        const POSITION_SECONDS: f64 = 170.625;
+        const EFFECTIVE_RATE: u32 = 48_000;
+        const EFFECTIVE_RATE_F64: f64 = 48_000.0;
+
+        let plan = preseek_warmup_plan(
+            POSITION_SECONDS,
+            2_048,
+            EFFECTIVE_RATE,
+            819,
+            EFFECTIVE_RATE_F64 / 819.0,
+        );
+        let requested_column =
+            f64_to_u64_saturating((POSITION_SECONDS * EFFECTIVE_RATE_F64 / 819.0).floor());
+        let expected_first_column = f64_to_u64_saturating(
+            ((POSITION_SECONDS - 410.0 / EFFECTIVE_RATE_F64) * EFFECTIVE_RATE_F64 / 819.0).floor(),
+        );
+
+        assert_eq!(plan.warmup_columns, 2);
+        assert_eq!(plan.first_output_column, expected_first_column);
+        assert!(
+            plan.first_output_column < requested_column,
+            "non-divisible FFT/hop warmup must preserve the actual first output time"
+        );
+
+        let divisible = preseek_warmup_plan(
+            POSITION_SECONDS,
+            2_048,
+            EFFECTIVE_RATE,
+            512,
+            EFFECTIVE_RATE_F64 / 512.0,
+        );
+        assert_eq!(divisible.warmup_columns, 4);
+        assert_eq!(
+            divisible.first_output_column,
+            f64_to_u64_saturating((POSITION_SECONDS * EFFECTIVE_RATE_F64 / 512.0).floor())
+        );
     }
 
     #[test]
