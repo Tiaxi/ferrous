@@ -6255,7 +6255,11 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
             && retainedSegmentsCoverViewportForZoomFill(
                 m_zoomFillFrozenRetainedSegments,
                 viewportWidth));
-    if (allowCpuSnapshot && !retainedFreezeCoversViewport) {
+    const bool pinnedCenteredFreeze =
+        centeredViewportScrollsWithPlayback.has_value()
+        && !*centeredViewportScrollsWithPlayback;
+    if (allowCpuSnapshot
+        && (!retainedFreezeCoversViewport || pinnedCenteredFreeze)) {
         ensureZoomFillSnapshotImageLocked();
     }
     m_zoomFillFrozenDisplayImage = m_gpuDisplayImage;

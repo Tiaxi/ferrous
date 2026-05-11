@@ -1291,6 +1291,7 @@ private slots:
     void spectrogramMetadataOnlySameTrackResetFreezesExistingFrame();
     void spectrogramZoomFillSkipsCpuFreezeSnapshotWithoutRetainedFrame();
     void spectrogramZoomFillUsesRetainedFreezeWithoutCpuSnapshot();
+    void spectrogramZoomFillPinnedRetainedFreezeKeepsDisplayFallback();
     void spectrogramSyntheticClearSkipsCpuFreezeSnapshotWithoutRetainedFrame();
     void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
     void spectrogramDataResetInvalidatesRetainedSourceStateDuringFreeze();
@@ -14370,6 +14371,55 @@ void QmlSmokeTest::spectrogramZoomFillUsesRetainedFreezeWithoutCpuSnapshot() {
         QVERIFY2(
             item.m_zoomFillFrozenDisplayImage.isNull(),
             "retained freeze capture should not build a CPU snapshot when retained segments can preserve the visible frame");
+        QVERIFY(item.m_zoomFillFrozenRetainedAvailable);
+    }
+}
+
+void QmlSmokeTest::spectrogramZoomFillPinnedRetainedFreezeKeepsDisplayFallback() {
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 240;
+    QByteArray chunk(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 44100, 1024, true,
+        true, 26, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, false);
+        QVERIFY(item.m_gpuDisplayImage.isNull());
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(119));
+
+        item.m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(0, 0, 120, bins),
+                QRectF(0.0, 0.0, 120.0, 80.0),
+                true,
+            },
+        };
+        item.m_zoomFillFrozenRetainedAvailable = true;
+
+        item.captureZoomFillFrozenCacheLocked(
+            true,
+            1.0,
+            60.0,
+            false,
+            true);
+
+        QVERIFY2(
+            !item.m_zoomFillFrozenDisplayImage.isNull(),
+            "pinned centered retained freezes need a display-image fallback "
+            "so rapid zoom resets cannot go black if retained pages are "
+            "temporarily not drawable");
         QVERIFY(item.m_zoomFillFrozenRetainedAvailable);
     }
 }
