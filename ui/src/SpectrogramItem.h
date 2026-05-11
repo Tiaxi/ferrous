@@ -293,7 +293,8 @@ private:
         bool retainedTextureCoversVisibleRange,
         bool gpuDisplayImageAvailable,
         int retainedUploadColumns,
-        bool retainedTextureReset);
+        bool retainedTextureReset,
+        bool centeredViewportScrollsWithPlayback);
     static bool shouldDrawFrozenRetainedSourceForZoomFill(
         bool rendererFreeze,
         bool retainedFreezeAvailableForFrame,

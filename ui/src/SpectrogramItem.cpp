@@ -3676,7 +3676,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     finalRetainedTextureCoversVisibleRange,
                     !m_gpuDisplayImage.isNull(),
                     m_gpuSourcePageUploadColumns,
-                    m_gpuSourcePageTextureReset);
+                    m_gpuSourcePageTextureReset,
+                    centeredViewportScrollsWithPlayback);
             const bool freezeCanRevealFinalFrame =
                 rendererFreeze
                 && m_zoomFillDataReady
@@ -6140,12 +6141,13 @@ bool SpectrogramItem::retainedSourceReadyForZoomReveal(
     const bool retainedTextureCoversVisibleRange,
     const bool gpuDisplayImageAvailable,
     const int retainedUploadColumns,
-    const bool retainedTextureReset) {
+    const bool retainedTextureReset,
+    const bool centeredViewportScrollsWithPlayback) {
     if (!canUseRetainedSourceTextureBody) {
         return gpuDisplayImageAvailable;
     }
     return retainedTextureCoversVisibleRange
-        && retainedUploadColumns <= 0
+        && (retainedUploadColumns <= 0 || centeredViewportScrollsWithPlayback)
         && !retainedTextureReset;
 }
 

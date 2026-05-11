@@ -1260,7 +1260,7 @@ private slots:
     void spectrogramZoomFillWaitsForZoomOutVisibleColumns();
     void spectrogramZoomFillWaitsForContiguousVisibleColumns();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
-    void spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence();
+    void spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads();
     void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
     void spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport();
     void spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX();
@@ -13161,7 +13161,7 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence() {
+void QmlSmokeTest::spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads() {
     QVERIFY(SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(
         true, true, false));
     QVERIFY2(
@@ -13176,17 +13176,23 @@ void QmlSmokeTest::spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence() {
 
     QVERIFY2(
         !SpectrogramItem::retainedSourceReadyForZoomReveal(
-            true, true, false, 384, false),
+            true, true, false, 384, false, false),
         "zoom-fill must not reveal the retained-source path on the same frame "
         "that is still uploading newly decoded columns");
     QVERIFY2(
+        SpectrogramItem::retainedSourceReadyForZoomReveal(
+            true, true, false, 384, false, true),
+        "a centered viewport that is already scrolling should reveal once "
+        "retained pages cover the visible frame, even if edge columns were "
+        "uploaded during that paint");
+    QVERIFY2(
         !SpectrogramItem::retainedSourceReadyForZoomReveal(
-            true, true, false, 0, true),
+            true, true, false, 0, true, true),
         "zoom-fill must not reveal while the retained texture was recreated");
     QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
-        true, true, false, 0, false));
+        true, true, false, 0, false, false));
     QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
-        false, false, true, 384, true));
+        false, false, true, 384, true, false));
 
     QVERIFY2(
         !SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(
