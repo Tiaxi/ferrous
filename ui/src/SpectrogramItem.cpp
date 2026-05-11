@@ -1024,11 +1024,17 @@ void SpectrogramItem::setPositionSeconds(double value) {
             setPositionAnchorLocked(clamped, now);
             changed = true;
         }
-        // In rolling mode, ignore small backward heartbeat jitter to avoid
-        // scroll stutter.  In centered mode, backward jumps are real seeks
-        // that must be applied — the spectrogram stays in the ring buffer.
-        const bool regressedDuringPlayback =
+        const bool smoothPlaybackHeartbeat =
             m_displayMode == 0
+            || (m_displayMode == 1 && m_zoomFillActive);
+        // Ignore small backward heartbeat jitter while the spectrogram is
+        // visually scrolling. During centered zoom-fill, accepting those
+        // regressions makes the frozen preview hold position until the
+        // interpolated clock catches up, which shows up as a post-zoom nudge.
+        // Normal centered playback still applies small backward seeks
+        // immediately when no zoom transition is active.
+        const bool regressedDuringPlayback =
+            smoothPlaybackHeartbeat
             && m_playing
             && m_positionAnchorInitialized
             && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
@@ -1040,7 +1046,7 @@ void SpectrogramItem::setPositionSeconds(double value) {
         constexpr double kServoAlpha = 0.25;
         constexpr double kServoMaxErrorSeconds = 0.15;
         const bool smallCorrection =
-            m_displayMode == 0 && std::abs(error) < kServoMaxErrorSeconds;
+            smoothPlaybackHeartbeat && std::abs(error) < kServoMaxErrorSeconds;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profileEnabled
             && m_smoothnessProfile.active

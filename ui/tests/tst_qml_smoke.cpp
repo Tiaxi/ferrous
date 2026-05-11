@@ -1071,6 +1071,7 @@ private slots:
     void spectrogramGpuSamplerLoggingIgnoresPlaceholderTextureSize();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
+    void spectrogramCenteredZoomFillHeartbeatDoesNotMoveAnchorBackward();
     void spectrogramCenteredSmallSeekSnapsWithoutServoSlide();
     void spectrogramCenteredSeekFollowsLocalVisualClock();
     void spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrecomputedReady();
@@ -3932,6 +3933,33 @@ void QmlSmokeTest::spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward() {
             "lagging playback heartbeat moved anchor backward from %1 to %2")
             .arg(anchoredPosition, 0, 'f', 3)
             .arg(item.positionSeconds(), 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramCenteredZoomFillHeartbeatDoesNotMoveAnchorBackward() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+    item.setPositionSeconds(10.0);
+    item.setPlaying(true);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomFillActive = true;
+    }
+
+    QTest::qWait(40);
+    const double before =
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+    item.setPositionSeconds(before - 0.02);
+    const double after =
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+
+    QVERIFY2(
+        after >= before - 0.001,
+        qPrintable(QStringLiteral(
+            "lagging centered zoom-fill heartbeat moved visual clock backward "
+            "from %1 to %2")
+            .arg(before, 0, 'f', 4)
+            .arg(after, 0, 'f', 4)));
 }
 
 void QmlSmokeTest::spectrogramCenteredSmallSeekSnapsWithoutServoSlide() {
