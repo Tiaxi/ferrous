@@ -440,7 +440,8 @@ private:
         int height,
         double effectiveZoom,
         bool rollingMode,
-        int pageWidth = kRetainedSourcePageWidth) const;
+        int pageWidth = kRetainedSourcePageWidth,
+        std::optional<qint64> targetScaleDisplayRight = std::nullopt) const;
     void syncRetainedSourceTextureLocked(
         QQuickWindow *window,
         qint64 displayLeft,

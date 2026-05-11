@@ -3473,6 +3473,35 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             const qint64 retainedRenderableRight = rollingMode
                 ? displayRight
                 : std::min(displayRight, static_cast<qint64>(m_precomputedMaxColumnIndex));
+            const qint64 retainedUploadRenderableRight = rollingMode
+                ? displayRight
+                : static_cast<qint64>(m_precomputedMaxColumnIndex);
+            const double retainedColumnsPerSecondForFrame =
+                m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0
+                    ? static_cast<double>(m_precomputedSampleRateHz)
+                        / static_cast<double>(m_precomputedHopSize)
+                    : 0.0;
+            // Keep a small right-side retained halo warm while the centered
+            // viewport scrolls. Zoom-out freezes reuse this cache; without
+            // offscreen columns the frozen preview scrolls left and exposes
+            // the texture edge before the coarser backend frame is ready.
+            const qint64 retainedScrollHaloColumns =
+                !rollingMode
+                    && centeredViewportScrollsWithPlayback
+                    && retainedColumnsPerSecondForFrame > 0.0
+                    && std::isfinite(retainedColumnsPerSecondForFrame)
+                ? std::min<qint64>(
+                      static_cast<qint64>(kRetainedUploadColumnsPerPaint),
+                      static_cast<qint64>(
+                          std::ceil(retainedColumnsPerSecondForFrame * 10.0)))
+                : 0;
+            const qint64 retainedUploadRight =
+                retainedScrollHaloColumns > 0
+                    && retainedUploadRenderableRight >= displayRight
+                ? std::min(
+                      retainedUploadRenderableRight,
+                      displayRight + retainedScrollHaloColumns)
+                : displayRight;
             const int retainedPageWidth = retainedSourcePageWidthForGpuLimit(currentWindow);
             const bool retainedPagesCoverBeforeUpload =
                 canUseRetainedSourceTextureBody
@@ -3531,7 +3560,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     syncRetainedSourceTextureLocked(
                         currentWindow,
                         displayLeft,
-                        displayRight,
+                        retainedUploadRight,
                         rollingMode);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                     profileRetainedUploadMs += std::chrono::duration<double, std::milli>(
@@ -3620,6 +3649,30 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     ? static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize)
                     : 0.0;
+            };
+            const auto retainedFrozenCacheSegmentsForCurrentFrame = [&]() {
+                if (!haveRetainedTextureSegments) {
+                    return QVector<RetainedRenderSegment>{};
+                }
+                if (retainedScrollHaloColumns <= 0
+                    || retainedUploadRight <= displayRight) {
+                    return retainedTextureSegments;
+                }
+                const RetainedRenderPlan haloPlan =
+                    buildRetainedRenderPlanLocked(
+                        displayLeft,
+                        retainedUploadRight,
+                        retainedUploadRight,
+                        drawX,
+                        drawPixels,
+                        h,
+                        effectiveZoom,
+                        rollingMode,
+                        retainedPageWidth,
+                        displayRight);
+                return haloPlan.haveSegments
+                    ? haloPlan.segments
+                    : retainedTextureSegments;
             };
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             double zoomTraceFrozenSourceColumnDelta =
@@ -4142,7 +4195,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (useRetainedSourceTextureBodyForFrame
                 && !rendererFreeze
                 && retainedSourceTexture == m_gpuSourceTexture.texture()) {
-                m_zoomFillFrozenRetainedSegments = retainedTextureSegments;
+                m_zoomFillFrozenRetainedSegments =
+                    retainedFrozenCacheSegmentsForCurrentFrame();
                 m_zoomFillFrozenRetainedAvailable = true;
                 anchorCachedRetainedSourceForCurrentFrame();
             }
@@ -4193,7 +4247,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     retainedSourceSegmentsReadyForFrame();
                 if (haveRetainedTextureSegments
                     && !retainedTextureSegments.isEmpty()) {
-                    m_zoomFillFrozenRetainedSegments = retainedTextureSegments;
+                    m_zoomFillFrozenRetainedSegments =
+                        retainedFrozenCacheSegmentsForCurrentFrame();
                     m_zoomFillFrozenRetainedAvailable = true;
                 } else if (!m_gpuDisplayImage.isNull()) {
                     m_zoomFillFrozenRetainedSegments = {};
@@ -7311,7 +7366,8 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
     const int height,
     const double effectiveZoom,
     const bool rollingMode,
-    const int pageWidth) const {
+    const int pageWidth,
+    const std::optional<qint64> targetScaleDisplayRight) const {
     RetainedRenderPlan plan;
     if (displayRight < displayLeft
         || drawPixels <= 0
@@ -7326,7 +7382,13 @@ SpectrogramItem::RetainedRenderPlan SpectrogramItem::buildRetainedRenderPlanLock
         return plan;
     }
 
-    const qint64 sourceColumns = std::max<qint64>(1, displayRight - displayLeft + 1);
+    const qint64 scaleDisplayRight =
+        targetScaleDisplayRight.value_or(displayRight);
+    const qint64 sourceColumns = std::max<qint64>(
+        1,
+        scaleDisplayRight >= displayLeft
+            ? scaleDisplayRight - displayLeft + 1
+            : displayRight - displayLeft + 1);
     const double targetScale = rollingMode
         ? effectiveZoom
         : static_cast<double>(drawPixels) / static_cast<double>(sourceColumns);

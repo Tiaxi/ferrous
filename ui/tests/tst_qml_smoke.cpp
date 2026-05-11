@@ -1267,6 +1267,7 @@ private slots:
     void spectrogramZoomFillRetainedPreviewUsesFrozenScrollMode();
     void spectrogramZoomFillPlayheadUsesFrozenAnchorDuringFreeze();
     void spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX();
+    void spectrogramZoomFillRetainedPreviewKeepsRightScrollHalo();
     void spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame();
     void spectrogramZoomFillMetadataResetKeepsActiveRetainedFreezeScroll();
     void spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections();
@@ -13538,6 +13539,52 @@ void QmlSmokeTest::spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScree
         90.0);
     QVERIFY(std::isnan(
         SpectrogramItem::retainedSourceColumnForScreenXForZoomTrace({}, 100.0)));
+}
+
+void QmlSmokeTest::spectrogramZoomFillRetainedPreviewKeepsRightScrollHalo() {
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(12);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr int totalColumns = 140;
+    QByteArray data(totalColumns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        data, bins, 0, totalColumns,
+        0, totalColumns, 48000, 1024, false,
+        true, 1, false, 1);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::RetainedRenderPlan plan =
+        item.buildRetainedRenderPlanLocked(
+            0,
+            119,
+            119,
+            0.0,
+            100,
+            12,
+            1.0,
+            false,
+            SpectrogramItem::kRetainedSourcePageWidth,
+            99);
+
+    QVERIFY(plan.haveSegments);
+    QCOMPARE(plan.segments.size(), qsizetype{1});
+    QCOMPARE(plan.segments[0].sourceRect.width(), 120);
+    QCOMPARE(plan.segments[0].targetRect.width(), 120.0);
+
+    const QVector<SpectrogramItem::RetainedRenderSegment> scrolled =
+        SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
+            plan.segments,
+            10.0,
+            SpectrogramItem::kRetainedSourcePageWidth,
+            1.0,
+            50.0);
+
+    QVERIFY2(
+        SpectrogramItem::retainedSegmentsCoverViewportForZoomFill(scrolled, 100),
+        "frozen retained zoom-out previews need right-side offscreen columns so playback scrolling does not expose a black edge");
 }
 
 void QmlSmokeTest::spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame() {
