@@ -322,6 +322,9 @@ private:
         int pageWidth = 0,
         double targetScaleFactor = 1.0,
         double targetAnchorX = 0.0);
+    static double retainedSourceColumnScreenXForZoomTrace(
+        const QVector<RetainedRenderSegment> &segments,
+        double sourceColumn);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,
@@ -643,6 +646,7 @@ private:
     double m_zoomFillFrozenRetainedAnchorX{0.0};
     double m_zoomFillFrozenRetainedLastColumnDelta{0.0};
     quint64 m_zoomFillFrozenRetainedGeneration{0};
+    qint64 m_zoomFillFrozenRetainedRollingEpoch{0};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;
     QImage m_gpuRowLutImage;
@@ -739,6 +743,9 @@ private:
     double m_gaplessPositionOffset{0.0};
     std::chrono::steady_clock::time_point m_centeredGaplessTransitionAt{};
     int m_debugPaintCounter{0};
+    int m_debugChannelIndex{-1};
+    quint64 m_zoomWiggleTraceFrameSerial{0};
+    double m_zoomWiggleTraceProbeSeconds{0.0};
 
     mutable QMutex m_stateMutex;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

@@ -1262,6 +1262,7 @@ private slots:
     void spectrogramZoomFillRetainedRevealWaitsForUploadQuiescence();
     void spectrogramZoomFillRetainedPreviewScrollsWithPlaybackClock();
     void spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport();
+    void spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX();
     void spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame();
     void spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections();
     void spectrogramZoomFillRetainedPreviewCoversPostRevealUploadGaps();
@@ -13287,6 +13288,36 @@ void QmlSmokeTest::spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenter
     QCOMPARE(longMovingCentered.size(), 1);
     QCOMPARE(longMovingCentered[0].sourceRect, QRect(133, 0, 40, 16));
     QCOMPARE(longMovingCentered[0].targetRect, QRectF(9.5, 0.0, 80.0, 32.0));
+}
+
+void QmlSmokeTest::spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX() {
+    const QVector<SpectrogramItem::RetainedRenderSegment> segments{
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(100, 0, 40, 16),
+            QRectF(10.0, 0.0, 80.0, 32.0),
+            true,
+        },
+        SpectrogramItem::RetainedRenderSegment{
+            QRect(140, 0, 20, 16),
+            QRectF(90.0, 0.0, 40.0, 32.0),
+            true,
+        },
+    };
+
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnScreenXForZoomTrace(segments, 100.0),
+        10.0);
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnScreenXForZoomTrace(segments, 120.0),
+        50.0);
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnScreenXForZoomTrace(segments, 150.0),
+        110.0);
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnScreenXForZoomTrace(segments, 90.0),
+        -10.0);
+    QVERIFY(std::isnan(
+        SpectrogramItem::retainedSourceColumnScreenXForZoomTrace({}, 100.0)));
 }
 
 void QmlSmokeTest::spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame() {

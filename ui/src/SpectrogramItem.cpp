@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 #define FERROUS_SPECTROGRAM_TRACE_LOGF(...)              \
@@ -82,6 +83,7 @@ const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
 std::atomic<int> g_gpuSpectrogramPaintLogBudget{12};
 std::atomic<int> g_zoomFillRenderLogBudget{80};
+std::atomic<int> g_zoomWiggleTraceLogBudget{4000};
 std::atomic<int> g_zoomFillSourceUploadLogBudget{80};
 std::atomic<int> g_gpuDebugStageLogBudget{24};
 std::atomic<int> g_gpuMaterialLogBudget{24};
@@ -1460,6 +1462,8 @@ void SpectrogramItem::setZoomLevel(double value) {
             m_displayMode == 1
             && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
             && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
+        const double zoomTraceProbeSeconds =
+            currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
         m_renderZoomLevel = value;
         m_precomputedCanvasDirty = true;
         invalidateMapping();
@@ -1475,6 +1479,7 @@ void SpectrogramItem::setZoomLevel(double value) {
             m_zoomFillActive = true;
             m_zoomFillDataReady = false;
             m_zoomFillFreezePending = true;
+            m_zoomWiggleTraceProbeSeconds = zoomTraceProbeSeconds;
         }
     }
 
@@ -1533,6 +1538,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     const Clock::time_point lockAttemptAt = Clock::now();
 #endif
     QMutexLocker lock(&m_stateMutex);
+    m_debugChannelIndex = channelIndex;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     profile.lockWaitMs =
         std::chrono::duration<double, std::milli>(Clock::now() - lockAttemptAt)
@@ -3083,6 +3089,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         QMutexLocker lock(&m_stateMutex);
 
         const double renderPositionSeconds = currentRenderPositionSecondsLocked(renderNow);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        const quint64 zoomTraceFrameSerial = ++m_zoomWiggleTraceFrameSerial;
+#endif
         const bool usePrecomputed = m_precomputedReady
             && m_precomputedBinsPerColumn > 0
             && m_precomputedTotalColumnsEstimate > 0;
@@ -3577,6 +3586,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         / static_cast<double>(m_precomputedHopSize)
                     : 0.0;
             };
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            double zoomTraceFrozenSourceColumnDelta =
+                std::numeric_limits<double>::quiet_NaN();
+            double zoomTraceFrozenTargetScale =
+                std::numeric_limits<double>::quiet_NaN();
+#endif
             const auto anchorCachedRetainedSourceForCurrentFrame = [&]() {
                 m_zoomFillFrozenRetainedPositionSeconds = renderPositionSeconds;
                 m_zoomFillFrozenRetainedColumnsPerSecond =
@@ -3591,6 +3606,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         : (width() > 0.0 ? width() * 0.5 : 0.0);
                 m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
                 m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
+                m_zoomFillFrozenRetainedRollingEpoch = m_rollingEpoch;
             };
             const auto useCachedRetainedSourceSegments = [&]() {
                 retainedSourceTexture = m_gpuSourceTexture.texture();
@@ -3617,6 +3633,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     ? currentRetainedPixelsPerSecond
                         / m_zoomFillFrozenRetainedPixelsPerSecond
                     : 1.0;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                zoomTraceFrozenSourceColumnDelta = frozenSourceColumnDelta;
+                zoomTraceFrozenTargetScale = frozenTargetScale;
+#endif
                 retainedTextureSegments =
                     scrollFrozenRetainedSegmentsForZoomFill(
                         m_zoomFillFrozenRetainedSegments,
@@ -3709,6 +3729,165 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     && haveRetainedTextureSegments;
             }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            const bool zoomWiggleTraceActive =
+                m_zoomFillActive
+                || rendererFreeze
+                || m_zoomFillDataReady
+                || m_zoomFillFreezePending
+                || usePostRevealCachedRetainedSourceForFrame;
+            if (zoomWiggleTraceActive) {
+                const int remainingLogs = g_zoomWiggleTraceLogBudget.fetch_sub(1);
+                if (remainingLogs > 0) {
+                    const qint64 sourceColumns =
+                        std::max<qint64>(1, displayRight - displayLeft + 1);
+                    const double targetScale = rollingMode
+                        ? effectiveZoom
+                        : static_cast<double>(drawPixels)
+                            / static_cast<double>(sourceColumns);
+                    const int filledPixels = rollingMode
+                        ? std::min(
+                              drawPixels,
+                              static_cast<int>(
+                                  std::ceil(static_cast<double>(sourceColumns)
+                                      * effectiveZoom)))
+                        : drawPixels;
+                    const int contentXOffset = rollingMode
+                        ? std::max(0, drawPixels - filledPixels)
+                        : 0;
+                    const double currentColumnsPerSecond =
+                        retainedScrollColumnsPerSecond();
+                    const double traceProbeSeconds =
+                        std::isfinite(m_zoomWiggleTraceProbeSeconds)
+                            && m_zoomWiggleTraceProbeSeconds > 0.0
+                        ? m_zoomWiggleTraceProbeSeconds
+                        : renderPositionSeconds;
+                    const auto probeColumnFor = [rollingMode](
+                                                    double probeSeconds,
+                                                    double columnsPerSecond,
+                                                    qint64 rollingEpoch) {
+                        if (!std::isfinite(probeSeconds)
+                            || !std::isfinite(columnsPerSecond)
+                            || columnsPerSecond <= 0.0) {
+                            return std::numeric_limits<double>::quiet_NaN();
+                        }
+                        const double trackColumn = probeSeconds * columnsPerSecond;
+                        return rollingMode
+                            ? static_cast<double>(rollingEpoch) + trackColumn
+                            : trackColumn;
+                    };
+                    const double nativeProbeColumn = probeColumnFor(
+                        traceProbeSeconds,
+                        currentColumnsPerSecond,
+                        m_rollingEpoch);
+                    const double nativeX =
+                        std::isfinite(nativeProbeColumn)
+                        && std::isfinite(targetScale)
+                        && drawPixels > 0
+                        ? drawX
+                            + static_cast<double>(contentXOffset)
+                            + (nativeProbeColumn - static_cast<double>(displayLeft))
+                                * targetScale
+                        : std::numeric_limits<double>::quiet_NaN();
+                    const bool selectedUsesFrozenRetained =
+                        (useFrozenRetainedSourceForFrame
+                            || usePostRevealCachedRetainedSourceForFrame)
+                        && m_zoomFillFrozenRetainedGeneration != 0
+                        && retainedSourcePageGeneration
+                            == m_zoomFillFrozenRetainedGeneration;
+                    const double selectedColumnsPerSecond =
+                        selectedUsesFrozenRetained
+                            ? m_zoomFillFrozenRetainedColumnsPerSecond
+                            : currentColumnsPerSecond;
+                    const qint64 selectedRollingEpoch =
+                        selectedUsesFrozenRetained
+                            ? m_zoomFillFrozenRetainedRollingEpoch
+                            : m_rollingEpoch;
+                    const double selectedProbeColumn = probeColumnFor(
+                        traceProbeSeconds,
+                        selectedColumnsPerSecond,
+                        selectedRollingEpoch);
+                    const double selectedX =
+                        retainedSourceColumnScreenXForZoomTrace(
+                            retainedTextureSegments,
+                            selectedProbeColumn);
+                    const double selectedDeltaX =
+                        std::isfinite(selectedX) && std::isfinite(nativeX)
+                            ? selectedX - nativeX
+                            : std::numeric_limits<double>::quiet_NaN();
+                    const char *selectedPath =
+                        useFrozenRetainedSourceForFrame ? "frozen-retained"
+                        : usePostRevealCachedRetainedSourceForFrame ? "cached-retained"
+                        : retainedSourceReadyForFrame ? "native-retained"
+                        : revealViaWarmedDisplayImage ? "warmed-image"
+                        : rendererFreeze ? "frozen-image"
+                        : "display-image";
+                    const RetainedRenderSegment *segment0 =
+                        retainedTextureSegments.isEmpty()
+                            ? nullptr
+                            : &retainedTextureSegments[0];
+                    FERROUS_SPECTROGRAM_TRACE_LOGF(stderr,
+                        "[Qt-zoom-wiggle@%p] frame=%llu ch=%d path=%s "
+                        "reveal=%d freeze=%d active=%d data_ready=%d awaiting=%d "
+                        "freeze_pending=%d render_freeze=%d use_frozen=%d cached=%d "
+                        "retained_ready=%d selected_frozen=%d rolling=%d "
+                        "centered_scroll=%d zoom=%.4f render_zoom=%.4f ez=%.4f "
+                        "hop=%d requested_hop=%d gen=%llu frozen_gen=%llu pos=%.6f "
+                        "probe_s=%.6f native_col=%.3f selected_col=%.3f "
+                        "native_x=%.3f selected_x=%.3f delta_x=%.3f "
+                        "display=%lld..%lld draw_x=%.3f draw_px=%d phase=%.3f "
+                        "frozen_delta=%.3f frozen_scale=%.6f current_cps=%.6f "
+                        "selected_cps=%.6f current_epoch=%lld frozen_epoch=%lld "
+                        "segs=%lld seg0_valid=%d seg0_src=%d+%d seg0_dst=%.3f+%.3f\n",
+                        static_cast<const void *>(this),
+                        static_cast<unsigned long long>(zoomTraceFrameSerial),
+                        m_debugChannelIndex,
+                        selectedPath,
+                        freezeCanRevealFinalFrame ? 1 : 0,
+                        rendererFreeze ? 1 : 0,
+                        m_zoomFillActive ? 1 : 0,
+                        m_zoomFillDataReady ? 1 : 0,
+                        m_awaitingZoomData ? 1 : 0,
+                        m_zoomFillFreezePending ? 1 : 0,
+                        rendererFreeze ? 1 : 0,
+                        useFrozenRetainedSourceForFrame ? 1 : 0,
+                        usePostRevealCachedRetainedSourceForFrame ? 1 : 0,
+                        retainedSourceReadyForFrame ? 1 : 0,
+                        selectedUsesFrozenRetained ? 1 : 0,
+                        rollingMode ? 1 : 0,
+                        centeredViewportScrollsWithPlayback ? 1 : 0,
+                        m_zoomLevel,
+                        m_renderZoomLevel,
+                        effectiveZoom,
+                        m_precomputedHopSize,
+                        m_requestedNativeHopSize,
+                        static_cast<unsigned long long>(m_precomputedSessionGeneration),
+                        static_cast<unsigned long long>(m_zoomFillFrozenRetainedGeneration),
+                        renderPositionSeconds,
+                        traceProbeSeconds,
+                        nativeProbeColumn,
+                        selectedProbeColumn,
+                        nativeX,
+                        selectedX,
+                        selectedDeltaX,
+                        static_cast<long long>(displayLeft),
+                        static_cast<long long>(displayRight),
+                        drawX,
+                        drawPixels,
+                        columnPhase,
+                        zoomTraceFrozenSourceColumnDelta,
+                        zoomTraceFrozenTargetScale,
+                        currentColumnsPerSecond,
+                        selectedColumnsPerSecond,
+                        static_cast<long long>(m_rollingEpoch),
+                        static_cast<long long>(m_zoomFillFrozenRetainedRollingEpoch),
+                        static_cast<long long>(retainedTextureSegments.size()),
+                        segment0 != nullptr && segment0->valid ? 1 : 0,
+                        segment0 != nullptr ? segment0->sourceRect.x() : 0,
+                        segment0 != nullptr ? segment0->sourceRect.width() : 0,
+                        segment0 != nullptr ? segment0->targetRect.x() : 0.0,
+                        segment0 != nullptr ? segment0->targetRect.width() : 0.0);
+                }
+            }
             if (rendererFreeze && m_zoomFillDataReady && !m_awaitingZoomData) {
                 const int remainingLogs = g_zoomFillRenderLogBudget.fetch_sub(1);
                 if (remainingLogs > 0) {
@@ -3789,12 +3968,16 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         ? QStringLiteral("none")
                         : logSegment(retainedTextureSegments[1]);
                     FERROUS_SPECTROGRAM_PROFILE_LOGF(stderr,
-                        "[ui-spectrogram] zoom_fill_reveal_gate reveal=%d renderer_freeze=%d "
+                        "[ui-spectrogram@%p] zoom_fill_reveal_gate frame=%llu ch=%d "
+                        "reveal=%d renderer_freeze=%d "
                         "can_retained=%d retained_cover=%d retained_segments=%d overflow=%d "
                         "display=%lld..%lld decoded_right=%lld draw=%d filled=%d ez=%.4f "
                         "gpu_source_range=%lld..%lld gpu_source_token=%llu current_token=%llu "
                         "source_tex=%dx%d cpu_image=%dx%d cpu_black=%d cpu_dim=%d "
                         "cpu_longest_black=%d@%d cpu_peak=%d..%d seg0=\"%s\" seg1=\"%s\"\n",
+                        static_cast<const void *>(this),
+                        static_cast<unsigned long long>(zoomTraceFrameSerial),
+                        m_debugChannelIndex,
                         freezeCanRevealFinalFrame ? 1 : 0,
                         rendererFreeze ? 1 : 0,
                         canUseRetainedSourceTextureBody ? 1 : 0,
@@ -5883,6 +6066,8 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
     m_zoomFillFrozenRetainedAnchorX = anchorX;
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
+    m_zoomFillFrozenRetainedRollingEpoch = m_rollingEpoch;
+    m_zoomWiggleTraceProbeSeconds = m_zoomFillFrozenRetainedPositionSeconds;
 }
 
 void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
@@ -5896,9 +6081,11 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedAnchorX = 0.0;
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedGeneration = 0;
+    m_zoomFillFrozenRetainedRollingEpoch = 0;
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
     m_zoomFillFreezePending = false;
+    m_zoomWiggleTraceProbeSeconds = 0.0;
 }
 
 SpectrogramItem::RetainedPageTextureExtent SpectrogramItem::retainedPageTextureExtentForSpan(
@@ -6127,6 +6314,54 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
         scrolled.push_back(shifted);
     }
     return scrolled;
+}
+
+double SpectrogramItem::retainedSourceColumnScreenXForZoomTrace(
+    const QVector<RetainedRenderSegment> &segments,
+    const double sourceColumn) {
+    const double notAvailable = std::numeric_limits<double>::quiet_NaN();
+    if (segments.isEmpty() || !std::isfinite(sourceColumn)) {
+        return notAvailable;
+    }
+
+    const RetainedRenderSegment *bestSegment = nullptr;
+    double bestDistance = std::numeric_limits<double>::infinity();
+    for (const RetainedRenderSegment &segment : segments) {
+        const double sourceWidth = static_cast<double>(segment.sourceRect.width());
+        const double targetWidth = segment.targetRect.width();
+        if (!segment.valid
+            || sourceWidth <= 0.0
+            || targetWidth <= 0.0
+            || !std::isfinite(targetWidth)
+            || !std::isfinite(segment.targetRect.x())) {
+            continue;
+        }
+
+        const double begin = static_cast<double>(segment.sourceRect.x());
+        const double end = begin + sourceWidth;
+        double distance = 0.0;
+        if (sourceColumn < begin) {
+            distance = begin - sourceColumn;
+        } else if (sourceColumn > end) {
+            distance = sourceColumn - end;
+        } else {
+            bestSegment = &segment;
+            break;
+        }
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestSegment = &segment;
+        }
+    }
+
+    if (bestSegment == nullptr) {
+        return notAvailable;
+    }
+    const double sourceWidth = static_cast<double>(bestSegment->sourceRect.width());
+    const double sourceToTargetScale = bestSegment->targetRect.width() / sourceWidth;
+    return bestSegment->targetRect.x()
+        + (sourceColumn - static_cast<double>(bestSegment->sourceRect.x()))
+            * sourceToTargetScale;
 }
 
 QVector<SpectrogramItem::RetainedPageUploadSpan>
