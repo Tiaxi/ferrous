@@ -3623,8 +3623,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         frozenSourceColumnDelta,
                         retainedPageWidth,
                         frozenTargetScale,
-                        m_zoomFillFrozenRetainedAnchorX,
-                        !rollingMode && centeredViewportScrollsWithPlayback);
+                        m_zoomFillFrozenRetainedAnchorX);
                 retainedTextureSegmentsOverflowed = false;
                 haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
                 rebuildRetainedDrawSegments();
@@ -6002,9 +6001,10 @@ double SpectrogramItem::frozenRetainedSourceColumnDeltaForZoomFill(
     const double clampedPrevious = std::isfinite(previousColumnDelta)
         ? std::max(0.0, previousColumnDelta)
         : 0.0;
-    // Centered zoom-fill swaps source coordinate systems at reveal. Keep
-    // stationary centered views pinned, but let playback-scrolling centered
-    // views advance so the preview does not halt before the final reveal.
+    // Stationary centered zoom-fill stays pinned. When the centered viewport
+    // itself is moving, advance the frozen source in its own column space so
+    // the target rect only carries the fractional phase used by the final
+    // retained render at reveal.
     if (!rollingMode && !centeredViewportScrollsWithPlayback) {
         return clampedPrevious;
     }
@@ -6019,8 +6019,7 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
     const double sourceColumnDelta,
     const int pageWidth,
     const double targetScaleFactor,
-    const double targetAnchorX,
-    const bool keepSourceColumns) {
+    const double targetAnchorX) {
     if (segments.isEmpty()) {
         return segments;
     }
@@ -6067,15 +6066,6 @@ SpectrogramItem::scrollFrozenRetainedSegmentsForZoomFill(
             const double sourceToTargetScale = sourceWidth > 0.0
                 ? segment.targetRect.width() / sourceWidth
                 : 0.0;
-            if (keepSourceColumns) {
-                shifted.targetRect.moveLeft(
-                    segment.targetRect.x()
-                    - safeSourceColumnDelta * sourceToTargetScale);
-                shifted.targetRect = scaleTargetRect(shifted.targetRect);
-                scrolled.push_back(shifted);
-                continue;
-            }
-
             const qint64 shiftedX =
                 static_cast<qint64>(segment.sourceRect.x()) + integerShift;
 
@@ -6591,6 +6581,41 @@ QVector<qint64> SpectrogramItem::retainedSourcePageIndicesToKeepLocked(
     return pageIndices;
 }
 
+QVector<qint64> SpectrogramItem::retainedFrozenPageIndicesToKeepForZoomFill(
+    const QVector<RetainedRenderSegment> &segments,
+    const int pageWidth) {
+    QVector<qint64> pageIndices;
+    if (segments.isEmpty() || pageWidth <= 0) {
+        return pageIndices;
+    }
+
+    const auto appendPage = [&](const qint64 pageIndex) {
+        if (pageIndex < 0 || pageIndices.contains(pageIndex)) {
+            return;
+        }
+        pageIndices.push_back(pageIndex);
+    };
+
+    for (const RetainedRenderSegment &segment : segments) {
+        if (!segment.valid || segment.sourceRect.isEmpty()) {
+            continue;
+        }
+        const qint64 sourceLeft = segment.sourceRect.x();
+        const qint64 sourceRight =
+            static_cast<qint64>(segment.sourceRect.x())
+            + segment.sourceRect.width() - 1;
+        const qint64 leftPage = sourceLeft / pageWidth;
+        const qint64 rightPage = sourceRight / pageWidth;
+        appendPage(leftPage - 1);
+        appendPage(leftPage);
+        appendPage(rightPage);
+        appendPage(rightPage + 1);
+    }
+
+    std::sort(pageIndices.begin(), pageIndices.end());
+    return pageIndices;
+}
+
 QVector<SpectrogramItem::RetainedPageUploadSpan> SpectrogramItem::collectRetainedPageUploadSpansLocked(
     const qint64 displayLeft,
     const qint64 displayRight,
@@ -6919,27 +6944,12 @@ void SpectrogramItem::syncRetainedSourcePagesLocked(
             &uploadBudgetExhausted);
     const QVector<qint64> currentPageIndicesToKeep =
         retainedSourcePageIndicesToKeepLocked(visiblePages, rollingMode, pageWidth);
-    QVector<qint64> frozenPageIndicesToKeep;
-    if (m_zoomFillFrozenRetainedAvailable && pageWidth > 0) {
-        const auto keepPageIndex = [&](const qint64 pageIndex) {
-            if (pageIndex < 0 || frozenPageIndicesToKeep.contains(pageIndex)) {
-                return;
-            }
-            frozenPageIndicesToKeep.push_back(pageIndex);
-        };
-        for (const RetainedRenderSegment &segment : m_zoomFillFrozenRetainedSegments) {
-            if (!segment.valid || segment.sourceRect.isEmpty()) {
-                continue;
-            }
-            const qint64 sourceLeft = segment.sourceRect.x();
-            const qint64 sourceRight =
-                static_cast<qint64>(segment.sourceRect.x())
-                + segment.sourceRect.width() - 1;
-            keepPageIndex(sourceLeft / pageWidth);
-            keepPageIndex(sourceRight / pageWidth);
-        }
-        std::sort(frozenPageIndicesToKeep.begin(), frozenPageIndicesToKeep.end());
-    }
+    const QVector<qint64> frozenPageIndicesToKeep =
+        m_zoomFillFrozenRetainedAvailable
+        ? retainedFrozenPageIndicesToKeepForZoomFill(
+              m_zoomFillFrozenRetainedSegments,
+              pageWidth)
+        : QVector<qint64>();
 
     std::erase_if(m_gpuSourcePages, [&](const auto &page) {
         if (page == nullptr

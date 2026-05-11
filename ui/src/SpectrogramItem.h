@@ -321,8 +321,7 @@ private:
         double sourceColumnDelta,
         int pageWidth = 0,
         double targetScaleFactor = 1.0,
-        double targetAnchorX = 0.0,
-        bool keepSourceColumns = false);
+        double targetAnchorX = 0.0);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,
@@ -388,6 +387,9 @@ private:
         const QVector<RetainedPageSpan> &visiblePages,
         bool rollingMode,
         int pageWidth) const;
+    static QVector<qint64> retainedFrozenPageIndicesToKeepForZoomFill(
+        const QVector<RetainedRenderSegment> &segments,
+        int pageWidth);
     QVector<RetainedPageUploadSpan> collectRetainedPageUploadSpansLocked(
         qint64 displayLeft,
         qint64 displayRight,
