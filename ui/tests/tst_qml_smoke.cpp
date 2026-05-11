@@ -13523,6 +13523,21 @@ void QmlSmokeTest::spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScree
         -10.0);
     QVERIFY(std::isnan(
         SpectrogramItem::retainedSourceColumnScreenXForZoomTrace({}, 100.0)));
+
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnForScreenXForZoomTrace(segments, 10.0),
+        100.0);
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnForScreenXForZoomTrace(segments, 50.0),
+        120.0);
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnForScreenXForZoomTrace(segments, 110.0),
+        150.0);
+    QCOMPARE(
+        SpectrogramItem::retainedSourceColumnForScreenXForZoomTrace(segments, -10.0),
+        90.0);
+    QVERIFY(std::isnan(
+        SpectrogramItem::retainedSourceColumnForScreenXForZoomTrace({}, 100.0)));
 }
 
 void QmlSmokeTest::spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame() {

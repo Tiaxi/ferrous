@@ -349,6 +349,9 @@ private:
     static double retainedSourceColumnScreenXForZoomTrace(
         const QVector<RetainedRenderSegment> &segments,
         double sourceColumn);
+    static double retainedSourceColumnForScreenXForZoomTrace(
+        const QVector<RetainedRenderSegment> &segments,
+        double screenX);
     static QVector<RetainedPageUploadSpan> retainedPageUploadSpansForPaintBudget(
         const QVector<RetainedPageUploadSpan> &spans,
         int maxColumns,
@@ -668,9 +671,12 @@ private:
     double m_zoomFillFrozenRetainedColumnsPerSecond{0.0};
     double m_zoomFillFrozenRetainedPixelsPerSecond{0.0};
     double m_zoomFillFrozenRetainedAnchorX{0.0};
+    double m_zoomFillFrozenRetainedProbeSourceX{
+        std::numeric_limits<double>::quiet_NaN()};
     double m_zoomFillFrozenRetainedLastColumnDelta{0.0};
     quint64 m_zoomFillFrozenRetainedGeneration{0};
     qint64 m_zoomFillFrozenRetainedRollingEpoch{0};
+    bool m_zoomFillFrozenRetainedProbeSourceXValid{false};
     bool m_zoomFillFrozenRetainedViewportScrollsWithPlayback{false};
     QImage m_gpuDbRemapImage;
     QImage m_gpuPaletteImage;

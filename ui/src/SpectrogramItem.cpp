@@ -3626,6 +3626,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 std::numeric_limits<double>::quiet_NaN();
             double zoomTraceFrozenTargetScale =
                 std::numeric_limits<double>::quiet_NaN();
+            double zoomTraceFrozenProbeSourceX =
+                std::numeric_limits<double>::quiet_NaN();
+            double zoomTraceFrozenProbeX =
+                std::numeric_limits<double>::quiet_NaN();
+            double zoomTraceFrozenExpectedProbeX =
+                std::numeric_limits<double>::quiet_NaN();
 #endif
             const auto anchorCachedRetainedSourceForCurrentFrame = [&]() {
                 m_zoomFillFrozenRetainedPositionSeconds = renderPositionSeconds;
@@ -3639,6 +3645,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         ? static_cast<double>(
                               std::clamp(playheadPixel, 0, std::max(0, w - 1)))
                         : (width() > 0.0 ? width() * 0.5 : 0.0);
+                m_zoomFillFrozenRetainedProbeSourceX =
+                    retainedSourceColumnForScreenXForZoomTrace(
+                        retainedTextureSegments,
+                        m_zoomFillFrozenRetainedAnchorX);
+                m_zoomFillFrozenRetainedProbeSourceXValid =
+                    std::isfinite(m_zoomFillFrozenRetainedProbeSourceX);
                 m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
                 m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
                 m_zoomFillFrozenRetainedRollingEpoch = m_rollingEpoch;
@@ -3689,6 +3701,29 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 haveRetainedTextureSegments = !retainedTextureSegments.isEmpty();
                 allRetainedTextureSegmentsDrawable = false;
                 rebuildRetainedDrawSegments();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                if (m_zoomFillFrozenRetainedProbeSourceXValid) {
+                    zoomTraceFrozenProbeSourceX =
+                        m_zoomFillFrozenRetainedProbeSourceX;
+                    zoomTraceFrozenProbeX =
+                        retainedSourceColumnScreenXForZoomTrace(
+                            retainedTextureSegments,
+                            m_zoomFillFrozenRetainedProbeSourceX);
+                    const double sourceColumnToPixels =
+                        m_zoomFillFrozenRetainedColumnsPerSecond > 0.0
+                            && std::isfinite(
+                                m_zoomFillFrozenRetainedColumnsPerSecond)
+                        ? m_zoomFillFrozenRetainedPixelsPerSecond
+                            / m_zoomFillFrozenRetainedColumnsPerSecond
+                        : std::numeric_limits<double>::quiet_NaN();
+                    zoomTraceFrozenExpectedProbeX =
+                        std::isfinite(sourceColumnToPixels)
+                        ? m_zoomFillFrozenRetainedAnchorX
+                            - frozenSourceColumnDelta * sourceColumnToPixels
+                                * frozenTargetScale
+                        : std::numeric_limits<double>::quiet_NaN();
+                }
+#endif
             };
             const bool finalRetainedTextureCoversVisibleRange =
                 canUseRetainedSourceTextureBody
@@ -3887,6 +3922,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         std::isfinite(selectedX) && std::isfinite(nativeX)
                             ? selectedX - nativeX
                             : std::numeric_limits<double>::quiet_NaN();
+                    const double frozenProbeDeltaX =
+                        std::isfinite(zoomTraceFrozenProbeX)
+                            && std::isfinite(nativeX)
+                        ? zoomTraceFrozenProbeX - nativeX
+                        : std::numeric_limits<double>::quiet_NaN();
                     const char *selectedPath =
                         useFrozenRetainedSourceForFrame ? "frozen-retained"
                         : usePostRevealCachedRetainedSourceForFrame ? "cached-retained"
@@ -3907,6 +3947,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         "hop=%d requested_hop=%d gen=%llu frozen_gen=%llu pos=%.6f "
                         "probe_s=%.6f native_col=%.3f selected_col=%.3f "
                         "native_x=%.3f selected_x=%.3f delta_x=%.3f "
+                        "frozen_probe_src=%.3f frozen_probe_x=%.3f "
+                        "frozen_probe_expected_x=%.3f frozen_probe_delta_x=%.3f "
                         "display=%lld..%lld draw_x=%.3f draw_px=%d phase=%.3f "
                         "frozen_delta=%.3f frozen_scale=%.6f current_cps=%.6f "
                         "selected_cps=%.6f current_epoch=%lld frozen_epoch=%lld "
@@ -3942,6 +3984,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         nativeX,
                         selectedX,
                         selectedDeltaX,
+                        zoomTraceFrozenProbeSourceX,
+                        zoomTraceFrozenProbeX,
+                        zoomTraceFrozenExpectedProbeX,
+                        frozenProbeDeltaX,
                         static_cast<long long>(displayLeft),
                         static_cast<long long>(displayRight),
                         drawX,
@@ -6168,6 +6214,19 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
     m_zoomFillFrozenRetainedPixelsPerSecond =
         m_zoomFillFrozenRetainedColumnsPerSecond * std::max(0.001, effectiveZoom);
     m_zoomFillFrozenRetainedAnchorX = anchorX;
+    if (m_zoomFillFrozenRetainedAvailable
+        && !m_zoomFillFrozenRetainedSegments.isEmpty()) {
+        m_zoomFillFrozenRetainedProbeSourceX =
+            retainedSourceColumnForScreenXForZoomTrace(
+                m_zoomFillFrozenRetainedSegments,
+                m_zoomFillFrozenRetainedAnchorX);
+        m_zoomFillFrozenRetainedProbeSourceXValid =
+            std::isfinite(m_zoomFillFrozenRetainedProbeSourceX);
+    } else {
+        m_zoomFillFrozenRetainedProbeSourceX =
+            std::numeric_limits<double>::quiet_NaN();
+        m_zoomFillFrozenRetainedProbeSourceXValid = false;
+    }
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedGeneration = m_precomputedSessionGeneration;
     m_zoomFillFrozenRetainedRollingEpoch = m_rollingEpoch;
@@ -6176,6 +6235,48 @@ void SpectrogramItem::captureZoomFillFrozenCacheLocked(
             *centeredViewportScrollsWithPlayback;
     }
     m_zoomWiggleTraceProbeSeconds = m_zoomFillFrozenRetainedPositionSeconds;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    const RetainedRenderSegment *segment0 =
+        m_zoomFillFrozenRetainedSegments.isEmpty()
+            ? nullptr
+            : &m_zoomFillFrozenRetainedSegments[0];
+    const RetainedRenderSegment *segment1 =
+        m_zoomFillFrozenRetainedSegments.size() < 2
+            ? nullptr
+            : &m_zoomFillFrozenRetainedSegments[1];
+    FERROUS_SPECTROGRAM_TRACE_LOGF(stderr,
+        "[Qt-zoom-freeze-capture@%p] ch=%d retained_available=%d "
+        "retained_cover=%d cpu_image=%dx%d gen=%llu pos=%.6f "
+        "cps=%.6f pps=%.6f anchor_x=%.3f probe_src_valid=%d "
+        "probe_src=%.3f centered_scroll=%d segs=%lld "
+        "seg0_valid=%d seg0_src=%d+%d seg0_dst=%.3f+%.3f "
+        "seg1_valid=%d seg1_src=%d+%d seg1_dst=%.3f+%.3f\n",
+        static_cast<const void *>(this),
+        m_debugChannelIndex,
+        m_zoomFillFrozenRetainedAvailable ? 1 : 0,
+        retainedFreezeCoversViewport ? 1 : 0,
+        m_zoomFillFrozenDisplayImage.width(),
+        m_zoomFillFrozenDisplayImage.height(),
+        static_cast<unsigned long long>(m_zoomFillFrozenRetainedGeneration),
+        m_zoomFillFrozenRetainedPositionSeconds,
+        m_zoomFillFrozenRetainedColumnsPerSecond,
+        m_zoomFillFrozenRetainedPixelsPerSecond,
+        m_zoomFillFrozenRetainedAnchorX,
+        m_zoomFillFrozenRetainedProbeSourceXValid ? 1 : 0,
+        m_zoomFillFrozenRetainedProbeSourceX,
+        m_zoomFillFrozenRetainedViewportScrollsWithPlayback ? 1 : 0,
+        static_cast<long long>(m_zoomFillFrozenRetainedSegments.size()),
+        segment0 != nullptr && segment0->valid ? 1 : 0,
+        segment0 != nullptr ? segment0->sourceRect.x() : 0,
+        segment0 != nullptr ? segment0->sourceRect.width() : 0,
+        segment0 != nullptr ? segment0->targetRect.x() : 0.0,
+        segment0 != nullptr ? segment0->targetRect.width() : 0.0,
+        segment1 != nullptr && segment1->valid ? 1 : 0,
+        segment1 != nullptr ? segment1->sourceRect.x() : 0,
+        segment1 != nullptr ? segment1->sourceRect.width() : 0,
+        segment1 != nullptr ? segment1->targetRect.x() : 0.0,
+        segment1 != nullptr ? segment1->targetRect.width() : 0.0);
+#endif
 }
 
 void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
@@ -6187,9 +6288,12 @@ void SpectrogramItem::clearZoomFillFrozenCacheLocked() {
     m_zoomFillFrozenRetainedColumnsPerSecond = 0.0;
     m_zoomFillFrozenRetainedPixelsPerSecond = 0.0;
     m_zoomFillFrozenRetainedAnchorX = 0.0;
+    m_zoomFillFrozenRetainedProbeSourceX =
+        std::numeric_limits<double>::quiet_NaN();
     m_zoomFillFrozenRetainedLastColumnDelta = 0.0;
     m_zoomFillFrozenRetainedGeneration = 0;
     m_zoomFillFrozenRetainedRollingEpoch = 0;
+    m_zoomFillFrozenRetainedProbeSourceXValid = false;
     m_zoomFillFrozenRetainedViewportScrollsWithPlayback = false;
     m_zoomFillFrozenRetainedAvailable = false;
     m_zoomFillFrozenRetainedActive = false;
@@ -6591,6 +6695,53 @@ double SpectrogramItem::retainedSourceColumnScreenXForZoomTrace(
     return bestSegment->targetRect.x()
         + (sourceColumn - static_cast<double>(bestSegment->sourceRect.x()))
             * sourceToTargetScale;
+}
+
+double SpectrogramItem::retainedSourceColumnForScreenXForZoomTrace(
+    const QVector<RetainedRenderSegment> &segments,
+    const double screenX) {
+    const double notAvailable = std::numeric_limits<double>::quiet_NaN();
+    if (segments.isEmpty() || !std::isfinite(screenX)) {
+        return notAvailable;
+    }
+
+    const RetainedRenderSegment *bestSegment = nullptr;
+    double bestDistance = std::numeric_limits<double>::infinity();
+    for (const RetainedRenderSegment &segment : segments) {
+        const double sourceWidth = static_cast<double>(segment.sourceRect.width());
+        const double targetWidth = segment.targetRect.width();
+        if (!segment.valid
+            || sourceWidth <= 0.0
+            || targetWidth <= 0.0
+            || !std::isfinite(targetWidth)
+            || !std::isfinite(segment.targetRect.x())) {
+            continue;
+        }
+
+        const double begin = segment.targetRect.x();
+        const double end = begin + targetWidth;
+        double distance = 0.0;
+        if (screenX < begin) {
+            distance = begin - screenX;
+        } else if (screenX > end) {
+            distance = screenX - end;
+        } else {
+            bestSegment = &segment;
+            break;
+        }
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestSegment = &segment;
+        }
+    }
+
+    if (bestSegment == nullptr) {
+        return notAvailable;
+    }
+    const double sourceWidth = static_cast<double>(bestSegment->sourceRect.width());
+    const double sourceToTargetScale = bestSegment->targetRect.width() / sourceWidth;
+    return static_cast<double>(bestSegment->sourceRect.x())
+        + (screenX - bestSegment->targetRect.x()) / sourceToTargetScale;
 }
 
 QVector<SpectrogramItem::RetainedPageUploadSpan>
