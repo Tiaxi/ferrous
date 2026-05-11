@@ -1264,6 +1264,7 @@ private slots:
     void spectrogramZoomFillRetainedPreviewScrollsOnlyWithMovingCenteredViewport();
     void spectrogramZoomWiggleTraceProjectsRetainedSourceColumnToScreenX();
     void spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFrame();
+    void spectrogramZoomFillMetadataResetKeepsActiveRetainedFreezeScroll();
     void spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections();
     void spectrogramZoomFillRetainedPreviewCoversPostRevealUploadGaps();
     void spectrogramRetainedRenderPlanAllowsDecodedTailSlack();
@@ -13369,6 +13370,67 @@ void QmlSmokeTest::spectrogramZoomFillDefersRetainedFreezeUntilScaledPreviewFram
             "the first post-zoom paint must capture the retained preview after m_renderZoomLevel has changed");
         QCOMPARE(item.m_renderZoomLevel, 1.25);
     }
+}
+
+void QmlSmokeTest::spectrogramZoomFillMetadataResetKeepsActiveRetainedFreezeScroll() {
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr quint64 trackToken = 54;
+    QByteArray chunk(240 * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, 240,
+        0, 1024, 48000, 336, false,
+        true, trackToken, false, 6);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_precomputedCanvasDisplayLeft = 100;
+        item.m_precomputedCanvasDisplayRight = 219;
+        item.m_precomputedCanvasZoomLevel = 3.8147;
+        item.m_precomputedCanvasHopSize = 336;
+        item.m_precomputedCanvasTotalColumnsEstimate = 2048;
+        item.m_zoomLevel = 3.8147;
+        item.m_renderZoomLevel = 3.8147;
+        item.m_awaitingZoomData = true;
+        item.m_zoomFillActive = true;
+        item.m_zoomFillDataReady = false;
+        item.m_zoomFillFrozenRetainedAvailable = true;
+        item.m_zoomFillFrozenRetainedActive = true;
+        item.m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(875, 0, 946, bins),
+                QRectF(-1.0, 0.0, 1183.0, 80.0),
+                true,
+            },
+        };
+        item.m_zoomFillFrozenRetainedPositionSeconds = 83.971;
+        item.m_zoomFillFrozenRetainedColumnsPerSecond = 48000.0 / 336.0;
+        item.m_zoomFillFrozenRetainedPixelsPerSecond =
+            item.m_zoomFillFrozenRetainedColumnsPerSecond
+            * item.effectiveZoomLocked();
+        item.m_zoomFillFrozenRetainedLastColumnDelta = 20.0;
+        item.m_zoomFillFrozenRetainedGeneration = 6;
+        item.m_zoomWiggleTraceProbeSeconds = 83.971;
+    }
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0,
+        13739, 110654, 48000, 268, false,
+        true, trackToken, true, 7);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    QVERIFY(item.m_precomputedResetPending);
+    QVERIFY(item.m_zoomFillActive);
+    QVERIFY(item.m_zoomFillFrozenRetainedActive);
+    QCOMPARE(item.m_zoomFillFrozenRetainedGeneration, static_cast<quint64>(6));
+    QCOMPARE(item.m_zoomFillFrozenRetainedLastColumnDelta, 20.0);
+    QCOMPARE(item.m_zoomFillFrozenRetainedPositionSeconds, 83.971);
+    QCOMPARE(item.m_zoomWiggleTraceProbeSeconds, 83.971);
 }
 
 void QmlSmokeTest::spectrogramZoomFillRetainedPreviewIgnoresBackwardClockCorrections() {

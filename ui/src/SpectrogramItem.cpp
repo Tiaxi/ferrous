@@ -1905,7 +1905,14 @@ void SpectrogramItem::feedPrecomputedChunk(
             && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
             && (!m_gpuDisplayImage.isNull() || m_zoomFillFrozenRetainedAvailable);
         if (canPreserveSameTrackFrame) {
-            captureZoomFillFrozenCacheLocked(false);
+            const bool shouldCaptureFreeze =
+                shouldCaptureZoomFillFreezeForHopChange(
+                    m_zoomFillActive,
+                    !m_zoomFillFrozenDisplayImage.isNull(),
+                    m_zoomFillFrozenRetainedAvailable);
+            if (shouldCaptureFreeze) {
+                captureZoomFillFrozenCacheLocked(false);
+            }
             m_zoomFillFrozenRetainedActive =
                 m_zoomFillFrozenRetainedAvailable;
             m_zoomFillActive =
