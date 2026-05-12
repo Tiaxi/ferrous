@@ -1292,6 +1292,7 @@ private slots:
     void spectrogramZoomFillSkipsCpuFreezeSnapshotWithoutRetainedFrame();
     void spectrogramZoomFillUsesRetainedFreezeWithoutCpuSnapshot();
     void spectrogramZoomFillPinnedRetainedFreezeKeepsDisplayFallback();
+    void spectrogramZoomFillScrollingRetainedFreezeKeepsDisplayFallback();
     void spectrogramSyntheticClearSkipsCpuFreezeSnapshotWithoutRetainedFrame();
     void spectrogramSyntheticClearInvalidatesRetainedSourceStateDuringFreeze();
     void spectrogramDataResetInvalidatesRetainedSourceStateDuringFreeze();
@@ -14420,6 +14421,54 @@ void QmlSmokeTest::spectrogramZoomFillPinnedRetainedFreezeKeepsDisplayFallback()
             "pinned centered retained freezes need a display-image fallback "
             "so rapid zoom resets cannot go black if retained pages are "
             "temporarily not drawable");
+        QVERIFY(item.m_zoomFillFrozenRetainedAvailable);
+    }
+}
+
+void QmlSmokeTest::spectrogramZoomFillScrollingRetainedFreezeKeepsDisplayFallback() {
+    SpectrogramItem item;
+    item.setWidth(120);
+    item.setHeight(80);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int columns = 240;
+    QByteArray chunk(columns * bins, '\x50');
+    item.feedPrecomputedChunk(
+        chunk, bins, 0, columns,
+        0, columns, 44100, 1024, true,
+        true, 27, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(80);
+        item.syncPrecomputedDisplayImageLocked(
+            120, 80, 0, 119, false, 1.0, false);
+        QVERIFY(item.m_gpuDisplayImage.isNull());
+
+        item.m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(0, 0, 120, bins),
+                QRectF(0.0, 0.0, 120.0, 80.0),
+                true,
+            },
+        };
+        item.m_zoomFillFrozenRetainedAvailable = true;
+
+        item.captureZoomFillFrozenCacheLocked(
+            true,
+            1.0,
+            60.0,
+            true,
+            true);
+
+        QVERIFY2(
+            !item.m_zoomFillFrozenDisplayImage.isNull(),
+            "scrolling centered retained freezes also need a display-image "
+            "fallback because rapid stacked zoom-outs can scale or scroll "
+            "the retained preview out of full viewport coverage before the "
+            "new generation is revealable");
         QVERIFY(item.m_zoomFillFrozenRetainedAvailable);
     }
 }
