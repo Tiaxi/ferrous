@@ -3426,9 +3426,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && currentWindow->rendererInterface()->graphicsApi()
                     == QSGRendererInterface::OpenGL
                 && retainedSourceTextureFitsGpuLimits;
-            const bool maintainCpuDisplayImage =
-                currentWindow == nullptr
-                || !canUseRetainedSourceTextureBody;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             if (currentWindow == nullptr) {
                 profileFallbackReason = "no-window";
@@ -3519,6 +3516,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     rollingMode,
                     retainedPageWidth,
                     true);
+            const bool maintainCpuDisplayImage =
+                currentWindow == nullptr
+                || !canUseRetainedSourceTextureBody
+                || shouldMaintainDisplayFallbackForRetainedReveal(
+                    canUseRetainedSourceTextureBody,
+                    !m_gpuDisplayImage.isNull(),
+                    retainedPagesCoverBeforeUpload);
             const qint64 seekStartedAtMs = SpectrogramSeekTrace::startedAtMs();
             const qint64 seekAgeMs = seekStartedAtMs > 0 ? paintNowMs - seekStartedAtMs : -1;
             const bool deferTinyRetainedUploadDuringSeek =
@@ -6448,6 +6452,15 @@ bool SpectrogramItem::retainedSourceReadyForZoomReveal(
     return retainedTextureCoversVisibleRange
         && (retainedUploadColumns <= 0 || centeredViewportScrollsWithPlayback)
         && !retainedTextureReset;
+}
+
+bool SpectrogramItem::shouldMaintainDisplayFallbackForRetainedReveal(
+    const bool canUseRetainedSourceTextureBody,
+    const bool gpuDisplayImageAvailable,
+    const bool retainedPagesCoverVisibleRange) {
+    return canUseRetainedSourceTextureBody
+        && gpuDisplayImageAvailable
+        && !retainedPagesCoverVisibleRange;
 }
 
 bool SpectrogramItem::shouldDrawFrozenRetainedSourceForZoomFill(

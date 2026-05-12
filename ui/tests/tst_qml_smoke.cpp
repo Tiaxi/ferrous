@@ -13322,6 +13322,19 @@ void QmlSmokeTest::spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads(
         false, false, true, 384, true, false));
 
     QVERIFY2(
+        SpectrogramItem::shouldMaintainDisplayFallbackForRetainedReveal(
+            true, true, false),
+        "after a warmed retained-source reveal, the display fallback must stay "
+        "alive until retained pages cover the visible range; otherwise the next "
+        "decoded growth can clear the fallback and leave the renderer empty");
+    QVERIFY(!SpectrogramItem::shouldMaintainDisplayFallbackForRetainedReveal(
+        true, true, true));
+    QVERIFY(!SpectrogramItem::shouldMaintainDisplayFallbackForRetainedReveal(
+        true, false, false));
+    QVERIFY(!SpectrogramItem::shouldMaintainDisplayFallbackForRetainedReveal(
+        false, true, false));
+
+    QVERIFY2(
         !SpectrogramItem::shouldCaptureZoomFillFreezeForHopChange(
             true, true, false),
         "intermediate zoom resets must not replace an active frozen display");
@@ -14222,13 +14235,14 @@ void QmlSmokeTest::spectrogramZoomFillRevealsWarmedDisplayWhenRetainedPreviewIsP
     }
 
     constexpr int bins = 8;
-    constexpr int decodedColumns = 2355;
+    constexpr int initialDecodedColumns = 2303;
+    constexpr int finalDecodedColumns = 2355;
     constexpr int totalEstimate = 2366;
     constexpr int hop = 5703;
     constexpr quint64 trackToken = 109;
-    QByteArray decoded(decodedColumns * bins, '\x60');
+    QByteArray decoded(initialDecodedColumns * bins, '\x60');
     item->feedPrecomputedChunk(
-        decoded, bins, 0, decodedColumns,
+        decoded, bins, 0, initialDecodedColumns,
         0, totalEstimate, 44100, hop, false,
         true, trackToken, false, 20);
     item->setPositionSeconds(23.0);
@@ -14281,6 +14295,26 @@ void QmlSmokeTest::spectrogramZoomFillRevealsWarmedDisplayWhenRetainedPreviewIsP
             !item->m_gpuDisplayImage.isNull(),
             "the current decoded frame should be warmed into a display image when retained pages do not cover the viewport");
         QVERIFY(item->m_zoomFillFrozenDisplayImage.isNull());
+    }
+
+    constexpr int tailColumns = finalDecodedColumns - initialDecodedColumns;
+    QByteArray tail(tailColumns * bins, '\x70');
+    item->feedPrecomputedChunk(
+        tail, bins, 0, tailColumns,
+        initialDecodedColumns, totalEstimate, 44100, hop, false,
+        false, trackToken, false, 20);
+
+    QSGNode *tailNode = item->updatePaintNode(node, nullptr);
+    QVERIFY(tailNode == node);
+    assertTextureNodeDebugBodyInvariants(
+        node,
+        "post-reveal decoded growth should keep drawing the warmed display fallback until retained pages cover the viewport");
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        QVERIFY2(
+            !item->m_gpuDisplayImage.isNull(),
+            "decoded growth after reveal must not clear the only warmed display fallback before retained pages cover the frame");
+        QVERIFY(!item->m_zoomFillActive);
     }
 
     delete node;

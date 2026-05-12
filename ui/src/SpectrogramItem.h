@@ -297,6 +297,10 @@ private:
         int retainedUploadColumns,
         bool retainedTextureReset,
         bool centeredViewportScrollsWithPlayback);
+    static bool shouldMaintainDisplayFallbackForRetainedReveal(
+        bool canUseRetainedSourceTextureBody,
+        bool gpuDisplayImageAvailable,
+        bool retainedPagesCoverVisibleRange);
     static bool shouldDrawFrozenRetainedSourceForZoomFill(
         bool rendererFreeze,
         bool retainedFreezeAvailableForFrame,
