@@ -1287,6 +1287,7 @@ private slots:
     void spectrogramZoomFillWarmsDisplayCacheBehindFrozenFrame();
     void spectrogramZoomFillRevealsOnlyFromRenderableFrame();
     void spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectly();
+    void spectrogramZoomFillRevealsWarmedDisplayWhenRetainedPreviewIsPartial();
     void spectrogramMetadataOnlyZoomResetDefersFreezeSnapshot();
     void spectrogramMetadataOnlySameTrackResetFreezesExistingFrame();
     void spectrogramZoomFillSkipsCpuFreezeSnapshotWithoutRetainedFrame();
@@ -13310,6 +13311,11 @@ void QmlSmokeTest::spectrogramZoomFillRetainedRevealHandlesScrollingEdgeUploads(
         !SpectrogramItem::retainedSourceReadyForZoomReveal(
             true, true, false, 0, true, true),
         "zoom-fill must not reveal while the retained texture was recreated");
+    QVERIFY2(
+        SpectrogramItem::retainedSourceReadyForZoomReveal(
+            true, false, true, 384, true, false),
+        "when retained pages do not cover the viewport, a freshly warmed display image "
+        "must be enough to reveal instead of leaving the spectrogram empty");
     QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
         true, true, false, 0, false, false));
     QVERIFY(SpectrogramItem::retainedSourceReadyForZoomReveal(
@@ -14185,6 +14191,96 @@ void QmlSmokeTest::spectrogramFullscreenMaxZoomRevealUsesRetainedFullModeDirectl
             item->m_gpuDisplayImage.isNull(),
             "retained full-mode reveal should leave the CPU display image cold");
         QVERIFY(item->m_gpuSourceTexture.texture() != nullptr);
+    }
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomFillRevealsWarmedDisplayWhenRetainedPreviewIsPartial() {
+    qputenv("FERROUS_GPU_DEBUG_MODE", "full");
+    struct DebugModeGuard {
+        ~DebugModeGuard() { qunsetenv("FERROUS_GPU_DEBUG_MODE"); }
+    } debugModeGuard;
+
+    QQuickWindow window;
+    window.setColor(Qt::black);
+    window.resize(1183, 159);
+
+    auto *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(window.width());
+    item->setHeight(window.height());
+    item->setDisplayMode(1); // Centered
+    item->setPlaying(true);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    if (windowGraphicsApi(window) != QSGRendererInterface::OpenGL) {
+        QSKIP(qPrintable(
+            QStringLiteral("retained full-mode partial-preview reveal test requires OpenGL scene graph, got %1")
+                .arg(graphicsApiName(windowGraphicsApi(window)))));
+    }
+
+    constexpr int bins = 8;
+    constexpr int decodedColumns = 2355;
+    constexpr int totalEstimate = 2366;
+    constexpr int hop = 5703;
+    constexpr quint64 trackToken = 109;
+    QByteArray decoded(decodedColumns * bins, '\x60');
+    item->feedPrecomputedChunk(
+        decoded, bins, 0, decodedColumns,
+        0, totalEstimate, 44100, hop, false,
+        true, trackToken, false, 20);
+    item->setPositionSeconds(23.0);
+
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        item->m_zoomLevel = 0.0898;
+        item->m_renderZoomLevel = 0.0898;
+        item->m_requestedNativeHopSize = hop;
+        item->m_awaitingZoomData = false;
+        item->m_zoomFillActive = true;
+        item->m_zoomFillDataReady = true;
+        item->m_zoomFillFrozenDisplayImage = QImage();
+        item->m_gpuDisplayImage = QImage();
+        item->m_precomputedCanvasDisplayLeft = 0;
+        item->m_precomputedCanvasDisplayRight = totalEstimate - 1;
+        item->m_zoomFillFrozenRetainedAvailable = true;
+        item->m_zoomFillFrozenRetainedActive = true;
+        item->m_zoomFillFrozenRetainedGeneration = 16;
+        item->m_zoomFillFrozenRetainedSegments = {
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(0, 0, SpectrogramItem::kRetainedSourcePageWidth, bins),
+                QRectF(291.2, 0.0, 179.5, static_cast<double>(window.height())),
+                true,
+            },
+            SpectrogramItem::RetainedRenderSegment{
+                QRect(
+                    SpectrogramItem::kRetainedSourcePageWidth,
+                    0,
+                    910,
+                    bins),
+                QRectF(470.8, 0.0, 79.8, static_cast<double>(window.height())),
+                true,
+            },
+        };
+    }
+
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    assertTextureNodeDebugBodyInvariants(
+        node,
+        "partial retained zoom-fill preview should reveal through a warmed display image instead of painting black");
+
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        QVERIFY2(
+            !item->m_zoomFillActive,
+            "zoom-fill should clear once the warmed display image can render the decoded frame");
+        QVERIFY2(
+            !item->m_gpuDisplayImage.isNull(),
+            "the current decoded frame should be warmed into a display image when retained pages do not cover the viewport");
+        QVERIFY(item->m_zoomFillFrozenDisplayImage.isNull());
     }
 
     delete node;

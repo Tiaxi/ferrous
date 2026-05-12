@@ -3806,6 +3806,37 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     rollingMode,
                     retainedPageWidth,
                     true);
+            const bool shouldWarmDisplayImageForZoomReveal =
+                rendererFreeze
+                && m_zoomFillDataReady
+                && !m_awaitingZoomData
+                && canUseRetainedSourceTextureBody
+                && !finalRetainedTextureCoversVisibleRange
+                && m_gpuDisplayImage.isNull()
+                && drawPixels > 0;
+            if (shouldWarmDisplayImageForZoomReveal) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileFallbackReason = "retained-reveal-display";
+                const auto displayStart = std::chrono::steady_clock::now();
+                const quint64 displayGenerationBefore = m_gpuDisplayGeneration;
+#endif
+                syncPrecomputedDisplayImageLocked(
+                    drawPixels,
+                    h,
+                    displayLeft,
+                    displayRight,
+                    rollingMode,
+                    effectiveZoom,
+                    true);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                profileDisplayImageBuildMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - displayStart).count();
+                profileCpuDisplayImageRebuilt =
+                    profileCpuDisplayImageRebuilt
+                    || (m_gpuDisplayGeneration != displayGenerationBefore
+                        && !m_gpuDisplayImage.isNull());
+#endif
+            }
             const bool retainedSourceReadyForReveal =
                 retainedSourceReadyForZoomReveal(
                     canUseRetainedSourceTextureBody,
@@ -6410,6 +6441,9 @@ bool SpectrogramItem::retainedSourceReadyForZoomReveal(
     const bool centeredViewportScrollsWithPlayback) {
     if (!canUseRetainedSourceTextureBody) {
         return gpuDisplayImageAvailable;
+    }
+    if (gpuDisplayImageAvailable && !retainedTextureCoversVisibleRange) {
+        return true;
     }
     return retainedTextureCoversVisibleRange
         && (retainedUploadColumns <= 0 || centeredViewportScrollsWithPlayback)
