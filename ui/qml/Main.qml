@@ -16,7 +16,7 @@ import "logic/PathUtils.js" as PathUtils
 import "panes" as Panes
 import "viewers" as Viewers
 
-Kirigami.ApplicationWindow {
+ApplicationWindow {
     id: root
     width: 1600
     height: 980
