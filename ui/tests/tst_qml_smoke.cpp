@@ -366,6 +366,7 @@ private slots:
     void cleanupTestCase();
     void loadsMainQmlWithFallbackBridge();
     void loadsExtractedQmlSlicesWithFallbackProps();
+    void mainWindowContentStartsBelowMenuBar();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void libraryTreeStartsCollapsedByDefault();
@@ -946,6 +947,32 @@ Item {
 }
 )QML"), baseUrl, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
+}
+
+void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
+
+    const QUrl url = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml"));
+    engine.load(url);
+    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    QObject *root = engine.rootObjects().constFirst();
+    QVERIFY(root != nullptr);
+
+    QObject *menuBar = qvariant_cast<QObject *>(root->property("menuBar"));
+    QObject *contentItem = qvariant_cast<QObject *>(root->property("contentItem"));
+    QVERIFY(menuBar != nullptr);
+    QVERIFY(contentItem != nullptr);
+    QTRY_VERIFY(menuBar->property("height").toReal() > 0.0);
+    QVERIFY2(
+        contentItem->property("y").toReal() >= menuBar->property("height").toReal(),
+        "Application content must start below the menu bar");
 }
 
 void QmlSmokeTest::albumArtTileKeepsHeightInsideColumnLayout() {
