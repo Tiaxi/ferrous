@@ -368,6 +368,7 @@ private slots:
     void loadsExtractedQmlSlicesWithFallbackProps();
     void mainWindowContentStartsBelowMenuBar();
     void albumArtTileKeepsHeightInsideColumnLayout();
+    void albumArtViewerInfoUsesImageProviderLocalPath();
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void libraryTreeStartsCollapsedByDefault();
     void rootRowsStartExpandedByDefault();
@@ -1023,6 +1024,85 @@ Item {
     QVERIFY(tile != nullptr);
     QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
     QVERIFY2(tile->property("height").toReal() > 0.0, "AlbumArtTile collapsed to zero height");
+}
+
+void QmlSmokeTest::albumArtViewerInfoUsesImageProviderLocalPath() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    id: harness
+    property string requestedPath: ""
+    property int requestCount: 0
+    property bool focusCalled: false
+
+    function openAndToggleInfo() {
+        viewerController.openAlbumArtViewer()
+        viewerController.toggleAlbumArtInfoVisible(function() {
+            harness.focusCalled = true
+        })
+    }
+
+    function overlayText() {
+        return viewerController.albumArtInfoOverlayText()
+    }
+
+    QtObject {
+        id: bridge
+        property string currentTrackCoverPath: "image://covers//tmp/Front%20Cover.png#w=600&r=4"
+        signal imageFileDetailsChanged(string path)
+
+        function requestImageFileDetails(path) {
+            harness.requestedPath = path
+            harness.requestCount += 1
+        }
+
+        function cachedImageFileDetails(path) {
+            if (path !== "/tmp/Front Cover.png") {
+                return ({})
+            }
+            return ({
+                fileName: "Front Cover.png",
+                resolutionText: "300 x 200",
+                fileSizeText: "12 KiB",
+                path: path
+            })
+        }
+    }
+
+    Controllers.ViewerController {
+        id: viewerController
+        objectName: "viewerController"
+        uiBridge: bridge
+        useWholeScreenViewerMode: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "openAndToggleInfo"));
+
+    QCOMPARE(
+        controller->property("albumArtViewerInfoSource").toString(),
+        QStringLiteral("/tmp/Front Cover.png"));
+    QCOMPARE(root->property("requestedPath").toString(), QStringLiteral("/tmp/Front Cover.png"));
+    QCOMPARE(root->property("requestCount").toInt(), 1);
+    QCOMPARE(controller->property("albumArtInfoVisible").toBool(), true);
+    QCOMPARE(root->property("focusCalled").toBool(), true);
+
+    QVariant overlayText;
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "overlayText", Q_RETURN_ARG(QVariant, overlayText)));
+    QVERIFY2(
+        overlayText.toString().contains(QStringLiteral("Front Cover.png")),
+        qPrintable(overlayText.toString()));
 }
 
 void QmlSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {

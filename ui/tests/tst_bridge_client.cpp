@@ -53,6 +53,7 @@ private slots:
     void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void asyncImageFileDetailsRequestCachesAndSignals();
+    void asyncImageFileDetailsAcceptsImageProviderUrl();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void testMutedChannelsMaskDecoding();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
@@ -340,6 +341,34 @@ void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {
     QCOMPARE(result.value(QStringLiteral("height")).toInt(), 96);
     QCOMPARE(result.value(QStringLiteral("format")).toString(), QStringLiteral("PNG"));
     QCOMPARE(result.value(QStringLiteral("path")).toString(), QFileInfo(sourcePath).canonicalFilePath());
+}
+
+void BridgeClientTest::asyncImageFileDetailsAcceptsImageProviderUrl() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString sourcePath = tempDir.filePath(QStringLiteral("front cover.png"));
+    QImage image(80, 60, QImage::Format_RGB32);
+    image.fill(Qt::blue);
+    QVERIFY(image.save(sourcePath, "PNG"));
+
+    const QString providerUrl = CoverImageProvider::urlForPath(sourcePath)
+        + QStringLiteral("#w=600&r=3");
+    QSignalSpy detailsSpy(&client, SIGNAL(imageFileDetailsChanged(QString)));
+
+    client.requestImageFileDetails(providerUrl);
+
+    QTRY_VERIFY_WITH_TIMEOUT(detailsSpy.count() > 0, 3000);
+
+    const QVariantMap byLocalPath = client.cachedImageFileDetails(sourcePath);
+    const QVariantMap byProviderUrl = client.cachedImageFileDetails(providerUrl);
+    QCOMPARE(byLocalPath.value(QStringLiteral("fileName")).toString(), QStringLiteral("front cover.png"));
+    QCOMPARE(byLocalPath.value(QStringLiteral("width")).toInt(), 80);
+    QCOMPARE(byLocalPath.value(QStringLiteral("height")).toInt(), 60);
+    QCOMPARE(byProviderUrl.value(QStringLiteral("fileName")).toString(), QStringLiteral("front cover.png"));
 }
 
 void BridgeClientTest::itunesRectangularArtworkRowUsesNormalizedFileDetails() {
