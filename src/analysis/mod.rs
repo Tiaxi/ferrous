@@ -164,6 +164,7 @@ pub struct AnalysisSnapshot {
 #[derive(Debug, Clone)]
 pub struct PrecomputedSpectrogramChunk {
     pub track_token: u64,
+    pub generation: u64,
     /// Packed column data: `column_count` × `channel_count` × `bins_per_column` bytes.
     /// Within each column, all channels are contiguous.
     pub columns_u8: Vec<u8>,
@@ -567,7 +568,8 @@ impl AnalysisRuntimeState {
                 );
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                self.start_spectrogram_session(position_seconds, true, clear_history, ctx);
+                let start = self.spectrogram_restart_start_seconds(position_seconds);
+                self.start_spectrogram_session(start, true, clear_history, ctx);
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
                 profile_eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
@@ -760,6 +762,7 @@ impl AnalysisRuntimeState {
             .send(AnalysisEvent::PrecomputedSpectrogramChunk(
                 PrecomputedSpectrogramChunk {
                     track_token: outgoing_track_token,
+                    generation: 0,
                     columns_u8: Vec::new(),
                     bins_per_column,
                     column_count: 0,
@@ -1087,10 +1090,14 @@ impl AnalysisRuntimeState {
     /// around the playhead appears as quickly as possible.  Rolling mode
     /// starts at the playhead.
     fn centered_start_seconds(&self) -> f64 {
+        self.spectrogram_restart_start_seconds(self.last_spectrogram_position)
+    }
+
+    fn spectrogram_restart_start_seconds(&self, position_seconds: f64) -> f64 {
         if self.display_mode == SpectrogramDisplayMode::Centered {
-            (self.last_spectrogram_position - self.centered_margin_seconds()).max(0.0)
+            (position_seconds - self.centered_visible_left_margin_seconds()).max(0.0)
         } else {
-            self.last_spectrogram_position
+            position_seconds
         }
     }
 
@@ -1182,6 +1189,14 @@ impl AnalysisRuntimeState {
         }
     }
 
+    fn centered_visible_left_margin_seconds(&self) -> f64 {
+        Self::centered_visible_left_margin_from_full_margin(self.centered_margin_seconds())
+    }
+
+    fn centered_visible_left_margin_from_full_margin(full_margin: f64) -> f64 {
+        ((full_margin - 2.0).max(0.0) * 0.5) + 2.0
+    }
+
     /// Start a spectrogram session without emitting an initial reset.
     /// Used when staged chunks have already been emitted with reset flags.
     fn start_spectrogram_session_no_reset(
@@ -1227,14 +1242,22 @@ impl AnalysisRuntimeState {
             // session restarts and data loss.
             let current_margin = self.centered_margin_seconds();
             let margin = current_margin.max(self.spectrogram_session_margin);
+            let visible_left_margin = Self::centered_visible_left_margin_from_full_margin(
+                current_margin,
+            )
+            .max(Self::centered_visible_left_margin_from_full_margin(
+                self.spectrogram_session_margin,
+            ));
             let window_seconds = margin * 2.0 + 10.0;
             let window_start = self.spectrogram_session_start;
             let window_end = window_start + window_seconds;
 
-            // The visible left edge can be up to `margin` seconds before
-            // the playhead (full screen width when playhead is at track end).
-            // Check that the entire visible range fits within the window.
-            let visible_left = (position_seconds - margin).max(0.0);
+            // Normal centered playback uses a half-screen left edge. Keep the
+            // decoded window end conservative above, but check the retained
+            // left edge against the same margin used for fast restarts so
+            // small seeks after a restart can replenish lookahead instead of
+            // restarting repeatedly.
+            let visible_left = (position_seconds - visible_left_margin).max(0.0);
             let retained_window_start = if let (Some(cols_per_second), Some(ring_capacity)) = (
                 self.current_centered_cols_per_second(),
                 self.centered_ring_capacity_columns(),
@@ -1276,6 +1299,7 @@ impl AnalysisRuntimeState {
                     .send(AnalysisEvent::PrecomputedSpectrogramChunk(
                         PrecomputedSpectrogramChunk {
                             track_token: self.active_track_token,
+                            generation: 0,
                             columns_u8: Vec::new(),
                             bins_per_column: 0,
                             column_count: 0,
@@ -1294,8 +1318,7 @@ impl AnalysisRuntimeState {
                 // playback snapshot may send a PositionUpdate at the new
                 // position before the worker processes our NewTrack.
                 self.suppress_next_spectrogram_position_update = true;
-                let margin = self.centered_margin_seconds();
-                let start = (position_seconds - margin).max(0.0);
+                let start = self.spectrogram_restart_start_seconds(position_seconds);
                 self.start_spectrogram_session(start, true, true, ctx);
             }
         } else {
@@ -2364,7 +2387,7 @@ mod tests {
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = AtomicU64::new(0);
         let spectrogram_decode_generation = AtomicU64::new(0);
-        let spectrogram_decode_columns_produced = AtomicU64::new(13_000);
+        let spectrogram_decode_columns_produced = AtomicU64::new(15_000);
         let ctx = AnalysisContext {
             event_tx: &event_tx,
             waveform_job_tx: &waveform_job_tx,
@@ -2375,7 +2398,7 @@ mod tests {
         };
 
         let seek_target = 3.554;
-        let expected_start = (seek_target - state.centered_margin_seconds()).max(0.0);
+        let expected_start = (seek_target - state.centered_visible_left_margin_seconds()).max(0.0);
         state.seek_spectrogram_position(seek_target, &ctx);
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
@@ -2385,6 +2408,109 @@ mod tests {
             "seek whose visible left edge was evicted from the centered ring should restart, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
+    fn centered_seek_outside_window_restarts_near_visible_left_edge() {
+        // Restarting from the full conservative margin makes the current
+        // viewport wait for thousands of off-screen columns after a seek.
+        // Start near the normal centered visible-left edge so the fresh
+        // viewport fills first.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_session_effective_rate = 48_000;
+        state.fft_size = 2_048;
+        state.hop_size = 64;
+        state.zoom_level = 16.0;
+        state.spectrogram_widget_width = 3_440;
+        state.spectrogram_max_widget_width = 3_440;
+        state.spectrogram_session_start = 0.0;
+        state.spectrogram_session_margin = state.centered_margin_seconds();
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        let seek_target = 85.0;
+        let full_margin_start = (seek_target - state.centered_margin_seconds()).max(0.0);
+        let fast_start = (seek_target - state.centered_visible_left_margin_seconds()).max(0.0);
+        assert!(
+            fast_start > full_margin_start + 1.0,
+            "test setup should distinguish fast viewport start from the old full-margin start"
+        );
+
+        state.seek_spectrogram_position(seek_target, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
+                if (start_seconds - fast_start).abs() < 0.01 && clear_history_on_reset),
+            "centered restart should prioritize the visible-left edge, got {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn centered_seek_after_fast_restart_reuses_replenishing_window() {
+        // After a fast restart begins near the visible-left edge, small
+        // follow-up seeks should reuse the replenishing decoded window
+        // instead of requiring the old full-margin window to be present.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.active_session_effective_rate = 48_000;
+        state.fft_size = 2_048;
+        state.hop_size = 256;
+        state.zoom_level = 1.0;
+        state.spectrogram_widget_width = 1_920;
+        state.spectrogram_max_widget_width = 1_920;
+
+        let first_restart_target = 96.975;
+        state.spectrogram_session_start =
+            state.spectrogram_restart_start_seconds(first_restart_target);
+        state.spectrogram_session_margin = state.centered_margin_seconds();
+
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let produced_after_restart = f64_to_u64_saturating(
+            (state.spectrogram_session_start + 35.0)
+                * state.current_centered_cols_per_second().unwrap(),
+        );
+        let spectrogram_decode_columns_produced = AtomicU64::new(produced_after_restart);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+        };
+
+        state.seek_spectrogram_position(107.328, &ctx);
+
+        let cmd = spectrogram_cmd_rx.try_recv().unwrap();
+        assert!(
+            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
+            "small seek after a fast centered restart should reuse the replenishing window, got {cmd:?}"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "in-window seek should not emit a synthetic clear reset"
+        );
     }
 
     #[test]
@@ -2496,8 +2622,8 @@ mod tests {
         };
 
         // Seek to 200s — outside the decoded window, so the session
-        // should restart from one centered margin before the target.
-        let expected_start = (200.0 - state.centered_margin_seconds()).max(0.0);
+        // should restart near the normal centered visible-left edge.
+        let expected_start = (200.0 - state.centered_visible_left_margin_seconds()).max(0.0);
         state.seek_spectrogram_position(200.0, &ctx);
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
@@ -3047,6 +3173,7 @@ mod tests {
                 for i in 0..5u32 {
                     let _ = tx.send(PrecomputedSpectrogramChunk {
                         track_token: 0,
+                        generation: 0,
                         columns_u8: vec![0u8; 4],
                         bins_per_column: 4,
                         column_count: 1,
@@ -3068,6 +3195,7 @@ mod tests {
                 }
                 let _ = tx.send(PrecomputedSpectrogramChunk {
                     track_token: 0,
+                    generation: 0,
                     columns_u8: vec![0u8; 4],
                     bins_per_column: 4,
                     column_count: 1,
@@ -3103,6 +3231,7 @@ mod tests {
         for i in 0..3u32 {
             let _ = tx.send(PrecomputedSpectrogramChunk {
                 track_token: 0,
+                generation: 0,
                 columns_u8: vec![0u8; 12],
                 bins_per_column: 4,
                 column_count: 3,

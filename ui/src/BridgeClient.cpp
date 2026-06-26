@@ -4049,19 +4049,20 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [0..4]   u32  payload_len
     // [4]      u8   magic = 0xA2
     // [5..13]  u64  track_token
-    // [13..15] u16  bins_per_column
-    // [15..17] u16  column_count
-    // [17]     u8   channel_count
-    // [18..22] u32  start_column_index
-    // [22..26] u32  total_columns_estimate
-    // [26..30] u32  sample_rate_hz
-    // [30..32] u16  hop_size
-    // [32..36] f32  coverage_seconds
-    // [36]     u8   complete
-    // [37]     u8   buffer_reset
-    // [38]     u8   clear_history
-    // [39..]   column_data
-    constexpr int kHeaderLen = 39;
+    // [13..21] u64  generation
+    // [21..23] u16  bins_per_column
+    // [23..25] u16  column_count
+    // [25]     u8   channel_count
+    // [26..30] u32  start_column_index
+    // [30..34] u32  total_columns_estimate
+    // [34..38] u32  sample_rate_hz
+    // [38..40] u16  hop_size
+    // [40..44] f32  coverage_seconds
+    // [44]     u8   complete
+    // [45]     u8   buffer_reset
+    // [46]     u8   clear_history
+    // [47..]   column_data
+    constexpr int kHeaderLen = 47;
     if (raw.size() < kHeaderLen) {
         return;
     }
@@ -4094,17 +4095,18 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
         return;
     }
     const quint64 trackToken = readU64(base + 1);
-    const int bins = readU16(base + 9);
-    const int columns = readU16(base + 11);
-    const int channelCount = d[base + 13];
-    const int startIndex = static_cast<int>(readU32(base + 14));
-    const int totalEstimate = static_cast<int>(readU32(base + 18));
-    const int sampleRate = static_cast<int>(readU32(base + 22));
-    const int hopSize = readU16(base + 26);
-    const float coverage = readF32(base + 28);
-    const bool complete = d[base + 32] != 0;
-    const bool bufferReset = d[base + 33] != 0;
-    const bool clearHistory = d[base + 34] != 0;
+    const quint64 generation = readU64(base + 9);
+    const int bins = readU16(base + 17);
+    const int columns = readU16(base + 19);
+    const int channelCount = d[base + 21];
+    const int startIndex = static_cast<int>(readU32(base + 22));
+    const int totalEstimate = static_cast<int>(readU32(base + 26));
+    const int sampleRate = static_cast<int>(readU32(base + 30));
+    const int hopSize = readU16(base + 34);
+    const float coverage = readF32(base + 36);
+    const bool complete = d[base + 40] != 0;
+    const bool bufferReset = d[base + 41] != 0;
+    const bool clearHistory = d[base + 42] != 0;
 
     const int dataOffset = kHeaderLen;
     const int expectedDataLen = columns * channelCount * bins;
@@ -4113,7 +4115,7 @@ void BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     emit precomputedSpectrogramChunkReady(
         columnData, bins, channelCount, columns,
         startIndex, totalEstimate, sampleRate, hopSize,
-        coverage, complete, bufferReset, clearHistory, trackToken);
+        coverage, complete, bufferReset, clearHistory, trackToken, generation);
 }
 
 void BridgeClient::scheduleTrackIdentityChanged() {

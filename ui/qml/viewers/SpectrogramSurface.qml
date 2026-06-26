@@ -159,7 +159,7 @@ Item {
         function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
                                                      startIndex, totalEstimate, sampleRate,
                                                      hopSize, coverage, complete, bufferReset,
-                                                     clearHistory, trackToken) {
+                                                     clearHistory, trackToken, generation) {
             // Sync pane count to match the chunk's channel count.
             // On buffer_reset (track change), allow shrinking; otherwise
             // only grow to avoid destroying precomputed data mid-track.
@@ -179,7 +179,7 @@ Item {
                     pane.spectrogramItem.feedPrecomputedChunk(
                         data, bins, ch, columns, startIndex,
                         totalEstimate, sampleRate, hopSize, complete,
-                        bufferReset, trackToken, clearHistory)
+                        bufferReset, trackToken, clearHistory, generation)
                 }
             }
         }

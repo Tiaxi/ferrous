@@ -456,6 +456,7 @@ private slots:
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramZoomOutProducesDistinctHop();
+    void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
@@ -613,7 +614,7 @@ Item {
         signal imageFileDetailsChanged(string path)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
-            real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken)
+            real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken, var generation)
         signal trackIdentityChanged()
         signal trackMetadataChanged()
         signal snapshotChanged()
@@ -4954,6 +4955,63 @@ void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
     const double ez = item.m_renderZoomLevel
         * static_cast<double>(hop2) / 1024.0;
     QVERIFY(std::abs(ez - 1.0) < 0.01);
+}
+
+void QmlSmokeTest::spectrogramCenteredZoomOutDropsOlderSameTrackGeneration() {
+    SpectrogramItem item;
+    item.setWidth(1183);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int referenceColumns = 4000;
+    constexpr quint64 trackToken = 1;
+    QByteArray initialChunk(binsPerColumn * referenceColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, referenceColumns,
+        0, referenceColumns, 48000, 1024, false,
+        true, trackToken, false, 1);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_zoomLevel = 0.1;
+        item.m_renderZoomLevel = 0.1;
+        item.m_awaitingZoomData = false;
+    }
+
+    constexpr int coarseColumns = 800;
+    QByteArray coarseChunk(binsPerColumn * coarseColumns, '\x70');
+    item.feedPrecomputedChunk(
+        coarseChunk, binsPerColumn, 0, coarseColumns,
+        0, coarseColumns, 48000, 5120, false,
+        true, trackToken, false, 4);
+
+    QCOMPARE(item.m_precomputedHopSize, 5120);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
+    const qint64 ringWriteSeq = item.m_ringWriteSeq;
+
+    // A superseded rapid-zoom session can use a rounded hop that still
+    // matches the final zoom tolerance. Generation, not hop alone, must
+    // keep those older chunks out of the current ring.
+    constexpr int staleColumns = 64;
+    QByteArray staleResetChunk(binsPerColumn * staleColumns, '\x20');
+    item.feedPrecomputedChunk(
+        staleResetChunk, binsPerColumn, 0, staleColumns,
+        0, staleColumns, 48000, 5088, false,
+        true, trackToken, false, 3);
+
+    QByteArray staleDataChunk(binsPerColumn * staleColumns, '\x20');
+    item.feedPrecomputedChunk(
+        staleDataChunk, binsPerColumn, 0, staleColumns,
+        0, staleColumns, 48000, 5088, false,
+        false, trackToken, false, 3);
+
+    QCOMPARE(item.m_precomputedHopSize, 5120);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, coarseColumns);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, coarseColumns - 1);
+    QCOMPARE(item.m_ringWriteSeq, ringWriteSeq);
 }
 
 void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {

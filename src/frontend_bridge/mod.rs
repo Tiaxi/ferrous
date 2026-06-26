@@ -1760,6 +1760,7 @@ mod tests {
 
         let first = crate::analysis::PrecomputedSpectrogramChunk {
             track_token: 7,
+            generation: 11,
             columns_u8: vec![1, 2],
             bins_per_column: 1,
             column_count: 2,
@@ -1775,6 +1776,7 @@ mod tests {
         };
         let second = crate::analysis::PrecomputedSpectrogramChunk {
             track_token: 7,
+            generation: 11,
             columns_u8: vec![3, 4],
             bins_per_column: 1,
             column_count: 2,
