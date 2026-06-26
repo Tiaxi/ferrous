@@ -106,6 +106,25 @@ QString normalizeLocalPathArg(const QString &path) {
         trimmed = trimmed.mid(6, trimmed.size() - 8);
     }
 
+    constexpr QLatin1StringView coversPrefix("image://covers/");
+    if (trimmed.startsWith(coversPrefix)) {
+        QString localPath = trimmed.mid(coversPrefix.size());
+        const int queryPos = localPath.indexOf(QLatin1Char('?'));
+        const int fragmentPos = localPath.indexOf(QLatin1Char('#'));
+        int endPos = localPath.size();
+        if (queryPos >= 0) {
+            endPos = std::min(endPos, queryPos);
+        }
+        if (fragmentPos >= 0) {
+            endPos = std::min(endPos, fragmentPos);
+        }
+        localPath.truncate(endPos);
+        localPath = QUrl::fromPercentEncoding(localPath.toUtf8()).trimmed();
+        if (!localPath.isEmpty()) {
+            return localPath;
+        }
+    }
+
     const QUrl asUrl(trimmed);
     if (asUrl.isValid() && asUrl.isLocalFile()) {
         const QString localPath = asUrl.toLocalFile().trimmed();

@@ -22,11 +22,17 @@ function urlToLocalPath(urlValue) {
 }
 
 function pathFromAnyUrl(urlValue) {
-    const text = (urlValue || "").toString()
+    let text = (urlValue || "").toString()
     if (text.length === 0) {
         return ""
     }
-    const localPath = text.indexOf("file://") === 0 ? urlToLocalPath(text) : text
+    if (text.startsWith("QUrl(\"") && text.endsWith("\")")) {
+        text = text.substring(6, text.length - 2)
+    }
+    const coversPrefix = "image://covers/"
+    const localPath = text.indexOf("file://") === 0
+        ? urlToLocalPath(text)
+        : (text.indexOf(coversPrefix) === 0 ? text.substring(coversPrefix.length) : text)
     const queryIndex = localPath.indexOf("?")
     const fragmentIndex = localPath.indexOf("#")
     let endIndex = localPath.length
@@ -36,7 +42,15 @@ function pathFromAnyUrl(urlValue) {
     if (fragmentIndex >= 0) {
         endIndex = Math.min(endIndex, fragmentIndex)
     }
-    return endIndex < localPath.length ? localPath.substring(0, endIndex) : localPath
+    const path = endIndex < localPath.length ? localPath.substring(0, endIndex) : localPath
+    if (text.indexOf(coversPrefix) !== 0) {
+        return path
+    }
+    try {
+        return decodeURIComponent(path)
+    } catch (error) {
+        return path
+    }
 }
 
 function folderDialogPath(dialogObj) {
