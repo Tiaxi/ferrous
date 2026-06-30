@@ -98,7 +98,8 @@ public:
         int columns, int startIndex, int totalEstimate,
         int sampleRate, int hopSize, bool complete,
         bool bufferReset, quint64 trackToken = 0,
-        bool clearHistoryOnReset = false);
+        bool clearHistoryOnReset = false,
+        quint64 generation = 0);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -156,6 +157,7 @@ private:
         int startIndex,
         int bins,
         quint64 trackToken,
+        quint64 generation,
         bool clearHistoryOnReset);
     qint64 currentRollingDisplayRightLocked(std::chrono::steady_clock::time_point now) const;
     void truncateRollingTailLocked(qint64 newWriteSeq);
@@ -309,6 +311,8 @@ private:
     int m_precomputedHopSize{1024};
     quint64 m_precomputedTrackToken{0};
     quint64 m_precomputedCommittedToken{0}; // token from the most recent buffer_reset
+    quint64 m_precomputedSessionGeneration{0};
+    quint64 m_precomputedCommittedGeneration{0};
     bool m_precomputedReady{false};
     double m_positionSeconds{0.0};
     double m_positionAnchorSeconds{0.0};
@@ -322,6 +326,7 @@ private:
     int m_precomputedPendingResetStartIndex{0};
     int m_precomputedPendingResetBins{0};
     quint64 m_precomputedPendingResetTrackToken{0};
+    quint64 m_precomputedPendingResetGeneration{0};
     bool m_precomputedPendingResetClearHistory{false};
     qint64 m_precomputedLastDisplaySeq{-1};
     int m_precomputedLastRightCol{-1};

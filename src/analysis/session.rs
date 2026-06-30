@@ -34,6 +34,9 @@ macro_rules! profile_eprintln {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Keep default 2048-FFT stereo centered chunks at <=64 columns, about 128 KiB.
+const CENTERED_CHUNK_BYTE_BUDGET: usize = 64 * 1_025 * 2;
+
 fn clamp_to_u8(v: usize) -> u8 {
     u8::try_from(v).unwrap_or(u8::MAX)
 }
@@ -261,6 +264,7 @@ impl StagingChunkState {
             seconds_from_frames(self.total_covered_samples, u64::from(self.effective_rate));
         Some(PrecomputedSpectrogramChunk {
             track_token: 0,
+            generation: 0,
             columns_u8: std::mem::take(&mut self.chunk_buf),
             bins_per_column: clamp_to_u16(self.bins_per_column),
             column_count: self.chunk_columns,
@@ -340,6 +344,7 @@ fn staging_drain_stft_rows(
                 seconds_from_frames(state.total_covered_samples, u64::from(state.effective_rate));
             let chunk = PrecomputedSpectrogramChunk {
                 track_token: 0,
+                generation: 0,
                 columns_u8: std::mem::take(&mut state.chunk_buf),
                 bins_per_column: clamp_to_u16(state.bins_per_column),
                 column_count: state.chunk_columns,
@@ -358,9 +363,11 @@ fn staging_drain_stft_rows(
             }
             state.chunk_start_index = state.columns_produced;
             state.chunk_columns = 0;
-            state.target_chunk_columns = next_target_chunk_columns(
+            state.target_chunk_columns = next_target_chunk_columns_for_payload(
                 state.target_chunk_columns,
                 SpectrogramDisplayMode::Centered,
+                state.bins_per_column,
+                state.channel_count,
             );
         }
     }
@@ -561,6 +568,9 @@ fn spectrogram_worker_loop(
                 Err(_) => break,
             },
         };
+        let Some(cmd) = coalesce_queued_new_track_command(cmd, cmd_rx, generation) else {
+            continue;
+        };
 
         match cmd {
             SpectrogramWorkerCommand::NewTrack {
@@ -642,6 +652,40 @@ fn spectrogram_worker_loop(
             SpectrogramWorkerCommand::Stop => break,
             _ => {} // UpdateTrackToken, CancelPendingContinue, etc. — stale outside session
         }
+    }
+}
+
+fn coalesce_queued_new_track_command(
+    initial_cmd: SpectrogramWorkerCommand,
+    cmd_rx: &Receiver<SpectrogramWorkerCommand>,
+    generation: &AtomicU64,
+) -> Option<SpectrogramWorkerCommand> {
+    if !matches!(initial_cmd, SpectrogramWorkerCommand::NewTrack { .. }) {
+        return Some(initial_cmd);
+    }
+
+    let mut latest_new_track = initial_cmd;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            SpectrogramWorkerCommand::NewTrack { .. } => {
+                latest_new_track = cmd;
+            }
+            SpectrogramWorkerCommand::Stop => return Some(SpectrogramWorkerCommand::Stop),
+            _ => {}
+        }
+    }
+
+    let &SpectrogramWorkerCommand::NewTrack {
+        generation: cmd_generation,
+        ..
+    } = &latest_new_track
+    else {
+        return Some(latest_new_track);
+    };
+    if cmd_generation == generation.load(Ordering::Relaxed) {
+        Some(latest_new_track)
+    } else {
+        None
     }
 }
 
@@ -893,6 +937,7 @@ fn run_spectrogram_session(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token,
+            generation: gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(bins_per_column),
             column_count: 0,
@@ -1275,6 +1320,7 @@ fn process_session_commands(
     session: &mut SpectrogramSessionState,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
 ) -> Option<SessionAction> {
+    let mut latest_new_track: Option<SpectrogramWorkerCommand> = None;
     let mut latest_position: Option<f64> = None;
     let mut latest_seek: Option<f64> = None;
     let mut needs_flush_token = false;
@@ -1289,7 +1335,7 @@ fn process_session_commands(
                 latest_seek = Some(position_seconds);
             }
             SpectrogramWorkerCommand::NewTrack { .. } => {
-                return Some(SessionAction::NewSession(cmd));
+                latest_new_track = Some(cmd);
             }
             SpectrogramWorkerCommand::SetDisplayMode(mode) => {
                 apply_display_mode(session, mode);
@@ -1323,6 +1369,10 @@ fn process_session_commands(
                 return Some(SessionAction::Stop);
             }
         }
+    }
+
+    if let Some(cmd) = latest_new_track {
+        return Some(SessionAction::NewSession(cmd));
     }
 
     // FlushToken takes priority over position-only results — the UI
@@ -1494,6 +1544,7 @@ fn handle_session_seek(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: session.track_token,
+            generation: session.gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(session.bins_per_column),
             column_count: 0,
@@ -1546,6 +1597,22 @@ fn next_target_chunk_columns(current: u16, display_mode: SpectrogramDisplayMode)
     current
         .saturating_mul(2)
         .min(max_target_chunk_columns(display_mode))
+}
+
+fn next_target_chunk_columns_for_payload(
+    current: u16,
+    display_mode: SpectrogramDisplayMode,
+    bins_per_column: usize,
+    channel_count: usize,
+) -> u16 {
+    let column_cap = next_target_chunk_columns(current, display_mode);
+    if display_mode != SpectrogramDisplayMode::Centered {
+        return column_cap;
+    }
+
+    let bytes_per_column = bins_per_column.saturating_mul(channel_count).max(1);
+    let payload_cap = CENTERED_CHUNK_BYTE_BUDGET / bytes_per_column;
+    column_cap.min(clamp_to_u16(payload_cap.max(1)))
 }
 
 /// Apply a display-mode change to a live session: update rate limit
@@ -1662,6 +1729,7 @@ fn session_drain_stft_rows(
             let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
                 PrecomputedSpectrogramChunk {
                     track_token: session.track_token,
+                    generation: session.gen,
                     columns_u8: std::mem::take(&mut session.chunk_buf),
                     bins_per_column: clamp_to_u16(session.bins_per_column),
                     column_count: session.chunk_columns,
@@ -1680,8 +1748,12 @@ fn session_drain_stft_rows(
             session.chunk_columns = 0;
             columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
             // Ramp up chunk size in rolling mode only to a latency-friendly cap.
-            session.target_chunk_columns =
-                next_target_chunk_columns(session.target_chunk_columns, session.display_mode);
+            session.target_chunk_columns = next_target_chunk_columns_for_payload(
+                session.target_chunk_columns,
+                session.display_mode,
+                session.bins_per_column,
+                session.channel_count,
+            );
         }
     }
 }
@@ -1817,6 +1889,7 @@ fn session_flush_chunk(
         let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
             PrecomputedSpectrogramChunk {
                 track_token: session.track_token,
+                generation: session.gen,
                 columns_u8: std::mem::take(&mut session.chunk_buf),
                 bins_per_column: clamp_to_u16(session.bins_per_column),
                 column_count: session.chunk_columns,
@@ -1855,6 +1928,7 @@ fn session_flush_token(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: session.track_token,
+            generation: session.gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(session.bins_per_column),
             column_count: 0,
@@ -1895,6 +1969,7 @@ fn session_emit_finalize_chunk(
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: session.track_token,
+            generation: session.gen,
             columns_u8: Vec::new(),
             bins_per_column: clamp_to_u16(session.bins_per_column),
             column_count: 0,
@@ -2009,6 +2084,24 @@ mod tests {
         assert_eq!(
             next_target_chunk_columns(256, SpectrogramDisplayMode::Centered),
             256
+        );
+    }
+
+    #[test]
+    fn centered_mode_caps_chunk_growth_by_payload_bytes() {
+        // 256 centered columns at 1025 bins and 2 channels is about
+        // 512 KiB, which shows up as UI-thread dispatch spikes.
+        assert_eq!(
+            next_target_chunk_columns_for_payload(128, SpectrogramDisplayMode::Centered, 1_025, 2),
+            64
+        );
+        assert_eq!(
+            next_target_chunk_columns_for_payload(32, SpectrogramDisplayMode::Centered, 1_025, 2),
+            64
+        );
+        assert_eq!(
+            next_target_chunk_columns_for_payload(32, SpectrogramDisplayMode::Rolling, 1_025, 2),
+            64
         );
     }
 
@@ -2337,6 +2430,134 @@ mod tests {
         let action = process_session_commands(&mut session, &rx);
         // NewTrack must take priority.
         assert!(matches!(action, Some(SessionAction::NewSession(_))));
+    }
+
+    #[test]
+    fn process_session_commands_coalesces_queued_new_tracks_to_latest() {
+        let mut session = make_test_session();
+
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 2,
+            path: PathBuf::from("/tmp/intermediate.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.5,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        })
+        .unwrap();
+        tx.send(SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 3,
+            path: PathBuf::from("/tmp/final.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.1,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        })
+        .unwrap();
+
+        let action = process_session_commands(&mut session, &rx);
+        let Some(SessionAction::NewSession(SpectrogramWorkerCommand::NewTrack {
+            generation,
+            zoom_level,
+            ..
+        })) = action
+        else {
+            panic!("expected latest queued NewTrack");
+        };
+        assert_eq!(generation, 3);
+        assert!((zoom_level - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn idle_worker_coalesces_queued_new_tracks_before_starting_session() {
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        let generation_state = AtomicU64::new(3);
+        let initial = SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 2,
+            path: PathBuf::from("/tmp/intermediate.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.5,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        };
+        tx.send(SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 3,
+            path: PathBuf::from("/tmp/final.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.1,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        })
+        .unwrap();
+
+        let cmd = coalesce_queued_new_track_command(initial, &rx, &generation_state)
+            .expect("latest queued generation should still be live");
+        let SpectrogramWorkerCommand::NewTrack {
+            generation,
+            zoom_level,
+            ..
+        } = cmd
+        else {
+            panic!("expected latest queued NewTrack");
+        };
+        assert_eq!(generation, 3);
+        assert!((zoom_level - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn idle_worker_drops_stale_new_track_before_starting_session() {
+        let (_tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        let generation_state = AtomicU64::new(3);
+        let initial = SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation: 2,
+            path: PathBuf::from("/tmp/intermediate.flac"),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 0.5,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Centered,
+        };
+
+        let cmd = coalesce_queued_new_track_command(initial, &rx, &generation_state);
+        assert!(
+            cmd.is_none(),
+            "stale NewTrack generations should not open files or emit reset chunks"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -2707,6 +2928,7 @@ mod tests {
             if chunk_columns >= target_chunk_columns {
                 chunks.push(PrecomputedSpectrogramChunk {
                     track_token: 0,
+                    generation: 0,
                     columns_u8: vec![0u8; usize::from(chunk_columns) * bins_per_column],
                     bins_per_column: clamp_to_u16(bins_per_column),
                     column_count: chunk_columns,

@@ -852,6 +852,7 @@ mod tests {
         };
         let chunk = crate::analysis::PrecomputedSpectrogramChunk {
             track_token: 9,
+            generation: 3,
             columns_u8: Vec::new(),
             bins_per_column: 4097,
             column_count: 0,

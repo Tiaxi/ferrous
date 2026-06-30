@@ -398,6 +398,7 @@ impl SmoothedPlaybackClock {
 
     fn enter_seek_hold(&mut self, target: Duration, now: Instant) {
         self.reset_with_mode(target, now, PlaybackClockMode::SeekHold);
+        self.rate = 0.0;
     }
 
     fn enter_seek_reacquire(&mut self) {
@@ -1927,12 +1928,23 @@ fn configure_playbin_buffering(playbin: &gst::Element) {
 fn seek_flags_for_path(path: Option<&Path>) -> gst::SeekFlags {
     if path.is_some_and(is_dts_file) {
         gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+    } else if path.is_some_and(is_flac_file) {
+        // Fast FLAC seeks can leave flacparse in an internally errored state
+        // after rapid synced seeks. Accurate flushed seeks avoid that parser
+        // stall while keeping other formats on the low-latency path.
+        gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     } else {
         // Accurate seeks can force parsers/demuxers to scan large files.
         // Default playback should prefer responsiveness, especially on slow
         // network-backed filesystems.
         gst::SeekFlags::FLUSH
     }
+}
+
+fn is_flac_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("flac"))
 }
 
 /// Check whether gapless playback has rolled over to the next track.
@@ -2776,16 +2788,16 @@ mod tests {
     }
 
     #[test]
-    fn seek_hold_advances_visible_position_from_target() {
+    fn seek_hold_does_not_run_ahead_before_backend_reacquires_position() {
         let base = Instant::now();
+        let target = Duration::from_secs_f64(12.0);
         let mut clock = SmoothedPlaybackClock::new(base);
-        clock.enter_seek_hold(Duration::from_secs_f64(12.0), base);
+        clock.enter_seek_hold(target, base);
 
         let visible = clock.current_position(base + Duration::from_millis(120));
-        assert!(
-            visible > Duration::from_secs_f64(12.10),
-            "seek hold should advance from target, got {:.6}",
-            visible.as_secs_f64()
+        assert_eq!(
+            visible, target,
+            "seek hold should keep the requested target stable until GStreamer confirms playback position"
         );
     }
 
@@ -2963,10 +2975,10 @@ mod tests {
     }
 
     #[test]
-    fn flac_seek_prefers_fast_non_accurate_mode() {
+    fn flac_seek_uses_accurate_mode_to_avoid_parser_stall() {
         let flags = seek_flags_for_path(Some(Path::new("/tmp/test.flac")));
         assert!(flags.contains(gst::SeekFlags::FLUSH));
-        assert!(!flags.contains(gst::SeekFlags::ACCURATE));
+        assert!(flags.contains(gst::SeekFlags::ACCURATE));
         assert!(!flags.contains(gst::SeekFlags::KEY_UNIT));
     }
 
