@@ -416,6 +416,7 @@ private:
         int processedEvents{0};
         qsizetype processedAnalysisBytes{0};
         qsizetype processedPrecomputedBytes{0};
+        double precomputedPopMs{0.0};
         double precomputedDispatchMs{0.0};
         double maxPrecomputedFrameMs{0.0};
         bool analysisCapSaturated{false};

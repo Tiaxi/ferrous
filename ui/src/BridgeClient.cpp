@@ -1591,9 +1591,14 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         }
         QElapsedTimer frameTimer;
         frameTimer.start();
+        QElapsedTimer popTimer;
+        popTimer.start();
         std::size_t len = 0;
         std::uint8_t *ptr = ferrous_ffi_bridge_pop_precomputed_spectrogram(m_ffiBridge, &len);
+        const double popCallMs =
+            static_cast<double>(popTimer.nsecsElapsed()) / 1'000'000.0;
         if (ptr == nullptr || len == 0) {
+            result.precomputedPopMs += popCallMs;
             break;
         }
         result.processedPrecomputedFrames++;
@@ -1602,6 +1607,8 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
             static_cast<qsizetype>(len));
         result.processedPrecomputedBytes += raw.size();
         ferrous_ffi_bridge_free_precomputed_spectrogram(ptr, len);
+        result.precomputedPopMs +=
+            static_cast<double>(popTimer.nsecsElapsed()) / 1'000'000.0;
         const PrecomputedDispatchStats stats =
             parsePrecomputedSpectrogramFrame(raw);
         result.precomputedDispatchMs += stats.dispatchMs;
