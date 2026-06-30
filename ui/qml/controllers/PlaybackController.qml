@@ -138,7 +138,7 @@ QtObject {
         root.applyInterpolatedPosition(clampedPosition)
         root.resetInterpolationState(clampedPosition, nowMs)
         root.interpolationActive = true
-        if (Math.abs(error) >= 0.001 || action !== "follow") {
+        if (action !== "follow" || Math.abs(error) >= root.profileHeartbeatLogThresholdSeconds) {
             root.logPlaybackProfile(
                 "heartbeat",
                 "incoming=" + incomingPosition.toFixed(3)

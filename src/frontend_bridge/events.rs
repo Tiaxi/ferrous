@@ -17,6 +17,7 @@ use crate::lastfm::{
 use crate::library::{is_supported_audio, track_file_fingerprint, IndexedTrack, LibraryEvent};
 use crate::metadata::{MetadataEvent, MetadataService};
 use crate::playback::{PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
+use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
     library_tree, try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeState,
@@ -313,18 +314,20 @@ fn process_playback_snapshot_event(
         #[cfg(feature = "profiling-logs")]
         let position_trace =
             playback_position_trace(previous_playback.position, state.playback.position);
-        profile_eprintln!(
-            "[bridge-pos] prev_ms={} next_ms={} delta_ms={} urgency={urgency:?} token={} current={}",
-            position_trace.previous,
-            position_trace.current,
-            position_trace.delta,
-            state.analysis_track_token,
-            state
-                .playback
-                .current
-                .as_ref()
-                .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
-        );
+        if heartbeat_trace_enabled() {
+            profile_eprintln!(
+                "[bridge-pos] prev_ms={} next_ms={} delta_ms={} urgency={urgency:?} token={} current={}",
+                position_trace.previous,
+                position_trace.current,
+                position_trace.delta,
+                state.analysis_track_token,
+                state
+                    .playback
+                    .current
+                    .as_ref()
+                    .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
+            );
+        }
         analysis.command(AnalysisCommand::PositionUpdate(pos_seconds));
     }
     urgency

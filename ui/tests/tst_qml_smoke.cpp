@@ -402,11 +402,13 @@ private slots:
     void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
     void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
     void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
+    void playbackControllerProfileSkipsMinorFollowHeartbeatLogs();
     void playbackControllerIgnoresSteadyStateHeartbeatJitter();
     void playbackControllerKeepsWallClockInterpolationAfterSubRealtimeHeartbeats();
     void playbackControllerSteadyStateTrimReducesNoticeableLag();
     void playbackControllerFollowsBoundedRecoveryCadenceWithoutBurst();
     void spectrogramSeekProfileFlagsStalledPostSeekWindow();
+    void spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling();
     void spectrogramSmoothnessProfileFlagsGapHeavyWindow();
     void spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals();
     void waveformProgressInvalidatesOnlyTailSpan();
@@ -1939,7 +1941,9 @@ Item {
         Q_ARG(QVariant, QVariant())));
 
     const QString warnings = takeCapturedMessagesText();
-    QVERIFY2(warnings.contains(QStringLiteral("action=follow")), qPrintable(warnings));
+    QVERIFY2(
+        !warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
+        qPrintable(warnings));
     QVERIFY2(!warnings.contains(QStringLiteral("action=trim")), qPrintable(warnings));
     QVERIFY2(!warnings.contains(QStringLiteral("action=bleed")), qPrintable(warnings));
 }
@@ -2005,6 +2009,64 @@ Item {
         qPrintable(warnings));
     QVERIFY2(
         !warnings.contains(QStringLiteral("[qml-playback-profile] bleed")),
+        qPrintable(warnings));
+}
+
+void QmlSmokeTest::playbackControllerProfileSkipsMinorFollowHeartbeatLogs() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property bool profileLogsEnabled: true
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
+    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+
+    clearCapturedMessages();
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.006);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChanged",
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const QString warnings = takeCapturedMessagesText();
+    QVERIFY2(
+        !warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
         qPrintable(warnings));
 }
 
@@ -3018,6 +3080,57 @@ void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
     QVERIFY(state.value("incidentDetected").toBool());
     QCOMPARE(state.value("gapFrames").toInt(), 3);
     QCOMPARE(state.value("maxPendingRows").toInt(), 0);
+#else
+    QSKIP("Seek hitch profiling instrumentation is compiled out");
+#endif
+}
+
+void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    qputenv("FERROUS_PROFILE_UI", "1");
+    SpectrogramSeekTrace::noteSeekIssued(42.0);
+
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    SpectrogramItem duplicateItem;
+    duplicateItem.setWidth(320);
+    duplicateItem.setHeight(180);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_profileEnabled = true;
+        item.m_precomputedCanvasDisplayRight = 96;
+        item.m_gpuDisplayWidth = 320;
+
+        const qint64 startedAtMs = SpectrogramSeekTrace::startedAtMs();
+        QVERIFY(startedAtMs > 0);
+        item.maybeStartSeekProfileLocked(startedAtMs);
+        QVERIFY(item.m_seekProfile.active);
+
+        item.noteSeekProfileFrameLocked(startedAtMs + 30, 0.016, false, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 60, 0.016, false, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 90, 0.016, false, false);
+        item.noteSeekProfileFrameLocked(startedAtMs + 150, 0.016, false, false);
+        QVERIFY(!item.m_seekProfile.active);
+
+        item.maybeStartSeekProfileLocked(startedAtMs + 180);
+        QVERIFY(!item.m_seekProfile.active);
+        QCOMPARE(
+            item.m_lastFinalizedSeekProfileGeneration,
+            SpectrogramSeekTrace::currentGeneration());
+    }
+
+    {
+        QMutexLocker lock(&duplicateItem.m_stateMutex);
+        duplicateItem.m_profileEnabled = true;
+        duplicateItem.m_precomputedCanvasDisplayRight = 96;
+        duplicateItem.m_gpuDisplayWidth = 320;
+        duplicateItem.maybeStartSeekProfileLocked(SpectrogramSeekTrace::startedAtMs() + 180);
+        QVERIFY(!duplicateItem.m_seekProfile.active);
+    }
+
+    qunsetenv("FERROUS_PROFILE_UI");
 #else
     QSKIP("Seek hitch profiling instrumentation is compiled out");
 #endif

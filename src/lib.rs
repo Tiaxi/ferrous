@@ -8,5 +8,6 @@ pub mod lastfm;
 pub mod library;
 pub mod metadata;
 pub mod playback;
+mod profile_logging;
 mod raw_audio;
 pub mod tag_editor;
