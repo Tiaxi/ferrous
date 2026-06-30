@@ -57,7 +57,7 @@ These are the most likely user-visible fixes or low-risk backend/analysis fixes.
 
 ### P1 Branch: `codex/rescue-p1-spectrogram-fixes`
 
-Status: in progress on 2026-06-30.
+Status: implemented, validated, and merged via PR #22 on 2026-06-30.
 
 Validation so far:
 
@@ -75,6 +75,26 @@ Adaptation notes:
 - Texture segmentation/body-texture bounding commits are skipped as obsolete for
   the current tiled renderer: tile count is bounded by widget width, and dirty
   tile uploads already avoid repeated full-body texture uploads.
+
+### P2 Branch: `codex/rescue-p2-spectrogram-throughput`
+
+Status: implemented and validated on 2026-07-01.
+
+Validation:
+
+- `./scripts/run-tests.sh --ui-only` passed.
+
+Adaptation notes:
+
+- Spectrogram chunks now bypass QML payload dispatch when live
+  `SpectrogramItem` instances are registered. `BridgeClient` still emits the
+  legacy full-payload signal as a fallback when no direct routes exist.
+- The no-copy split avoidance from `f30628a` was folded into the direct-routing
+  adaptation: registered items receive a raw-data view of the interleaved frame
+  plus their channel index, and `SpectrogramItem` extracts the active channel
+  from that view.
+- Precomputed spectrogram frames are counted in bridge-poll work accounting so
+  the poll loop can immediately continue when it saturates the per-pass cap.
 
 ## P1: CPU Spectrogram Behavior And Performance
 
@@ -125,9 +145,9 @@ Useful if precomputed spectrogram dispatch still shows up as a UI hot path.
 
 | Status | Commit | Pick type | Why rescue it |
 | --- | --- | --- | --- |
-| todo | `ade12ee` `fix: route spectrogram chunks outside qml` | Adapt | Routes chunk frames directly from `BridgeClient` to registered `SpectrogramItem`s. |
-| todo | `f30628a` `fix: avoid spectrogram chunk split copies` | Depends on `ade12ee` | Avoids per-channel split-copying by passing raw chunk data and channel index. |
-| todo | `13c13ca` `fix: reserve spectrogram ring column map` | Direct/adapt | Small hot-path allocation reduction while feeding precomputed columns. |
+| adapted | `ade12ee` `fix: route spectrogram chunks outside qml` | Adapt | Routes chunk frames directly from `BridgeClient` to registered `SpectrogramItem`s. |
+| adapted | `f30628a` `fix: avoid spectrogram chunk split copies` | Folded into `ade12ee` adaptation | Avoids per-channel split-copying by passing raw chunk data and channel index. |
+| picked | `13c13ca` `fix: reserve spectrogram ring column map` | Direct/adapt | Small hot-path allocation reduction while feeding precomputed columns. |
 
 ## P2: Diagnostics And Profiling Cleanup
 
