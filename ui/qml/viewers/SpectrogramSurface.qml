@@ -156,10 +156,7 @@ Item {
 
     Connections {
         target: root.uiBridge
-        function onPrecomputedSpectrogramChunkReady(data, bins, channelCount, columns,
-                                                     startIndex, totalEstimate, sampleRate,
-                                                     hopSize, coverage, complete, bufferReset,
-                                                     clearHistory, trackToken, generation) {
+        function onPrecomputedSpectrogramChannelsReady(channelCount, bufferReset) {
             // Sync pane count to match the chunk's channel count.
             // On buffer_reset (track change), allow shrinking; otherwise
             // only grow to avoid destroying precomputed data mid-track.
@@ -167,20 +164,6 @@ Item {
                 root.channelDescriptors = descriptorsForChannelCount(channelCount)
             } else if (channelCount > spectrogramRepeater.count) {
                 root.channelDescriptors = descriptorsForChannelCount(channelCount)
-            }
-
-            const paneCount = spectrogramRepeater.count
-            for (let ch = 0; ch < channelCount; ++ch) {
-                if (ch >= paneCount) {
-                    break
-                }
-                const pane = spectrogramRepeater.itemAt(ch)
-                if (pane && pane.spectrogramItem) {
-                    pane.spectrogramItem.feedPrecomputedChunk(
-                        data, bins, ch, columns, startIndex,
-                        totalEstimate, sampleRate, hopSize, complete,
-                        bufferReset, trackToken, clearHistory, generation)
-                }
             }
         }
     }
@@ -260,6 +243,12 @@ Item {
                         if (index === 0) {
                             root.uiBridge.setSpectrogramZoomLevel(level)
                         }
+                    }
+                    Component.onCompleted: {
+                        root.uiBridge.registerSpectrogramItem(spectrogramPaneItem, index)
+                    }
+                    Component.onDestruction: {
+                        root.uiBridge.unregisterSpectrogramItem(spectrogramPaneItem)
                     }
                     // Only report width from the first pane (all share the same width).
                     onSpectrogramWidthChanged: (w) => {

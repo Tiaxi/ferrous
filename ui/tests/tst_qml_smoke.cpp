@@ -635,6 +635,7 @@ Item {
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
             real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken, var generation)
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal trackIdentityChanged()
         signal trackMetadataChanged()
         signal snapshotChanged()
@@ -660,6 +661,8 @@ Item {
         function setSpectrogramZoomEnabled(value) {}
         function setSpectrogramZoomLevel(level) {}
         function setSpectrogramWidgetWidth(width) {}
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
         function setViewerFullscreenMode(mode) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

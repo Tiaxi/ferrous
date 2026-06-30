@@ -1447,6 +1447,15 @@ void SpectrogramItem::feedPrecomputedChunk(
         const int channelOffset = channelIndex * bins;
         const auto *srcData =
             reinterpret_cast<const char *>(data.constData());
+        const quint64 effectiveTrackToken =
+            trackToken != 0 ? trackToken : m_precomputedTrackToken;
+        auto activeTokenIt = m_trackColumnToSeqByToken.find(effectiveTrackToken);
+        if (activeTokenIt == m_trackColumnToSeqByToken.end()) {
+            activeTokenIt = m_trackColumnToSeqByToken.insert(
+                effectiveTrackToken,
+                QHash<qint32, qint64>{});
+        }
+        activeTokenIt->reserve(activeTokenIt->size() + columns);
 
         for (int col = 0; col < columns; ++col) {
             const int srcOff = col * stridePerColumn + channelOffset;
@@ -1471,15 +1480,13 @@ void SpectrogramItem::feedPrecomputedChunk(
                         if (tokenIt != m_trackColumnToSeqByToken.end()
                             && tokenIt->value(previousTrackCol, -1) == previousSeq) {
                             tokenIt->remove(previousTrackCol);
-                            if (tokenIt->isEmpty()) {
+                            if (tokenIt != activeTokenIt && tokenIt->isEmpty()) {
                                 m_trackColumnToSeqByToken.erase(tokenIt);
                             }
                         }
                     }
                 }
             }
-            const quint64 effectiveTrackToken =
-                trackToken != 0 ? trackToken : m_precomputedTrackToken;
             memcpy(m_ringBuffer.data() + slot * bins,
                    srcData + srcOff,
                    static_cast<size_t>(bins));
@@ -1490,7 +1497,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             if (!m_ringTrackToken.empty()) {
                 m_ringTrackToken[static_cast<size_t>(slot)] = effectiveTrackToken;
             }
-            m_trackColumnToSeqByToken[effectiveTrackToken].insert(trackCol, m_ringWriteSeq);
+            activeTokenIt->insert(trackCol, m_ringWriteSeq);
             if (trackCol > m_precomputedMaxColumnIndex) {
                 m_precomputedMaxColumnIndex = trackCol;
             }

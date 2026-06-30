@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QNetworkAccessManager>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -281,6 +282,8 @@ public:
     Q_INVOKABLE void setSpectrogramZoomEnabled(bool value);
     Q_INVOKABLE void setSpectrogramZoomLevel(float level);
     Q_INVOKABLE void setSpectrogramWidgetWidth(int width);
+    Q_INVOKABLE void registerSpectrogramItem(QObject *item, int channelIndex);
+    Q_INVOKABLE void unregisterSpectrogramItem(QObject *item);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void setLastFmScrobblingEnabled(bool value);
     Q_INVOKABLE void beginLastFmAuth();
@@ -347,6 +350,7 @@ signals:
         int startIndex, int totalEstimate, int sampleRate, int hopSize,
         float coverage, bool complete, bool bufferReset, bool clearHistory,
         quint64 trackToken, quint64 generation);
+    void precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset);
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();
@@ -406,11 +410,17 @@ private:
 
     struct BridgePollRunResult {
         int processedAnalysisFrames{0};
+        int processedPrecomputedFrames{0};
         int processedTreeFrames{0};
         int processedSearchFrames{0};
         int processedEvents{0};
         qsizetype processedAnalysisBytes{0};
+        qsizetype processedPrecomputedBytes{0};
+        double precomputedPopMs{0.0};
+        double precomputedDispatchMs{0.0};
+        double maxPrecomputedFrameMs{0.0};
         bool analysisCapSaturated{false};
+        bool precomputedCapSaturated{false};
         bool treeCapSaturated{false};
         bool searchCapSaturated{false};
         bool eventCapSaturated{false};
@@ -418,6 +428,7 @@ private:
 
         bool anyWorkProcessed() const {
             return processedAnalysisFrames > 0
+                || processedPrecomputedFrames > 0
                 || processedTreeFrames > 0
                 || processedSearchFrames > 0
                 || processedEvents > 0;
@@ -426,10 +437,35 @@ private:
         bool shouldContinueImmediately() const {
             return budgetExhausted
                 || analysisCapSaturated
+                || precomputedCapSaturated
                 || treeCapSaturated
                 || searchCapSaturated
                 || eventCapSaturated;
         }
+    };
+
+    struct PrecomputedDispatchStats {
+        bool valid{false};
+        double dispatchMs{0.0};
+        int bins{0};
+        int columns{0};
+        int channelCount{0};
+        int startIndex{0};
+        int totalEstimate{0};
+        int sampleRate{0};
+        int hopSize{0};
+        float coverage{0.0f};
+        bool complete{false};
+        bool bufferReset{false};
+        bool clearHistory{false};
+        quint64 trackToken{0};
+        quint64 generation{0};
+        qsizetype dataBytes{0};
+    };
+
+    struct SpectrogramRoute {
+        QPointer<QObject> item;
+        int channelIndex{0};
     };
 
     bool startInProcessBridge();
@@ -477,7 +513,11 @@ private:
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
     bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
     void processAnalysisBytes(const QByteArray &chunk);
-    void parsePrecomputedSpectrogramFrame(const QByteArray &raw);
+    PrecomputedDispatchStats parsePrecomputedSpectrogramFrame(const QByteArray &raw);
+    void routePrecomputedSpectrogramFrame(
+        const char *data,
+        qsizetype dataSize,
+        const PrecomputedDispatchStats &stats);
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logDiagnostic(const QString &category, const QString &message);
@@ -649,6 +689,7 @@ private:
     int m_searchApplyDispatchMs{12};
     QTimer m_searchModelApplyTimer;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> m_deferredSearchDisplayRows;
+    QVector<SpectrogramRoute> m_spectrogramRoutes;
     std::thread m_searchApplyThread;
     mutable std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;
