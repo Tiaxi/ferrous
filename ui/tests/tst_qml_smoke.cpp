@@ -3955,10 +3955,10 @@ void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.ensureMapping(180);
-        item.syncPrecomputedDisplayImageLocked(320, 180, 0, 319, false, 1.0);
+        item.rebuildPrecomputedCanvasLocked(320, 180, 0, 319, false);
     }
     QVERIFY(item.m_precomputedReady);
-    QVERIFY(!item.m_gpuDisplayImage.isNull());
+    QVERIFY(!item.m_canvas.isNull());
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(319));
     QVERIFY(item.m_positionAnchorSeconds > 70.0);
 
@@ -3969,7 +3969,7 @@ void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     QVERIFY2(
         !item.m_precomputedReady,
         "non-gapless track-change metadata reset must not keep old spectrogram visible");
-    QVERIFY(item.m_gpuDisplayImage.isNull());
+    QVERIFY(item.m_canvas.isNull());
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(-1));
     QCOMPARE(item.m_precomputedResetPending, false);
     QCOMPARE(item.m_zoomFillActive, false);

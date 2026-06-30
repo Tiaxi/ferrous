@@ -499,7 +499,11 @@ void SpectrogramItem::setPositionSeconds(double value) {
         const bool centeredSeek = m_displayMode == 1
             && clamped >= 1.0
             && !recentCenteredGapless;
-        if (largeJump && !centeredSeek) {
+        if (centeredSeek) {
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(clamped, now);
+            changed = true;
+        } else if (largeJump) {
             // Update the target position unconditionally, but only stamp the
             // start time on the *first* activation.  Without this guard, each
             // position heartbeat (~100 ms) during a natural track transition
@@ -513,45 +517,42 @@ void SpectrogramItem::setPositionSeconds(double value) {
             }
             return;
         }
-        if (largePositionJump && centeredSeek) {
+        if (!centeredSeek) {
+            // In rolling mode, ignore small backward heartbeat jitter to avoid
+            // scroll stutter.  In centered mode, backward jumps are real seeks
+            // that must be applied — the spectrogram stays in the ring buffer.
+            const bool regressedDuringPlayback =
+                m_displayMode == 0
+                && m_playing
+                && m_positionAnchorInitialized
+                && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
+            // Soft PLL: for small errors (normal heartbeat jitter ~10-20ms),
+            // blend toward the GStreamer position to smooth jitter while
+            // still converging to prevent drift.  For large errors (initial
+            // position set, post-seek correction), use the value directly.
+            const double error = clamped - currentPosition;
+            constexpr double kServoAlpha = 0.25;
+            constexpr double kServoMaxErrorSeconds = 0.15;
+            const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            if (m_profileEnabled
+                && m_smoothnessProfile.active
+                && (regressedDuringPlayback
+                    || (smallCorrection && std::abs(error) >= 0.001))) {
+                noteSmoothnessServoLocked(error, regressedDuringPlayback);
+            }
+#endif
+            const double effectivePosition = regressedDuringPlayback
+                ? currentPosition
+                : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
+            if (m_positionAnchorInitialized
+                && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
+                return;
+            }
             m_positionJumpHoldActive = false;
-            setPositionAnchorLocked(clamped, now);
+            setPositionAnchorLocked(effectivePosition, now);
             changed = true;
         }
-        // In rolling mode, ignore small backward heartbeat jitter to avoid
-        // scroll stutter.  In centered mode, backward jumps are real seeks
-        // that must be applied — the spectrogram stays in the ring buffer.
-        const bool regressedDuringPlayback =
-            m_displayMode == 0
-            && m_playing
-            && m_positionAnchorInitialized
-            && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
-        // Soft PLL: for small errors (normal heartbeat jitter ~10-20ms),
-        // blend toward the GStreamer position to smooth jitter while
-        // still converging to prevent drift.  For large errors (initial
-        // position set, post-seek correction), use the value directly.
-        const double error = clamped - currentPosition;
-        constexpr double kServoAlpha = 0.25;
-        constexpr double kServoMaxErrorSeconds = 0.15;
-        const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        if (m_profileEnabled
-            && m_smoothnessProfile.active
-            && (regressedDuringPlayback
-                || (smallCorrection && std::abs(error) >= 0.001))) {
-            noteSmoothnessServoLocked(error, regressedDuringPlayback);
-        }
-#endif
-        const double effectivePosition = regressedDuringPlayback
-            ? currentPosition
-            : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
-        if (m_positionAnchorInitialized
-            && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
-            return;
-        }
-        m_positionJumpHoldActive = false;
-        setPositionAnchorLocked(effectivePosition, now);
-        changed = true;
     }
     if (changed) {
         emit positionSecondsChanged();
@@ -1069,9 +1070,6 @@ void SpectrogramItem::feedPrecomputedChunk(
             qtRenderNotAtDefault || backendNotAtReferenceHop;
 
         m_zoomFillActive = false;
-        m_zoomFillDataReady = false;
-        m_zoomFillFrozenRetainedActive = false;
-        clearZoomFillFrozenCacheLocked();
         applyPrecomputedResetLocked(
             startIndex, bins, trackToken, generation, clearHistoryOnReset);
         m_precomputedResetPending = false;
