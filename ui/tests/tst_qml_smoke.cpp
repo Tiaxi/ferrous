@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QSGSimpleTextureNode>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -457,6 +458,7 @@ private slots:
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
+    void spectrogramResizeForcesFreshBodyTextureUpload();
     void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
     void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
@@ -5046,6 +5048,56 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     QVERIFY(!item.m_canvas.isNull());
     QCOMPARE(item.m_canvasFilledCols, zoomedOutDecodedColumns);
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+
+    delete updatedNode;
+}
+
+void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    auto *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(240);
+    item->setHeight(80);
+    item->setDisplayMode(1);
+    item->setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int columns = 320;
+    QByteArray data(bins * columns, '\x20');
+    for (int column = 96; column < 160; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(64 + column - 96 + bin));
+        }
+    }
+
+    item->feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns,
+        48000, 1024, false, true, 1, false);
+    item->setPositionSeconds(1.0);
+
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(node->childCount() >= 2);
+    auto *tilesRoot = node->childAtIndex(1);
+    QVERIFY(tilesRoot != nullptr);
+    QVERIFY(tilesRoot->childCount() > 0);
+    auto *tileNode =
+        static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(0));
+    QVERIFY(tileNode != nullptr);
+    QVERIFY(tileNode->texture() != nullptr);
+    QCOMPARE(tileNode->texture()->textureSize().height(), 80);
+
+    item->setHeight(140);
+    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    QVERIFY(item->m_canvas.height() == 140);
+    QVERIFY(tileNode->texture() != nullptr);
+    QCOMPARE(tileNode->texture()->textureSize().height(), 140);
 
     delete updatedNode;
 }
