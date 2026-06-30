@@ -192,6 +192,14 @@ private:
         double t,
         bool rollingMode,
         const std::array<quint8, 256> &dbRemap);
+    void drawPrecomputedPixelAtLocked(
+        int canvasX,
+        int pixelX,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode,
+        double effectiveZoom,
+        const std::array<quint8, 256> &dbRemap);
     int ringSlotForDisplayIndexLocked(
         qint64 displayIndex,
         bool rollingMode) const;
@@ -334,6 +342,7 @@ private:
     qint64 m_precomputedCanvasDisplayRight{-1};
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
+    double m_precomputedCanvasSubpixelOffset{0.0};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};

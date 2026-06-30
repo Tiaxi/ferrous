@@ -2365,7 +2365,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
                 scrollOffset = columnPhase * effectiveZoom;
                 if (rollingMode) {
-                    drawX = static_cast<double>(w - drawCols) - columnPhase * effectiveZoom;
+                    drawX = static_cast<double>(w - drawCols)
+                        - columnPhase * effectiveZoom
+                        - m_precomputedCanvasSubpixelOffset;
                 } else {
                     const qint64 decodedRightEdge =
                         m_precomputedMaxColumnIndex >= 0
@@ -3575,6 +3577,7 @@ void SpectrogramItem::invalidateCanvas() {
     m_precomputedCanvasDisplayRight = -1;
     m_precomputedCanvasRolling = false;
     m_precomputedCanvasDirty = true;
+    m_precomputedCanvasSubpixelOffset = 0.0;
     m_dirtyTiles.clear();
 }
 
@@ -4122,6 +4125,47 @@ void SpectrogramItem::drawInterpolatedColumnAtLocked(
     }
 }
 
+void SpectrogramItem::drawPrecomputedPixelAtLocked(
+    int canvasX,
+    int pixelX,
+    qint64 displayLeft,
+    qint64 displayRight,
+    bool rollingMode,
+    double effectiveZoom,
+    const std::array<quint8, 256> &dbRemap) {
+    if (m_canvas.isNull() || effectiveZoom <= 0.0 || displayRight < displayLeft) {
+        return;
+    }
+    const double columnsPerPixel = 1.0 / effectiveZoom;
+    const double rangeStart = static_cast<double>(pixelX) * columnsPerPixel;
+    const double rangeEnd = static_cast<double>(pixelX + 1) * columnsPerPixel;
+    const qint64 colFirst = std::min(
+        displayLeft + static_cast<qint64>(std::floor(rangeStart)),
+        displayRight);
+    const qint64 colLast = std::min(
+        displayLeft + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
+        displayRight);
+
+    const bool interpolate = effectiveZoom > 1.001;
+    if (colFirst < colLast && !interpolate) {
+        drawPeakHoldColumnRangeLocked(
+            canvasX, colFirst, colLast, rollingMode, dbRemap);
+    } else if (interpolate) {
+        const double t = rangeStart - std::floor(rangeStart);
+        if (t > 0.001) {
+            const qint64 colR = std::min(colFirst + 1, displayRight);
+            if (colR != colFirst) {
+                drawInterpolatedColumnAtLocked(
+                    canvasX, colFirst, colR, t, rollingMode, dbRemap);
+                return;
+            }
+        }
+        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, dbRemap);
+    } else {
+        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, dbRemap);
+    }
+}
+
 void SpectrogramItem::rebuildPrecomputedCanvasLocked(
     int width,
     int height,
@@ -4157,46 +4201,15 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
         && sourceColumns + 5 >= static_cast<qint64>(width)) {
         drawPixels = width;
     }
-    const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
     const auto dbRemap = buildPrecomputedDbRemapLocked();
 
-    const bool interpolate = rebuildEffectiveZoom > 1.001;
     for (int px = 0; px < drawPixels; ++px) {
-        const double rangeStart =
-            static_cast<double>(px) * columnsPerPixel;
-        const double rangeEnd =
-            static_cast<double>(px + 1) * columnsPerPixel;
-        const qint64 colFirst = std::min(
-            displayLeft + static_cast<qint64>(std::floor(rangeStart)),
-            displayRight);
-        const qint64 colLast = std::min(
-            displayLeft
-                + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
-            displayRight);
-
-        if (colFirst < colLast && !interpolate) {
-            // Multiple source columns map to this pixel: peak-hold.
-            drawPeakHoldColumnRangeLocked(
-                px, colFirst, colLast, rollingMode, dbRemap);
-        } else if (interpolate) {
-            const double srcColF = rangeStart;
-            const double t = srcColF - std::floor(srcColF);
-            if (t > 0.001) {
-                const qint64 colR = std::min(colFirst + 1, displayRight);
-                if (colR != colFirst) {
-                    drawInterpolatedColumnAtLocked(
-                        px, colFirst, colR, t, rollingMode, dbRemap);
-                    continue;
-                }
-            }
-            drawPrecomputedColumnAtLocked(
-                px, colFirst, rollingMode, dbRemap);
-        } else {
-            drawPrecomputedColumnAtLocked(
-                px, colFirst, rollingMode, dbRemap);
-        }
+        drawPrecomputedPixelAtLocked(
+            px, px, displayLeft, displayRight,
+            rollingMode, rebuildEffectiveZoom, dbRemap);
     }
 
+    const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
     m_canvasWriteX = width > 0 ? (drawPixels % width) : 0;
     m_canvasFilledCols = drawPixels;
     m_precomputedCanvasDisplayLeft = displayLeft;
@@ -4208,24 +4221,14 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
     m_precomputedCanvasRolling = rollingMode;
     m_precomputedCanvasZoomLevel = rebuildEffectiveZoom;
     m_precomputedCanvasDirty = false;
+    m_precomputedCanvasSubpixelOffset = 0.0;
 }
 
 bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayLeft,
     qint64 displayRight,
     bool rollingMode) {
-    // Incremental advance only works at 1:1 column-to-pixel mapping.
-    // TODO: Implement incremental advance for non-1.0 zoom levels if
-    // full rebuild shows measurable frame drops on target hardware.
     const double effectiveZoom = effectiveZoomLocked();
-    if (std::abs(effectiveZoom - 1.0) > 0.001) {
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        if (m_profileEnabled) {
-            noteSmoothnessAdvanceFallbackLocked(effectiveZoom);
-        }
-#endif
-        return false;
-    }
     if (m_canvas.isNull()
         || m_canvas.width() <= 0
         || displayRight < displayLeft
@@ -4240,6 +4243,11 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     }
 
     const int width = m_canvas.width();
+    const double oldEffectiveZoom = m_precomputedCanvasZoomLevel;
+    if (std::abs(effectiveZoom - oldEffectiveZoom) > 0.001) {
+        return false;
+    }
+
     const int nextVisibleCols = std::min(
         width,
         static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
@@ -4248,33 +4256,102 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
         m_precomputedCanvasDisplayLeft = displayLeft;
         m_precomputedCanvasDisplayRight = displayLeft - 1;
         m_precomputedCanvasDirty = false;
+        m_precomputedCanvasSubpixelOffset = 0.0;
         return true;
     }
 
-    const qint64 appendStart = std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
-    const qint64 appendCount = std::max<qint64>(0, displayRight - appendStart + 1);
-    if (appendCount > width) {
+    if (std::abs(effectiveZoom - 1.0) <= 0.001) {
+        const qint64 appendStart =
+            std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
+        const qint64 appendCount =
+            std::max<qint64>(0, displayRight - appendStart + 1);
+        if (appendCount > width) {
+            return false;
+        }
+
+        if (appendCount > 0) {
+            const auto dbRemap = buildPrecomputedDbRemapLocked();
+            for (qint64 displayIndex = appendStart; displayIndex <= displayRight; ++displayIndex) {
+                drawPrecomputedColumnAtLocked(
+                    m_canvasWriteX,
+                    displayIndex,
+                    rollingMode,
+                    dbRemap);
+                m_canvasWriteX = (m_canvasWriteX + 1) % width;
+                m_canvasFilledCols = std::min(width, m_canvasFilledCols + 1);
+            }
+        }
+
+        m_canvasFilledCols = nextVisibleCols;
+        m_precomputedCanvasDisplayLeft = displayLeft;
+        m_precomputedCanvasDisplayRight =
+            displayLeft + static_cast<qint64>(nextVisibleCols) - 1;
+        m_precomputedCanvasDirty = false;
+        m_precomputedCanvasSubpixelOffset = 0.0;
+        return true;
+    }
+
+    if (!rollingMode) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (m_profileEnabled) {
+            noteSmoothnessAdvanceFallbackLocked(effectiveZoom);
+        }
+#endif
         return false;
     }
 
-    if (appendCount > 0) {
+    const int oldFilledPixels = std::clamp(m_canvasFilledCols, 0, width);
+    const int newFilledPixels = std::min(
+        width,
+        static_cast<int>(std::ceil(
+            static_cast<double>(displayRight - displayLeft + 1) * effectiveZoom)));
+    const qint64 advanceColumns = displayLeft - m_precomputedCanvasDisplayLeft;
+    const double requestedShiftPixels =
+        m_precomputedCanvasSubpixelOffset
+        + static_cast<double>(advanceColumns) * effectiveZoom;
+    const int shiftPixels = std::max(
+        0,
+        static_cast<int>(std::floor(requestedShiftPixels + 1e-9)));
+    const double nextSubpixelOffset = std::clamp(
+        requestedShiftPixels - static_cast<double>(shiftPixels),
+        0.0,
+        0.999999);
+
+    if (shiftPixels >= width) {
+        return false;
+    }
+
+    const int preservedPixels = std::max(0, oldFilledPixels - shiftPixels);
+    const int appendPixels = newFilledPixels - preservedPixels;
+    if (appendPixels < 0 || appendPixels > width) {
+        return false;
+    }
+
+    if (appendPixels > 0) {
         const auto dbRemap = buildPrecomputedDbRemapLocked();
-        for (qint64 displayIndex = appendStart; displayIndex <= displayRight; ++displayIndex) {
-            drawPrecomputedColumnAtLocked(
+        const int firstPixel = newFilledPixels - appendPixels;
+        for (int pixelX = firstPixel; pixelX < newFilledPixels; ++pixelX) {
+            drawPrecomputedPixelAtLocked(
                 m_canvasWriteX,
-                displayIndex,
+                pixelX,
+                displayLeft,
+                displayRight,
                 rollingMode,
+                effectiveZoom,
                 dbRemap);
             m_canvasWriteX = (m_canvasWriteX + 1) % width;
-            m_canvasFilledCols = std::min(width, m_canvasFilledCols + 1);
         }
     }
 
-    m_canvasFilledCols = nextVisibleCols;
+    m_canvasFilledCols = newFilledPixels;
     m_precomputedCanvasDisplayLeft = displayLeft;
     m_precomputedCanvasDisplayRight =
-        displayLeft + static_cast<qint64>(nextVisibleCols) - 1;
+        newFilledPixels > 0
+            ? (displayLeft + static_cast<qint64>(
+                   static_cast<double>(newFilledPixels) / effectiveZoom) - 1)
+            : (displayLeft - 1);
     m_precomputedCanvasDirty = false;
+    m_precomputedCanvasSubpixelOffset = nextSubpixelOffset;
     return true;
 }
 

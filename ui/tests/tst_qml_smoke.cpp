@@ -476,6 +476,9 @@ private slots:
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
     void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
+    void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
+    void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
+    void spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramSyntheticClearPreservesCanvasDuringSeek();
@@ -5868,6 +5871,185 @@ void QmlSmokeTest::spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead() 
     QVERIFY2(
         item.m_ringCapacity >= zoomAdjustedWidth * 2 + lookaheadCols,
         "rolling mode should reserve at least one extra viewport width of ring headroom beyond the decode lookahead");
+}
+
+void QmlSmokeTest::spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill() {
+    SpectrogramItem item;
+    item.setWidth(12);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 4;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(20 + column * 10 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    QImage initialCanvas;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 2.0;
+        item.ensureMapping(6);
+        item.rebuildPrecomputedCanvasLocked(12, 6, 0, 3, true);
+        QCOMPARE(item.m_canvasFilledCols, 8);
+        QCOMPARE(item.m_canvasWriteX, 8);
+        initialCanvas = item.m_canvas.copy();
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(80 + bin));
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.advancePrecomputedCanvasLocked(0, 4, true));
+        QCOMPARE(item.m_canvasFilledCols, 10);
+        QCOMPARE(item.m_canvasWriteX, 10);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(4));
+        QCOMPARE(item.m_precomputedCanvasSubpixelOffset, 0.0);
+        for (int y = 0; y < initialCanvas.height(); ++y) {
+            for (int x = 0; x < 8; ++x) {
+                QCOMPARE(item.m_canvas.pixelColor(x, y), initialCanvas.pixelColor(x, y));
+            }
+        }
+    }
+}
+
+void QmlSmokeTest::spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally() {
+    SpectrogramItem item;
+    item.setWidth(12);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 6;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(20 + column * 10 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    QImage initialCanvas;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 2.0;
+        item.ensureMapping(6);
+        item.rebuildPrecomputedCanvasLocked(12, 6, 0, 5, true);
+        QCOMPARE(item.m_canvasFilledCols, 12);
+        QCOMPARE(item.m_canvasWriteX, 0);
+        initialCanvas = item.m_canvas.copy();
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(120 + bin));
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.advancePrecomputedCanvasLocked(1, 6, true));
+        QCOMPARE(item.m_canvasFilledCols, 12);
+        QCOMPARE(item.m_canvasWriteX, 2);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(1));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(6));
+        QCOMPARE(item.m_precomputedCanvasSubpixelOffset, 0.0);
+        const int srcStart =
+            (item.m_canvasWriteX - item.m_canvasFilledCols + item.m_canvas.width())
+            % item.m_canvas.width();
+        QCOMPARE(srcStart, 2);
+        for (int y = 0; y < initialCanvas.height(); ++y) {
+            for (int x = 0; x < initialCanvas.width() - 2; ++x) {
+                QCOMPARE(
+                    item.m_canvas.pixelColor((srcStart + x) % item.m_canvas.width(), y),
+                    initialCanvas.pixelColor(x + 2, y));
+            }
+        }
+    }
+}
+
+void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom() {
+    SpectrogramItem item;
+    item.setWidth(7);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 4;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(24 + column * 12 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    QImage initialCanvas;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1.75;
+        item.ensureMapping(6);
+        item.rebuildPrecomputedCanvasLocked(7, 6, 0, 3, true);
+        QCOMPARE(item.m_canvasFilledCols, 7);
+        QCOMPARE(item.m_canvasWriteX, 0);
+        initialCanvas = item.m_canvas.copy();
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(128 + bin));
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.advancePrecomputedCanvasLocked(1, 4, true));
+        QCOMPARE(item.m_canvasFilledCols, 7);
+        QCOMPARE(item.m_canvasWriteX, 1);
+        QVERIFY(item.m_precomputedCanvasSubpixelOffset > 0.70);
+        QVERIFY(item.m_precomputedCanvasSubpixelOffset < 0.80);
+        const int srcStart =
+            (item.m_canvasWriteX - item.m_canvasFilledCols + item.m_canvas.width())
+            % item.m_canvas.width();
+        QCOMPARE(srcStart, 1);
+        for (int y = 0; y < initialCanvas.height(); ++y) {
+            for (int x = 0; x < initialCanvas.width() - 1; ++x) {
+                QCOMPARE(
+                    item.m_canvas.pixelColor((srcStart + x) % item.m_canvas.width(), y),
+                    initialCanvas.pixelColor(x + 1, y));
+            }
+        }
+    }
 }
 
 void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
