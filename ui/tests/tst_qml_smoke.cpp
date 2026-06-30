@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
+#include <QSGSimpleTextureNode>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -381,6 +382,9 @@ private slots:
     void testMutedChannelRendersGrayscale();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
+    void spectrogramCenteredSmallSeekSnapsWithoutServoSlide();
+    void spectrogramCenteredSeekFollowsLocalVisualClock();
+    void spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrecomputedReady();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
@@ -391,7 +395,10 @@ private slots:
     void playbackControllerDeterministicTimeHooksDriveInterpolation();
     void playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock();
     void playbackControllerPostSeekHeartbeatSnapsToBackendPosition();
-    void playbackControllerPostSeekHeartbeatAtTargetResumesInterpolation();
+    void playbackControllerPostSeekBehindHeartbeatKeepsVisualClock();
+    void playbackControllerPostSeekHeldTargetKeepsVisualClock();
+    void playbackControllerPostSeekTargetEchoKeepsVisualClockActive();
+    void playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock();
     void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
     void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
     void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
@@ -417,11 +424,13 @@ private slots:
     void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
+    void spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramRollingGaplessTrackChangePreservesZoom();
     void spectrogramCenteredGaplessTrackChangeResetsZoom();
     void spectrogramRollingResetTrackChangeResetsZoom();
+    void spectrogramTrackChangeMetadataResetClearsOldCenteredFrame();
     void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
     void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
     void spectrogramTrackChangeCancelsPendingZoomDebounce();
@@ -438,6 +447,7 @@ private slots:
     void spectrogramPixelToFrequency();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
@@ -446,6 +456,8 @@ private slots:
     void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
     void spectrogramOverlayStalenessDetectsDisplayRangeChange();
     void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
+    void spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale();
+    void spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode();
     void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
     void spectrogramLeftClickDoesNotSeek();
     void spectrogramClickToSeekDisabledInRollingMode();
@@ -456,10 +468,17 @@ private slots:
     void spectrogramAdvanceWorksWhenBackendMatchesZoom();
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
+    void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
+    void spectrogramResizeForcesFreshBodyTextureUpload();
+    void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
     void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
+    void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
+    void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
+    void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
+    void spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramSyntheticClearPreservesCanvasDuringSeek();
@@ -1460,7 +1479,7 @@ Item {
         qPrintable(QStringLiteral("spectrogram=%1").arg(spectrogramAfterHeartbeat, 0, 'f', 6)));
 }
 
-void QmlSmokeTest::playbackControllerPostSeekHeartbeatAtTargetResumesInterpolation() {
+void QmlSmokeTest::playbackControllerPostSeekBehindHeartbeatKeepsVisualClock() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -1509,6 +1528,100 @@ Item {
     QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
     QVERIFY(bridge != nullptr);
 
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(2240.0))));
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY(displayedBeforeHeartbeat > 48.20);
+
+    bridge->setProperty("positionSeconds", 48.08);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(2240.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedOnHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        displayedOnHeartbeat >= displayedBeforeHeartbeat - 0.001,
+        qPrintable(QStringLiteral("displayed_before=%1 displayed_on_heartbeat=%2")
+            .arg(displayedBeforeHeartbeat, 0, 'f', 6)
+            .arg(displayedOnHeartbeat, 0, 'f', 6)));
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(2280.0))));
+
+    const double displayedAfterStep =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY2(
+        displayedAfterStep > displayedOnHeartbeat + 0.03,
+        qPrintable(QStringLiteral("displayed_on_heartbeat=%1 displayed_after=%2")
+            .arg(displayedOnHeartbeat, 0, 'f', 6)
+            .arg(displayedAfterStep, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerPostSeekHeldTargetKeepsVisualClock() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommittedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(48.0)),
+        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(2100.0))));
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY(displayedBeforeHeartbeat > 48.09);
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
     bridge->setProperty("positionSeconds", 48.0);
     QVERIFY(QMetaObject::invokeMethod(
         controller,
@@ -1520,21 +1633,183 @@ Item {
     const double displayedOnHeartbeat =
         controller->property("displayedPositionSeconds").toDouble();
     QVERIFY2(
-        std::abs(displayedOnHeartbeat - 48.0) < 0.02,
-        qPrintable(QStringLiteral("displayed_on_heartbeat=%1").arg(displayedOnHeartbeat, 0, 'f', 6)));
+        displayedOnHeartbeat >= displayedBeforeHeartbeat - 0.001,
+        qPrintable(QStringLiteral("displayed_before=%1 displayed_on_heartbeat=%2")
+            .arg(displayedBeforeHeartbeat, 0, 'f', 6)
+            .arg(displayedOnHeartbeat, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerPostSeekTargetEchoKeepsVisualClockActive() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 180.0
+        property string currentTrackPath: "/music/test.flac"
+        property real volume: 1.0
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommittedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(48.0)),
+        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
+
+    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("positionSeconds", 48.0);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(2000.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
 
     QVERIFY(QMetaObject::invokeMethod(
         controller,
         "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(2140.0))));
+        Q_ARG(QVariant, QVariant::fromValue(2240.0))));
+    const double displayedBeforeBackendHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
+    QVERIFY(displayedBeforeBackendHeartbeat > 48.20);
 
-    const double displayedAfterStep =
+    bridge->setProperty("positionSeconds", 48.08);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(2240.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    const double displayedAfterBackendHeartbeat =
         controller->property("displayedPositionSeconds").toDouble();
     QVERIFY2(
-        displayedAfterStep > displayedOnHeartbeat + 0.03,
-        qPrintable(QStringLiteral("displayed_on_heartbeat=%1 displayed_after=%2")
-            .arg(displayedOnHeartbeat, 0, 'f', 6)
-            .arg(displayedAfterStep, 0, 'f', 6)));
+        displayedAfterBackendHeartbeat >= displayedBeforeBackendHeartbeat - 0.001,
+        qPrintable(QStringLiteral("displayed_before=%1 displayed_after=%2")
+            .arg(displayedBeforeBackendHeartbeat, 0, 'f', 6)
+            .arg(displayedAfterBackendHeartbeat, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 480.0
+        property string currentTrackPath: "/music/test.flac"
+        property int playingQueueIndex: 0
+        property real volume: 1.0
+        property var playAtCalls: []
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+        function playAt(index) { playAtCalls = playAtCalls.concat([index]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(bridge != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommittedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(410.0)),
+        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(2300.0))));
+    QVERIFY(controller->property("displayedPositionSeconds").toDouble() > 410.20);
+    QVERIFY(controller->property("visualSeekClockActive").toBool());
+
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "playAt",
+        Q_ARG(QVariant, QVariant::fromValue(0))));
+
+    QCOMPARE(bridge->property("playAtCalls").toList().size(), 1);
+    QCOMPARE(bridge->property("playAtCalls").toList().at(0).toInt(), 0);
+    QVERIFY(!controller->property("visualSeekClockActive").toBool());
+    QVERIFY2(
+        controller->property("displayedPositionSeconds").toDouble() < 0.02,
+        qPrintable(QStringLiteral("displayed=%1")
+            .arg(controller->property("displayedPositionSeconds").toDouble(), 0, 'f', 6)));
+    QVERIFY2(
+        controller->property("spectrogramPositionSeconds").toDouble() < 0.02,
+        qPrintable(QStringLiteral("spectrogram=%1")
+            .arg(controller->property("spectrogramPositionSeconds").toDouble(), 0, 'f', 6)));
+
+    bridge->setProperty("positionSeconds", 0.0);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(2310.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+
+    QVERIFY2(
+        controller->property("displayedPositionSeconds").toDouble() < 0.03,
+        qPrintable(QStringLiteral("displayed_after_heartbeat=%1")
+            .arg(controller->property("displayedPositionSeconds").toDouble(), 0, 'f', 6)));
+    QVERIFY2(
+        controller->property("spectrogramPositionSeconds").toDouble() < 0.03,
+        qPrintable(QStringLiteral("spectrogram_after_heartbeat=%1")
+            .arg(controller->property("spectrogramPositionSeconds").toDouble(), 0, 'f', 6)));
 }
 
 void QmlSmokeTest::playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst() {
@@ -2294,6 +2569,71 @@ void QmlSmokeTest::spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward() {
             "lagging playback heartbeat moved anchor backward from %1 to %2")
             .arg(anchoredPosition, 0, 'f', 3)
             .arg(item.positionSeconds(), 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramCenteredSmallSeekSnapsWithoutServoSlide() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    item.setPositionSeconds(10.0);
+    item.setPlaying(true);
+
+    QTest::qWait(30);
+    item.setPositionSeconds(10.08);
+
+    QVERIFY2(
+        std::abs(item.m_positionAnchorSeconds - 10.08) < 0.0001,
+        qPrintable(QStringLiteral(
+            "centered small seek should snap to target, got anchor %1")
+            .arg(item.m_positionAnchorSeconds, 0, 'f', 4)));
+    QVERIFY2(
+        std::abs(item.m_positionSeconds - 10.08) < 0.0001,
+        qPrintable(QStringLiteral(
+            "centered small seek should publish target, got position %1")
+            .arg(item.m_positionSeconds, 0, 'f', 4)));
+}
+
+void QmlSmokeTest::spectrogramCenteredSeekFollowsLocalVisualClock() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    item.m_precomputedReady = true;
+    item.setPositionSeconds(0.5);
+    item.setPlaying(true);
+
+    constexpr double seekTarget = 134.577;
+    item.setPositionSeconds(seekTarget);
+    item.setPositionSeconds(seekTarget + 0.08);
+
+    const double displayed =
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+    QVERIFY2(
+        displayed > seekTarget + 0.06,
+        qPrintable(QStringLiteral(
+            "centered seek should follow the visual clock, target=%1 displayed=%2")
+            .arg(seekTarget, 0, 'f', 3)
+            .arg(displayed, 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrecomputedReady() {
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+
+    item.setPositionSeconds(0.6);
+    item.setPlaying(true);
+
+    constexpr double seekTarget = 117.079;
+    item.setPositionSeconds(seekTarget);
+    item.setPositionSeconds(seekTarget + 0.08);
+
+    const double displayed =
+        item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
+    QVERIFY2(
+        displayed > seekTarget + 0.06,
+        qPrintable(QStringLiteral(
+            "early centered seek should follow the visual clock before precomputed ready, target=%1 displayed=%2")
+            .arg(seekTarget, 0, 'f', 3)
+            .arg(displayed, 0, 'f', 3)));
 }
 
 void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
@@ -3319,6 +3659,40 @@ void QmlSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
             .arg(item.m_precomputedCanvasDisplayRight)));
 }
 
+void QmlSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 8;
+    constexpr int decodedColumns = 4'000;
+    constexpr int totalEstimate = 20'000;
+    constexpr int sampleRate = 48'000;
+    constexpr int hop = 1'024;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, totalEstimate,
+        sampleRate, hop, false, true, 1);
+    QByteArray data(decodedColumns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, decodedColumns, 0, totalEstimate,
+        sampleRate, hop, false, false, 1);
+    item.setPositionSeconds(103.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    QVERIFY2(
+        item.m_precomputedCanvasDisplayRight
+            > static_cast<qint64>(item.m_precomputedMaxColumnIndex),
+        qPrintable(QStringLiteral("display range was clamped to lagging decoded tail %1..%2 max=%3")
+            .arg(item.m_precomputedCanvasDisplayLeft)
+            .arg(item.m_precomputedCanvasDisplayRight)
+            .arg(item.m_precomputedMaxColumnIndex)));
+    QVERIFY(item.m_precomputedCanvasDisplayLeft > decodedColumns);
+}
+
 void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
     // Regression: the centered ring resets on every session restart
     // (e.g. zoom change on fullscreen toggle) and recomputes its cap
@@ -3558,6 +3932,51 @@ void QmlSmokeTest::spectrogramRollingResetTrackChangeResetsZoom() {
     QCOMPARE(backendZoomSpy.takeFirst().at(0).toFloat(), 1.0f);
     QCOMPARE(item.zoomLevel(), 1.0);
     QCOMPARE(item.m_renderZoomLevel, 1.0);
+}
+
+void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+    item.setPlaying(true);
+
+    constexpr int bins = 8;
+    constexpr int total = 4096;
+    constexpr quint64 oldToken = 3;
+    constexpr quint64 newToken = 4;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        48000, 1024, false, true, oldToken, true);
+    QByteArray oldData(320 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        oldData, bins, 0, 320, 0, total,
+        48000, 1024, false, false, oldToken, false);
+    item.setPositionSeconds(72.0);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(180);
+        item.rebuildPrecomputedCanvasLocked(320, 180, 0, 319, false);
+    }
+    QVERIFY(item.m_precomputedReady);
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(319));
+    QVERIFY(item.m_positionAnchorSeconds > 70.0);
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        48000, 1024, false, true, newToken, true);
+
+    QVERIFY2(
+        !item.m_precomputedReady,
+        "non-gapless track-change metadata reset must not keep old spectrogram visible");
+    QVERIFY(item.m_canvas.isNull());
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(-1));
+    QCOMPARE(item.m_precomputedResetPending, false);
+    QCOMPARE(item.m_zoomFillActive, false);
+    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.01);
 }
 
 void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
@@ -4336,6 +4755,35 @@ void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
     QVERIFY(hasContent);
 }
 
+void QmlSmokeTest::spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48000);
+    item.setCrosshairEnabled(true);
+    item.setShowTimeLabels(true);
+
+    const int bins = 4097;
+    QByteArray data(bins * 100, '\x80');
+    item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024,
+                               false, true, 1, false);
+
+    const double cps = 48000.0 / 1024.0;
+    const uchar *firstBits = nullptr;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.0);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        firstBits = item.m_crosshairImage.constBits();
+        QVERIFY(firstBits != nullptr);
+        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.5);
+        QVERIFY(!item.m_crosshairImage.isNull());
+        QCOMPARE(item.m_crosshairImage.constBits(), firstBits);
+    }
+}
+
 void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
@@ -4666,6 +5114,106 @@ void QmlSmokeTest::spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled() {
     // non-negative (valid time).
     QVERIFY(seekSeconds > 0.0);
     QVERIFY(seekSeconds < 5.0);  // Left of center → earlier than playhead
+}
+
+void QmlSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int totalEstimate = 20'000;
+    constexpr int sampleRate = 48'000;
+    constexpr int hopSize = 1'024;
+    QByteArray chunk(8'000 * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        chunk,
+        binsPerColumn,
+        0,
+        8'000,
+        0,
+        totalEstimate,
+        sampleRate,
+        hopSize,
+        false,
+        true,
+        42);
+
+    item.setDisplayMode(1);
+    item.setCrosshairEnabled(true);
+    item.setPositionSeconds(10.0);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_crosshairCachedDisplayLeft = 0;
+        item.m_crosshairCachedDrawX = 0.0;
+        item.m_crosshairCachedRollingMode = false;
+    }
+
+    item.setPositionSeconds(100.0);
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress,
+        QPointF(300.0, 90.0),
+        QPointF(300.0, 90.0),
+        Qt::RightButton,
+        Qt::RightButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 1);
+    const double seekSeconds = seekSpy.at(0).at(0).toDouble();
+    QVERIFY2(
+        seekSeconds > 100.0,
+        qPrintable(QStringLiteral("stale cache produced backward seek target %1")
+            .arg(seekSeconds, 0, 'f', 3)));
+}
+
+void QmlSmokeTest::spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int decodedColumns = 4'000;
+    constexpr int totalEstimate = 20'000;
+    constexpr int sampleRate = 48'000;
+    constexpr int hopSize = 1'024;
+    QByteArray chunk(decodedColumns * binsPerColumn, '\0');
+    item.feedPrecomputedChunk(
+        chunk,
+        binsPerColumn,
+        0,
+        decodedColumns,
+        0,
+        totalEstimate,
+        sampleRate,
+        hopSize,
+        false,
+        true,
+        42);
+
+    item.setDisplayMode(1);
+    item.setCrosshairEnabled(true);
+    item.setPositionSeconds(103.0);
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+    QMouseEvent pressEvent(
+        QEvent::MouseButtonPress,
+        QPointF(300.0, 90.0),
+        QPointF(300.0, 90.0),
+        Qt::RightButton,
+        Qt::RightButton,
+        Qt::NoModifier);
+    item.mousePressEvent(&pressEvent);
+
+    QCOMPARE(seekSpy.count(), 1);
+    const double seekSeconds = seekSpy.at(0).at(0).toDouble();
+    QVERIFY2(
+        seekSeconds > 103.0,
+        qPrintable(QStringLiteral("lagging decoded tail produced backward seek target %1")
+            .arg(seekSeconds, 0, 'f', 3)));
 }
 
 void QmlSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {
@@ -5001,6 +5549,154 @@ void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
     QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
 }
 
+void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int binsPerColumn = 8;
+    constexpr int initialColumns = 2000;
+    QByteArray initialChunk(binsPerColumn * initialColumns, '\x40');
+    item.feedPrecomputedChunk(
+        initialChunk, binsPerColumn, 0, initialColumns,
+        0, initialColumns, 48000, 1024, true,
+        true, 1, false);
+    item.setPositionSeconds(10.0);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(item.m_precomputedCanvasDisplayLeft > 0);
+    const qint64 initialDisplayLeft = item.m_precomputedCanvasDisplayLeft;
+    item.setZoomLevel(0.1);
+    item.m_zoomDebounceTimer->stop();
+    QVERIFY(item.m_awaitingZoomData);
+
+    constexpr int zoomedOutTotalColumns = 200;
+    constexpr int zoomedOutDecodedColumns = 32;
+    QByteArray zoomedOutChunk(binsPerColumn * zoomedOutDecodedColumns, '\x60');
+    item.feedPrecomputedChunk(
+        zoomedOutChunk, binsPerColumn, 0, zoomedOutDecodedColumns,
+        0, zoomedOutTotalColumns, 48000, 10240, false,
+        true, 1, false);
+
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+
+    QVERIFY2(!item.m_zoomFillActive,
+             "zoom-out should not freeze on the old centered cache while the coarser restart fills");
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
+    QVERIFY(item.m_precomputedCanvasDisplayLeft < initialDisplayLeft);
+    QVERIFY(!item.m_canvas.isNull());
+    QCOMPARE(item.m_canvasFilledCols, zoomedOutDecodedColumns);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
+
+    delete updatedNode;
+}
+
+void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+
+    auto *item = new SpectrogramItem();
+    item->setParentItem(window.contentItem());
+    item->setWidth(240);
+    item->setHeight(80);
+    item->setDisplayMode(1);
+    item->setPlaying(false);
+
+    constexpr int bins = 32;
+    constexpr int columns = 320;
+    QByteArray data(bins * columns, '\x20');
+    for (int column = 96; column < 160; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            data[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(64 + column - 96 + bin));
+        }
+    }
+
+    item->feedPrecomputedChunk(
+        data, bins, 0, columns, 0, columns,
+        48000, 1024, false, true, 1, false);
+    item->setPositionSeconds(1.0);
+
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(node->childCount() >= 2);
+    auto *tilesRoot = node->childAtIndex(1);
+    QVERIFY(tilesRoot != nullptr);
+    QVERIFY(tilesRoot->childCount() > 0);
+    auto *tileNode =
+        static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(0));
+    QVERIFY(tileNode != nullptr);
+    QVERIFY(tileNode->texture() != nullptr);
+    QCOMPARE(tileNode->texture()->textureSize().height(), 80);
+
+    item->setHeight(140);
+    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    QVERIFY(item->m_canvas.height() == 140);
+    QVERIFY(tileNode->texture() != nullptr);
+    QCOMPARE(tileNode->texture()->textureSize().height(), 140);
+
+    delete updatedNode;
+}
+
+void QmlSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
+    SpectrogramItem item;
+    item.setWidth(240);
+    item.setHeight(159);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setLogScale(false);
+
+    constexpr int binsPerColumn = 1025;
+    constexpr int columns = 400;
+    QByteArray chunk(binsPerColumn * columns, '\0');
+    for (int column = 0; column < columns; ++column) {
+        for (int bin = binsPerColumn - 12; bin < binsPerColumn; ++bin) {
+            chunk[column * binsPerColumn + bin] = static_cast<char>(
+                static_cast<unsigned char>(0xFF));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, columns, 48000, 1024, true,
+        true, 1, false);
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(!item.m_canvas.isNull());
+
+    auto topRowLuma = [&item]() -> int {
+        const int sampleX = std::clamp(item.m_canvas.width() / 2, 0,
+                                       std::max(0, item.m_canvas.width() - 1));
+        const QColor topPixel = item.m_canvas.pixelColor(sampleX, 0);
+        const QColor midPixel = item.m_canvas.pixelColor(
+            sampleX,
+            std::clamp(item.m_canvas.height() / 2, 0,
+                       std::max(0, item.m_canvas.height() - 1)));
+        return qGray(topPixel.rgb()) - qGray(midPixel.rgb());
+    };
+
+    QVERIFY2(topRowLuma() > 20,
+             "default-height linear spectrogram should show highest-bin energy on the top row");
+
+    item.setHeight(318);
+    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QVERIFY(updatedNode == node);
+    QVERIFY(!item.m_canvas.isNull());
+    QVERIFY2(topRowLuma() > 20,
+             "taller linear spectrogram should still show highest-bin energy on the top row");
+
+    delete updatedNode;
+}
+
 void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
     SpectrogramItem item;
     item.setWidth(1920);
@@ -5148,6 +5844,212 @@ void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
     // Ring capacity should NOT be 100000 (full track).
     // It should be bounded to ~3 screen widths + lookahead.
     QVERIFY(item.m_ringCapacity < 20000);
+}
+
+void QmlSmokeTest::spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead() {
+    SpectrogramItem item;
+    item.setWidth(3440);
+    item.setHeight(80);
+    item.setDisplayMode(0); // Rolling
+    item.setZoomLevel(1.0);
+
+    constexpr int binsPerColumn = 64;
+    constexpr int columns = 100;
+    constexpr int sampleRate = 48000;
+    constexpr int hopSize = 1024;
+    QByteArray chunk(binsPerColumn * columns, '\x40');
+    item.feedPrecomputedChunk(
+        chunk, binsPerColumn, 0, columns,
+        0, 100000, sampleRate, hopSize, false,
+        true, 1, false);
+
+    const double colsPerSecond =
+        static_cast<double>(sampleRate) / static_cast<double>(hopSize);
+    const int lookaheadCols = static_cast<int>(10.0 * colsPerSecond);
+    const int zoomAdjustedWidth = 3440;
+
+    QVERIFY2(
+        item.m_ringCapacity >= zoomAdjustedWidth * 2 + lookaheadCols,
+        "rolling mode should reserve at least one extra viewport width of ring headroom beyond the decode lookahead");
+}
+
+void QmlSmokeTest::spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill() {
+    SpectrogramItem item;
+    item.setWidth(12);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 4;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(20 + column * 10 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    QImage initialCanvas;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 2.0;
+        item.ensureMapping(6);
+        item.rebuildPrecomputedCanvasLocked(12, 6, 0, 3, true);
+        QCOMPARE(item.m_canvasFilledCols, 8);
+        QCOMPARE(item.m_canvasWriteX, 8);
+        initialCanvas = item.m_canvas.copy();
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(80 + bin));
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.advancePrecomputedCanvasLocked(0, 4, true));
+        QCOMPARE(item.m_canvasFilledCols, 10);
+        QCOMPARE(item.m_canvasWriteX, 10);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(4));
+        QCOMPARE(item.m_precomputedCanvasSubpixelOffset, 0.0);
+        for (int y = 0; y < initialCanvas.height(); ++y) {
+            for (int x = 0; x < 8; ++x) {
+                QCOMPARE(item.m_canvas.pixelColor(x, y), initialCanvas.pixelColor(x, y));
+            }
+        }
+    }
+}
+
+void QmlSmokeTest::spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally() {
+    SpectrogramItem item;
+    item.setWidth(12);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 6;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(20 + column * 10 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    QImage initialCanvas;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 2.0;
+        item.ensureMapping(6);
+        item.rebuildPrecomputedCanvasLocked(12, 6, 0, 5, true);
+        QCOMPARE(item.m_canvasFilledCols, 12);
+        QCOMPARE(item.m_canvasWriteX, 0);
+        initialCanvas = item.m_canvas.copy();
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(120 + bin));
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.advancePrecomputedCanvasLocked(1, 6, true));
+        QCOMPARE(item.m_canvasFilledCols, 12);
+        QCOMPARE(item.m_canvasWriteX, 2);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(1));
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(6));
+        QCOMPARE(item.m_precomputedCanvasSubpixelOffset, 0.0);
+        const int srcStart =
+            (item.m_canvasWriteX - item.m_canvasFilledCols + item.m_canvas.width())
+            % item.m_canvas.width();
+        QCOMPARE(srcStart, 2);
+        for (int y = 0; y < initialCanvas.height(); ++y) {
+            for (int x = 0; x < initialCanvas.width() - 2; ++x) {
+                QCOMPARE(
+                    item.m_canvas.pixelColor((srcStart + x) % item.m_canvas.width(), y),
+                    initialCanvas.pixelColor(x + 2, y));
+            }
+        }
+    }
+}
+
+void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom() {
+    SpectrogramItem item;
+    item.setWidth(7);
+    item.setHeight(6);
+    item.setDisplayMode(0); // Rolling
+
+    constexpr int bins = 4;
+    constexpr int initialColumns = 4;
+    QByteArray initialChunk(bins * initialColumns, '\0');
+    for (int column = 0; column < initialColumns; ++column) {
+        for (int bin = 0; bin < bins; ++bin) {
+            initialChunk[column * bins + bin] = static_cast<char>(
+                static_cast<unsigned char>(24 + column * 12 + bin));
+        }
+    }
+
+    item.feedPrecomputedChunk(
+        initialChunk, bins, 0, initialColumns,
+        0, 64, 48000, 1024, false, true, 1, false);
+
+    QImage initialCanvas;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1.75;
+        item.ensureMapping(6);
+        item.rebuildPrecomputedCanvasLocked(7, 6, 0, 3, true);
+        QCOMPARE(item.m_canvasFilledCols, 7);
+        QCOMPARE(item.m_canvasWriteX, 0);
+        initialCanvas = item.m_canvas.copy();
+    }
+
+    QByteArray appendChunk(bins, '\0');
+    for (int bin = 0; bin < bins; ++bin) {
+        appendChunk[bin] = static_cast<char>(
+            static_cast<unsigned char>(128 + bin));
+    }
+    item.feedPrecomputedChunk(
+        appendChunk, bins, 0, 1,
+        initialColumns, 64, 48000, 1024, false, false, 1, false);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.advancePrecomputedCanvasLocked(1, 4, true));
+        QCOMPARE(item.m_canvasFilledCols, 7);
+        QCOMPARE(item.m_canvasWriteX, 1);
+        QVERIFY(item.m_precomputedCanvasSubpixelOffset > 0.70);
+        QVERIFY(item.m_precomputedCanvasSubpixelOffset < 0.80);
+        const int srcStart =
+            (item.m_canvasWriteX - item.m_canvasFilledCols + item.m_canvas.width())
+            % item.m_canvas.width();
+        QCOMPARE(srcStart, 1);
+        for (int y = 0; y < initialCanvas.height(); ++y) {
+            for (int x = 0; x < initialCanvas.width() - 1; ++x) {
+                QCOMPARE(
+                    item.m_canvas.pixelColor((srcStart + x) % item.m_canvas.width(), y),
+                    initialCanvas.pixelColor(x + 1, y));
+            }
+        }
+    }
 }
 
 void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {

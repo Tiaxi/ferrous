@@ -45,6 +45,7 @@ class BridgeClientTest : public QObject {
 
 private slots:
     void playAtDoesNotEmitImmediateSnapshotChanged();
+    void playAtClearsPendingSeekAndPublishesRestartPosition();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
     void inProcessBridgeInstallsWakeNotifier();
@@ -52,6 +53,7 @@ private slots:
     void diagnosticsWritesBatchOffHotPath();
     void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
+    void seekPublishesOptimisticPositionAndExtendsPendingWindow();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void asyncImageFileDetailsAcceptsImageProviderUrl();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
@@ -100,6 +102,31 @@ void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
     QCOMPARE(client.m_selectedQueueIndex, 2);
     QCOMPARE(client.m_pendingQueueSelection, 9);
     QVERIFY(client.m_pendingQueueSelectionUntilMs > 0);
+}
+
+void BridgeClientTest::playAtClearsPendingSeekAndPublishesRestartPosition() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_positionSeconds = 410.0;
+    client.m_positionText = QStringLiteral("06:50");
+    client.m_pendingSeek = true;
+    client.m_pendingSeekTargetSeconds = 410.0;
+    client.m_pendingSeekStartedAtMs = QDateTime::currentMSecsSinceEpoch() - 100;
+    client.m_pendingSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + 2900;
+
+    QSignalSpy playbackSpy(&client, &BridgeClient::playbackChanged);
+    client.playAt(0);
+    QCoreApplication::processEvents();
+
+    QVERIFY(!client.m_pendingSeek);
+    QCOMPARE(client.m_pendingSeekStartedAtMs, qint64{0});
+    QCOMPARE(client.m_pendingSeekUntilMs, qint64{0});
+    QCOMPARE(client.m_positionSeconds, 0.0);
+    QCOMPARE(client.m_positionText, QStringLiteral("00:00"));
+    QCOMPARE(playbackSpy.count(), 1);
 }
 
 void BridgeClientTest::queueSnapshotKeepsRawCoverPathsInRows() {
@@ -314,6 +341,26 @@ void BridgeClientTest::pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives
     QCOMPARE(client.m_positionSeconds, 60.0);
     QCOMPARE(client.m_positionText, QStringLiteral("01:00"));
     QVERIFY(!client.m_pollPlaybackChanged);
+}
+
+void BridgeClientTest::seekPublishesOptimisticPositionAndExtendsPendingWindow() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_positionSeconds = 12.0;
+    client.m_positionText = QStringLiteral("00:12");
+
+    QSignalSpy playbackSpy(&client, &BridgeClient::playbackChanged);
+    client.seek(96.25);
+    QCoreApplication::processEvents();
+
+    QCOMPARE(client.m_positionSeconds, 96.25);
+    QCOMPARE(client.m_positionText, QStringLiteral("01:36"));
+    QVERIFY(client.m_pendingSeek);
+    QVERIFY(client.m_pendingSeekUntilMs - client.m_pendingSeekStartedAtMs >= 2900);
+    QCOMPARE(playbackSpy.count(), 1);
 }
 
 void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {

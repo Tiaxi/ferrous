@@ -51,6 +51,18 @@ constexpr qint64 kSmoothnessIdleMs = 450;
 const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
 
+bool centeredDecodedTailLooksFinal(
+    qint64 decodedColumnCount,
+    qint64 estimatedColumnCount,
+    qint64 visibleWindowColumns) {
+    if (decodedColumnCount <= 0 || estimatedColumnCount <= 0) {
+        return false;
+    }
+    const qint64 eofSlackColumns =
+        std::max<qint64>(64, std::max<qint64>(1, visibleWindowColumns));
+    return decodedColumnCount + eofSlackColumns >= estimatedColumnCount;
+}
+
 double linearInterpolate(double y1, double y2, double mu) {
     return y1 * (1.0 - mu) + y2 * mu;
 }
@@ -487,7 +499,11 @@ void SpectrogramItem::setPositionSeconds(double value) {
         const bool centeredSeek = m_displayMode == 1
             && clamped >= 1.0
             && !recentCenteredGapless;
-        if (largeJump && !centeredSeek) {
+        if (centeredSeek) {
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(clamped, now);
+            changed = true;
+        } else if (largeJump) {
             // Update the target position unconditionally, but only stamp the
             // start time on the *first* activation.  Without this guard, each
             // position heartbeat (~100 ms) during a natural track transition
@@ -501,40 +517,42 @@ void SpectrogramItem::setPositionSeconds(double value) {
             }
             return;
         }
-        // In rolling mode, ignore small backward heartbeat jitter to avoid
-        // scroll stutter.  In centered mode, backward jumps are real seeks
-        // that must be applied — the spectrogram stays in the ring buffer.
-        const bool regressedDuringPlayback =
-            m_displayMode == 0
-            && m_playing
-            && m_positionAnchorInitialized
-            && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
-        // Soft PLL: for small errors (normal heartbeat jitter ~10-20ms),
-        // blend toward the GStreamer position to smooth jitter while
-        // still converging to prevent drift.  For large errors (initial
-        // position set, post-seek correction), use the value directly.
-        const double error = clamped - currentPosition;
-        constexpr double kServoAlpha = 0.25;
-        constexpr double kServoMaxErrorSeconds = 0.15;
-        const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
+        if (!centeredSeek) {
+            // In rolling mode, ignore small backward heartbeat jitter to avoid
+            // scroll stutter.  In centered mode, backward jumps are real seeks
+            // that must be applied — the spectrogram stays in the ring buffer.
+            const bool regressedDuringPlayback =
+                m_displayMode == 0
+                && m_playing
+                && m_positionAnchorInitialized
+                && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
+            // Soft PLL: for small errors (normal heartbeat jitter ~10-20ms),
+            // blend toward the GStreamer position to smooth jitter while
+            // still converging to prevent drift.  For large errors (initial
+            // position set, post-seek correction), use the value directly.
+            const double error = clamped - currentPosition;
+            constexpr double kServoAlpha = 0.25;
+            constexpr double kServoMaxErrorSeconds = 0.15;
+            const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        if (m_profileEnabled
-            && m_smoothnessProfile.active
-            && (regressedDuringPlayback
-                || (smallCorrection && std::abs(error) >= 0.001))) {
-            noteSmoothnessServoLocked(error, regressedDuringPlayback);
-        }
+            if (m_profileEnabled
+                && m_smoothnessProfile.active
+                && (regressedDuringPlayback
+                    || (smallCorrection && std::abs(error) >= 0.001))) {
+                noteSmoothnessServoLocked(error, regressedDuringPlayback);
+            }
 #endif
-        const double effectivePosition = regressedDuringPlayback
-            ? currentPosition
-            : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
-        if (m_positionAnchorInitialized
-            && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
-            return;
+            const double effectivePosition = regressedDuringPlayback
+                ? currentPosition
+                : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
+            if (m_positionAnchorInitialized
+                && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
+                return;
+            }
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(effectivePosition, now);
+            changed = true;
         }
-        m_positionJumpHoldActive = false;
-        setPositionAnchorLocked(effectivePosition, now);
-        changed = true;
     }
     if (changed) {
         emit positionSecondsChanged();
@@ -958,10 +976,12 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     // Early hop change detection: activate canvas freeze BEFORE any
     // reset processing that might call invalidateCanvas().  The freeze
-    // must be active when applyPrecomputedResetLocked runs so it can
-    // preserve the old canvas for updatePaintNode's canvasFreeze check.
+    // is only needed for finer-hop zoom-in restarts; on coarser-hop
+    // zoom-outs, preserving the old centered image makes the view look
+    // stuck at 1.0 until almost the full zoomed-out track has decoded.
     if (hopSize > 0
         && hopSize != m_precomputedHopSize
+        && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
         && m_displayMode == 1
         && !m_canvas.isNull()) {
         m_zoomFillActive = true;
@@ -1026,6 +1046,86 @@ void SpectrogramItem::feedPrecomputedChunk(
             "[Qt-synthetic-clear@%p] ring wiped, gate armed, preserved=%d\n",
             static_cast<const void *>(this),
             preserveCanvasForSeek ? 1 : 0);
+        update();
+        return;
+    } else if (bufferReset
+        && columns <= 0
+        && clearHistoryOnReset
+        && bins > 0
+        && startIndex == 0
+        && m_displayMode == 1
+        && trackToken != 0
+        && m_precomputedTrackToken != 0
+        && trackToken != m_precomputedTrackToken) {
+        // Non-gapless track changes arrive first as metadata-only reset
+        // chunks.  Deferring these like same-track seeks keeps the previous
+        // track's per-pane render caches alive until the first data chunk,
+        // so one stereo pane can visibly lag behind on track changes.
+        const bool wasReady = m_precomputedReady;
+        const bool qtRenderNotAtDefault =
+            std::abs(m_renderZoomLevel - 1.0) > 0.001;
+        const bool backendNotAtReferenceHop =
+            hopSize > 0 && hopSize != static_cast<int>(kReferenceHopSamples);
+        const bool needsZoomReset =
+            qtRenderNotAtDefault || backendNotAtReferenceHop;
+
+        m_zoomFillActive = false;
+        applyPrecomputedResetLocked(
+            startIndex, bins, trackToken, generation, clearHistoryOnReset);
+        m_precomputedResetPending = false;
+        m_precomputedPendingResetStartIndex = 0;
+        m_precomputedPendingResetBins = 0;
+        m_precomputedPendingResetTrackToken = 0;
+        m_precomputedPendingResetGeneration = 0;
+        m_precomputedPendingResetClearHistory = false;
+        m_precomputedReady = false;
+        m_precomputedBinsPerColumn = bins;
+        if (totalEstimate > 0) {
+            m_precomputedTotalColumnsEstimate = totalEstimate;
+        }
+        if (sampleRate > 0) {
+            m_precomputedSampleRateHz = sampleRate;
+        }
+        if (hopSize > 0) {
+            m_precomputedHopSize = hopSize;
+        }
+        if (sampleRate > 0 && hopSize > 0) {
+            const double seekPositionSeconds =
+                static_cast<double>(startIndex * hopSize)
+                / static_cast<double>(sampleRate);
+            m_positionJumpHoldActive = false;
+            setPositionAnchorLocked(seekPositionSeconds, Clock::now());
+        }
+        m_precomputedTrackToken = trackToken;
+        m_precomputedLastRightCol = -1;
+        m_precomputedLastDisplaySeq = -1;
+        m_timeGridDirty = true;
+
+        if (needsZoomReset) {
+            m_zoomLevel = 1.0;
+            m_renderZoomLevel = 1.0;
+            m_awaitingZoomData = false;
+            m_pendingBackendZoom = 1.0f;
+            if (m_zoomDebounceTimer) {
+                m_zoomDebounceTimer->stop();
+            }
+            if (qtRenderNotAtDefault) {
+                m_precomputedTotalColumnsEstimate = 0;
+            }
+            m_precomputedCanvasDirty = true;
+            m_crosshairDirty = true;
+            m_timeGridDirty = true;
+        }
+
+        lock.unlock();
+        if (needsZoomReset) {
+            emit zoomLevelChanged();
+            emit zoomResetRequested();
+            emit backendZoomRequested(1.0f);
+        }
+        if (wasReady) {
+            emit precomputedReadyChanged();
+        }
         update();
         return;
     } else if (bufferReset && columns <= 0) {
@@ -1269,11 +1369,13 @@ void SpectrogramItem::feedPrecomputedChunk(
             neededCapacity = screenWidth * 3
                 + static_cast<int>(extraSeconds * colsPerSecond);
         } else {
-            // Rolling: need screen width / effectiveZoom of history + lookahead.
+            // Rolling: need one visible viewport of history, the decoder
+            // lookahead, and one extra viewport of slack so eviction never
+            // intrudes into the live window when the decoder runs ahead.
             const double ez = effectiveZoomLocked();
             const int zoomAdjustedWidth = static_cast<int>(
                 static_cast<double>(screenWidth) / std::max(0.05, ez));
-            neededCapacity = zoomAdjustedWidth
+            neededCapacity = zoomAdjustedWidth * 2
                 + static_cast<int>(extraSeconds * colsPerSecond);
         }
         // Add some margin.
@@ -2058,6 +2160,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             int playheadPixel;
             bool rollingMode;
             qint64 writeHeadSeq = -1;
+            bool centeredDecodedTailLooksFinalForFrame = false;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             qint64 unclampedDisplaySeq = 0;
             qint64 writeHeadHeadroom = 0;
@@ -2118,18 +2221,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // silence counted by container duration but trimmed
                 // during playback).  A fixed 128-column tolerance fails
                 // at high zoom where 128 cols is ~0.2 s and the gap is
-                // typically ~1 s.  Instead, whenever the decoder can't
-                // fill the right half of the centered window — i.e.
-                // maxCol is within one half-window of the playhead —
-                // use maxCol as the hard right edge.  During steady
-                // mid-track playback the decoder parks thousands of
-                // columns ahead of the playhead, so this clause is
-                // inert.  It activates at EOF (decoder stopped growing)
-                // and naturally drives playhead detachment from center
-                // toward the right edge, while keeping the displayed
-                // time axis bounded by real content so the crosshair
-                // never shows positions past the audible end.
-                if (maxColCount > 0
+                // typically ~1 s. Use maxCol as the hard right edge only
+                // when the decoded tail is plausibly at EOF. During rapid far
+                // seeks the decoded tail can lag far behind the optimistic
+                // playhead; clamping in that state makes the viewport race
+                // forward as decode catches up and can map right-edge clicks
+                // backward. The EOF clamp still drives playhead detachment and
+                // keeps the time axis bounded by audible content.
+                const bool decodedTailLooksFinal =
+                    centeredDecodedTailLooksFinal(
+                        maxColCount, estimateCount, visibleWindowCols);
+                centeredDecodedTailLooksFinalForFrame = decodedTailLooksFinal;
+                if (decodedTailLooksFinal
                     && static_cast<qint64>(maxColCount) - 1
                         < static_cast<qint64>(nowCol)
                             + static_cast<qint64>(halfWindowCols)) {
@@ -2262,7 +2365,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
                 scrollOffset = columnPhase * effectiveZoom;
                 if (rollingMode) {
-                    drawX = static_cast<double>(w - drawCols) - columnPhase * effectiveZoom;
+                    drawX = static_cast<double>(w - drawCols)
+                        - columnPhase * effectiveZoom
+                        - m_precomputedCanvasSubpixelOffset;
                 } else {
                     const qint64 decodedRightEdge =
                         m_precomputedMaxColumnIndex >= 0
@@ -2285,7 +2390,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         totalColsForScroll > 0
                         && displaySpan * 100 / totalColsForScroll >= 90;
                     const bool eofClampedToDecodedContent =
-                        decodedRightEdge >= 0 && displayRight >= decodedRightEdge;
+                        centeredDecodedTailLooksFinalForFrame
+                        && decodedRightEdge >= 0
+                        && displayRight >= decodedRightEdge;
                     const bool centeredScrolling =
                         !nearFullTrack
                         && displayLeft > 0
@@ -2875,13 +2982,79 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         return;
     }
 
+    qint64 displayLeft = m_crosshairCachedDisplayLeft;
+    bool rollingMode = m_crosshairCachedRollingMode;
+    double drawX = m_crosshairCachedDrawX;
+    if (m_displayMode == 1
+        && width() > 0.0
+        && m_precomputedTotalColumnsEstimate > 0) {
+        const double effectiveZoom = effectiveZoomLocked();
+        const int widgetWidth = std::max(1, static_cast<int>(std::floor(width())));
+        const int visibleWindowCols = static_cast<int>(
+            std::ceil(static_cast<double>(widgetWidth) / effectiveZoom));
+        const int halfWindowCols = visibleWindowCols / 2;
+        const auto now = std::chrono::steady_clock::now();
+        const double renderPositionSeconds = currentRenderPositionSecondsLocked(now);
+        const int nowCol = static_cast<int>(std::floor(
+            std::max(0.0, renderPositionSeconds) * columnsPerSecond));
+        const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
+            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+            : static_cast<qint64>(0);
+        const qint64 estimateCount = std::max(
+            static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+            static_cast<qint64>(1));
+        const qint64 estTotalCols = std::max(maxColCount, estimateCount);
+        qint64 displayRight = 0;
+        if (static_cast<qint64>(visibleWindowCols) * 100 / estTotalCols >= 90) {
+            displayLeft = 0;
+            displayRight = estTotalCols - 1;
+        } else {
+            displayLeft = std::max<qint64>(
+                0,
+                static_cast<qint64>(nowCol) - static_cast<qint64>(halfWindowCols));
+            displayRight = std::min(
+                estTotalCols - 1,
+                displayLeft + static_cast<qint64>(visibleWindowCols) - 1);
+            displayLeft = std::max<qint64>(
+                0,
+                displayRight - static_cast<qint64>(visibleWindowCols) + 1);
+        }
+        const bool decodedTailLooksFinal =
+            centeredDecodedTailLooksFinal(
+                maxColCount, estimateCount, visibleWindowCols);
+        if (decodedTailLooksFinal
+            && maxColCount - 1
+                < static_cast<qint64>(nowCol) + static_cast<qint64>(halfWindowCols)) {
+            displayRight = std::min(displayRight, maxColCount - 1);
+            displayLeft = std::max<qint64>(
+                0,
+                displayRight - static_cast<qint64>(visibleWindowCols) + 1);
+        }
+        const double columnF = std::max(0.0, renderPositionSeconds) * columnsPerSecond;
+        const double columnPhase = std::clamp(columnF - std::floor(columnF), 0.0, 0.999);
+        const qint64 displaySpan = displayRight - displayLeft + 1;
+        const qint64 totalColsForScroll = std::max(maxColCount, estimateCount);
+        const bool nearFullTrack =
+            totalColsForScroll > 0
+            && displaySpan * 100 / totalColsForScroll >= 90;
+        const bool eofClampedToDecodedContent =
+            decodedTailLooksFinal && maxColCount > 0 && displayRight >= maxColCount - 1;
+        const bool centeredScrolling =
+            !nearFullTrack
+            && displayLeft > 0
+            && !eofClampedToDecodedContent
+            && displayRight < totalColsForScroll - 1;
+        drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
+        rollingMode = false;
+    }
+
     const double seconds = pixelToTimeSeconds(
         event->position().x(),
-        m_crosshairCachedDisplayLeft,
-        m_crosshairCachedRollingMode,
+        displayLeft,
+        rollingMode,
         m_rollingEpoch,
         columnsPerSecond,
-        m_crosshairCachedDrawX,
+        drawX,
         effectiveZoomLocked());
 
     lock.unlock();
@@ -2972,6 +3145,10 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     if (!m_crosshairEnabled || (!localHover && !hasSharedX)
         || width <= 0 || height <= 0) {
         m_crosshairImage = QImage();
+        m_crosshairVerticalLineRect = QRect();
+        m_crosshairHorizontalLineRect = QRect();
+        m_crosshairFreqLabelRect = QRect();
+        m_crosshairTimeLabelRect = QRect();
         m_crosshairDirty = false;
         m_crosshairCachedDisplayLeft = displayLeft;
         m_crosshairCachedDrawX = drawX;
@@ -2984,48 +3161,134 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
         ? std::clamp(static_cast<int>(m_hoverPosition.x()), 0, width - 1)
         : std::clamp(static_cast<int>(m_crosshairSharedX), 0, width - 1);
 
-    m_crosshairImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
-    m_crosshairImage.fill(Qt::transparent);
+    const bool drawLinePrimitives = localHover || hasSharedX;
+    const bool drawFreqLabel = localHover;
+    const bool drawTimeLabel = m_showTimeLabels;
+    if (!drawLinePrimitives && !drawFreqLabel && !drawTimeLabel) {
+        m_crosshairImage = QImage();
+        m_crosshairVerticalLineRect = QRect();
+        m_crosshairHorizontalLineRect = QRect();
+        m_crosshairFreqLabelRect = QRect();
+        m_crosshairTimeLabelRect = QRect();
+        m_crosshairDirty = false;
+        m_crosshairCachedDisplayLeft = displayLeft;
+        m_crosshairCachedDrawX = drawX;
+        m_crosshairCachedRollingMode = rollingMode;
+        m_crosshairCachedBinsPerColumn = m_binsPerColumn;
+        return;
+    }
 
-    QPainter painter(&m_crosshairImage);
-    painter.setRenderHint(QPainter::Antialiasing, false);
+    QRect nextFreqLabelRect;
+    QRect nextTimeLabelRect;
+    QRect nextVerticalLineRect;
+    QRect nextHorizontalLineRect;
+    QString freqText;
+    QString timeText;
+    QFont labelFont;
+    labelFont.setPixelSize(10);
+    const QFontMetrics fm(labelFont);
+    constexpr int pad = 3;
 
-    const QColor lineColor(255, 255, 255, 140);
-    QPen dotPen(lineColor);
-    dotPen.setStyle(Qt::DotLine);
-    dotPen.setWidthF(1.0);
-    painter.setPen(dotPen);
+    if (drawLinePrimitives) {
+        nextVerticalLineRect = QRect(effectiveX, 0, 1, height);
+        if (localHover) {
+            const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
+            nextHorizontalLineRect = QRect(0, mouseY, width, 1);
+        }
+    }
 
-    // Vertical line: full height on all panes (spans across panes visually).
-    painter.drawLine(effectiveX, 0, effectiveX, height - 1);
-
-    if (localHover) {
+    if (drawFreqLabel) {
         const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
-        // Horizontal line: full width on the hovered pane.
-        painter.drawLine(0, mouseY, width - 1, mouseY);
-
-        // Frequency label at RIGHT edge, aligned to cursor Y.
-        QFont font;
-        font.setPixelSize(10);
-        painter.setFont(font);
-        const QFontMetrics fm(font);
-
-        const QColor labelBg(0, 0, 10, 160);
-        const QColor labelFg(255, 255, 255, 220);
-        constexpr int pad = 3;
-
         const double freqHz = pixelToFrequencyHzLocked(mouseY, height);
         if (freqHz >= 0.0) {
-            const QString freqText = formatFrequencyLabelPrecise(freqHz);
+            freqText = formatFrequencyLabelPrecise(freqHz);
             const int textW = fm.horizontalAdvance(freqText);
             const int textH = fm.height();
             const int labelY = std::clamp(mouseY - textH / 2, 0, height - textH - 2 * pad);
             const int labelX = width - textW - 2 * pad - 2;
+            nextFreqLabelRect = QRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad);
+        }
+    }
+
+    if (drawTimeLabel) {
+        const double continuousTime = pixelToTimeSeconds(
+            static_cast<double>(effectiveX), displayLeft, rollingMode,
+            m_rollingEpoch, columnsPerSecond, drawX, effectiveZoomLocked());
+        const double trackTime = continuousTime - m_gaplessPositionOffset;
+        if (trackTime >= 0.0) {
+            timeText = formatTimeLabelPrecise(trackTime);
+            const int textW = fm.horizontalAdvance(timeText);
+            const int textH = fm.height();
+            const int labelX = std::clamp(effectiveX - textW / 2, 0, width - textW - 2 * pad);
+            nextTimeLabelRect = QRect(
+                labelX,
+                height - textH - 2 * pad - 2,
+                textW + 2 * pad,
+                textH + 2 * pad);
+        }
+    }
+
+    const bool reuseImageBuffer =
+        !m_crosshairImage.isNull()
+        && m_crosshairImage.width() == width
+        && m_crosshairImage.height() == height;
+    if (!reuseImageBuffer) {
+        m_crosshairImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+        m_crosshairImage.fill(Qt::transparent);
+    }
+
+    QPainter painter(&m_crosshairImage);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+
+    if (reuseImageBuffer) {
+        QRect clearRect = m_crosshairVerticalLineRect.adjusted(-1, -1, 1, 1)
+            .united(m_crosshairHorizontalLineRect.adjusted(-1, -1, 1, 1))
+            .united(m_crosshairFreqLabelRect.adjusted(-1, -1, 1, 1))
+            .united(m_crosshairTimeLabelRect.adjusted(-1, -1, 1, 1))
+            .united(nextVerticalLineRect.adjusted(-1, -1, 1, 1))
+            .united(nextHorizontalLineRect.adjusted(-1, -1, 1, 1))
+            .united(nextFreqLabelRect.adjusted(-1, -1, 1, 1))
+            .united(nextTimeLabelRect.adjusted(-1, -1, 1, 1))
+            .intersected(QRect(0, 0, width, height));
+        if (!clearRect.isEmpty()) {
+            painter.setCompositionMode(QPainter::CompositionMode_Source);
+            painter.fillRect(clearRect, Qt::transparent);
+            painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        }
+    }
+
+    if (drawLinePrimitives) {
+        const QColor lineColor(255, 255, 255, 140);
+        QPen dotPen(lineColor);
+        dotPen.setStyle(Qt::DotLine);
+        dotPen.setWidthF(1.0);
+        painter.setPen(dotPen);
+
+        // Vertical line: full height on all panes (spans across panes visually).
+        painter.drawLine(effectiveX, 0, effectiveX, height - 1);
+
+        if (localHover) {
+            const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
+            // Horizontal line: full width on the hovered pane.
+            painter.drawLine(0, mouseY, width - 1, mouseY);
+        }
+    }
+
+    if (localHover) {
+        // Frequency label at RIGHT edge, aligned to cursor Y.
+        painter.setFont(labelFont);
+
+        const QColor labelBg(0, 0, 10, 160);
+        const QColor labelFg(255, 255, 255, 220);
+        if (!nextFreqLabelRect.isEmpty()) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(labelBg);
-            painter.drawRoundedRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad, 3, 3);
+            painter.drawRoundedRect(nextFreqLabelRect, 3, 3);
             painter.setPen(labelFg);
-            painter.drawText(labelX + pad, labelY + pad + fm.ascent(), freqText);
+            painter.drawText(
+                nextFreqLabelRect.x() + pad,
+                nextFreqLabelRect.y() + pad + fm.ascent(),
+                freqText);
         }
     }
 
@@ -3033,34 +3296,26 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     // shown whenever any pane is hovered (via shared X).
     // Subtract gapless offset to show per-track time.
     if (m_showTimeLabels) {
-        const double continuousTime = pixelToTimeSeconds(
-            static_cast<double>(effectiveX), displayLeft, rollingMode,
-            m_rollingEpoch, columnsPerSecond, drawX, effectiveZoomLocked());
-        const double trackTime = continuousTime - m_gaplessPositionOffset;
-        if (trackTime >= 0.0) {
-            QFont font;
-            font.setPixelSize(10);
-            painter.setFont(font);
-            const QFontMetrics fm(font);
-
+        if (!nextTimeLabelRect.isEmpty()) {
+            painter.setFont(labelFont);
             const QColor labelBg(0, 0, 10, 160);
             const QColor labelFg(255, 255, 255, 220);
-            constexpr int pad = 3;
-
-            const QString timeText = formatTimeLabelPrecise(trackTime);
-            const int textW = fm.horizontalAdvance(timeText);
-            const int textH = fm.height();
-            const int labelX = std::clamp(effectiveX - textW / 2, 0, width - textW - 2 * pad);
             painter.setPen(Qt::NoPen);
             painter.setBrush(labelBg);
-            painter.drawRoundedRect(labelX, height - textH - 2 * pad - 2,
-                                     textW + 2 * pad, textH + 2 * pad, 3, 3);
+            painter.drawRoundedRect(nextTimeLabelRect, 3, 3);
             painter.setPen(labelFg);
-            painter.drawText(labelX + pad, height - pad - 2 - fm.descent(), timeText);
+            painter.drawText(
+                nextTimeLabelRect.x() + pad,
+                nextTimeLabelRect.bottom() - pad - fm.descent(),
+                timeText);
         }
     }
 
     painter.end();
+    m_crosshairVerticalLineRect = nextVerticalLineRect;
+    m_crosshairHorizontalLineRect = nextHorizontalLineRect;
+    m_crosshairFreqLabelRect = nextFreqLabelRect;
+    m_crosshairTimeLabelRect = nextTimeLabelRect;
     m_crosshairDirty = false;
     m_crosshairCachedDisplayLeft = displayLeft;
     m_crosshairCachedDrawX = drawX;
@@ -3322,6 +3577,7 @@ void SpectrogramItem::invalidateCanvas() {
     m_precomputedCanvasDisplayRight = -1;
     m_precomputedCanvasRolling = false;
     m_precomputedCanvasDirty = true;
+    m_precomputedCanvasSubpixelOffset = 0.0;
     m_dirtyTiles.clear();
 }
 
@@ -3440,26 +3696,29 @@ void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
     const int height = m_canvas.height();
     const int srcBins = std::max(1, m_binsPerColumn);
     const int maxBin = srcBins - 1;
-    const int ratio = std::clamp(
-        static_cast<int>(std::lround(static_cast<double>(srcBins) / static_cast<double>(std::max(1, height)))),
-        0,
-        1023);
+    auto mappedBinAtRow = [this, height, maxBin](int row) -> int {
+        const int clampedRow = std::clamp(row, 0, std::max(0, height - 1));
+        if (static_cast<int>(m_iToBin.size()) == height) {
+            return std::clamp(m_iToBin[static_cast<size_t>(clampedRow)], 0, maxBin);
+        }
+        if (height <= 1) {
+            return maxBin;
+        }
+        const double fraction =
+            static_cast<double>(clampedRow)
+            / static_cast<double>(height - 1);
+        return std::clamp(
+            static_cast<int>(std::floor(fraction * static_cast<double>(maxBin))),
+            0,
+            maxBin);
+    };
 
     for (int y = 0; y < height; ++y) {
         const int i = height - 1 - y;
 
-        int bin0 = 0;
-        int bin1 = 0;
-        int bin2 = 0;
-        if (m_logScale && static_cast<int>(m_iToBin.size()) == height) {
-            bin0 = m_iToBin[static_cast<size_t>(std::clamp(i - 1, 0, height - 1))];
-            bin1 = m_iToBin[static_cast<size_t>(i)];
-            bin2 = m_iToBin[static_cast<size_t>(std::clamp(i + 1, 0, height - 1))];
-        } else {
-            bin0 = (i - 1) * ratio;
-            bin1 = i * ratio;
-            bin2 = (i + 1) * ratio;
-        }
+        const int bin0 = mappedBinAtRow(i - 1);
+        const int bin1 = mappedBinAtRow(i);
+        const int bin2 = mappedBinAtRow(i + 1);
 
         int index0 = bin0 + static_cast<int>(std::lround(static_cast<double>(bin1 - bin0) / 2.0));
         if (index0 == bin0) {
@@ -3866,6 +4125,47 @@ void SpectrogramItem::drawInterpolatedColumnAtLocked(
     }
 }
 
+void SpectrogramItem::drawPrecomputedPixelAtLocked(
+    int canvasX,
+    int pixelX,
+    qint64 displayLeft,
+    qint64 displayRight,
+    bool rollingMode,
+    double effectiveZoom,
+    const std::array<quint8, 256> &dbRemap) {
+    if (m_canvas.isNull() || effectiveZoom <= 0.0 || displayRight < displayLeft) {
+        return;
+    }
+    const double columnsPerPixel = 1.0 / effectiveZoom;
+    const double rangeStart = static_cast<double>(pixelX) * columnsPerPixel;
+    const double rangeEnd = static_cast<double>(pixelX + 1) * columnsPerPixel;
+    const qint64 colFirst = std::min(
+        displayLeft + static_cast<qint64>(std::floor(rangeStart)),
+        displayRight);
+    const qint64 colLast = std::min(
+        displayLeft + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
+        displayRight);
+
+    const bool interpolate = effectiveZoom > 1.001;
+    if (colFirst < colLast && !interpolate) {
+        drawPeakHoldColumnRangeLocked(
+            canvasX, colFirst, colLast, rollingMode, dbRemap);
+    } else if (interpolate) {
+        const double t = rangeStart - std::floor(rangeStart);
+        if (t > 0.001) {
+            const qint64 colR = std::min(colFirst + 1, displayRight);
+            if (colR != colFirst) {
+                drawInterpolatedColumnAtLocked(
+                    canvasX, colFirst, colR, t, rollingMode, dbRemap);
+                return;
+            }
+        }
+        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, dbRemap);
+    } else {
+        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, dbRemap);
+    }
+}
+
 void SpectrogramItem::rebuildPrecomputedCanvasLocked(
     int width,
     int height,
@@ -3901,46 +4201,15 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
         && sourceColumns + 5 >= static_cast<qint64>(width)) {
         drawPixels = width;
     }
-    const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
     const auto dbRemap = buildPrecomputedDbRemapLocked();
 
-    const bool interpolate = rebuildEffectiveZoom > 1.001;
     for (int px = 0; px < drawPixels; ++px) {
-        const double rangeStart =
-            static_cast<double>(px) * columnsPerPixel;
-        const double rangeEnd =
-            static_cast<double>(px + 1) * columnsPerPixel;
-        const qint64 colFirst = std::min(
-            displayLeft + static_cast<qint64>(std::floor(rangeStart)),
-            displayRight);
-        const qint64 colLast = std::min(
-            displayLeft
-                + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
-            displayRight);
-
-        if (colFirst < colLast && !interpolate) {
-            // Multiple source columns map to this pixel: peak-hold.
-            drawPeakHoldColumnRangeLocked(
-                px, colFirst, colLast, rollingMode, dbRemap);
-        } else if (interpolate) {
-            const double srcColF = rangeStart;
-            const double t = srcColF - std::floor(srcColF);
-            if (t > 0.001) {
-                const qint64 colR = std::min(colFirst + 1, displayRight);
-                if (colR != colFirst) {
-                    drawInterpolatedColumnAtLocked(
-                        px, colFirst, colR, t, rollingMode, dbRemap);
-                    continue;
-                }
-            }
-            drawPrecomputedColumnAtLocked(
-                px, colFirst, rollingMode, dbRemap);
-        } else {
-            drawPrecomputedColumnAtLocked(
-                px, colFirst, rollingMode, dbRemap);
-        }
+        drawPrecomputedPixelAtLocked(
+            px, px, displayLeft, displayRight,
+            rollingMode, rebuildEffectiveZoom, dbRemap);
     }
 
+    const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
     m_canvasWriteX = width > 0 ? (drawPixels % width) : 0;
     m_canvasFilledCols = drawPixels;
     m_precomputedCanvasDisplayLeft = displayLeft;
@@ -3952,24 +4221,14 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
     m_precomputedCanvasRolling = rollingMode;
     m_precomputedCanvasZoomLevel = rebuildEffectiveZoom;
     m_precomputedCanvasDirty = false;
+    m_precomputedCanvasSubpixelOffset = 0.0;
 }
 
 bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayLeft,
     qint64 displayRight,
     bool rollingMode) {
-    // Incremental advance only works at 1:1 column-to-pixel mapping.
-    // TODO: Implement incremental advance for non-1.0 zoom levels if
-    // full rebuild shows measurable frame drops on target hardware.
     const double effectiveZoom = effectiveZoomLocked();
-    if (std::abs(effectiveZoom - 1.0) > 0.001) {
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        if (m_profileEnabled) {
-            noteSmoothnessAdvanceFallbackLocked(effectiveZoom);
-        }
-#endif
-        return false;
-    }
     if (m_canvas.isNull()
         || m_canvas.width() <= 0
         || displayRight < displayLeft
@@ -3984,6 +4243,11 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     }
 
     const int width = m_canvas.width();
+    const double oldEffectiveZoom = m_precomputedCanvasZoomLevel;
+    if (std::abs(effectiveZoom - oldEffectiveZoom) > 0.001) {
+        return false;
+    }
+
     const int nextVisibleCols = std::min(
         width,
         static_cast<int>(std::max<qint64>(0, displayRight - displayLeft + 1)));
@@ -3992,33 +4256,102 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
         m_precomputedCanvasDisplayLeft = displayLeft;
         m_precomputedCanvasDisplayRight = displayLeft - 1;
         m_precomputedCanvasDirty = false;
+        m_precomputedCanvasSubpixelOffset = 0.0;
         return true;
     }
 
-    const qint64 appendStart = std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
-    const qint64 appendCount = std::max<qint64>(0, displayRight - appendStart + 1);
-    if (appendCount > width) {
+    if (std::abs(effectiveZoom - 1.0) <= 0.001) {
+        const qint64 appendStart =
+            std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
+        const qint64 appendCount =
+            std::max<qint64>(0, displayRight - appendStart + 1);
+        if (appendCount > width) {
+            return false;
+        }
+
+        if (appendCount > 0) {
+            const auto dbRemap = buildPrecomputedDbRemapLocked();
+            for (qint64 displayIndex = appendStart; displayIndex <= displayRight; ++displayIndex) {
+                drawPrecomputedColumnAtLocked(
+                    m_canvasWriteX,
+                    displayIndex,
+                    rollingMode,
+                    dbRemap);
+                m_canvasWriteX = (m_canvasWriteX + 1) % width;
+                m_canvasFilledCols = std::min(width, m_canvasFilledCols + 1);
+            }
+        }
+
+        m_canvasFilledCols = nextVisibleCols;
+        m_precomputedCanvasDisplayLeft = displayLeft;
+        m_precomputedCanvasDisplayRight =
+            displayLeft + static_cast<qint64>(nextVisibleCols) - 1;
+        m_precomputedCanvasDirty = false;
+        m_precomputedCanvasSubpixelOffset = 0.0;
+        return true;
+    }
+
+    if (!rollingMode) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (m_profileEnabled) {
+            noteSmoothnessAdvanceFallbackLocked(effectiveZoom);
+        }
+#endif
         return false;
     }
 
-    if (appendCount > 0) {
+    const int oldFilledPixels = std::clamp(m_canvasFilledCols, 0, width);
+    const int newFilledPixels = std::min(
+        width,
+        static_cast<int>(std::ceil(
+            static_cast<double>(displayRight - displayLeft + 1) * effectiveZoom)));
+    const qint64 advanceColumns = displayLeft - m_precomputedCanvasDisplayLeft;
+    const double requestedShiftPixels =
+        m_precomputedCanvasSubpixelOffset
+        + static_cast<double>(advanceColumns) * effectiveZoom;
+    const int shiftPixels = std::max(
+        0,
+        static_cast<int>(std::floor(requestedShiftPixels + 1e-9)));
+    const double nextSubpixelOffset = std::clamp(
+        requestedShiftPixels - static_cast<double>(shiftPixels),
+        0.0,
+        0.999999);
+
+    if (shiftPixels >= width) {
+        return false;
+    }
+
+    const int preservedPixels = std::max(0, oldFilledPixels - shiftPixels);
+    const int appendPixels = newFilledPixels - preservedPixels;
+    if (appendPixels < 0 || appendPixels > width) {
+        return false;
+    }
+
+    if (appendPixels > 0) {
         const auto dbRemap = buildPrecomputedDbRemapLocked();
-        for (qint64 displayIndex = appendStart; displayIndex <= displayRight; ++displayIndex) {
-            drawPrecomputedColumnAtLocked(
+        const int firstPixel = newFilledPixels - appendPixels;
+        for (int pixelX = firstPixel; pixelX < newFilledPixels; ++pixelX) {
+            drawPrecomputedPixelAtLocked(
                 m_canvasWriteX,
-                displayIndex,
+                pixelX,
+                displayLeft,
+                displayRight,
                 rollingMode,
+                effectiveZoom,
                 dbRemap);
             m_canvasWriteX = (m_canvasWriteX + 1) % width;
-            m_canvasFilledCols = std::min(width, m_canvasFilledCols + 1);
         }
     }
 
-    m_canvasFilledCols = nextVisibleCols;
+    m_canvasFilledCols = newFilledPixels;
     m_precomputedCanvasDisplayLeft = displayLeft;
     m_precomputedCanvasDisplayRight =
-        displayLeft + static_cast<qint64>(nextVisibleCols) - 1;
+        newFilledPixels > 0
+            ? (displayLeft + static_cast<qint64>(
+                   static_cast<double>(newFilledPixels) / effectiveZoom) - 1)
+            : (displayLeft - 1);
     m_precomputedCanvasDirty = false;
+    m_precomputedCanvasSubpixelOffset = nextSubpixelOffset;
     return true;
 }
 
