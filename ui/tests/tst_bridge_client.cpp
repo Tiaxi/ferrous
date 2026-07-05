@@ -20,6 +20,7 @@
 #undef private
 
 #include "../src/FerrousBridgeFfi.h"
+#include "../src/SpectrogramTraceLogging.h"
 
 namespace {
 
@@ -99,7 +100,9 @@ private slots:
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
+    void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
     void diagnosticsWritesBatchOffHotPath();
+    void profileDiagnosticsBypassUiThreadDiskQueue();
     void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void seekPublishesOptimisticPositionAndExtendsPendingWindow();
@@ -349,6 +352,27 @@ void BridgeClientTest::precomputedSpectrogramChunksRouteDirectlyToRegisteredItem
     QCOMPARE(static_cast<quint8>(right.m_ringBuffer.at(0)), static_cast<quint8>(0x77));
 }
 
+void BridgeClientTest::spectrogramDetailedTraceLoggingRequiresExplicitOptIn() {
+    qunsetenv("FERROUS_PROFILE_SPECTROGRAM_TRACE");
+    SpectrogramTraceLogging::refreshDetailedSettingForTests();
+    QVERIFY(!SpectrogramTraceLogging::detailedEnabled());
+
+    qputenv("FERROUS_PROFILE_SPECTROGRAM_TRACE", "1");
+    SpectrogramTraceLogging::refreshDetailedSettingForTests();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QVERIFY(SpectrogramTraceLogging::detailedEnabled());
+#else
+    QVERIFY(!SpectrogramTraceLogging::detailedEnabled());
+#endif
+
+    qputenv("FERROUS_PROFILE_SPECTROGRAM_TRACE", "false");
+    SpectrogramTraceLogging::refreshDetailedSettingForTests();
+    QVERIFY(!SpectrogramTraceLogging::detailedEnabled());
+
+    qunsetenv("FERROUS_PROFILE_SPECTROGRAM_TRACE");
+    SpectrogramTraceLogging::refreshDetailedSettingForTests();
+}
+
 void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -377,6 +401,20 @@ void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
     const QString contents = QString::fromUtf8(file.readAll());
     QVERIFY(contents.contains(QStringLiteral("[ui] first line")));
     QVERIFY(contents.contains(QStringLiteral("[ui] second line")));
+}
+
+void BridgeClientTest::profileDiagnosticsBypassUiThreadDiskQueue() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    client.m_profileUiEnabled = true;
+    client.m_pendingDiagnosticsDiskLines.clear();
+
+    client.logProfileDiagnostic(
+        QStringLiteral("ui-prof"),
+        QStringLiteral("event_loop_stall ms=42 timer_ms=8 connected=1 snapshot_pending=0"));
+
+    QCOMPARE(client.m_pendingDiagnosticsDiskLines.size(), 0);
 }
 
 void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {

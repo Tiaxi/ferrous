@@ -25,6 +25,8 @@ use gstreamer_app as gst_app;
 use gstreamer_audio as gst_audio;
 
 use crate::analysis::{AnalysisCommand, AnalysisPcmChunk, SpectrogramChannelLabel};
+#[cfg(feature = "profiling-logs")]
+use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::{
     audio_byte_range, is_dts_file, is_raw_surround_file, register_raw_surround_typefinders,
 };
@@ -784,6 +786,9 @@ impl GstPlaybackRuntime {
         mode: PlaybackClockMode,
         accepted: Duration,
     ) {
+        if !heartbeat_trace_enabled() {
+            return;
+        }
         let seek_trace = self.recent_seek_trace();
         let clock_trace = self.clock_trace();
         profile_eprintln!(

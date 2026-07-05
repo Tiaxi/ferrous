@@ -44,6 +44,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::profile_logging::heartbeat_trace_enabled;
 #[cfg(feature = "gst")]
 use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
@@ -572,7 +573,9 @@ impl AnalysisRuntimeState {
                 self.start_spectrogram_session(start, true, clear_history, ctx);
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
-                profile_eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
+                if heartbeat_trace_enabled() {
+                    profile_eprintln!("[analysis] PositionUpdate pos={position_seconds:.2}");
+                }
                 self.update_spectrogram_position(position_seconds, ctx);
             }
             AnalysisCommand::SeekPosition(position_seconds) => {

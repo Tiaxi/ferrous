@@ -1,6 +1,6 @@
 # GPU Spectrogram Worktree Rescue List
 
-Last reviewed: 2026-06-27
+Last reviewed: 2026-07-01
 
 Source worktree: `.worktrees/gpu-spectrogram-overhaul`  
 Source branch tip: `7d52c0b` (`fix: keep warmed zoom reveal fallback`)  
@@ -96,6 +96,25 @@ Adaptation notes:
 - Precomputed spectrogram frames are counted in bridge-poll work accounting so
   the poll loop can immediately continue when it saturates the per-pass cap.
 
+### P2 Branch: `codex/rescue-p2-diagnostics-cleanup`
+
+Status: implemented and validated on 2026-07-01.
+
+Validation:
+
+- `./scripts/run-tests.sh` passed.
+
+Adaptation notes:
+
+- The diagnostic/profile logging cleanup was replayed onto the current tiled
+  CPU renderer rather than the source branch's retained GPU renderer.
+- `c9be021` was skipped as obsolete: current `main` already lacks the
+  zoom-fill payload peak scan that commit removed. Pulling its hunk forward
+  would have reintroduced older GPU-specific zoom-fill gate code.
+- The retained-GPU upload-budget portion of `ae3cb4c` was left behind; the
+  relevant seek-profile duplicate suppression was adapted and covered by the
+  existing Qt smoke profiling test.
+
 ## P1: CPU Spectrogram Behavior And Performance
 
 This is a coherent `SpectrogramItem` block. Replay in order if current `main`
@@ -155,13 +174,13 @@ Only worth rescuing if profiling logs are still noisy or causing stalls.
 
 | Status | Commit | Pick type | Why rescue it |
 | --- | --- | --- | --- |
-| todo | `c2e7b7c` `fix: gate hot spectrogram trace logs behind opt-in` | Direct/adapt | Keeps detailed spectrogram trace output behind `FERROUS_PROFILE_SPECTROGRAM_TRACE`. |
-| todo | `fd9ad83` `fix: suppress minor playback heartbeat profile spam` | Direct/adapt | Reduces QML heartbeat log noise for tiny follow corrections. |
-| todo | `f534fd7` `fix: gate heartbeat profile trace behind opt-in` | Direct/adapt | Adds Rust-side opt-in gate for heartbeat trace logging. |
-| todo | `fab8fd7` `fix: route ui profile diagnostics off the main thread` | Direct/adapt | Sends UI profile diagnostics to stderr instead of the UI-thread disk queue. |
-| todo | `c9be021` `fix: remove hot-path zoom fill payload scan` | Adapt | Removes expensive payload peak scanning from zoom-fill diagnostics. |
-| todo | `ed48f59` `fix: avoid repeated seek profile summaries` | Adapt | Prevents duplicate seek profile summaries for the same trace generation. |
-| todo | `ae3cb4c` `fix: reduce spectrogram profiling churn` | Adapt | Globally gates duplicate seek profile logging and reduces retained upload budget churn. |
+| adapted | `c2e7b7c` `fix: gate hot spectrogram trace logs behind opt-in` | Direct/adapt | Keeps detailed spectrogram trace output behind `FERROUS_PROFILE_SPECTROGRAM_TRACE`. |
+| adapted | `fd9ad83` `fix: suppress minor playback heartbeat profile spam` | Direct/adapt | Reduces QML heartbeat log noise for tiny follow corrections. Current `main` already carried the later 0.1s threshold, so that value was preserved. |
+| adapted | `f534fd7` `fix: gate heartbeat profile trace behind opt-in` | Direct/adapt | Adds Rust-side opt-in gate for heartbeat trace logging. |
+| picked | `fab8fd7` `fix: route ui profile diagnostics off the main thread` | Direct/adapt | Sends UI profile diagnostics to stderr instead of the UI-thread disk queue. |
+| skipped | `c9be021` `fix: remove hot-path zoom fill payload scan` | Obsolete | Current `main` already lacks the expensive payload peak scan; the conflicting source hunk was tied to older GPU zoom-fill gating. |
+| picked | `ed48f59` `fix: avoid repeated seek profile summaries` | Adapt | Prevents duplicate seek profile summaries for the same trace generation. |
+| adapted | `ae3cb4c` `fix: reduce spectrogram profiling churn` | Partial | Globally gates duplicate seek profile logging. Retained-GPU upload-budget churn was skipped as obsolete for the current tiled renderer. |
 
 ## P3: Optional Or Cautious
 
