@@ -572,9 +572,19 @@ pub struct FrontendBridgeHandle {
     rx: Receiver<BridgeEvent>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct BridgeRuntimeOptions {
     metadata_delay: Duration,
+    persisted_state_enabled: bool,
+}
+
+impl Default for BridgeRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            metadata_delay: Duration::ZERO,
+            persisted_state_enabled: cfg!(not(test)),
+        }
+    }
 }
 
 impl FrontendBridgeHandle {
@@ -585,7 +595,10 @@ impl FrontendBridgeHandle {
 
     #[cfg(all(test, not(feature = "gst")))]
     fn spawn_with_metadata_delay(metadata_delay: Duration) -> Self {
-        Self::spawn_with_options(BridgeRuntimeOptions { metadata_delay })
+        Self::spawn_with_options(BridgeRuntimeOptions {
+            metadata_delay,
+            ..BridgeRuntimeOptions::default()
+        })
     }
 
     fn spawn_with_options(options: BridgeRuntimeOptions) -> Self {
@@ -661,6 +674,7 @@ struct BridgeLoopRuntime {
     last_tree_emit_at: Option<Instant>,
     last_tree_emit_track_count: usize,
     deferred_tree_rebuild_at: Option<Instant>,
+    persisted_state_enabled: bool,
 }
 
 struct BridgeLoopFlags {
@@ -744,17 +758,8 @@ impl BridgeLoopRuntime {
             apply_album_art_event_tx,
         );
 
-        let mut state = BridgeState::default();
-        load_settings_into(&mut state.settings);
-        state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
-        let (lastfm, lastfm_rx) = spawn_lastfm_service(&state.settings);
-        restore_initial_bridge_state(
-            &mut state,
-            &analysis,
-            &playback,
-            &external_queue_details_tx,
-            &lastfm,
-        );
+        let (state, lastfm, lastfm_rx) =
+            prepare_initial_bridge_state(options, &analysis, &playback, &external_queue_details_tx);
 
         let playing_poll_interval = env_duration_ms("FERROUS_PLAYBACK_POLL_MS", 40, 8, 500);
         let paused_poll_interval =
@@ -823,6 +828,7 @@ impl BridgeLoopRuntime {
             last_tree_emit_at: None,
             last_tree_emit_track_count: 0,
             deferred_tree_rebuild_at: None,
+            persisted_state_enabled: options.persisted_state_enabled,
         }
     }
 
@@ -1350,6 +1356,11 @@ impl BridgeLoopRuntime {
     }
 
     fn maybe_persist(&mut self) {
+        if !self.persisted_state_enabled {
+            self.flags.settings_dirty = false;
+            self.flags.session_dirty = false;
+            return;
+        }
         if self.flags.settings_dirty && self.last_settings_save.elapsed() >= Duration::from_secs(2)
         {
             save_settings(&self.state.settings);
@@ -1369,11 +1380,36 @@ impl BridgeLoopRuntime {
     }
 
     fn shutdown(&mut self, event_tx: &Sender<BridgeEvent>) {
-        save_settings(&self.state.settings);
-        save_session_snapshot(&session_snapshot_for_state(&self.state));
+        if self.persisted_state_enabled {
+            save_settings(&self.state.settings);
+            save_session_snapshot(&session_snapshot_for_state(&self.state));
+        }
         self.lastfm.command(LastFmCommand::Shutdown);
         let _ = try_send_event(event_tx, BridgeEvent::Stopped);
     }
+}
+
+fn prepare_initial_bridge_state(
+    options: BridgeRuntimeOptions,
+    analysis: &AnalysisEngine,
+    playback: &PlaybackEngine,
+    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+) -> (BridgeState, LastFmHandle, Receiver<LastFmEvent>) {
+    let mut state = BridgeState::default();
+    if options.persisted_state_enabled {
+        load_settings_into(&mut state.settings);
+    }
+    state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
+    let (lastfm, lastfm_rx) = spawn_lastfm_service(&state.settings);
+    restore_initial_bridge_state(
+        &mut state,
+        analysis,
+        playback,
+        external_queue_details_tx,
+        &lastfm,
+        options.persisted_state_enabled,
+    );
+    (state, lastfm, lastfm_rx)
 }
 
 fn restore_initial_bridge_state(
@@ -1382,6 +1418,7 @@ fn restore_initial_bridge_state(
     playback: &PlaybackEngine,
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     lastfm: &LastFmHandle,
+    persisted_state_enabled: bool,
 ) {
     state.playback.volume = state.settings.volume;
     playback.command(PlaybackCommand::SetVolume(state.settings.volume));
@@ -1397,7 +1434,9 @@ fn restore_initial_bridge_state(
     lastfm.command(LastFmCommand::SetEnabled(
         state.settings.integrations.lastfm_scrobbling_enabled,
     ));
-    apply_session_restore(state, playback, load_session_snapshot().as_ref());
+    if persisted_state_enabled {
+        apply_session_restore(state, playback, load_session_snapshot().as_ref());
+    }
     if should_sync_queue_details_on_initial_restore(state) {
         let _ = sync_queue_details(state, external_queue_details_tx);
     }
@@ -1661,6 +1700,33 @@ mod tests {
             ..LibrarySnapshot::default()
         });
         assert!(should_sync_queue_details_on_initial_restore(&state));
+    }
+
+    #[test]
+    fn default_test_runtime_ignores_persisted_session_snapshot() {
+        let _guard = test_guard();
+        if let Some(path) = config::session_path() {
+            let _ = std::fs::remove_file(path);
+        }
+        save_session_snapshot(&SessionSnapshot {
+            queue: vec![p("/music/a.flac")],
+            selected_queue_index: Some(0),
+            current_queue_index: Some(0),
+            current_path: Some(p("/music/a.flac")),
+        });
+
+        let runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+
+        assert!(
+            !runtime.persisted_state_enabled,
+            "unit-test runtimes must not restore state written by earlier tests"
+        );
+        assert!(runtime.state.queue.is_empty());
+        assert!(runtime.state.selected_queue_index.is_none());
+        assert!(runtime.state.playback.current.is_none());
+        if let Some(path) = config::session_path() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     fn wait_for_snapshot_matching<F>(
