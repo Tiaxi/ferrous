@@ -561,6 +561,9 @@ void BridgeClientTest::itunesRectangularArtworkRowUsesNormalizedFileDetails() {
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
+    client.m_itunesArtworkTempDir =
+        std::make_unique<QTemporaryDir>(tempDir.filePath(QStringLiteral("itunes-artwork-XXXXXX")));
+    QVERIFY(client.m_itunesArtworkTempDir->isValid());
 
     const QString sourcePath = tempDir.filePath(QStringLiteral("rect.jpg"));
     QImage image(300, 200, QImage::Format_RGB32);
@@ -615,6 +618,9 @@ void BridgeClientTest::itunesSquareArtworkReuseSkipsRedundantNormalization() {
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
+    client.m_itunesArtworkTempDir =
+        std::make_unique<QTemporaryDir>(tempDir.filePath(QStringLiteral("itunes-artwork-XXXXXX")));
+    QVERIFY(client.m_itunesArtworkTempDir->isValid());
 
     const QString sourcePath = tempDir.filePath(QStringLiteral("square.jpg"));
     QImage image(300, 300, QImage::Format_RGB32);

@@ -3101,7 +3101,6 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
         QMutexLocker lock(&item.m_stateMutex);
         item.m_profileEnabled = true;
         item.m_precomputedCanvasDisplayRight = 96;
-        item.m_gpuDisplayWidth = 320;
 
         const qint64 startedAtMs = SpectrogramSeekTrace::startedAtMs();
         QVERIFY(startedAtMs > 0);
@@ -3125,7 +3124,6 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
         QMutexLocker lock(&duplicateItem.m_stateMutex);
         duplicateItem.m_profileEnabled = true;
         duplicateItem.m_precomputedCanvasDisplayRight = 96;
-        duplicateItem.m_gpuDisplayWidth = 320;
         duplicateItem.maybeStartSeekProfileLocked(SpectrogramSeekTrace::startedAtMs() + 180);
         QVERIFY(!duplicateItem.m_seekProfile.active);
     }
@@ -3205,6 +3203,11 @@ void QmlSmokeTest::spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSign
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 2.0;
         item.m_precomputedHopSize = 1024;
+        item.m_precomputedCanvasZoomLevel = 2.0;
+        item.m_canvas = QImage(320, 180, QImage::Format_RGB32);
+        item.m_precomputedCanvasDisplayLeft = 0;
+        item.m_precomputedCanvasDisplayRight = 0;
+        item.m_precomputedCanvasRolling = false;
         QVERIFY(!item.advancePrecomputedCanvasLocked(1, 10, false));
         state = item.debugSmoothnessProfileStateLocked();
     }
