@@ -1,3 +1,10 @@
+ferrous (0.1.10-1) unstable; urgency=low
+
+  * Fix centered spectrogram generation, throughput, and stability issues.
+  * Restore album art image info and keep content below the menu bar.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Wed, 08 Jul 2026 21:40:44 +0300
+
 ferrous (0.1.9-1) unstable; urgency=low
 
   * Move playback clock ownership fully into the backend-owned path.
