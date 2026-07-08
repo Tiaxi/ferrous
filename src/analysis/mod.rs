@@ -498,7 +498,9 @@ impl AnalysisRuntimeState {
                 self.hop_size = hop;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                self.start_spectrogram_session(self.centered_start_seconds(), true, true, ctx);
+                let target = self.last_spectrogram_position;
+                let start = self.spectrogram_restart_start_seconds(target);
+                self.start_spectrogram_session_with_target(start, target, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramWidgetWidth(width) => {
                 let w = width.max(320);
@@ -537,8 +539,9 @@ impl AnalysisRuntimeState {
                 self.hop_size = zoom_hop_size(self.fft_size, self.zoom_level);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                let start = self.centered_start_seconds();
-                self.start_spectrogram_session(start, true, true, ctx);
+                let target = self.last_spectrogram_position;
+                let start = self.spectrogram_restart_start_seconds(target);
+                self.start_spectrogram_session_with_target(start, target, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
                 self.clear_early_continuation(ctx);
@@ -547,7 +550,9 @@ impl AnalysisRuntimeState {
                 self.spectrogram_view_mode = view_mode;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
-                self.start_spectrogram_session(self.centered_start_seconds(), true, true, ctx);
+                let target = self.last_spectrogram_position;
+                let start = self.spectrogram_restart_start_seconds(target);
+                self.start_spectrogram_session_with_target(start, target, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramDisplayMode(mode) => {
                 self.clear_early_continuation(ctx);
@@ -570,7 +575,13 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let start = self.spectrogram_restart_start_seconds(position_seconds);
-                self.start_spectrogram_session(start, true, clear_history, ctx);
+                self.start_spectrogram_session_with_target(
+                    start,
+                    position_seconds,
+                    true,
+                    clear_history,
+                    ctx,
+                );
             }
             AnalysisCommand::PositionUpdate(position_seconds) => {
                 if heartbeat_trace_enabled() {
@@ -608,9 +619,9 @@ impl AnalysisRuntimeState {
                     // Restart — the worker may have consumed the
                     // continuation and be decoding the wrong file.
                     self.spectrogram_position_offset = 0.0;
-                    self.start_spectrogram_session(
-                        self.last_spectrogram_position,
-                        true,  // emit_initial_reset — triggers UI truncation
+                    let target = self.last_spectrogram_position;
+                    self.start_spectrogram_session_with_target(
+                        target, target, true,  // emit_initial_reset — triggers UI truncation
                         false, // clear_history — preserve rolling history
                         ctx,
                     );
@@ -890,6 +901,7 @@ impl AnalysisRuntimeState {
         // the centered-gapless path can emit a finalize chunk for it
         // before the new track's staged chunks flood the event stream.
         let outgoing_track_token = self.active_track_token;
+        self.suppress_next_spectrogram_position_update = false;
 
         // Save previous compat params so the rolling gapless path can
         // detect incompatible transitions (e.g. 48 kHz/6ch → 44.1 kHz/2ch)
@@ -1046,6 +1058,23 @@ impl AnalysisRuntimeState {
         clear_history_on_reset: bool,
         ctx: &AnalysisContext<'_>,
     ) {
+        self.start_spectrogram_session_with_target(
+            start_seconds,
+            start_seconds,
+            emit_initial_reset,
+            clear_history_on_reset,
+            ctx,
+        );
+    }
+
+    fn start_spectrogram_session_with_target(
+        &mut self,
+        start_seconds: f64,
+        target_position_seconds: f64,
+        emit_initial_reset: bool,
+        clear_history_on_reset: bool,
+        ctx: &AnalysisContext<'_>,
+    ) {
         let Some(path) = self.active_track_path.clone() else {
             profile_eprintln!(
                 "[analysis] start_spectrogram_session: no active_track_path, skipping"
@@ -1081,19 +1110,12 @@ impl AnalysisRuntimeState {
                     .max(self.spectrogram_max_widget_width),
                 channel_count: self.active_session_channel_count.max(1),
                 start_seconds,
+                target_position_seconds,
                 emit_initial_reset,
                 clear_history_on_reset,
                 view_mode: self.spectrogram_view_mode,
                 display_mode: self.display_mode,
             });
-    }
-
-    /// Return the decode start position for the current display mode.
-    /// Centered mode starts just before the visible left edge so data
-    /// around the playhead appears as quickly as possible.  Rolling mode
-    /// starts at the playhead.
-    fn centered_start_seconds(&self) -> f64 {
-        self.spectrogram_restart_start_seconds(self.last_spectrogram_position)
     }
 
     fn spectrogram_restart_start_seconds(&self, position_seconds: f64) -> f64 {
@@ -1320,9 +1342,15 @@ impl AnalysisRuntimeState {
                 // Suppress the next PositionUpdate to prevent a race: the
                 // playback snapshot may send a PositionUpdate at the new
                 // position before the worker processes our NewTrack.
-                self.suppress_next_spectrogram_position_update = true;
                 let start = self.spectrogram_restart_start_seconds(position_seconds);
-                self.start_spectrogram_session(start, true, true, ctx);
+                self.start_spectrogram_session_with_target(
+                    start,
+                    position_seconds,
+                    true,
+                    true,
+                    ctx,
+                );
+                self.suppress_next_spectrogram_position_update = true;
             }
         } else {
             // Rolling mode: an explicit seek breaks the continuous gapless
@@ -1418,6 +1446,7 @@ impl AnalysisRuntimeState {
     fn reset_spectrogram_state(&mut self) {
         self.pending_channels.clear();
         self.pcm_fifo.clear();
+        self.suppress_next_spectrogram_position_update = false;
         // Clear labels so the first chunk from the new track
         // unconditionally sets them.  Keeping stale labels from the
         // previous track would cause the transient-suppression logic in
@@ -1895,6 +1924,19 @@ mod tests {
     }
 
     #[test]
+    fn reset_spectrogram_state_clears_pending_position_suppression() {
+        let mut state = AnalysisRuntimeState::new();
+        state.suppress_next_spectrogram_position_update = true;
+
+        state.reset_spectrogram_state();
+
+        assert!(
+            !state.suppress_next_spectrogram_position_update,
+            "stale centered-seek suppression must not survive a reset"
+        );
+    }
+
+    #[test]
     fn push_pcm_chunk_suppresses_transient_channel_reduction_during_startup() {
         let mut state = AnalysisRuntimeState::new();
         let token = 1;
@@ -2084,6 +2126,7 @@ mod tests {
     #[test]
     fn non_gapless_track_change_sends_new_track() {
         let mut state = AnalysisRuntimeState::new();
+        state.suppress_next_spectrogram_position_update = true;
         let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
@@ -2118,6 +2161,10 @@ mod tests {
         }
         // Generation must have been incremented.
         assert_eq!(spectrogram_decode_generation.load(Ordering::Relaxed), 1);
+        assert!(
+            !state.suppress_next_spectrogram_position_update,
+            "track changes must clear stale centered-seek suppression"
+        );
     }
 
     #[test]
@@ -2406,8 +2453,14 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
-                if (start_seconds - expected_start).abs() < 0.01 && clear_history_on_reset),
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack {
+                start_seconds,
+                target_position_seconds,
+                clear_history_on_reset,
+                ..
+            } if (start_seconds - expected_start).abs() < 0.01
+                && (target_position_seconds - seek_target).abs() < 0.01
+                && clear_history_on_reset),
             "seek whose visible left edge was evicted from the centered ring should restart, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
@@ -2458,9 +2511,15 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
-                if (start_seconds - fast_start).abs() < 0.01 && clear_history_on_reset),
-            "centered restart should prioritize the visible-left edge, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack {
+                start_seconds,
+                target_position_seconds,
+                clear_history_on_reset,
+                ..
+            } if (start_seconds - fast_start).abs() < 0.01
+                && (target_position_seconds - seek_target).abs() < 0.01
+                && clear_history_on_reset),
+            "centered restart should prioritize the visible-left edge while targeting the playhead, got {cmd:?}"
         );
     }
 
@@ -2631,9 +2690,15 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::NewTrack { start_seconds, clear_history_on_reset, .. }
-                if (start_seconds - expected_start).abs() < 0.01 && clear_history_on_reset),
-            "centered seek outside window should restart with clear_history=true, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::NewTrack {
+                start_seconds,
+                target_position_seconds,
+                clear_history_on_reset,
+                ..
+            } if (start_seconds - expected_start).abs() < 0.01
+                && (target_position_seconds - 200.0).abs() < 0.01
+                && clear_history_on_reset),
+            "centered seek outside window should restart with clear_history=true and target the playhead, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
