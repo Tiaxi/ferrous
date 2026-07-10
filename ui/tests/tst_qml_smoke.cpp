@@ -482,6 +482,7 @@ private slots:
     void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
     void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
     void spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom();
+    void spectrogramCenteredLateFillUsesCircularCanvasOffset();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramSyntheticClearPreservesCanvasDuringSeek();
@@ -6200,6 +6201,44 @@ void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom
             }
         }
     }
+}
+
+void QmlSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {
+    // A centered canvas becomes circular once its display window starts
+    // scrolling. Columns that arrive later for a previously blank right-edge
+    // region must be written through that circular offset, not to their
+    // logical screen X in the underlying image.
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(10);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr quint64 token = 1;
+    QByteArray initial(151 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 151, 0, 1000,
+        48000, 1024, false, true, token);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(10);
+        item.rebuildPrecomputedCanvasLocked(100, 10, 50, 149, false);
+        QVERIFY(item.advancePrecomputedCanvasLocked(60, 159, false));
+    }
+
+    // Column 151 is not decoded yet, so its physical circular slot is black.
+    QCOMPARE(item.m_canvasWriteX, 10);
+    QCOMPARE(item.m_canvas.pixel(1, 5), qRgb(0, 0, 0));
+
+    QByteArray late(9 * bins, '\x70');
+    item.feedPrecomputedChunk(
+        late, bins, 0, 9, 151, 1000,
+        48000, 1024, false, false, token);
+
+    // Logical x=91 maps to physical x=(canvasStart 10 + 91) % 100 = 1.
+    // Painting x=91 directly leaves the visible gap permanently black.
+    QVERIFY(item.m_canvas.pixel(1, 5) != qRgb(0, 0, 0));
 }
 
 void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {

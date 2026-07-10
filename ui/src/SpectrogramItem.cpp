@@ -1566,16 +1566,23 @@ void SpectrogramItem::feedPrecomputedChunk(
         if (overlapsVisible) {
             const auto dbRemap = buildPrecomputedDbRemapLocked();
             const double ez = effectiveZoomLocked();
+            const int canvasWidth = m_canvas.width();
+            const int drawCols = std::min(m_canvasFilledCols, canvasWidth);
+            const int canvasStart =
+                (m_canvasWriteX - drawCols + canvasWidth) % canvasWidth;
             for (qint32 col = std::max(static_cast<qint32>(startIndex), dispL);
                  col <= std::min(chunkEnd, dispR); ++col) {
-                // Use the rebuild's mapping (inverted): px = (col - dispL) * ez.
-                // This matches rebuildPrecomputedCanvasLocked's
-                // colFirst = displayLeft + floor(px / ez), ensuring no gaps.
-                const int px = static_cast<int>(
+                // Use the rebuild's logical mapping, then translate through
+                // the circular canvas offset. Once centered playback starts
+                // scrolling, logical x=0 no longer lives at physical x=0.
+                // Writing late right-edge data directly to logical x leaves
+                // the visible circular slot permanently black.
+                const int logicalX = static_cast<int>(
                     static_cast<double>(col - dispL) * ez);
-                if (px >= 0 && px < m_canvas.width()) {
+                if (logicalX >= 0 && logicalX < canvasWidth) {
+                    const int canvasX = (canvasStart + logicalX) % canvasWidth;
                     drawPrecomputedColumnAtLocked(
-                        px, static_cast<qint64>(col), false, dbRemap);
+                        canvasX, static_cast<qint64>(col), false, dbRemap);
                 }
             }
         }
