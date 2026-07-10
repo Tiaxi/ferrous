@@ -2918,6 +2918,11 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
     const int newWidth = static_cast<int>(newGeometry.width());
     const int oldWidth = static_cast<int>(oldGeometry.width());
     if (newWidth != oldWidth && newWidth > 0) {
+        // Keep the ring's width floor in sync with the Rust worker as soon
+        // as geometry changes. The centered decoder can be parked while the
+        // item is fullscreen, so waiting for the next data chunk may miss
+        // the wide geometry entirely if the viewer is closed first.
+        s_maxWidgetWidthSeen = std::max(s_maxWidgetWidthSeen, newWidth);
         emit spectrogramWidthChanged(newWidth);
     }
     update();

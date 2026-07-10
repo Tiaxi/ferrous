@@ -428,6 +428,7 @@ private slots:
     void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
     void spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
+    void spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramRollingGaplessTrackChangePreservesZoom();
     void spectrogramCenteredGaplessTrackChangeResetsZoom();
@@ -3871,6 +3872,36 @@ void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
                             .arg(item.m_ringCapacity)
                             .arg(fullscreenCap)));
     QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+}
+
+void QmlSmokeTest::spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk() {
+    // Regression: the Rust worker records a larger widget width as soon as
+    // QML reports it, but Qt used to record the same maximum only while
+    // ingesting a data chunk. If fullscreen was closed before the parked
+    // centered decoder delivered another chunk, Qt forgot the wide width
+    // and allocated a windowed ring that was smaller than the worker's
+    // retained lookahead. The decoder then evicted columns around the
+    // playhead, leaving a permanent black gap in the rendered timeline.
+    SpectrogramItem::s_maxWidgetWidthSeen = 0;
+
+    SpectrogramItem item;
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+
+    item.setWidth(1200);
+    item.setWidth(3840); // Enter fullscreen; no data arrives while wide.
+    item.setWidth(1200); // Exit fullscreen before the next chunk.
+
+    constexpr int bins = 4;
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, 64, false, true, 1);
+
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+    QVERIFY2(item.m_ringCapacity >= 3840,
+             qPrintable(QString("post-fullscreen ring cap too small: %1")
+                            .arg(item.m_ringCapacity)));
 }
 
 void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
