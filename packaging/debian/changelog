@@ -1,3 +1,9 @@
+ferrous (0.1.11-1) unstable; urgency=low
+
+  * Fix permanent centered spectrogram gaps after zoom and fullscreen transitions.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Fri, 10 Jul 2026 11:47:32 +0300
+
 ferrous (0.1.10-1) unstable; urgency=low
 
   * Fix centered spectrogram generation, throughput, and stability issues.
