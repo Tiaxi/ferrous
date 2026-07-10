@@ -428,6 +428,7 @@ private slots:
     void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
     void spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
+    void spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
     void spectrogramRollingGaplessTrackChangePreservesZoom();
     void spectrogramCenteredGaplessTrackChangeResetsZoom();
@@ -481,6 +482,7 @@ private slots:
     void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
     void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
     void spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom();
+    void spectrogramCenteredLateFillUsesCircularCanvasOffset();
     void spectrogramPeakHoldRebuildUsesMaxNotNearest();
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramSyntheticClearPreservesCanvasDuringSeek();
@@ -3873,6 +3875,36 @@ void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
     QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
 }
 
+void QmlSmokeTest::spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk() {
+    // Regression: the Rust worker records a larger widget width as soon as
+    // QML reports it, but Qt used to record the same maximum only while
+    // ingesting a data chunk. If fullscreen was closed before the parked
+    // centered decoder delivered another chunk, Qt forgot the wide width
+    // and allocated a windowed ring that was smaller than the worker's
+    // retained lookahead. The decoder then evicted columns around the
+    // playhead, leaving a permanent black gap in the rendered timeline.
+    SpectrogramItem::s_maxWidgetWidthSeen = 0;
+
+    SpectrogramItem item;
+    item.setHeight(200);
+    item.setDisplayMode(1); // Centered
+
+    item.setWidth(1200);
+    item.setWidth(3840); // Enter fullscreen; no data arrives while wide.
+    item.setWidth(1200); // Exit fullscreen before the next chunk.
+
+    constexpr int bins = 4;
+    QByteArray data(16 * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, 16, 0, 161024,
+        44100, 64, false, true, 1);
+
+    QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
+    QVERIFY2(item.m_ringCapacity >= 3840,
+             qPrintable(QString("post-fullscreen ring cap too small: %1")
+                            .arg(item.m_ringCapacity)));
+}
+
 void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
     // Regression: when the channel count changes (e.g. 6ch PerChannel
     // → 2ch PerChannel), the old SpectrogramItems are destroyed and
@@ -6169,6 +6201,44 @@ void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom
             }
         }
     }
+}
+
+void QmlSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {
+    // A centered canvas becomes circular once its display window starts
+    // scrolling. Columns that arrive later for a previously blank right-edge
+    // region must be written through that circular offset, not to their
+    // logical screen X in the underlying image.
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(10);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 4;
+    constexpr quint64 token = 1;
+    QByteArray initial(151 * bins, '\x60');
+    item.feedPrecomputedChunk(
+        initial, bins, 0, 151, 0, 1000,
+        48000, 1024, false, true, token);
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(10);
+        item.rebuildPrecomputedCanvasLocked(100, 10, 50, 149, false);
+        QVERIFY(item.advancePrecomputedCanvasLocked(60, 159, false));
+    }
+
+    // Column 151 is not decoded yet, so its physical circular slot is black.
+    QCOMPARE(item.m_canvasWriteX, 10);
+    QCOMPARE(item.m_canvas.pixel(1, 5), qRgb(0, 0, 0));
+
+    QByteArray late(9 * bins, '\x70');
+    item.feedPrecomputedChunk(
+        late, bins, 0, 9, 151, 1000,
+        48000, 1024, false, false, token);
+
+    // Logical x=91 maps to physical x=(canvasStart 10 + 91) % 100 = 1.
+    // Painting x=91 directly leaves the visible gap permanently black.
+    QVERIFY(item.m_canvas.pixel(1, 5) != qRgb(0, 0, 0));
 }
 
 void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
