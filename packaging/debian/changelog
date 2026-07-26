@@ -1,3 +1,9 @@
+ferrous (0.1.12-1) unstable; urgency=low
+
+  * Fix a spectrogram crash while evicting old gapless track history.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Sun, 26 Jul 2026 20:40:22 +0300
+
 ferrous (0.1.11-1) unstable; urgency=low
 
   * Fix permanent centered spectrogram gaps after zoom and fullscreen transitions.
