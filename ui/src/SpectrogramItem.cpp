@@ -1507,6 +1507,11 @@ void SpectrogramItem::feedPrecomputedChunk(
                             tokenIt->remove(previousTrackCol);
                             if (tokenIt != activeTokenIt && tokenIt->isEmpty()) {
                                 m_trackColumnToSeqByToken.erase(tokenIt);
+                                // QHash::erase() can relocate buckets while
+                                // repairing the probe chain, invalidating
+                                // iterators to entries that were not erased.
+                                activeTokenIt =
+                                    m_trackColumnToSeqByToken.find(effectiveTrackToken);
                             }
                         }
                     }

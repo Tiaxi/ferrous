@@ -20,6 +20,7 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "../src/DiagnosticsLog.h"
@@ -416,6 +417,7 @@ private slots:
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
+    void spectrogramEvictingOldTokenKeepsActiveTokenIteratorValid();
     void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
     void spectrogramCenteredModeSeekPreservesRing();
     void spectrogramCenteredGaplessPreStagedFill();
@@ -3391,6 +3393,69 @@ void QmlSmokeTest::spectrogramGaplessTokenChunksPassFilter() {
         gaplessData, bins, 0, 2, 4, total, 48000, 1024, false, false, 4);
     QCOMPARE(item.m_ringWriteSeq, 6);
     QCOMPARE(item.m_precomputedTrackToken, 4ULL);
+}
+
+void QmlSmokeTest::spectrogramEvictingOldTokenKeepsActiveTokenIteratorValid() {
+    // Reproduce the bucket compaction from the crash: the old and active
+    // track tokens share an initial bucket, so erasing the old token moves
+    // the active token's bucket. Any cached active-token iterator must be
+    // reacquired before the next column is inserted.
+    constexpr size_t bucketCount = 128;
+    std::array<quint64, bucketCount> firstTokenByBucket{};
+    const size_t hashSeed = QHashSeed::globalSeed();
+    quint64 oldToken = 0;
+    quint64 activeToken = 0;
+    for (quint64 token = 1; token < 10'000; ++token) {
+        const size_t bucket = qHash(token, hashSeed) & (bucketCount - 1);
+        if (firstTokenByBucket[bucket] != 0) {
+            oldToken = firstTokenByBucket[bucket];
+            activeToken = token;
+            break;
+        }
+        firstTokenByBucket[bucket] = token;
+    }
+    QVERIFY(oldToken != 0);
+    QVERIFY(activeToken > oldToken);
+
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1);
+
+    constexpr int bins = 4;
+    constexpr int total = 20'000;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, total,
+        48000, 1024, false, true, oldToken);
+    item.feedPrecomputedChunk(
+        QByteArray(bins, '\x20'), bins, 0, 1, 0, total,
+        48000, 1024, false, false, oldToken);
+    const int capacity = item.m_ringCapacity;
+    QVERIFY(capacity > 1);
+
+    item.feedPrecomputedChunk(
+        QByteArray((capacity - 1) * bins, '\x20'),
+        bins, 0, capacity - 1, 1, total,
+        48000, 1024, false, false, oldToken);
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(capacity));
+
+    item.feedPrecomputedChunk(
+        QByteArray((capacity - 1) * bins, '\x40'),
+        bins, 0, capacity - 1, 0, total,
+        48000, 1024, false, false, activeToken);
+    QCOMPARE(item.m_trackColumnToSeqByToken.size(), 2);
+    QCOMPARE(item.m_trackColumnToSeqByToken.value(oldToken).size(), 1);
+
+    item.feedPrecomputedChunk(
+        QByteArray(bins, '\x40'), bins, 0, 1, capacity - 1, total,
+        48000, 1024, false, false, activeToken);
+
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(capacity) * 2);
+    QVERIFY(!item.m_trackColumnToSeqByToken.contains(oldToken));
+    QCOMPARE(item.m_trackColumnToSeqByToken.size(), 1);
+    QCOMPARE(
+        item.m_trackColumnToSeqByToken.value(activeToken).value(capacity - 1),
+        static_cast<qint64>(capacity) * 2 - 1);
 }
 
 void QmlSmokeTest::spectrogramFreshWidgetAcceptsDataWithImplicitReset() {
