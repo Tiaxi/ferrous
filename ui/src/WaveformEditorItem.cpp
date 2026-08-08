@@ -43,8 +43,10 @@ constexpr QColor kWaveform(54, 225, 161);
 constexpr QColor kMutedWaveform(74, 104, 92);
 constexpr QColor kGrid(20, 82, 49);
 constexpr QColor kCenterLine(108, 42, 45);
+constexpr QColor kCenterLineContrast(8, 18, 14, 235);
 constexpr QColor kChannelSeparator(79, 94, 86);
 constexpr QColor kPlayhead(190, 190, 200, 150);
+constexpr QColor kPlayheadContrast(8, 18, 14, 235);
 constexpr QColor kOverlay(190, 190, 200, 180);
 
 double readF64(const char *data) {
@@ -1360,12 +1362,11 @@ void WaveformEditorItem::paint(QPainter *painter) {
     const double span = visibleEnd - visibleStart;
     if (span > 0.0 && position >= visibleStart && position <= visibleEnd) {
         const int x = static_cast<int>(std::round((position - visibleStart) / span * (canvasWidth - 1)));
-        QPen playheadPen(kPlayhead);
-        playheadPen.setWidth(0);
-        painter->setPen(playheadPen);
-        painter->setCompositionMode(QPainter::CompositionMode_Difference);
-        painter->drawLine(x, 0, x, canvasHeight - 1);
-        painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
+        drawContrastingLine(
+            *painter,
+            QLine(x, 0, x, canvasHeight - 1),
+            kPlayhead,
+            kPlayheadContrast);
     }
     if (crosshair && hoverActive) {
         QMutexLocker lock(&m_stateMutex);
@@ -1847,6 +1848,28 @@ void WaveformEditorItem::drawChannelSeparators(
     }
 }
 
+void WaveformEditorItem::drawContrastingLine(
+    QPainter &painter, const QLine &line,
+    const QColor &foreground, const QColor &contrast) {
+    painter.save();
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+
+    QPen contrastPen(contrast);
+    contrastPen.setWidth(0);
+    contrastPen.setCapStyle(Qt::FlatCap);
+    painter.setPen(contrastPen);
+    painter.drawLine(line);
+
+    QPen foregroundPen(foreground);
+    foregroundPen.setWidth(0);
+    foregroundPen.setCapStyle(Qt::FlatCap);
+    foregroundPen.setStyle(Qt::CustomDashLine);
+    foregroundPen.setDashPattern({4.0, 4.0});
+    painter.setPen(foregroundPen);
+    painter.drawLine(line);
+    painter.restore();
+}
+
 QPainterPath WaveformEditorItem::buildSamplePath(const QPolygonF &samples) {
     QPainterPath path;
     if (samples.isEmpty()) return path;
@@ -1889,20 +1912,16 @@ std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
 
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,
                                          double visibleStart, double visibleEnd, int channels) const {
-    const QPainter::CompositionMode originalComposition =
-        painter.compositionMode();
-    painter.setCompositionMode(QPainter::CompositionMode_Difference);
-    painter.setPen(QPen(kCenterLine, 1.0));
     for (int channel = 0; channel < channels; ++channel) {
         const double top = static_cast<double>(channel) * height / channels;
         const double bottom = static_cast<double>(channel + 1) * height / channels;
-        painter.drawLine(
-            0,
-            static_cast<int>((top + bottom) * 0.5),
-            width - 1,
-            static_cast<int>((top + bottom) * 0.5));
+        const int y = static_cast<int>((top + bottom) * 0.5);
+        drawContrastingLine(
+            painter,
+            QLine(0, y, width - 1, y),
+            kCenterLine,
+            kCenterLineContrast);
     }
-    painter.setCompositionMode(originalComposition);
     if (!m_gridEnabled) return;
 
     QFont font;

@@ -3,7 +3,9 @@
 #pragma once
 
 #include <QByteArray>
+#include <QColor>
 #include <QImage>
+#include <QLine>
 #include <QMutex>
 #include <QPainterPath>
 #include <QPointF>
@@ -239,6 +241,9 @@ private:
                         double visibleStart, double visibleEnd, int channels) const;
     static void drawChannelSeparators(
         QPainter &painter, int width, int height, int channels);
+    static void drawContrastingLine(
+        QPainter &painter, const QLine &line,
+        const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
     static QString formatCrosshairTime(double seconds);
     static std::pair<QRect, QRect> crosshairLabelRects(

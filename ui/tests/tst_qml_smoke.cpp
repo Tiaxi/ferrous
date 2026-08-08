@@ -6,6 +6,8 @@
 #include <QHoverEvent>
 #include <QImage>
 #include <QMouseEvent>
+#include <QPaintDevice>
+#include <QPaintEngine>
 #include <QPainter>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -38,6 +40,72 @@
 #undef protected
 
 namespace {
+
+class CompositionRecordingPaintEngine final : public QPaintEngine {
+public:
+    CompositionRecordingPaintEngine()
+        : QPaintEngine(QPaintEngine::AlphaBlend
+                       | QPaintEngine::PorterDuff
+                       | QPaintEngine::PainterPaths) {}
+
+    bool begin(QPaintDevice *device) override {
+        setPaintDevice(device);
+        setActive(true);
+        return true;
+    }
+
+    bool end() override {
+        setActive(false);
+        return true;
+    }
+
+    void updateState(const QPaintEngineState &state) override {
+        if (state.state() & QPaintEngine::DirtyCompositionMode) {
+            compositionModes.push_back(state.compositionMode());
+        }
+    }
+
+    void drawLines(const QLine *, int) override {}
+    void drawPixmap(const QRectF &, const QPixmap &, const QRectF &) override {}
+    Type type() const override { return QPaintEngine::User; }
+
+    QVector<QPainter::CompositionMode> compositionModes;
+};
+
+class CompositionRecordingPaintDevice final : public QPaintDevice {
+public:
+    QPaintEngine *paintEngine() const override {
+        return const_cast<CompositionRecordingPaintEngine *>(&engine);
+    }
+
+    mutable CompositionRecordingPaintEngine engine;
+
+protected:
+    int metric(PaintDeviceMetric metric) const override {
+        switch (metric) {
+        case PdmWidth:
+        case PdmWidthMM:
+        case PdmHeight:
+        case PdmHeightMM:
+            return 64;
+        case PdmDpiX:
+        case PdmDpiY:
+        case PdmPhysicalDpiX:
+        case PdmPhysicalDpiY:
+            return 96;
+        case PdmDevicePixelRatio:
+            return 1;
+        case PdmDevicePixelRatioScaled:
+            return static_cast<int>(QPaintDevice::devicePixelRatioFScale());
+        case PdmNumColors:
+            return 16'777'216;
+        case PdmDepth:
+            return 32;
+        default:
+            return 0;
+        }
+    }
+};
 
 struct BinaryTreeRow {
     quint8 rowType{0};
@@ -479,6 +547,7 @@ private slots:
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
     void waveformEditorReferenceLineContrastsWaveform();
+    void waveformEditorContrastLinesUseFboSafeCompositionModes();
     void waveformEditorFpsOverlayTracksPaintRate();
     void waveformEditorUsesRasterTargetAndNativeFrameInterpolation();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
@@ -4944,6 +5013,27 @@ void QmlSmokeTest::waveformEditorReferenceLineContrastsWaveform() {
     QVERIFY(lineOnBackground != background);
     QVERIFY(luminance(lineOnWaveform) < luminance(waveform));
     QVERIFY(lineOnWaveform != waveform);
+}
+
+void QmlSmokeTest::waveformEditorContrastLinesUseFboSafeCompositionModes() {
+    CompositionRecordingPaintDevice device;
+    QPainter painter(&device);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    WaveformEditorItem::drawContrastingLine(
+        painter,
+        QLine(8, 8, 56, 8),
+        QColor(190, 190, 200, 150),
+        QColor(8, 18, 14, 235));
+    QCOMPARE(painter.compositionMode(), QPainter::CompositionMode_Source);
+    painter.end();
+
+    QVERIFY(!device.engine.compositionModes.isEmpty());
+    for (const QPainter::CompositionMode mode
+         : std::as_const(device.engine.compositionModes)) {
+        QVERIFY2(
+            mode <= QPainter::CompositionMode_Plus,
+            "FBO waveform overlays must avoid advanced OpenGL blend modes");
+    }
 }
 
 void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
