@@ -445,7 +445,13 @@ private slots:
     void waveformEditorKeepsOverlappingDetailDuringHandoff();
     void waveformEditorWideDetailCacheKeepsViewportDensity();
     void waveformEditorWholeTrackAcceptsDecodedEndpointTolerance();
+    void waveformEditorSeparatesChannelPanes();
+    void waveformEditorRestrictsDetailWorkToVisiblePoints();
+    void waveformEditorReusesSameSizedCache();
+    void waveformEditorZoomedPlaybackBypassesScrollingCache();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
+    void waveformEditorSampleViewRepaintsCrosshairCleanly();
+    void waveformEditorReclampsZoomForDecodedSampleRate();
     void waveformEditorRulersFollowGridSetting();
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
@@ -3812,7 +3818,7 @@ void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
     item.m_detail.framesPerPoint = 1;
     item.m_detail.pointCount = 48'000;
     item.m_detail.extrema.assign(96'000, 0.25F);
-    item.setZoomLevel(100.0);
+    item.setZoomLevel(4.0);
 
     QImage canvas(320, 180, QImage::Format_RGB32);
     QPainter painter(&canvas);
@@ -3821,7 +3827,8 @@ void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
 
     QVERIFY(item.m_cache.width() >= 959);
     QVERIFY(item.m_cache.width() <= 961);
-    QVERIFY(item.m_cacheEndSeconds - item.m_cacheStartSeconds < 0.31);
+    QVERIFY(item.m_cacheEndSeconds - item.m_cacheStartSeconds > 7.49);
+    QVERIFY(item.m_cacheEndSeconds - item.m_cacheStartSeconds < 7.51);
 }
 
 void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
@@ -3856,6 +3863,95 @@ void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
     QVERIFY(waveformPixels > 200);
 }
 
+void QmlSmokeTest::waveformEditorSeparatesChannelPanes() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QCOMPARE(canvas.pixelColor(160, 90), QColor(79, 94, 86));
+    QVERIFY(canvas.pixelColor(160, 89).green() > 180);
+    QVERIFY(canvas.pixelColor(160, 91).green() > 180);
+}
+
+void QmlSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(10.0);
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 4.75;
+    item.m_detail.endSeconds = 5.25;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 24'000;
+    item.m_detail.extrema.assign(48'000, 0.0F);
+
+    const auto [first, last] = item.detailPointRangeLocked(4.999, 5.001);
+
+    QVERIFY(first > 11'000);
+    QVERIFY(last < 13'000);
+    QVERIFY(last - first < 110);
+}
+
+void QmlSmokeTest::waveformEditorReusesSameSizedCache() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter firstPainter(&canvas);
+    item.paint(&firstPainter);
+    firstPainter.end();
+    const uchar *firstBuffer = item.m_cache.constBits();
+
+    item.invalidateCacheLocked();
+    QPainter secondPainter(&canvas);
+    item.paint(&secondPainter);
+    secondPainter.end();
+
+    QCOMPARE(item.m_cache.constBits(), firstBuffer);
+}
+
+void QmlSmokeTest::waveformEditorZoomedPlaybackBypassesScrollingCache() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(10.0);
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 3.5;
+    item.m_detail.endSeconds = 6.5;
+    item.m_detail.framesPerPoint = 90;
+    item.m_detail.pointCount = 1'600;
+    item.m_detail.extrema.assign(3'200, 0.25F);
+    item.m_detailRenderWidth = 400;
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+
+    QVERIFY(!item.samplePointsVisibleLocked());
+    QVERIFY(item.renderDetailDirectlyLocked(visibleStart, visibleEnd));
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QVERIFY(item.m_cacheDirty);
+    QVERIFY(item.m_cache.isNull());
+}
+
 void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
     WaveformEditorItem item;
     item.setWidth(320);
@@ -3883,6 +3979,60 @@ void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
         }
     }
     QVERIFY(changedPixels > 250);
+}
+
+void QmlSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setPositionSeconds(0.5);
+    item.setCrosshairEnabled(true);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 100;
+    item.m_detail.extrema.assign(200, 0.0F);
+    item.setZoomLevel(item.maximumZoomLevel());
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    QVERIFY(item.renderDetailDirectlyLocked(visibleStart, visibleEnd));
+
+    QImage baseline(400, 180, QImage::Format_RGB32);
+    baseline.fill(Qt::black);
+    QPainter baselinePainter(&baseline);
+    item.paint(&baselinePainter);
+    baselinePainter.end();
+
+    QImage reused = baseline.copy();
+    item.setHoverPosition(80.0, 40.0, true);
+    QPainter firstPainter(&reused);
+    item.paint(&firstPainter);
+    firstPainter.end();
+    item.setHoverPosition(240.0, 110.0, true);
+    QPainter secondPainter(&reused);
+    item.paint(&secondPainter);
+    secondPainter.end();
+
+    for (int y = 4; y < 90; ++y) {
+        QCOMPARE(reused.pixelColor(80, y), baseline.pixelColor(80, y));
+    }
+}
+
+void QmlSmokeTest::waveformEditorReclampsZoomForDecodedSampleRate() {
+    WaveformEditorItem item;
+    item.setWidth(100);
+    item.setDurationSeconds(100.0);
+    item.setZoomLevel(item.maximumZoomLevel());
+    QVERIFY(item.zoomLevel() > 100'000.0);
+
+    item.m_sampleRateHz = 1'000;
+    QVERIFY(item.clampZoomToMaximumLocked());
+
+    QCOMPARE(item.zoomLevel(), 8'000.0);
+    QVERIFY(item.m_cacheDirty);
 }
 
 void QmlSmokeTest::waveformEditorRulersFollowGridSetting() {

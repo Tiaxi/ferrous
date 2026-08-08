@@ -26,11 +26,13 @@ constexpr int kMaximumDetailPoints = 65'536;
 constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
 constexpr double kMinimumDetailMarginSeconds = 0.25;
+constexpr double kDirectRenderMaximumSpanSeconds = 2.0;
 constexpr QColor kBackground(5, 9, 7);
 constexpr QColor kWaveform(54, 225, 161);
 constexpr QColor kMutedWaveform(74, 104, 92);
 constexpr QColor kGrid(20, 82, 49);
 constexpr QColor kCenterLine(108, 42, 45);
+constexpr QColor kChannelSeparator(79, 94, 86);
 constexpr QColor kPlayhead(190, 190, 200, 150);
 constexpr QColor kOverlay(190, 190, 200, 180);
 
@@ -326,24 +328,37 @@ void WaveformEditorItem::requestDetailWindow() {
         bool channelsChanged = false;
         bool rateChanged = false;
         bool pointsChanged = false;
+        bool zoomChanged = false;
+        bool requestFollowup = false;
         {
             QMutexLocker lock(&m_stateMutex);
             if (generation != m_requestGeneration) return;
             clearPendingRequestLocked();
             if (!parsed) return;
             const bool oldPointsVisible = samplePointsVisibleLocked();
+            const bool firstDetail = m_detail.pointCount == 0;
+            const quint32 previousFramesPerPoint = m_detail.framesPerPoint;
             channelsChanged = m_channelCount != next.channelCount;
             rateChanged = m_sampleRateHz != next.sampleRateHz;
             m_channelCount = next.channelCount;
             m_sampleRateHz = next.sampleRateHz;
             m_detail = std::move(next);
             m_detailRenderWidth = requestRenderWidth;
+            zoomChanged = clampZoomToMaximumLocked();
             pointsChanged = oldPointsVisible != samplePointsVisibleLocked();
-            invalidateCacheLocked();
+            if (firstDetail || channelsChanged || zoomChanged
+                || m_detail.framesPerPoint < previousFramesPerPoint) {
+                invalidateCacheLocked();
+            }
+            const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+            requestFollowup = !detailOrPendingRequestCoversLocked(
+                visibleStart, visibleEnd);
         }
         if (channelsChanged) emit channelCountChanged();
         if (rateChanged) emit sampleRateHzChanged();
+        if (zoomChanged) emit zoomLevelChanged();
         if (pointsChanged) emit samplePointsVisibleChanged();
+        if (requestFollowup) scheduleDetailRequest();
         update();
     });
     watcher->setFuture(QtConcurrent::run(&WaveformEditorItem::decodeWindow, path, requestStart, requestEnd, points));
@@ -449,11 +464,51 @@ double WaveformEditorItem::maximumZoomLevelLocked() const {
     return std::max(1.0, m_durationSeconds * rate / pixels * 8.0);
 }
 
+bool WaveformEditorItem::clampZoomToMaximumLocked() {
+    const double clamped = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked());
+    if (std::abs(m_zoomLevel - clamped) < 0.0001) return false;
+    m_zoomLevel = clamped;
+    ++m_requestGeneration;
+    clearPendingRequestLocked();
+    invalidateCacheLocked();
+    return true;
+}
+
 bool WaveformEditorItem::samplePointsVisibleLocked() const {
     if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return false;
     const auto [start, end] = visibleRangeLocked();
     const double visiblePoints = (end - start) * static_cast<double>(std::max(1, m_detail.sampleRateHz));
     return width() / std::max(1.0, visiblePoints) >= 4.0;
+}
+
+bool WaveformEditorItem::renderDetailDirectlyLocked(
+    double visibleStart, double visibleEnd) const {
+    if (!detailCoversRangeLocked(visibleStart, visibleEnd)) return false;
+    const double visibleSpan = visibleEnd - visibleStart;
+    return samplePointsVisibleLocked()
+        || (visibleSpan <= kDirectRenderMaximumSpanSeconds
+            && detailResolutionCoversLocked(visibleStart, visibleEnd));
+}
+
+std::pair<int, int> WaveformEditorItem::detailPointRangeLocked(
+    double visibleStart, double visibleEnd) const {
+    const double detailSpan = m_detail.endSeconds - m_detail.startSeconds;
+    if (m_detail.pointCount <= 0 || detailSpan <= 0.0 || visibleEnd < visibleStart) {
+        return {0, 0};
+    }
+    const double pointCount = static_cast<double>(m_detail.pointCount);
+    const double first = std::clamp(
+        (visibleStart - m_detail.startSeconds) / detailSpan * pointCount - 0.5,
+        0.0,
+        pointCount);
+    const double last = std::clamp(
+        (visibleEnd - m_detail.startSeconds) / detailSpan * pointCount - 0.5,
+        0.0,
+        pointCount);
+    return {
+        std::clamp(static_cast<int>(std::floor(first)), 0, m_detail.pointCount),
+        std::clamp(static_cast<int>(std::ceil(last)) + 1, 0, m_detail.pointCount),
+    };
 }
 
 void WaveformEditorItem::updateFpsEstimateLocked() {
@@ -506,9 +561,10 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         if (!m_playing) return;
         const auto [start, end] = visibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(start, end);
-        if (m_detail.pointCount == 0
+        if (!renderDetailDirectlyLocked(start, end)
+            && (m_detail.pointCount == 0
             || start < m_cacheStartSeconds
-            || end > m_cacheEndSeconds) {
+            || end > m_cacheEndSeconds)) {
             invalidateCacheLocked();
         }
     }
@@ -540,12 +596,22 @@ void WaveformEditorItem::paint(QPainter *painter) {
     int channels = 1;
     int fpsValue = 0;
     bool showFps = false;
+    bool directDetail = false;
+    const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
+    const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
     {
         QMutexLocker lock(&m_stateMutex);
-        const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
-        rebuildCacheLocked(renderPixelWidthLocked(), canvasHeight);
-        cache = m_cache;
         std::tie(visibleStart, visibleEnd) = visibleRangeLocked();
+        directDetail = renderDetailDirectlyLocked(visibleStart, visibleEnd);
+        if (directDetail) {
+            painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+            drawDetailLocked(
+                *painter, canvasWidth, canvasHeight,
+                visibleStart, visibleEnd, displayedChannelCountLocked());
+        } else {
+            rebuildCacheLocked(renderPixelWidthLocked(), canvasHeight);
+            cache = m_cache;
+        }
         hover = m_hoverPosition;
         hoverActive = m_hoverActive;
         crosshair = m_crosshairEnabled;
@@ -557,22 +623,23 @@ void WaveformEditorItem::paint(QPainter *painter) {
         if (showFps) updateFpsEstimateLocked();
         fpsValue = m_fpsValue;
     }
-    const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
-    const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
-    const double cacheSpan = cacheEnd - cacheStart;
-    if (cacheSpan > 0.0 && visibleEnd > visibleStart) {
-        const double sourceX = (visibleStart - cacheStart) / cacheSpan * cache.width();
-        const double sourceWidth = (visibleEnd - visibleStart) / cacheSpan * cache.width();
-        painter->drawImage(
-            QRectF(0.0, 0.0, canvasWidth, canvasHeight), cache,
-            QRectF(sourceX, 0.0, sourceWidth, cache.height()));
-    } else {
-        painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+    if (!directDetail) {
+        const double cacheSpan = cacheEnd - cacheStart;
+        if (cacheSpan > 0.0 && visibleEnd > visibleStart) {
+            const double sourceX = (visibleStart - cacheStart) / cacheSpan * cache.width();
+            const double sourceWidth = (visibleEnd - visibleStart) / cacheSpan * cache.width();
+            painter->drawImage(
+                QRectF(0.0, 0.0, canvasWidth, canvasHeight), cache,
+                QRectF(sourceX, 0.0, sourceWidth, cache.height()));
+        } else {
+            painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+        }
     }
     {
         QMutexLocker lock(&m_stateMutex);
         drawGridLocked(
             *painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, channels);
+        drawChannelSeparators(*painter, canvasWidth, canvasHeight, channels);
     }
     const double span = visibleEnd - visibleStart;
     if (span > 0.0 && position >= visibleStart && position <= visibleEnd) {
@@ -609,7 +676,10 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     const int renderWidth = std::clamp(
         static_cast<int>(std::ceil(static_cast<double>(width) * renderSpan / visibleSpan)),
         width, width * 3);
-    m_cache = QImage(renderWidth, height, QImage::Format_RGB32);
+    if (m_cache.size() != QSize(renderWidth, height)
+        || m_cache.format() != QImage::Format_RGB32) {
+        m_cache = QImage(renderWidth, height, QImage::Format_RGB32);
+    }
     m_cache.fill(kBackground);
     QPainter painter(&m_cache);
     painter.setRenderHint(QPainter::Antialiasing, false);
@@ -632,6 +702,17 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     m_cacheStartSeconds = renderStart;
     m_cacheEndSeconds = renderEnd;
     m_cacheDirty = false;
+}
+
+void WaveformEditorItem::drawChannelSeparators(
+    QPainter &painter, int width, int height, int channels) {
+    if (channels < 2) return;
+    painter.setPen(QPen(kChannelSeparator, 1.0));
+    for (int channel = 1; channel < channels; ++channel) {
+        const int y = static_cast<int>(std::round(
+            static_cast<double>(channel) * height / channels));
+        painter.drawLine(0, y, width - 1, y);
+    }
 }
 
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,
@@ -727,6 +808,8 @@ void WaveformEditorItem::drawDetailLocked(QPainter &painter, int width, int heig
     const double visibleSpan = visibleEnd - visibleStart;
     if (detailSpan <= 0.0 || visibleSpan <= 0.0) return;
     const bool points = samplePointsVisibleLocked();
+    const auto [firstPoint, lastPoint] = detailPointRangeLocked(
+        visibleStart, visibleEnd);
     for (int displayChannel = 0; displayChannel < channels; ++displayChannel) {
         const double top = static_cast<double>(displayChannel) * height / channels;
         const double bottom = static_cast<double>(displayChannel + 1) * height / channels;
@@ -735,10 +818,24 @@ void WaveformEditorItem::drawDetailLocked(QPainter &painter, int width, int heig
         const QColor color = channelIsMutedLocked(displayChannel) ? kMutedWaveform : kWaveform;
         painter.setPen(QPen(color, points ? 1.2 : 1.0));
         QPolygonF polyline;
-        for (int point = 0; point < m_detail.pointCount; ++point) {
+        std::vector<float> pixelMinima;
+        std::vector<float> pixelMaxima;
+        std::vector<bool> pixelSeen;
+        if (points) {
+            polyline.reserve(lastPoint - firstPoint);
+        } else {
+            pixelMinima.assign(static_cast<std::size_t>(width), 1.0F);
+            pixelMaxima.assign(static_cast<std::size_t>(width), -1.0F);
+            pixelSeen.assign(static_cast<std::size_t>(width), false);
+        }
+        for (int point = firstPoint; point < lastPoint; ++point) {
             const double time = m_detail.startSeconds + (static_cast<double>(point) + 0.5) / m_detail.pointCount * detailSpan;
             if (time < visibleStart || time > visibleEnd) continue;
-            const int x = static_cast<int>(std::round((time - visibleStart) / visibleSpan * (width - 1)));
+            const int x = std::clamp(
+                static_cast<int>(std::round(
+                    (time - visibleStart) / visibleSpan * (width - 1))),
+                0,
+                width - 1);
             float minimum = 1.0F;
             float maximum = -1.0F;
             const int firstChannel = m_viewMode == 0 ? 0 : displayChannel;
@@ -748,12 +845,27 @@ void WaveformEditorItem::drawDetailLocked(QPainter &painter, int width, int heig
                 minimum = std::min(minimum, m_detail.extrema[index]);
                 maximum = std::max(maximum, m_detail.extrema[index + 1]);
             }
-            const double yMinimum = center - static_cast<double>(minimum) * half;
-            const double yMaximum = center - static_cast<double>(maximum) * half;
             if (points) {
-                polyline.append(QPointF(x, yMinimum));
+                polyline.append(QPointF(
+                    x, center - static_cast<double>(minimum) * half));
             } else {
-                painter.drawLine(x, static_cast<int>(std::round(yMinimum)), x, static_cast<int>(std::round(yMaximum)));
+                const auto pixel = static_cast<std::size_t>(x);
+                pixelMinima[pixel] = std::min(pixelMinima[pixel], minimum);
+                pixelMaxima[pixel] = std::max(pixelMaxima[pixel], maximum);
+                pixelSeen[pixel] = true;
+            }
+        }
+        if (!points) {
+            for (int x = 0; x < width; ++x) {
+                const auto pixel = static_cast<std::size_t>(x);
+                if (!pixelSeen[pixel]) continue;
+                painter.drawLine(
+                    x,
+                    static_cast<int>(std::round(
+                        center - static_cast<double>(pixelMinima[pixel]) * half)),
+                    x,
+                    static_cast<int>(std::round(
+                        center - static_cast<double>(pixelMaxima[pixel]) * half)));
             }
         }
         if (points && polyline.size() > 1) {

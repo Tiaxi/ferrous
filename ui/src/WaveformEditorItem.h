@@ -136,7 +136,11 @@ private:
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
     int renderPixelWidthLocked() const;
     double maximumZoomLevelLocked() const;
+    bool clampZoomToMaximumLocked();
     bool samplePointsVisibleLocked() const;
+    bool renderDetailDirectlyLocked(double visibleStart, double visibleEnd) const;
+    std::pair<int, int> detailPointRangeLocked(
+        double visibleStart, double visibleEnd) const;
     void updateFpsEstimateLocked();
     void bindWindowFrameLoop(QQuickWindow *window);
     void handleWindowFrameSwapped();
@@ -144,6 +148,8 @@ private:
     void rebuildCacheLocked(int width, int height);
     void drawGridLocked(QPainter &painter, int width, int height,
                         double visibleStart, double visibleEnd, int channels) const;
+    static void drawChannelSeparators(
+        QPainter &painter, int width, int height, int channels);
     void drawOverviewLocked(QPainter &painter, int width, int height,
                             double visibleStart, double visibleEnd, int channels) const;
     void drawDetailLocked(QPainter &painter, int width, int height,
