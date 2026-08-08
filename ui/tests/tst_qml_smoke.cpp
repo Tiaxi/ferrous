@@ -456,7 +456,10 @@ private slots:
     void waveformEditorSparseZoomDetailFallsBackUntilReady();
     void waveformEditorSeparatesChannelPanes();
     void waveformEditorRestrictsDetailWorkToVisiblePoints();
+    void waveformEditorDetailPointsUseAbsoluteSampleTimes();
     void waveformEditorReusesSameSizedCache();
+    void waveformEditorCacheHandoffsKeepAbsolutePixelGrid();
+    void waveformEditorFullscreenStagingUsesSmallRenderChunks();
     void waveformEditorBuildsReplacementCacheIncrementally();
     void waveformEditorZoomedPlaybackUsesScrollingCache();
     void waveformEditorPlaybackOverviewCacheHasForwardHeadroom();
@@ -3940,7 +3943,7 @@ void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
     item.m_detail.channelCount = 1;
     item.m_detail.startSeconds = 0.0;
     item.m_detail.endSeconds = 10.0 - 1.5 / 48'000.0;
-    item.m_detail.framesPerPoint = 2;
+    item.m_detail.framesPerPoint = 375;
     item.m_detail.pointCount = 1'280;
     item.m_detail.extrema.assign(2'560, 0.5F);
     QVERIFY(item.detailCoversRangeLocked(0.0, 10.0));
@@ -4158,6 +4161,22 @@ void QmlSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {
     QVERIFY(last - first < 110);
 }
 
+void QmlSmokeTest::waveformEditorDetailPointsUseAbsoluteSampleTimes() {
+    WaveformEditorItem item;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.framesPerPoint = 4;
+    item.m_detail.pointCount = 50;
+    item.m_detail.startSeconds = 0.04;
+    item.m_detail.endSeconds = 2.03;
+
+    const double sharedBinTime = item.detailPointTimeLocked(1);
+    QVERIFY(std::abs(sharedBinTime - 0.095) < 0.000'001);
+
+    item.m_detail.startSeconds = 0.08;
+    item.m_detail.endSeconds = 2.07;
+    QVERIFY(std::abs(item.detailPointTimeLocked(0) - sharedBinTime) < 0.000'001);
+}
+
 void QmlSmokeTest::waveformEditorReusesSameSizedCache() {
     WaveformEditorItem item;
     item.setWidth(320);
@@ -4177,6 +4196,91 @@ void QmlSmokeTest::waveformEditorReusesSameSizedCache() {
     secondPainter.end();
 
     QCOMPARE(item.m_cache.constBits(), firstBuffer);
+}
+
+void QmlSmokeTest::waveformEditorCacheHandoffsKeepAbsolutePixelGrid() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(100);
+    item.setDurationSeconds(10.0);
+    item.m_sampleRateHz = 1'000;
+    item.m_channelCount = 1;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.reserve(20'000);
+    for (int point = 0; point < item.m_detail.pointCount; ++point) {
+        const float minimum = -static_cast<float>((point % 17) + 1) / 20.0F;
+        const float maximum = static_cast<float>((point % 23) + 1) / 25.0F;
+        item.m_detail.extrema.push_back(minimum);
+        item.m_detail.extrema.push_back(maximum);
+    }
+
+    const auto firstGrid = item.cacheGridForRangeLocked(2.0, 4.0, 0.0, 10.0);
+    const auto secondGrid = item.cacheGridForRangeLocked(2.37, 4.37, 0.0, 10.0);
+    QCOMPARE(firstGrid.secondsPerPixel, secondGrid.secondsPerPixel);
+    const double pixelOffset = (secondGrid.startSeconds - firstGrid.startSeconds)
+        / firstGrid.secondsPerPixel;
+    const int firstSourceX = static_cast<int>(std::llround(pixelOffset));
+    QVERIFY(std::abs(pixelOffset - static_cast<double>(firstSourceX)) < 0.000'001);
+
+    QImage firstCache(firstGrid.width, 100, QImage::Format_RGB32);
+    firstCache.fill(QColor(5, 9, 7));
+    QPainter firstPainter(&firstCache);
+    item.drawDetailLocked(
+        firstPainter, firstGrid.width, 100,
+        firstGrid.startSeconds, firstGrid.endSeconds, 1);
+    firstPainter.end();
+
+    QImage secondCache(secondGrid.width, 100, QImage::Format_RGB32);
+    secondCache.fill(QColor(5, 9, 7));
+    QPainter secondPainter(&secondCache);
+    item.drawDetailLocked(
+        secondPainter, secondGrid.width, 100,
+        secondGrid.startSeconds, secondGrid.endSeconds, 1);
+    secondPainter.end();
+
+    const int overlapWidth = std::min(
+        secondCache.width(), firstCache.width() - firstSourceX);
+    QVERIFY(overlapWidth > 0);
+    for (int y = 0; y < firstCache.height(); ++y) {
+        const auto *firstLine = reinterpret_cast<const QRgb *>(
+            firstCache.constScanLine(y));
+        const auto *secondLine = reinterpret_cast<const QRgb *>(
+            secondCache.constScanLine(y));
+        for (int x = 0; x < overlapWidth; ++x) {
+            QVERIFY2(
+                secondLine[x] == firstLine[firstSourceX + x],
+                qPrintable(QStringLiteral(
+                    "overlap mismatch x=%1 y=%2 first=%3 second=%4")
+                    .arg(x)
+                    .arg(y)
+                    .arg(firstLine[firstSourceX + x], 0, 16)
+                    .arg(secondLine[x], 0, 16)));
+        }
+    }
+
+    item.m_cache = firstCache;
+    item.m_cacheDirty = false;
+    item.m_cacheStartSeconds = firstGrid.startSeconds;
+    item.m_cacheEndSeconds = firstGrid.endSeconds;
+    item.m_cacheSecondsPerPixel = firstGrid.secondsPerPixel;
+    item.m_cacheFramesPerPoint = item.m_detail.framesPerPoint;
+    item.m_cacheDisplayedChannels = 1;
+    item.beginStagedCacheForRangeLocked(2.37, 4.37, false);
+
+    QCOMPARE(item.m_stagedCacheCopySourceX, firstSourceX);
+    QCOMPARE(item.m_stagedCacheCopyWidth, overlapWidth);
+    QCOMPARE(item.m_stagedCacheNextX, overlapWidth);
+}
+
+void QmlSmokeTest::waveformEditorFullscreenStagingUsesSmallRenderChunks() {
+    QCOMPARE(WaveformEditorItem::stagedCacheRenderChunkColumns(1'440), 8);
+    QCOMPARE(WaveformEditorItem::stagedCacheRenderChunkColumns(318), 36);
+    QCOMPARE(WaveformEditorItem::stagedCacheRenderChunkColumns(100), 64);
 }
 
 void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {

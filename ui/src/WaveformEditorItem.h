@@ -152,6 +152,13 @@ private:
         std::vector<float> extrema;
     };
 
+    struct CacheGrid {
+        double startSeconds{0.0};
+        double endSeconds{0.0};
+        double secondsPerPixel{0.0};
+        int width{0};
+    };
+
     static QByteArray decodeWindow(
         const QString &path, double startSeconds, double endSeconds, int maxPoints);
     static bool parseWindow(const QByteArray &bytes, DetailWindow *window);
@@ -172,15 +179,17 @@ private:
     double detailRequestMarginLocked(double visibleSpan) const;
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
     int renderPixelWidthLocked() const;
-    std::pair<double, double> cacheRenderRangeLocked(
+    CacheGrid cacheGridForRangeLocked(
         double visibleStart, double visibleEnd,
         double sourceStart, double sourceEnd) const;
     double maximumZoomLevelLocked() const;
     bool clampZoomToMaximumLocked();
     bool samplePointsVisibleLocked() const;
     bool renderDetailDirectlyLocked(double visibleStart, double visibleEnd) const;
+    double detailPointTimeLocked(int point) const;
     std::pair<int, int> detailPointRangeLocked(
         double visibleStart, double visibleEnd) const;
+    static int stagedCacheRenderChunkColumns(int height);
     void updateFpsEstimateLocked();
     void bindWindowFrameLoop(QQuickWindow *window);
     void handleWindowFrameSwapped();
@@ -239,9 +248,18 @@ private:
     int m_cachedViewportHeight{0};
     double m_cacheStartSeconds{0.0};
     double m_cacheEndSeconds{0.0};
+    double m_cacheSecondsPerPixel{0.0};
+    quint32 m_cacheFramesPerPoint{0};
+    int m_cacheDisplayedChannels{0};
     QImage m_stagedCache;
     double m_stagedCacheStartSeconds{0.0};
     double m_stagedCacheEndSeconds{0.0};
+    double m_stagedCacheSecondsPerPixel{0.0};
+    quint32 m_stagedCacheFramesPerPoint{0};
+    int m_stagedCacheDisplayedChannels{0};
+    int m_stagedCacheCopySourceX{0};
+    int m_stagedCacheCopyWidth{0};
+    int m_stagedCacheCopiedColumns{0};
     int m_stagedCacheNextX{0};
     bool m_stagedCacheCommitsDeferredZoom{false};
     quint64 m_requestGeneration{0};
