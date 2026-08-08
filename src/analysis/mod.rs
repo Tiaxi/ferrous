@@ -6,6 +6,9 @@ mod fft;
 #[cfg(feature = "gst")]
 mod gst_waveform;
 mod session;
+mod waveform_window;
+
+pub(crate) use waveform_window::{decode_waveform_window, WaveformWindow};
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;

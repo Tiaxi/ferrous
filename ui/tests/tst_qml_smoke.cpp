@@ -13,6 +13,7 @@
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QJSValue>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QScopedPointer>
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
@@ -31,6 +33,7 @@
 #define private public
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformItem.h"
+#include "../src/WaveformEditorItem.h"
 #undef private
 #undef protected
 
@@ -429,6 +432,9 @@ private slots:
     void spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals();
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
+    void waveformEditorParsesSignedSampleWindow();
+    void waveformEditorSampleMarkersRequireSampleResolution();
+    void waveformEditorScrollsInsideCachedDetailWithoutRebuild();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
@@ -508,6 +514,7 @@ private slots:
 
 void QmlSmokeTest::initTestCase() {
     previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
 }
 
 void QmlSmokeTest::init() {
@@ -545,6 +552,15 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QObject *libraryView = qvariant_cast<QObject *>(root->property("libraryViewRef"));
     QVERIFY2(libraryView != nullptr, "Main.qml did not publish the library view ref");
     QCOMPARE(qvariant_cast<QObject *>(libraryView->property("model")), static_cast<QObject *>(&libraryModel));
+
+    QObject *modeSwitch = root->findChild<QObject *>(QStringLiteral("visualizationModeSwitch"));
+    QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
+    QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
+    QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
+    QVERIFY(setMode.isCallable());
+    setMode.call(QJSValueList{QJSValue(1)});
+    QTRY_COMPARE(modeSwitch->property("selectedMode").toInt(), 1);
+    setMode.call(QJSValueList{QJSValue(0)});
 
     bool invoked = QMetaObject::invokeMethod(root, "openItunesArtworkDialog");
     QVERIFY(invoked);
@@ -3470,6 +3486,93 @@ void QmlSmokeTest::waveformPeakUpdatesInvalidateChangedSuffix() {
     QVERIFY(item.m_cacheDirty);
     QVERIFY(item.m_dirtyRect.x() >= 160);
     QCOMPARE(item.m_dirtyRect.height(), 24);
+}
+
+void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
+    const auto appendF64 = [](QByteArray &out, double value) {
+        quint64 bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendLe<quint64>(out, bits);
+    };
+    const auto appendF32 = [](QByteArray &out, float value) {
+        quint32 bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendLe<quint32>(out, bits);
+    };
+    QByteArray frame;
+    frame.append("WVF1", 4);
+    appendLe<quint32>(frame, 48'000);
+    appendLe<quint16>(frame, 2);
+    appendLe<quint16>(frame, 0);
+    appendF64(frame, 1.0);
+    appendF64(frame, 1.000'041'666'666'666'7);
+    appendLe<quint32>(frame, 1);
+    appendLe<quint32>(frame, 2);
+    appendF32(frame, -0.75F);
+    appendF32(frame, -0.75F);
+    appendF32(frame, 0.25F);
+    appendF32(frame, 0.25F);
+    appendF32(frame, 0.5F);
+    appendF32(frame, 0.5F);
+    appendF32(frame, -0.125F);
+    appendF32(frame, -0.125F);
+
+    WaveformEditorItem::DetailWindow window;
+    QVERIFY(WaveformEditorItem::parseWindow(frame, &window));
+    QCOMPARE(window.sampleRateHz, 48'000);
+    QCOMPARE(window.channelCount, 2);
+    QCOMPARE(window.framesPerPoint, quint32(1));
+    QCOMPARE(window.pointCount, 2);
+    QCOMPARE(window.extrema.at(0), -0.75F);
+    QCOMPARE(window.extrema.at(6), -0.125F);
+}
+
+void QmlSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.pointCount = 100;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.extrema.assign(200, 0.0F);
+    item.setZoomLevel(1.0);
+    QVERIFY(item.samplePointsVisible());
+
+    item.m_detail.framesPerPoint = 2;
+    QVERIFY(!item.samplePointsVisible());
+}
+
+void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.pointCount = 1'000;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.extrema.assign(2'000, 0.0F);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(2.0);
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    QVERIFY(!item.m_cacheDirty);
+    QCOMPARE(item.m_cacheStartSeconds, 0.0);
+    QCOMPARE(item.m_cacheEndSeconds, 10.0);
+
+    item.setPositionSeconds(5.1);
+    QVERIFY(!item.m_cacheDirty);
 }
 
 void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {

@@ -30,6 +30,7 @@
 #include "SpectrogramItem.h"
 #include "TagEditorController.h"
 #include "WaveformItem.h"
+#include "WaveformEditorItem.h"
 
 namespace {
 
@@ -273,6 +274,7 @@ int main(int argc, char *argv[]) {
     engine.addImageProvider(QStringLiteral("covers"), new CoverImageProvider);
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+    qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &tagEditor);

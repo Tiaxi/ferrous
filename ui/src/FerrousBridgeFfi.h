@@ -52,6 +52,14 @@ std::uint8_t *ferrous_ffi_tag_editor_save(
     std::size_t save_len,
     std::size_t *len_out);
 void ferrous_ffi_tag_editor_free_buffer(std::uint8_t *ptr, std::size_t len);
+std::uint8_t *ferrous_ffi_waveform_window(
+    const std::uint8_t *path_ptr,
+    std::size_t path_len,
+    double start_seconds,
+    double end_seconds,
+    std::uint32_t max_points,
+    std::size_t *len_out);
+void ferrous_ffi_waveform_window_free(std::uint8_t *ptr, std::size_t len);
 double ferrous_ffi_fuzzy_match_score(
     const std::uint8_t *candidate_album_ptr, std::size_t candidate_album_len,
     const std::uint8_t *candidate_artist_ptr, std::size_t candidate_artist_len,
