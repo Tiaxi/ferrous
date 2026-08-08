@@ -110,8 +110,8 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     : QQuickPaintedItem(parent) {
     setAntialiasing(false);
     setOpaquePainting(true);
+    setFillColor(kBackground);
     setRenderTarget(QQuickPaintedItem::FramebufferObject);
-    setPerformanceHint(QQuickPaintedItem::FastFBOResizing);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
@@ -1244,6 +1244,10 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool stagingContinues = false;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
     const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
+    // The Qt 6.9+ FBO target uses the OpenGL paint engine. Replace the body
+    // pixels instead of blending with preserved framebuffer contents; the
+    // overlays switch back to source-over below for their intended alpha.
+    painter->setCompositionMode(QPainter::CompositionMode_Source);
     {
         QMutexLocker lock(&m_stateMutex);
         presentationCommitted = advanceStagedCacheLocked();
@@ -1323,6 +1327,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 QRect(0, 0, canvasWidth, canvasHeight), kBackground);
         }
     }
+    painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
     {
         QMutexLocker lock(&m_stateMutex);
         drawGridLocked(

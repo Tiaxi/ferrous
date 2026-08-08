@@ -4742,7 +4742,11 @@ void QmlSmokeTest::waveformEditorUsesFramebufferAndNativeFrameInterpolation() {
     item.setZoomLevel(2.0);
 
     QCOMPARE(item.renderTarget(), QQuickPaintedItem::FramebufferObject);
-    QVERIFY(item.performanceHints().testFlag(QQuickPaintedItem::FastFBOResizing));
+    QVERIFY(item.opaquePainting());
+    QCOMPARE(item.fillColor(), QColor(5, 9, 7));
+    QCOMPARE(
+        item.performanceHints(),
+        QQuickPaintedItem::PerformanceHints{});
 
     item.setPlaying(true);
     const double before = item.visibleRangeLocked().first;
