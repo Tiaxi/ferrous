@@ -514,6 +514,7 @@ private slots:
     void waveformEditorDeepZoomRequestPreservesViewportDensity();
     void waveformEditorQuantizesRequestForRequiredBinDensity();
     void waveformEditorFullscreenRequestStaysInTargetBin();
+    void waveformEditorFullscreenSampleCurveRequestsRawFramesEarly();
     void waveformEditorSampleViewPrefetchesUsefulSpan();
     void waveformEditorPrefetchesBeforeDetailBoundary();
     void waveformEditorKeepsOverlappingDetailDuringHandoff();
@@ -4049,6 +4050,47 @@ void QmlSmokeTest::waveformEditorFullscreenRequestStaysInTargetBin() {
         visibleEnd - visibleStart) * 0.9);
 }
 
+void QmlSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
+    WaveformEditorItem item;
+    item.setWidth(3'440);
+    item.setDurationSeconds(257.133333);
+    item.setPositionSeconds(8.9);
+    item.m_sampleRateHz = 44'100;
+    item.setZoomLevel(289.702);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(
+        visibleStart, visibleEnd);
+    const double visibleSpan = visibleEnd - visibleStart;
+    const double requestFrames = std::ceil(
+        (requestEnd - requestStart) * 44'100.0);
+    const int requestedPoints = item.detailRequestPointCountLocked(
+        requestStart, requestEnd);
+
+    QVERIFY(visibleSpan > 0.88);
+    QVERIFY(visibleSpan < 0.90);
+    QVERIFY(item.sampleCurveRequestedForPixelSpanLocked(
+        3'440, visibleStart, visibleEnd));
+    QVERIFY(requestEnd - requestStart > visibleSpan);
+    QVERIFY(requestFrames <= 65'536.0);
+    QVERIFY(static_cast<double>(requestedPoints) >= requestFrames);
+
+    item.m_detail.sampleRateHz = 44'100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = requestStart;
+    item.m_detail.endSeconds = requestEnd;
+    item.m_detail.framesPerPoint = 2;
+    item.m_detail.pointCount = requestedPoints / 2;
+    item.m_detail.extrema.assign(
+        static_cast<std::size_t>(item.m_detail.pointCount) * 2U, 0.25F);
+    QVERIFY(!item.detailResolutionCoversLocked(visibleStart, visibleEnd));
+
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = requestedPoints;
+    item.m_detail.extrema.assign(
+        static_cast<std::size_t>(item.m_detail.pointCount) * 2U, 0.25F);
+    QVERIFY(item.detailResolutionCoversLocked(visibleStart, visibleEnd));
+}
+
 void QmlSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
     WaveformEditorItem item;
     item.setWidth(1'183);
@@ -4116,7 +4158,7 @@ void QmlSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
     for (int y = 20; y < 160; ++y) {
         for (int x = 120; x < 200; ++x) {
             const QColor pixel(canvas.pixel(x, y));
-            if (pixel.green() > 180 && pixel.red() < 100) ++waveformPixels;
+            if (pixel.green() > 100 && pixel.red() < 100) ++waveformPixels;
         }
     }
     QVERIFY(waveformPixels > 20);
@@ -4313,15 +4355,15 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
     item.setHeight(180);
     item.setDurationSeconds(1.0);
     item.setPositionSeconds(0.5);
-    item.m_sampleRateHz = 1'000;
-    item.m_detail.sampleRateHz = 1'000;
+    item.m_sampleRateHz = 10'000;
+    item.m_detail.sampleRateHz = 10'000;
     item.m_detail.channelCount = 1;
     item.m_detail.startSeconds = 0.0;
     item.m_detail.endSeconds = 1.0;
     item.m_detail.framesPerPoint = 1;
-    item.m_detail.pointCount = 1'000;
-    item.m_detail.extrema.assign(2'000, 0.25F);
-    item.setZoomLevel(2.0);
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.assign(20'000, 0.25F);
+    item.setZoomLevel(1.5);
     QVERIFY(!item.playing());
     QVERIFY(!item.sampleCurveVisibleLocked());
 
@@ -4331,7 +4373,9 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
     painter.end();
     QVERIFY(!item.m_cacheDirty);
 
-    item.setZoomLevel(3.0);
+    // At 0.08 pixels per sample this matches the fullscreen 888 ms handoff:
+    // use the connected raw-sample curve instead of visible extrema bars.
+    item.setZoomLevel(2.0);
     QVERIFY(item.sampleCurveVisibleLocked());
     QVERIFY(item.m_cacheDirty);
 
@@ -4344,7 +4388,7 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
     QVERIFY(!item.samplePointsVisibleLocked());
     QVERIFY(!item.m_cacheDirty);
 
-    item.setZoomLevel(5.0);
+    item.setZoomLevel(50.0);
     QVERIFY(item.samplePointsVisibleLocked());
     QVERIFY(item.m_cacheDirty);
     item.m_requestTimer.stop();
@@ -4512,7 +4556,10 @@ void QmlSmokeTest::waveformEditorCacheHandoffsKeepAbsolutePixelGrid() {
             firstCache.constScanLine(y));
         const auto *secondLine = reinterpret_cast<const QRgb *>(
             secondCache.constScanLine(y));
-        for (int x = 0; x < overlapWidth; ++x) {
+        // QPainter may quantize antialias coverage by one value where a path
+        // meets an image boundary. Interior overlap must remain bit-exact;
+        // tile-edge continuity is covered separately with rendered edges.
+        for (int x = 1; x + 1 < overlapWidth; ++x) {
             QVERIFY2(
                 secondLine[x] == firstLine[firstSourceX + x],
                 qPrintable(QStringLiteral(

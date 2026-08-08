@@ -207,6 +207,8 @@ private:
     double sampleSpacingPixelsLocked(
         int pixelWidth, double visibleStart, double visibleEnd) const;
     double sampleSpacingPixelsLocked() const;
+    bool sampleCurveRequestedForPixelSpanLocked(
+        int pixelWidth, double visibleStart, double visibleEnd) const;
     bool sampleCurveVisibleLocked() const;
     bool samplePointsVisibleLocked() const;
     bool renderDetailDirectlyLocked(double visibleStart, double visibleEnd) const;

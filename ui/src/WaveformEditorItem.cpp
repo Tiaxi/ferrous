@@ -27,11 +27,12 @@ constexpr int kWindowHeaderBytes = 36;
 constexpr int kMaximumDetailPoints = 65'536;
 constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
-constexpr double kSampleCurvePixelsPerSample = 1.0;
+constexpr double kSampleCurvePixelsPerSample = 0.075;
 constexpr double kSampleMarkerPixelsPerSample = 2.0;
 constexpr double kDirectSamplePixelsPerSample = 4.0;
 constexpr double kMinimumSampleMarkerSize = 1.5;
 constexpr double kMaximumSampleMarkerSize = 3.0;
+constexpr double kSampleCurveSubpixelScale = 256.0;
 constexpr int kSampleCurveBoundaryMarginPixels = 8;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
 constexpr int kStagedCacheColumnsPerPaint = 128;
@@ -702,6 +703,11 @@ bool WaveformEditorItem::detailResolutionCoversPixelSpanLocked(
     const double detailSpan = m_detail.endSeconds - m_detail.startSeconds;
     const double visibleSpan = endSeconds - startSeconds;
     if (m_detail.pointCount <= 0 || detailSpan <= 0.0 || visibleSpan <= 0.0) return false;
+    if (sampleCurveRequestedForPixelSpanLocked(
+            pixelWidth, startSeconds, endSeconds)
+        && m_detail.framesPerPoint != 1) {
+        return false;
+    }
     const double visiblePoints = static_cast<double>(m_detail.pointCount)
         * visibleSpan / detailSpan;
     double requiredPoints = static_cast<double>(std::max(1, pixelWidth))
@@ -752,17 +758,21 @@ double WaveformEditorItem::detailRequestMarginLocked(double visibleSpan) const {
         / requiredVisibleDetailPointsLocked(visibleSpan);
     double maximumRequestSpan = densityLimitedSpan;
     if (m_sampleRateHz > 0) {
+        const bool rawSampleCurve = sampleCurveRequestedForPixelSpanLocked(
+            renderPixelWidthLocked(), 0.0, visibleSpan);
         const double requiredPoints = requiredVisibleDetailPointsLocked(
             visibleSpan);
         const double visibleFrames = visibleSpan
             * static_cast<double>(m_sampleRateHz);
-        const double targetFramesPerPoint = std::max(
-            1.0, std::floor(visibleFrames / requiredPoints));
+        const double targetFramesPerPoint = rawSampleCurve
+            ? 1.0
+            : std::max(1.0, std::floor(visibleFrames / requiredPoints));
         // Keep the requested frame count inside the bin size selected for the
         // viewport.  Otherwise a capped request can cross the next integer bin
         // boundary and remain permanently too coarse for the current zoom.
-        const double quantizedSpan = static_cast<double>(
-            kMaximumDetailPoints - 1)
+        const int pointCapacity = kMaximumDetailPoints
+            - (rawSampleCurve ? 2 : 1);
+        const double quantizedSpan = static_cast<double>(pointCapacity)
             * targetFramesPerPoint / static_cast<double>(m_sampleRateHz);
         maximumRequestSpan = std::min(maximumRequestSpan, quantizedSpan);
     }
@@ -792,11 +802,18 @@ int WaveformEditorItem::detailRequestPointCountLocked(
     if (m_sampleRateHz > 0) {
         const double requestFrames = std::ceil(
             requestSpan * static_cast<double>(m_sampleRateHz));
-        const double targetFramesPerPoint = std::max(
-            1.0, std::floor(requestFrames / std::max(1.0, required)));
-        requestedPoints = std::max(
-            requestedPoints,
-            static_cast<int>(std::ceil(requestFrames / targetFramesPerPoint)));
+        if (sampleCurveRequestedForPixelSpanLocked(
+                renderPixelWidthLocked(), visibleStart, visibleEnd)) {
+            requestedPoints = std::max(
+                requestedPoints, static_cast<int>(requestFrames));
+        } else {
+            const double targetFramesPerPoint = std::max(
+                1.0, std::floor(requestFrames / std::max(1.0, required)));
+            requestedPoints = std::max(
+                requestedPoints,
+                static_cast<int>(std::ceil(
+                    requestFrames / targetFramesPerPoint)));
+        }
     }
     return std::clamp(requestedPoints, 64, kMaximumDetailPoints);
 }
@@ -887,6 +904,20 @@ double WaveformEditorItem::sampleSpacingPixelsLocked() const {
     const auto [start, end] = visibleRangeLocked();
     return sampleSpacingPixelsLocked(
         std::max(1, static_cast<int>(std::floor(width()))), start, end);
+}
+
+bool WaveformEditorItem::sampleCurveRequestedForPixelSpanLocked(
+    int pixelWidth, double visibleStart, double visibleEnd) const {
+    const int sampleRate = m_sampleRateHz > 0
+        ? m_sampleRateHz
+        : m_detail.sampleRateHz;
+    if (sampleRate <= 0 || visibleEnd <= visibleStart) return false;
+    const double visibleSamples = (visibleEnd - visibleStart)
+        * static_cast<double>(sampleRate);
+    return static_cast<double>(std::max(1, pixelWidth))
+            / std::max(1.0, visibleSamples)
+            + kGridAlignmentEpsilon
+        >= kSampleCurvePixelsPerSample;
 }
 
 bool WaveformEditorItem::samplePointsVisibleLocked() const {
@@ -2112,17 +2143,20 @@ void WaveformEditorItem::drawDetailSliceLocked(
                 && (time < visibleStart || time >= visibleEnd)) {
                 continue;
             }
-            const double pixelPosition = (time - visibleStart)
-                / secondsPerPixel;
-            const int x = sampleCurve
-                ? static_cast<int>(std::round(pixelPosition))
-                : std::clamp(
-                    static_cast<int>(std::floor(
-                        pixelPosition + kGridAlignmentEpsilon)),
-                    0, width - 1);
+            const double pixelPosition = sampleCurve
+                ? std::round(
+                    (time / secondsPerPixel
+                        - visibleStart / secondsPerPixel)
+                    * kSampleCurveSubpixelScale)
+                    / kSampleCurveSubpixelScale
+                : (time - visibleStart) / secondsPerPixel;
+            const int x = std::clamp(
+                static_cast<int>(std::floor(
+                    pixelPosition + kGridAlignmentEpsilon)),
+                0, width - 1);
             if (sampleCurve) {
-                if (x < firstX - boundaryMargin
-                    || x >= lastX + boundaryMargin) {
+                if (pixelPosition < firstX - boundaryMargin
+                    || pixelPosition >= lastX + boundaryMargin) {
                     continue;
                 }
             } else if (x < firstX || x >= lastX) {
@@ -2139,7 +2173,8 @@ void WaveformEditorItem::drawDetailSliceLocked(
             }
             if (sampleCurve) {
                 polyline.append(QPointF(
-                    x, center - static_cast<double>(minimum) * half));
+                    pixelPosition,
+                    center - static_cast<double>(minimum) * half));
             } else {
                 const auto pixel = static_cast<std::size_t>(x - firstX);
                 pixelMinima[pixel] = std::min(pixelMinima[pixel], minimum);
