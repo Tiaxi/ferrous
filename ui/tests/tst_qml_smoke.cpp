@@ -443,12 +443,14 @@ private slots:
     void waveformEditorResizeRaisesDetailRequestDensity();
     void waveformEditorDeepZoomRequestPreservesViewportDensity();
     void waveformEditorQuantizesRequestForRequiredBinDensity();
+    void waveformEditorFullscreenRequestStaysInTargetBin();
     void waveformEditorSampleViewPrefetchesUsefulSpan();
     void waveformEditorPrefetchesBeforeDetailBoundary();
     void waveformEditorKeepsOverlappingDetailDuringHandoff();
     void waveformEditorWideDetailCacheKeepsViewportDensity();
     void waveformEditorWholeTrackAcceptsDecodedEndpointTolerance();
     void waveformEditorZoomOutUsesCompleteOverviewFallback();
+    void waveformEditorZoomOutKeepsReadyDetail();
     void waveformEditorZoomInRetainsCoveredCacheWhileRefining();
     void waveformEditorSparseZoomDetailFallsBackUntilReady();
     void waveformEditorSeparatesChannelPanes();
@@ -456,6 +458,7 @@ private slots:
     void waveformEditorReusesSameSizedCache();
     void waveformEditorBuildsReplacementCacheIncrementally();
     void waveformEditorZoomedPlaybackUsesScrollingCache();
+    void waveformEditorPlaybackOverviewCacheHasForwardHeadroom();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
@@ -3800,6 +3803,32 @@ void QmlSmokeTest::waveformEditorQuantizesRequestForRequiredBinDensity() {
         visibleEnd - visibleStart) * 0.9);
 }
 
+void QmlSmokeTest::waveformEditorFullscreenRequestStaysInTargetBin() {
+    WaveformEditorItem item;
+    item.setWidth(3'440);
+    item.setDurationSeconds(257.133333);
+    item.setPositionSeconds(72.0);
+    item.m_sampleRateHz = 44'100;
+    item.setZoomLevel(475.06);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(
+        visibleStart, visibleEnd);
+    const int requestedPoints = item.detailRequestPointCountLocked(
+        requestStart, requestEnd);
+    const double requestFrames = std::ceil(
+        (requestEnd - requestStart) * 44'100.0);
+    const double framesPerPoint = std::ceil(
+        requestFrames / static_cast<double>(requestedPoints));
+    const double returnedPoints = std::ceil(requestFrames / framesPerPoint);
+    const double visiblePoints = returnedPoints
+        * (visibleEnd - visibleStart) / (requestEnd - requestStart);
+
+    QCOMPARE(framesPerPoint, 1.0);
+    QVERIFY(requestedPoints <= 65'536);
+    QVERIFY(visiblePoints >= item.requiredVisibleDetailPointsLocked(
+        visibleEnd - visibleStart) * 0.9);
+}
+
 void QmlSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
     WaveformEditorItem item;
     item.setWidth(1'183);
@@ -3812,8 +3841,11 @@ void QmlSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
         visibleStart, visibleEnd);
 
     QVERIFY(visibleEnd - visibleStart < 0.004);
-    QVERIFY(requestEnd - requestStart > 0.49);
-    QVERIFY(item.detailRequestPointCountLocked(requestStart, requestEnd) < 23'000);
+    QVERIFY(requestEnd - requestStart > 1.4);
+    const int requestedPoints = item.detailRequestPointCountLocked(
+        requestStart, requestEnd);
+    QVERIFY(requestedPoints > 60'000);
+    QVERIFY(requestedPoints <= 65'536);
 }
 
 void QmlSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
@@ -3959,6 +3991,28 @@ void QmlSmokeTest::waveformEditorZoomOutUsesCompleteOverviewFallback() {
 
     QVERIFY(fullCanvas.pixelColor(20, 20).green() > 180);
     QVERIFY(fullCanvas.pixelColor(300, 20).green() > 180);
+}
+
+void QmlSmokeTest::waveformEditorZoomOutKeepsReadyDetail() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.m_sampleRateHz = 640;
+    item.m_detail.sampleRateHz = 640;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 6'400;
+    item.m_detail.extrema.assign(12'800, 0.25F);
+    item.setZoomLevel(5.0);
+    QVERIFY(!item.m_zoomFallbackToOverview);
+
+    item.setZoomLevel(2.0);
+
+    QVERIFY(!item.m_zoomFallbackToOverview);
 }
 
 void QmlSmokeTest::waveformEditorZoomInRetainsCoveredCacheWhileRefining() {
@@ -4142,6 +4196,30 @@ void QmlSmokeTest::waveformEditorZoomedPlaybackUsesScrollingCache() {
 
     QVERIFY(!item.m_cacheDirty);
     QVERIFY(!item.m_cache.isNull());
+}
+
+void QmlSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(10.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
+    item.m_playing = true;
+    item.m_positionUpdatedAt = std::chrono::steady_clock::now();
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const double visibleSpan = visibleEnd - visibleStart;
+
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(item.m_cacheEndSeconds > visibleEnd + visibleSpan * 1.6);
+    item.setPositionSeconds(5.5);
+    QVERIFY(!item.m_cacheDirty);
 }
 
 void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {

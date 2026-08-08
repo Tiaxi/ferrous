@@ -170,6 +170,9 @@ private:
     double detailRequestMarginLocked(double visibleSpan) const;
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
     int renderPixelWidthLocked() const;
+    std::pair<double, double> cacheRenderRangeLocked(
+        double visibleStart, double visibleEnd,
+        double sourceStart, double sourceEnd) const;
     double maximumZoomLevelLocked() const;
     bool clampZoomToMaximumLocked();
     bool samplePointsVisibleLocked() const;

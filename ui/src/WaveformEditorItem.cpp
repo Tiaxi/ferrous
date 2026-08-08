@@ -20,13 +20,14 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <tuple>
 
 namespace {
 constexpr int kWindowHeaderBytes = 36;
 constexpr int kMaximumDetailPoints = 65'536;
 constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
-constexpr double kMinimumDetailMarginSeconds = 0.25;
+constexpr double kMinimumDetailMarginSeconds = 0.75;
 constexpr int kStagedCacheColumnsPerPaint = 128;
 constexpr QColor kBackground(5, 9, 7);
 constexpr QColor kWaveform(54, 225, 161);
@@ -177,7 +178,7 @@ void WaveformEditorItem::setPositionSeconds(double value) {
         const bool rangeMoved = std::abs(previousRange.first - start) > 0.0001
             || std::abs(previousRange.second - end) > 0.0001;
         cacheNeedsUpdate = rangeMoved
-            && (m_detail.pointCount == 0
+            && (m_cacheDirty
                 || start < m_cacheStartSeconds
                 || end > m_cacheEndSeconds);
         if (cacheNeedsUpdate) invalidateCacheLocked();
@@ -222,7 +223,13 @@ void WaveformEditorItem::setZoomLevel(double value) {
             && !m_cacheDirty
             && visibleStart >= m_cacheStartSeconds
             && visibleEnd <= m_cacheEndSeconds;
-        if (value < previousZoom) m_zoomFallbackToOverview = true;
+        const bool detailReady = detailCoversRangeLocked(visibleStart, visibleEnd)
+            && detailResolutionCoversLocked(visibleStart, visibleEnd);
+        if (value < previousZoom) {
+            m_zoomFallbackToOverview = !detailReady;
+        } else if (detailReady) {
+            m_zoomFallbackToOverview = false;
+        }
         if (!zoomingInInsideCache) invalidateCacheLocked();
     }
     emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
@@ -590,8 +597,24 @@ double WaveformEditorItem::detailRequestMarginLocked(double visibleSpan) const {
     const double densityLimitedSpan = visibleSpan
         * static_cast<double>(kMaximumDetailPoints)
         / requiredVisibleDetailPointsLocked(visibleSpan);
+    double maximumRequestSpan = densityLimitedSpan;
+    if (m_sampleRateHz > 0) {
+        const double requiredPoints = requiredVisibleDetailPointsLocked(
+            visibleSpan);
+        const double visibleFrames = visibleSpan
+            * static_cast<double>(m_sampleRateHz);
+        const double targetFramesPerPoint = std::max(
+            1.0, std::floor(visibleFrames / requiredPoints));
+        // Keep the requested frame count inside the bin size selected for the
+        // viewport.  Otherwise a capped request can cross the next integer bin
+        // boundary and remain permanently too coarse for the current zoom.
+        const double quantizedSpan = static_cast<double>(
+            kMaximumDetailPoints - 1)
+            * targetFramesPerPoint / static_cast<double>(m_sampleRateHz);
+        maximumRequestSpan = std::min(maximumRequestSpan, quantizedSpan);
+    }
     const double maximumMargin = std::max(
-        0.0, (densityLimitedSpan - visibleSpan) * 0.5);
+        0.0, (maximumRequestSpan - visibleSpan) * 0.5);
     return std::min(preferredMargin, maximumMargin);
 }
 
@@ -628,6 +651,22 @@ int WaveformEditorItem::detailRequestPointCountLocked(
 int WaveformEditorItem::renderPixelWidthLocked() const {
     const double scale = window() != nullptr ? window()->effectiveDevicePixelRatio() : 1.0;
     return std::max(1, static_cast<int>(std::ceil(width() * scale)));
+}
+
+std::pair<double, double> WaveformEditorItem::cacheRenderRangeLocked(
+    double visibleStart, double visibleEnd,
+    double sourceStart, double sourceEnd) const {
+    const double visibleSpan = std::max(
+        0.000'000'001, visibleEnd - visibleStart);
+    const double precedingSpan = m_playing ? visibleSpan * 0.25 : visibleSpan;
+    const double followingSpan = m_playing ? visibleSpan * 1.75 : visibleSpan;
+    double renderStart = std::max(
+        sourceStart, visibleStart - precedingSpan);
+    double renderEnd = std::min(
+        sourceEnd, visibleEnd + followingSpan);
+    renderStart = std::min(renderStart, visibleStart);
+    renderEnd = std::max(renderEnd, visibleEnd);
+    return {renderStart, renderEnd};
 }
 
 double WaveformEditorItem::maximumZoomLevelLocked() const {
@@ -744,9 +783,9 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         request = !detailOrPendingRequestCoversLocked(start, end);
         const bool direct = renderDetailDirectlyLocked(start, end);
         if (!direct
-            && (m_detail.pointCount == 0
-            || start < m_cacheStartSeconds
-            || end > m_cacheEndSeconds)) {
+            && (m_cacheDirty
+                || start < m_cacheStartSeconds
+                || end > m_cacheEndSeconds)) {
             invalidateCacheLocked();
         }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -811,12 +850,9 @@ void WaveformEditorItem::beginStagedCacheLocked() {
         return;
     }
     const double visibleSpan = visibleEnd - visibleStart;
-    const double renderStart = std::min(
-        visibleStart,
-        std::max(m_detail.startSeconds, visibleStart - visibleSpan));
-    const double renderEnd = std::max(
-        visibleEnd,
-        std::min(m_detail.endSeconds, visibleEnd + visibleSpan));
+    const auto [renderStart, renderEnd] = cacheRenderRangeLocked(
+        visibleStart, visibleEnd,
+        m_detail.startSeconds, m_detail.endSeconds);
     const double renderSpan = std::max(visibleSpan, renderEnd - renderStart);
     const int viewportWidth = renderPixelWidthLocked();
     const int renderWidth = std::clamp(
@@ -1152,18 +1188,25 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     const auto profileRebuildStarted = std::chrono::steady_clock::now();
 #endif
     const auto [visibleStart, visibleEnd] = visibleRangeLocked();
-    double renderStart = visibleStart;
-    double renderEnd = visibleEnd;
     const bool detailCoversViewport = detailCoversRangeLocked(
         visibleStart, visibleEnd);
     const bool detailReady = detailCoversViewport
         && detailResolutionCoversLocked(visibleStart, visibleEnd);
+    const bool detailOverlapsViewport = m_detail.pointCount > 0
+        && visibleStart < m_detail.endSeconds
+        && visibleEnd > m_detail.startSeconds;
+    const bool useOverview = m_zoomFallbackToOverview
+        || (detailCoversViewport && !detailReady)
+        || !detailOverlapsViewport;
+    double renderStart = visibleStart;
+    double renderEnd = visibleEnd;
     if (detailReady) {
-        const double visibleSpan = visibleEnd - visibleStart;
-        renderStart = std::max(m_detail.startSeconds, visibleStart - visibleSpan);
-        renderEnd = std::min(m_detail.endSeconds, visibleEnd + visibleSpan);
-        renderStart = std::min(renderStart, visibleStart);
-        renderEnd = std::max(renderEnd, visibleEnd);
+        std::tie(renderStart, renderEnd) = cacheRenderRangeLocked(
+            visibleStart, visibleEnd,
+            m_detail.startSeconds, m_detail.endSeconds);
+    } else if (useOverview) {
+        std::tie(renderStart, renderEnd) = cacheRenderRangeLocked(
+            visibleStart, visibleEnd, 0.0, m_durationSeconds);
     }
     const double visibleSpan = std::max(0.000'000'001, visibleEnd - visibleStart);
     const double renderSpan = std::max(visibleSpan, renderEnd - renderStart);
@@ -1180,19 +1223,10 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     const int channels = displayedChannelCountLocked();
     if (detailReady) {
         drawDetailLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
-    } else if (m_zoomFallbackToOverview
-               || (detailCoversViewport
-                   && !detailResolutionCoversLocked(visibleStart, visibleEnd))) {
+    } else if (useOverview) {
         drawOverviewLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
     } else {
-        const bool detailOverlapsViewport = m_detail.pointCount > 0
-            && visibleStart < m_detail.endSeconds
-            && visibleEnd > m_detail.startSeconds;
-        if (detailOverlapsViewport) {
-            drawDetailLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
-        } else {
-            drawOverviewLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
-        }
+        drawDetailLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
     }
     painter.end();
     m_cachedViewportWidth = width;
