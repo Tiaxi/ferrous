@@ -183,6 +183,7 @@ ApplicationWindow {
         property string currentTrackFormatLabel: ""
         property string currentTrackChannelLayoutText: ""
         property string currentTrackChannelLayoutIconKey: ""
+        property int currentTrackChannels: 0
         property int currentTrackSampleRateHz: 0
         property int currentTrackBitDepth: 0
         property int currentTrackCurrentBitrateKbps: 0

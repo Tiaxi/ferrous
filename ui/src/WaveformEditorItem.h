@@ -30,6 +30,7 @@ class WaveformEditorItem : public QQuickPaintedItem {
     Q_PROPERTY(int viewMode READ viewMode WRITE setViewMode NOTIFY viewModeChanged)
     Q_PROPERTY(qulonglong mutedChannelsMask READ mutedChannelsMask WRITE setMutedChannelsMask NOTIFY mutedChannelsMaskChanged)
     Q_PROPERTY(int soloedChannel READ soloedChannel WRITE setSoloedChannel NOTIFY soloedChannelChanged)
+    Q_PROPERTY(int channelCountHint READ channelCountHint WRITE setChannelCountHint NOTIFY channelCountHintChanged)
     Q_PROPERTY(int channelCount READ channelCount NOTIFY channelCountChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(bool samplePointsVisible READ samplePointsVisible NOTIFY samplePointsVisibleChanged)
@@ -59,12 +60,15 @@ public:
     void setMutedChannelsMask(qulonglong value);
     int soloedChannel() const;
     void setSoloedChannel(int value);
+    int channelCountHint() const;
+    void setChannelCountHint(int value);
     int channelCount() const;
     int sampleRateHz() const;
     bool samplePointsVisible() const;
 
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE double maximumZoomLevel() const;
+    Q_INVOKABLE void setHoverPosition(double x, double y, bool active);
 
     void paint(QPainter *painter) override;
 
@@ -80,6 +84,7 @@ signals:
     void viewModeChanged();
     void mutedChannelsMaskChanged();
     void soloedChannelChanged();
+    void channelCountHintChanged();
     void channelCountChanged();
     void sampleRateHzChanged();
     void samplePointsVisibleChanged();
@@ -110,6 +115,8 @@ private:
     void scheduleDetailRequest();
     void requestDetailWindow();
     void clearDetailLocked();
+    void clearPendingRequestLocked();
+    bool detailOrPendingRequestCoversLocked(double startSeconds, double endSeconds) const;
     std::pair<double, double> visibleRangeLocked() const;
     double maximumZoomLevelLocked() const;
     bool samplePointsVisibleLocked() const;
@@ -138,7 +145,8 @@ private:
     int m_viewMode{0};
     qulonglong m_mutedChannelsMask{0};
     int m_soloedChannel{-1};
-    int m_channelCount{1};
+    int m_channelCountHint{1};
+    int m_channelCount{0};
     int m_sampleRateHz{0};
     bool m_hoverActive{false};
     QPointF m_hoverPosition;
@@ -150,5 +158,9 @@ private:
     double m_cacheStartSeconds{0.0};
     double m_cacheEndSeconds{0.0};
     quint64 m_requestGeneration{0};
+    bool m_requestInFlight{false};
+    double m_requestedStartSeconds{0.0};
+    double m_requestedEndSeconds{0.0};
+    int m_requestedMaxPoints{0};
     QTimer m_requestTimer;
 };

@@ -386,6 +386,7 @@ private slots:
     void loadsExtractedQmlSlicesWithFallbackProps();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
+    void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void mainWindowContentStartsBelowMenuBar();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -435,6 +436,12 @@ private slots:
     void waveformEditorParsesSignedSampleWindow();
     void waveformEditorSampleMarkersRequireSampleResolution();
     void waveformEditorScrollsInsideCachedDetailWithoutRebuild();
+    void waveformEditorUsesChannelHintBeforeDetailArrives();
+    void waveformEditorCoalescesPlaybackRequestsWithoutStarvingTimer();
+    void waveformEditorPendingWindowSuppressesDuplicateRequest();
+    void waveformEditorZoomSupersedesCoarsePendingRequest();
+    void waveformEditorHoverDrawsCrosshairAndReadouts();
+    void waveformEditorRulersRemainVisibleWithoutGrid();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
@@ -556,6 +563,7 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QObject *modeSwitch = root->findChild<QObject *>(QStringLiteral("visualizationModeSwitch"));
     QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
+    QVERIFY(modeSwitch->property("width").toDouble() <= 50.0);
     QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
     QVERIFY(setMode.isCallable());
     setMode.call(QJSValueList{QJSValue(1)});
@@ -624,6 +632,7 @@ Item {
         property string currentTrackGenre: ""
         property var currentTrackYear: null
         property int currentTrackNumber: 0
+        property int currentTrackChannels: 0
         property var itunesArtworkResults: []
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
@@ -1183,6 +1192,61 @@ Item {
     QVERIFY(channelMarker->property("visible").toBool());
     QCOMPARE(surface->property("pointerCursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
     QCOMPARE(pointerArea->property("cursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
+}
+
+void QmlSmokeTest::waveformSurfaceFollowsSharedChannelAndOverlaySettings() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "viewers" as Viewers
+
+Item {
+    width: 640
+    height: 320
+
+    QtObject {
+        id: bridge
+        property string currentTrackPath: ""
+        property var waveformPeaksPacked: ""
+        property real durationSeconds: 10
+        property int spectrogramViewMode: 1
+        property bool spectrogramZoomEnabled: true
+        property bool showSpectrogramScale: true
+        property bool showSpectrogramCrosshair: true
+        property int currentTrackChannels: 2
+        property var mutedChannelsMask: 0
+        property int soloedChannel: -1
+        property int channelButtonsVisibility: 2
+        function isChannelMuted(channelIndex) { return false }
+        function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+    }
+
+    Viewers.WaveformSurface {
+        id: surface
+        objectName: "waveformSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *surface = root->findChild<QObject *>(QStringLiteral("waveformSurface"));
+    auto *waveform = root->findChild<WaveformEditorItem *>(
+        QStringLiteral("waveformEditorItem"));
+    QVERIFY(surface != nullptr);
+    QVERIFY(waveform != nullptr);
+    QTRY_COMPARE(waveform->viewMode(), 1);
+    QTRY_COMPARE(waveform->channelCount(), 2);
+    QTRY_VERIFY(waveform->gridEnabled());
+    QTRY_VERIFY(waveform->crosshairEnabled());
+
+    surface->setProperty("interactiveOverlaysVisible", false);
+    QTRY_VERIFY(!waveform->crosshairEnabled());
 }
 
 void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
@@ -3573,6 +3637,117 @@ void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
 
     item.setPositionSeconds(5.1);
     QVERIFY(!item.m_cacheDirty);
+}
+
+void QmlSmokeTest::waveformEditorUsesChannelHintBeforeDetailArrives() {
+    WaveformEditorItem item;
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+
+    QCOMPARE(item.channelCount(), 2);
+
+    item.m_channelCount = 6;
+    QCOMPARE(item.channelCount(), 6);
+}
+
+void QmlSmokeTest::waveformEditorCoalescesPlaybackRequestsWithoutStarvingTimer() {
+    WaveformEditorItem item;
+    item.scheduleDetailRequest();
+    QVERIFY(item.m_requestTimer.isActive());
+    const int initialRemaining = item.m_requestTimer.remainingTime();
+
+    QTest::qWait(25);
+    item.scheduleDetailRequest();
+
+    QVERIFY(item.m_requestTimer.isActive());
+    QVERIFY(item.m_requestTimer.remainingTime() < initialRemaining - 10);
+}
+
+void QmlSmokeTest::waveformEditorPendingWindowSuppressesDuplicateRequest() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(10.0);
+    item.m_requestTimer.stop();
+    item.m_requestInFlight = true;
+    item.m_requestedStartSeconds = 0.0;
+    item.m_requestedEndSeconds = 10.0;
+    item.m_requestedMaxPoints = 1'200;
+
+    item.setPositionSeconds(2.0);
+
+    QVERIFY(!item.m_requestTimer.isActive());
+}
+
+void QmlSmokeTest::waveformEditorZoomSupersedesCoarsePendingRequest() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(10.0);
+    item.m_requestTimer.stop();
+    item.m_requestInFlight = true;
+    item.m_requestedStartSeconds = 0.0;
+    item.m_requestedEndSeconds = 10.0;
+    item.m_requestedMaxPoints = 1'200;
+
+    item.setZoomLevel(4.0);
+
+    QVERIFY(!item.m_requestInFlight);
+    QVERIFY(item.m_requestTimer.isActive());
+    QCOMPARE(item.zoomLevel(), 4.0);
+}
+
+void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setCrosshairEnabled(true);
+
+    QImage baseline(320, 180, QImage::Format_RGB32);
+    baseline.fill(Qt::black);
+    QPainter baselinePainter(&baseline);
+    item.paint(&baselinePainter);
+    baselinePainter.end();
+
+    item.setHoverPosition(137.0, 53.0, true);
+    QImage hovered(320, 180, QImage::Format_RGB32);
+    hovered.fill(Qt::black);
+    QPainter hoverPainter(&hovered);
+    item.paint(&hoverPainter);
+    hoverPainter.end();
+
+    int changedPixels = 0;
+    for (int y = 0; y < hovered.height(); ++y) {
+        for (int x = 0; x < hovered.width(); ++x) {
+            if (hovered.pixel(x, y) != baseline.pixel(x, y)) ++changedPixels;
+        }
+    }
+    QVERIFY(changedPixels > 250);
+}
+
+void QmlSmokeTest::waveformEditorRulersRemainVisibleWithoutGrid() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
+    item.setGridEnabled(false);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    int rulerPixels = 0;
+    for (int y = 0; y < canvas.height(); ++y) {
+        for (int x = 260; x < canvas.width(); ++x) {
+            const QColor pixel(canvas.pixel(x, y));
+            const int maximum = std::max({pixel.red(), pixel.green(), pixel.blue()});
+            const int minimum = std::min({pixel.red(), pixel.green(), pixel.blue()});
+            if (minimum > 80 && maximum - minimum < 40) ++rulerPixels;
+        }
+    }
+    QVERIFY(rulerPixels > 50);
 }
 
 void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {

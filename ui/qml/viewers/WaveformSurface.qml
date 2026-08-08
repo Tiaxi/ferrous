@@ -46,6 +46,7 @@ Item {
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
             && root.interactiveOverlaysVisible
         viewMode: root.uiBridge.spectrogramViewMode
+        channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
         mutedChannelsMask: root.uiBridge.mutedChannelsMask
         soloedChannel: root.uiBridge.soloedChannel
         onSeekRequested: function(seconds) {
@@ -55,12 +56,16 @@ Item {
         }
 
         HoverHandler {
+            id: waveformHover
             cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
             onPointChanged: {
+                waveform.setHoverPosition(point.position.x, point.position.y, hovered)
                 if (root.pointerActivity) {
                     root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
                 }
             }
+            onHoveredChanged: waveform.setHoverPosition(
+                point.position.x, point.position.y, hovered)
         }
     }
 

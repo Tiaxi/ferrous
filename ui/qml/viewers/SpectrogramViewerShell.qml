@@ -104,11 +104,12 @@ Item {
         Components.VisualizationModeSwitch {
             z: 20
             anchors.top: parent.top
-            anchors.left: parent.left
+            anchors.horizontalCenter: parent.horizontalCenter
             anchors.margins: 12
             controlsVisible: root.fullscreenControlsVisible
             selectedMode: root.visualizationMode
             setMode: root.setVisualizationMode
+            pointerActivity: root.noteFullscreenPointerActivity
         }
 
         Rectangle {
@@ -199,11 +200,12 @@ Item {
         Components.VisualizationModeSwitch {
             z: 20
             anchors.top: parent.top
-            anchors.left: parent.left
+            anchors.horizontalCenter: parent.horizontalCenter
             anchors.margins: 12
             controlsVisible: root.fullscreenControlsVisible
             selectedMode: root.visualizationMode
             setMode: root.setVisualizationMode
+            pointerActivity: root.noteFullscreenPointerActivity
         }
 
         Rectangle {

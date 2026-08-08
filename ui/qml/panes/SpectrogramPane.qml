@@ -32,7 +32,7 @@ Rectangle {
     Components.VisualizationModeSwitch {
         z: 20
         anchors.top: parent.top
-        anchors.right: parent.right
+        anchors.horizontalCenter: parent.horizontalCenter
         anchors.margins: 8
         selectedMode: root.visualizationMode
         setMode: root.setVisualizationMode

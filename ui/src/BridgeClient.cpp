@@ -2074,6 +2074,10 @@ QString BridgeClient::currentTrackChannelLayoutIconKey() const {
     return channelLayoutIconKey(m_currentTrackChannels);
 }
 
+int BridgeClient::currentTrackChannels() const {
+    return m_currentTrackChannels;
+}
+
 int BridgeClient::currentTrackSampleRateHz() const {
     return m_currentTrackSampleRateHz;
 }

@@ -96,6 +96,7 @@ bool WaveformEditorItem::crosshairEnabled() const { QMutexLocker lock(&m_stateMu
 int WaveformEditorItem::viewMode() const { QMutexLocker lock(&m_stateMutex); return m_viewMode; }
 qulonglong WaveformEditorItem::mutedChannelsMask() const { QMutexLocker lock(&m_stateMutex); return m_mutedChannelsMask; }
 int WaveformEditorItem::soloedChannel() const { QMutexLocker lock(&m_stateMutex); return m_soloedChannel; }
+int WaveformEditorItem::channelCountHint() const { QMutexLocker lock(&m_stateMutex); return m_channelCountHint; }
 int WaveformEditorItem::channelCount() const { QMutexLocker lock(&m_stateMutex); return displayedChannelCountLocked(); }
 int WaveformEditorItem::sampleRateHz() const { QMutexLocker lock(&m_stateMutex); return m_sampleRateHz; }
 bool WaveformEditorItem::samplePointsVisible() const { QMutexLocker lock(&m_stateMutex); return samplePointsVisibleLocked(); }
@@ -106,6 +107,7 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         if (m_sourcePath == value) return;
         m_sourcePath = value;
         ++m_requestGeneration;
+        clearPendingRequestLocked();
         clearDetailLocked();
         invalidateCacheLocked();
     }
@@ -132,7 +134,7 @@ void WaveformEditorItem::setPositionSeconds(double value) {
         const auto previousRange = visibleRangeLocked();
         m_positionSeconds = value;
         const auto [start, end] = visibleRangeLocked();
-        request = m_detail.pointCount == 0 || start < m_detail.startSeconds || end > m_detail.endSeconds;
+        request = !detailOrPendingRequestCoversLocked(start, end);
         const bool rangeMoved = std::abs(previousRange.first - start) > 0.0001
             || std::abs(previousRange.second - end) > 0.0001;
         cacheNeedsUpdate = rangeMoved
@@ -147,7 +149,7 @@ void WaveformEditorItem::setPositionSeconds(double value) {
 }
 
 void WaveformEditorItem::setDurationSeconds(double value) {
-    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); ++m_requestGeneration; clearDetailLocked(); invalidateCacheLocked(); }
+    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); ++m_requestGeneration; clearPendingRequestLocked(); clearDetailLocked(); invalidateCacheLocked(); }
     emit durationSecondsChanged(); emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
 }
 
@@ -158,6 +160,7 @@ void WaveformEditorItem::setZoomLevel(double value) {
         if (std::abs(m_zoomLevel - value) < 0.0001) return;
         m_zoomLevel = value;
         ++m_requestGeneration;
+        clearPendingRequestLocked();
         invalidateCacheLocked();
     }
     emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
@@ -169,14 +172,40 @@ void WaveformEditorItem::setCrosshairEnabled(bool value) { { QMutexLocker lock(&
 void WaveformEditorItem::setViewMode(int value) { value = std::clamp(value, 0, 1); { QMutexLocker lock(&m_stateMutex); if (m_viewMode == value) return; m_viewMode = value; invalidateCacheLocked(); } emit viewModeChanged(); emit channelCountChanged(); update(); }
 void WaveformEditorItem::setMutedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_mutedChannelsMask == value) return; m_mutedChannelsMask = value; invalidateCacheLocked(); } emit mutedChannelsMaskChanged(); update(); }
 void WaveformEditorItem::setSoloedChannel(int value) { { QMutexLocker lock(&m_stateMutex); if (m_soloedChannel == value) return; m_soloedChannel = value; invalidateCacheLocked(); } emit soloedChannelChanged(); update(); }
+void WaveformEditorItem::setChannelCountHint(int value) {
+    value = std::clamp(value, 1, 64);
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_channelCountHint == value) return;
+        m_channelCountHint = value;
+        invalidateCacheLocked();
+    }
+    emit channelCountHintChanged();
+    emit channelCountChanged();
+    update();
+}
 
 void WaveformEditorItem::resetZoom() { setZoomLevel(1.0); }
 double WaveformEditorItem::maximumZoomLevel() const { QMutexLocker lock(&m_stateMutex); return maximumZoomLevelLocked(); }
 
+void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_hoverActive = active;
+        m_hoverPosition = QPointF(x, y);
+    }
+    if (crosshairEnabled()) update();
+}
+
 void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.size() != oldGeometry.size()) {
-        { QMutexLocker lock(&m_stateMutex); invalidateCacheLocked(); }
+        {
+            QMutexLocker lock(&m_stateMutex);
+            ++m_requestGeneration;
+            clearPendingRequestLocked();
+            invalidateCacheLocked();
+        }
         scheduleDetailRequest();
     }
 }
@@ -221,7 +250,9 @@ bool WaveformEditorItem::parseWindow(const QByteArray &bytes, DetailWindow *wind
 }
 
 void WaveformEditorItem::scheduleDetailRequest() {
-    if (thread() == QThread::currentThread()) m_requestTimer.start();
+    if (thread() == QThread::currentThread() && !m_requestTimer.isActive()) {
+        m_requestTimer.start();
+    }
 }
 
 void WaveformEditorItem::requestDetailWindow() {
@@ -240,19 +271,25 @@ void WaveformEditorItem::requestDetailWindow() {
         path = m_sourcePath;
         points = std::clamp(static_cast<int>(std::ceil(width() * 3.0)), 64, 16'384);
         generation = ++m_requestGeneration;
+        m_requestInFlight = true;
+        m_requestedStartSeconds = requestStart;
+        m_requestedEndSeconds = requestEnd;
+        m_requestedMaxPoints = points;
     }
     auto *watcher = new QFutureWatcher<QByteArray>(this);
     connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [this, watcher, generation]() {
         const QByteArray bytes = watcher->result();
         watcher->deleteLater();
         DetailWindow next;
-        if (!parseWindow(bytes, &next)) return;
+        const bool parsed = parseWindow(bytes, &next);
         bool channelsChanged = false;
         bool rateChanged = false;
         bool pointsChanged = false;
         {
             QMutexLocker lock(&m_stateMutex);
             if (generation != m_requestGeneration) return;
+            clearPendingRequestLocked();
+            if (!parsed) return;
             const bool oldPointsVisible = samplePointsVisibleLocked();
             channelsChanged = m_channelCount != next.channelCount;
             rateChanged = m_sampleRateHz != next.sampleRateHz;
@@ -270,7 +307,23 @@ void WaveformEditorItem::requestDetailWindow() {
     watcher->setFuture(QtConcurrent::run(&WaveformEditorItem::decodeWindow, path, requestStart, requestEnd, points));
 }
 
-void WaveformEditorItem::clearDetailLocked() { m_detail = DetailWindow{}; m_channelCount = 1; m_sampleRateHz = 0; }
+void WaveformEditorItem::clearDetailLocked() { m_detail = DetailWindow{}; m_channelCount = 0; m_sampleRateHz = 0; }
+void WaveformEditorItem::clearPendingRequestLocked() {
+    m_requestInFlight = false;
+    m_requestedStartSeconds = 0.0;
+    m_requestedEndSeconds = 0.0;
+    m_requestedMaxPoints = 0;
+}
+bool WaveformEditorItem::detailOrPendingRequestCoversLocked(
+    double startSeconds, double endSeconds) const {
+    const bool detailCovers = m_detail.pointCount > 0
+        && startSeconds >= m_detail.startSeconds
+        && endSeconds <= m_detail.endSeconds;
+    const bool pendingCovers = m_requestInFlight
+        && startSeconds >= m_requestedStartSeconds
+        && endSeconds <= m_requestedEndSeconds;
+    return detailCovers || pendingCovers;
+}
 std::pair<double, double> WaveformEditorItem::visibleRangeLocked() const {
     if (m_durationSeconds <= 0.0) return {0.0, 0.0};
     const double span = m_durationSeconds / std::max(1.0, m_zoomLevel);
@@ -294,7 +347,10 @@ bool WaveformEditorItem::samplePointsVisibleLocked() const {
 }
 
 void WaveformEditorItem::invalidateCacheLocked() { m_cacheDirty = true; }
-int WaveformEditorItem::displayedChannelCountLocked() const { return m_viewMode == 0 ? 1 : std::max(1, m_channelCount); }
+int WaveformEditorItem::displayedChannelCountLocked() const {
+    const int sourceChannels = m_channelCount > 0 ? m_channelCount : m_channelCountHint;
+    return m_viewMode == 0 ? 1 : std::max(1, sourceChannels);
+}
 bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
     if (m_viewMode == 0) return false;
     if (m_soloedChannel >= 0) return channel != m_soloedChannel;
@@ -371,12 +427,12 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     QPainter painter(&m_cache);
     painter.setRenderHint(QPainter::Antialiasing, false);
     const int channels = displayedChannelCountLocked();
-    if (m_gridEnabled) drawGridLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
     if (m_detail.pointCount > 0 && visibleStart >= m_detail.startSeconds && visibleEnd <= m_detail.endSeconds) {
         drawDetailLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
     } else {
         drawOverviewLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
     }
+    drawGridLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
     painter.end();
     m_cachedViewportWidth = width;
     m_cachedViewportHeight = height;
@@ -397,7 +453,7 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
         const double interval = selectTimeInterval(span, width);
         for (double time = std::ceil(visibleStart / interval) * interval; time <= visibleEnd; time += interval) {
             const int x = static_cast<int>(std::round((time - visibleStart) / span * (width - 1)));
-            painter.drawLine(x, 0, x, height - 1);
+            if (m_gridEnabled) painter.drawLine(x, 0, x, height - 1);
             const QString label = formatTime(time, span);
             const int labelX = std::clamp(
                 x - metrics.horizontalAdvance(label) / 2,
@@ -414,7 +470,8 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
         const double bottom = static_cast<double>(channel + 1) * height / channels;
         const double center = (top + bottom) * 0.5;
         const double half = (bottom - top) * 0.5;
-        painter.setPen(QPen(kCenterLine, 1.0)); painter.drawLine(0, static_cast<int>(center), width - 1, static_cast<int>(center));
+        painter.setPen(QPen(kCenterLine, 1.0));
+        painter.drawLine(0, static_cast<int>(center), width - 1, static_cast<int>(center));
         const QString silenceLabel = QStringLiteral("-∞");
         painter.setPen(QColor(152, 165, 157));
         painter.drawText(
@@ -429,11 +486,14 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
             const double amplitude = std::pow(10.0, db / 20.0);
             const int upper = static_cast<int>(std::round(center - amplitude * (half - 1.0)));
             const int lower = static_cast<int>(std::round(center + amplitude * (half - 1.0)));
-            painter.drawLine(0, upper, width - 1, upper);
-            painter.drawLine(0, lower, width - 1, lower);
+            if (m_gridEnabled) {
+                painter.drawLine(0, upper, width - 1, upper);
+                painter.drawLine(0, lower, width - 1, lower);
+            }
             const QString text = db == 0.0 ? QStringLiteral("0") : QString::number(static_cast<int>(db));
             painter.setPen(QColor(152, 165, 157));
             painter.drawText(width - metrics.horizontalAdvance(text) - 3, upper + metrics.ascent(), text);
+            painter.drawText(width - metrics.horizontalAdvance(text) - 3, lower - 2, text);
             painter.setPen(QPen(kGrid, 1.0));
         }
     }
