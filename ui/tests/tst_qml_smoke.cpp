@@ -4056,7 +4056,7 @@ void QmlSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
     item.setDurationSeconds(257.133333);
     item.setPositionSeconds(8.9);
     item.m_sampleRateHz = 44'100;
-    item.setZoomLevel(289.702);
+    item.setZoomLevel(185.409);
     const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
     const auto [requestStart, requestEnd] = item.requestRangeLocked(
         visibleStart, visibleEnd);
@@ -4066,8 +4066,8 @@ void QmlSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
     const int requestedPoints = item.detailRequestPointCountLocked(
         requestStart, requestEnd);
 
-    QVERIFY(visibleSpan > 0.88);
-    QVERIFY(visibleSpan < 0.90);
+    QVERIFY(visibleSpan > 1.38);
+    QVERIFY(visibleSpan < 1.40);
     QVERIFY(item.sampleCurveRequestedForPixelSpanLocked(
         3'440, visibleStart, visibleEnd));
     QVERIFY(requestEnd - requestStart > visibleSpan);
@@ -4355,14 +4355,14 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
     item.setHeight(180);
     item.setDurationSeconds(1.0);
     item.setPositionSeconds(0.5);
-    item.m_sampleRateHz = 10'000;
-    item.m_detail.sampleRateHz = 10'000;
+    item.m_sampleRateHz = 12'000;
+    item.m_detail.sampleRateHz = 12'000;
     item.m_detail.channelCount = 1;
     item.m_detail.startSeconds = 0.0;
     item.m_detail.endSeconds = 1.0;
     item.m_detail.framesPerPoint = 1;
-    item.m_detail.pointCount = 10'000;
-    item.m_detail.extrema.assign(20'000, 0.25F);
+    item.m_detail.pointCount = 12'000;
+    item.m_detail.extrema.assign(24'000, 0.25F);
     item.setZoomLevel(1.5);
     QVERIFY(!item.playing());
     QVERIFY(!item.sampleCurveVisibleLocked());
@@ -4373,7 +4373,7 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
     painter.end();
     QVERIFY(!item.m_cacheDirty);
 
-    // At 0.08 pixels per sample this matches the fullscreen 888 ms handoff:
+    // At about 0.067 pixels per sample this exercises the early raw handoff:
     // use the connected raw-sample curve instead of visible extrema bars.
     item.setZoomLevel(2.0);
     QVERIFY(item.sampleCurveVisibleLocked());
@@ -4386,9 +4386,16 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
 
     item.setZoomLevel(4.0);
     QVERIFY(!item.samplePointsVisibleLocked());
+    // Sample curves are rasterized at their exact seconds-per-pixel scale;
+    // zooming further within the curve regime must not magnify the old cache.
+    QVERIFY(item.m_cacheDirty);
+
+    QPainter sharperCurvePainter(&canvas);
+    item.paint(&sharperCurvePainter);
+    sharperCurvePainter.end();
     QVERIFY(!item.m_cacheDirty);
 
-    item.setZoomLevel(50.0);
+    item.setZoomLevel(75.0);
     QVERIFY(item.samplePointsVisibleLocked());
     QVERIFY(item.m_cacheDirty);
     item.m_requestTimer.stop();

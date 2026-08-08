@@ -27,7 +27,7 @@ constexpr int kWindowHeaderBytes = 36;
 constexpr int kMaximumDetailPoints = 65'536;
 constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
-constexpr double kSampleCurvePixelsPerSample = 0.075;
+constexpr double kSampleCurvePixelsPerSample = 0.055;
 constexpr double kSampleMarkerPixelsPerSample = 2.0;
 constexpr double kDirectSamplePixelsPerSample = 4.0;
 constexpr double kMinimumSampleMarkerSize = 1.5;
@@ -306,13 +306,22 @@ void WaveformEditorItem::setZoomLevel(double value) {
         const bool samplePresentationChanged = !deferZoomOut
             && (previousSampleCurve != sampleCurveVisibleLocked()
                 || previousSamplePoints != samplePointsVisibleLocked());
+        // A raw-sample curve is rasterized at the presented zoom's exact
+        // seconds-per-pixel scale.  Magnifying that raster at the next zoom
+        // produces soft stair steps even though the underlying detail still
+        // contains every sample, so each sample-curve zoom needs a fresh
+        // scale-specific cache.
+        const bool sampleCurveScaleChanged = !deferZoomOut
+            && presentationChanged
+            && sampleCurveVisibleLocked();
         if (!deferZoomOut && value < previousPresentedZoom) {
             m_zoomFallbackToOverview = !detailReady;
         } else if (!deferZoomOut && detailReady) {
             m_zoomFallbackToOverview = false;
         }
         if (!deferZoomOut
-            && (!zoomingInInsideCache || samplePresentationChanged)) {
+            && (!zoomingInInsideCache || samplePresentationChanged
+                || sampleCurveScaleChanged)) {
             invalidateCacheLocked();
         }
     }
