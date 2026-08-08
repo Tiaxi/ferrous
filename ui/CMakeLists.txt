@@ -96,6 +96,7 @@ qt_add_qml_module(ferrous
         qml/Main.qml
         qml/components/AlbumArtTile.qml
         qml/components/ColumnHeaderRow.qml
+        qml/components/FullscreenControlsAutoHide.qml
         qml/components/MetadataMarqueeRow.qml
         qml/components/PopupTransition.qml
         qml/components/SurfaceCard.qml
