@@ -30,8 +30,13 @@ constexpr double kDetailPointsPerPixel = 4.0;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
 constexpr auto kStagedCacheBudget = std::chrono::microseconds(750);
 constexpr int kMaximumStagedRenderColumnsPerPaint = 256;
-constexpr int kStagedCacheCopyChunkColumns = 128;
+constexpr int kStagedCacheCopyChunkRows = 8;
+constexpr int kMaximumStagedCopyRowsPerPaint = 64;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
+constexpr double kPositionRegressionToleranceSeconds = 0.03;
+constexpr double kPositionSeekJumpSeconds = 0.75;
+constexpr double kPositionServoMaximumErrorSeconds = 0.15;
+constexpr double kPositionServoAlpha = 0.25;
 constexpr QColor kBackground(5, 9, 7);
 constexpr QColor kWaveform(54, 225, 161);
 constexpr QColor kMutedWaveform(74, 104, 92);
@@ -175,9 +180,22 @@ void WaveformEditorItem::setPositionSeconds(double value) {
         QMutexLocker lock(&m_stateMutex);
         value = std::clamp(value, 0.0, std::max(0.0, m_durationSeconds));
         if (std::abs(m_positionSeconds - value) < 0.0001) return;
+        const auto now = std::chrono::steady_clock::now();
         const auto previousRange = visibleRangeLocked();
+        if (m_playing) {
+            const double displayedPosition = displayedPositionSecondsLocked();
+            const double error = value - displayedPosition;
+            const bool heartbeatRegression =
+                error < -kPositionRegressionToleranceSeconds
+                && error > -kPositionSeekJumpSeconds;
+            if (heartbeatRegression) {
+                value = displayedPosition;
+            } else if (std::abs(error) < kPositionServoMaximumErrorSeconds) {
+                value = displayedPosition + kPositionServoAlpha * error;
+            }
+        }
         m_positionSeconds = value;
-        m_positionUpdatedAt = std::chrono::steady_clock::now();
+        m_positionUpdatedAt = now;
         const auto [start, end] = visibleRangeLocked();
         const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
@@ -506,9 +524,13 @@ void WaveformEditorItem::requestDetailWindow() {
                 if (stageReplacement) beginStagedCacheLocked();
                 if (!deferredZoomStage
                     && !stageReplacement
-                    && (firstDetail || channelsChanged || zoomChanged
-                        || replaceOverviewFallback
-                        || m_detail.framesPerPoint < previousFramesPerPoint)) {
+                    && detailResultRequiresImmediateCacheRefreshLocked(
+                        firstDetail,
+                        channelsChanged,
+                        zoomChanged,
+                        replaceOverviewFallback,
+                        previousFramesPerPoint,
+                        detailReady)) {
                     invalidateCacheLocked();
                 }
                 requestFollowup = !detailOrPendingRequestCoversLocked(
@@ -795,6 +817,20 @@ bool WaveformEditorItem::renderDetailDirectlyLocked(
         && detailResolutionCoversLocked(visibleStart, visibleEnd);
 }
 
+bool WaveformEditorItem::detailResultRequiresImmediateCacheRefreshLocked(
+    bool firstDetail, bool channelsChanged, bool zoomChanged,
+    bool replaceOverviewFallback, quint32 previousFramesPerPoint,
+    bool detailReady) const {
+    const bool preciseDetailReplacesOverview = detailReady
+        && m_cacheFramesPerPoint == 0;
+    return firstDetail
+        || channelsChanged
+        || zoomChanged
+        || replaceOverviewFallback
+        || m_detail.framesPerPoint < previousFramesPerPoint
+        || preciseDetailReplacesOverview;
+}
+
 double WaveformEditorItem::detailPointTimeLocked(int point) const {
     if (m_detail.sampleRateHz <= 0 || m_detail.framesPerPoint == 0) {
         return m_detail.startSeconds;
@@ -966,6 +1002,7 @@ void WaveformEditorItem::clearStagedCacheLocked() {
     m_stagedCacheDisplayedChannels = 0;
     m_stagedCacheCopySourceX = 0;
     m_stagedCacheCopyWidth = 0;
+    m_stagedCacheCopyNextRow = 0;
     m_stagedCacheCopiedColumns = 0;
     m_stagedCacheNextX = 0;
     m_stagedCacheCommitsDeferredZoom = false;
@@ -1036,29 +1073,41 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
     if (m_stagedCache.isNull()) return false;
     const auto stageStarted = std::chrono::steady_clock::now();
     int processedColumns = 0;
-    while (m_stagedCacheCopiedColumns < m_stagedCacheCopyWidth) {
-        const int copyColumns = std::min(
-            kStagedCacheCopyChunkColumns,
-            m_stagedCacheCopyWidth - m_stagedCacheCopiedColumns);
-        const int sourceX = m_stagedCacheCopySourceX
-            + m_stagedCacheCopiedColumns;
-        const int destinationX = m_stagedCacheCopiedColumns;
-        const qsizetype copyBytes = static_cast<qsizetype>(copyColumns)
+    int copiedRowsThisPaint = 0;
+    while (m_stagedCacheCopyWidth > 0
+        && m_stagedCacheCopyNextRow < m_stagedCache.height()
+        && copiedRowsThisPaint < kMaximumStagedCopyRowsPerPaint) {
+        const int copyRows = std::min({
+            kStagedCacheCopyChunkRows,
+            m_stagedCache.height() - m_stagedCacheCopyNextRow,
+            kMaximumStagedCopyRowsPerPaint - copiedRowsThisPaint,
+        });
+        const qsizetype copyBytes = static_cast<qsizetype>(m_stagedCacheCopyWidth)
             * static_cast<qsizetype>(sizeof(QRgb));
-        for (int y = 0; y < m_stagedCache.height(); ++y) {
+        for (int row = 0; row < copyRows; ++row) {
+            const int y = m_stagedCacheCopyNextRow + row;
             std::memcpy(
-                m_stagedCache.scanLine(y)
-                    + static_cast<qsizetype>(destinationX) * sizeof(QRgb),
+                m_stagedCache.scanLine(y),
                 m_cache.constScanLine(y)
-                    + static_cast<qsizetype>(sourceX) * sizeof(QRgb),
+                    + static_cast<qsizetype>(m_stagedCacheCopySourceX)
+                        * sizeof(QRgb),
                 static_cast<std::size_t>(copyBytes));
         }
-        m_stagedCacheCopiedColumns += copyColumns;
-        processedColumns += copyColumns;
+        m_stagedCacheCopyNextRow += copyRows;
+        copiedRowsThisPaint += copyRows;
+        processedColumns += std::max(
+            1,
+            static_cast<int>(std::ceil(
+                static_cast<double>(m_stagedCacheCopyWidth * copyRows)
+                / static_cast<double>(m_stagedCache.height()))));
         if (std::chrono::steady_clock::now() - stageStarted
             >= kStagedCacheBudget) {
             break;
         }
+    }
+    if (m_stagedCacheCopyWidth == 0
+        || m_stagedCacheCopyNextRow >= m_stagedCache.height()) {
+        m_stagedCacheCopiedColumns = m_stagedCacheCopyWidth;
     }
     if (m_stagedCacheCopiedColumns >= m_stagedCacheCopyWidth
         && m_stagedCacheNextX < m_stagedCache.width()
@@ -1108,6 +1157,7 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
             m_profile.maximumStagedCacheMs, stageMs);
         m_profile.lastStagedCacheMs = stageMs;
         m_profile.lastStagedCacheColumns = processedColumns;
+        m_profile.lastStagedCacheCopyRows = copiedRowsThisPaint;
     }
 #endif
     if (m_stagedCacheCopiedColumns < m_stagedCacheCopyWidth
@@ -1175,6 +1225,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool profileOverviewFallback = false;
     double profileStagedCacheMs = 0.0;
     int profileStagedCacheColumns = 0;
+    int profileStagedCacheCopyRows = 0;
 #endif
     QImage cache;
     double visibleStart = 0.0;
@@ -1210,6 +1261,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         profileOverviewFallback = m_zoomFallbackToOverview;
         profileStagedCacheMs = m_profile.lastStagedCacheMs;
         profileStagedCacheColumns = m_profile.lastStagedCacheColumns;
+        profileStagedCacheCopyRows = m_profile.lastStagedCacheCopyRows;
         profileRebuiltCache = !directDetail
             && (m_cacheDirty
                 || m_cachedViewportWidth != renderPixelWidthLocked()
@@ -1238,16 +1290,37 @@ void WaveformEditorItem::paint(QPainter *painter) {
     }
     if (presentationCommitted) emit samplePointsVisibleChanged();
     if (!directDetail) {
+        bool cachePaintCoversCanvas = false;
+        bool cachePainted = false;
         if (cacheSecondsPerPixel > 0.0 && visibleEnd > visibleStart) {
             const double sourceX = (visibleStart - cacheStart)
                 / cacheSecondsPerPixel;
             const double sourceWidth = (visibleEnd - visibleStart)
                 / cacheSecondsPerPixel;
-            painter->drawImage(
-                QRectF(0.0, 0.0, canvasWidth, canvasHeight), cache,
-                QRectF(sourceX, 0.0, sourceWidth, cache.height()));
-        } else {
-            painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+            const QRectF requestedSource(
+                sourceX, 0.0, sourceWidth, cache.height());
+            const QRectF clippedSource = requestedSource.intersected(
+                QRectF(0.0, 0.0, cache.width(), cache.height()));
+            if (!clippedSource.isEmpty()) {
+                cachePaintCoversCanvas = clippedSource == requestedSource;
+                if (!cachePaintCoversCanvas) {
+                    painter->fillRect(
+                        QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+                }
+                const double destinationScale = static_cast<double>(canvasWidth)
+                    / sourceWidth;
+                const QRectF destination(
+                    (clippedSource.left() - sourceX) * destinationScale,
+                    0.0,
+                    clippedSource.width() * destinationScale,
+                    canvasHeight);
+                painter->drawImage(destination, cache, clippedSource);
+                cachePainted = true;
+            }
+        }
+        if (!cachePainted) {
+            painter->fillRect(
+                QRect(0, 0, canvasWidth, canvasHeight), kBackground);
         }
     }
     {
@@ -1361,7 +1434,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         if (logSpike) {
             std::fprintf(
                 stderr,
-                "[ui-waveform-editor] paint_spike ms=%.3f zoom=%.3f span=%.6f mode=%s visible_points=%d detail_points=%d frames_per_point=%u fallback=%d cache_rebuilt=%d rebuild_ms=%.3f stage_ms=%.3f stage_columns=%d cache=%dx%d viewport=%dx%d\n",
+                "[ui-waveform-editor] paint_spike ms=%.3f zoom=%.3f span=%.6f mode=%s visible_points=%d detail_points=%d frames_per_point=%u fallback=%d cache_rebuilt=%d rebuild_ms=%.3f stage_ms=%.3f stage_columns=%d stage_copy_rows=%d cache=%dx%d viewport=%dx%d\n",
                 paintMs,
                 profileZoom,
                 profileSpan,
@@ -1374,6 +1447,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 profileRebuildMs,
                 profileStagedCacheMs,
                 profileStagedCacheColumns,
+                profileStagedCacheCopyRows,
                 profileCacheWidth,
                 profileCacheHeight,
                 canvasWidth,

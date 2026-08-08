@@ -136,6 +136,7 @@ private:
         double maximumStagedCacheMs{0.0};
         double lastStagedCacheMs{0.0};
         int lastStagedCacheColumns{0};
+        int lastStagedCacheCopyRows{0};
         double maximumFrameGapMs{0.0};
         double decodeMs{0.0};
         double maximumDecodeMs{0.0};
@@ -186,6 +187,10 @@ private:
     bool clampZoomToMaximumLocked();
     bool samplePointsVisibleLocked() const;
     bool renderDetailDirectlyLocked(double visibleStart, double visibleEnd) const;
+    bool detailResultRequiresImmediateCacheRefreshLocked(
+        bool firstDetail, bool channelsChanged, bool zoomChanged,
+        bool replaceOverviewFallback, quint32 previousFramesPerPoint,
+        bool detailReady) const;
     double detailPointTimeLocked(int point) const;
     std::pair<int, int> detailPointRangeLocked(
         double visibleStart, double visibleEnd) const;
@@ -259,6 +264,7 @@ private:
     int m_stagedCacheDisplayedChannels{0};
     int m_stagedCacheCopySourceX{0};
     int m_stagedCacheCopyWidth{0};
+    int m_stagedCacheCopyNextRow{0};
     int m_stagedCacheCopiedColumns{0};
     int m_stagedCacheNextX{0};
     bool m_stagedCacheCommitsDeferredZoom{false};
