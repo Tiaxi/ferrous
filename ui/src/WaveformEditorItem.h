@@ -204,6 +204,8 @@ private:
         double sourceStart, double sourceEnd) const;
     double maximumZoomLevelLocked() const;
     bool clampZoomToMaximumLocked();
+    double sampleSpacingPixelsLocked(
+        int pixelWidth, double visibleStart, double visibleEnd) const;
     double sampleSpacingPixelsLocked() const;
     bool sampleCurveVisibleLocked() const;
     bool samplePointsVisibleLocked() const;

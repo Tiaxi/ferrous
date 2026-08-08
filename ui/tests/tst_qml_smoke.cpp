@@ -523,6 +523,7 @@ private slots:
     void waveformEditorDeferredZoomOutCommitsCompletedDetailCache();
     void waveformEditorZoomOutKeepsReadyDetail();
     void waveformEditorZoomInRetainsCoveredCacheWhileRefining();
+    void waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoundaries();
     void waveformEditorSparseZoomDetailFallsBackUntilReady();
     void waveformEditorSeparatesChannelPanes();
     void waveformEditorRestrictsDetailWorkToVisiblePoints();
@@ -4303,6 +4304,49 @@ void QmlSmokeTest::waveformEditorZoomInRetainsCoveredCacheWhileRefining() {
 
     QVERIFY(!item.m_cacheDirty);
     QVERIFY(!item.m_zoomFallbackToOverview);
+    item.m_requestTimer.stop();
+}
+
+void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoundaries() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setPositionSeconds(0.5);
+    item.m_sampleRateHz = 1'000;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 1'000;
+    item.m_detail.extrema.assign(2'000, 0.25F);
+    item.setZoomLevel(2.0);
+    QVERIFY(!item.playing());
+    QVERIFY(!item.sampleCurveVisibleLocked());
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    QVERIFY(!item.m_cacheDirty);
+
+    item.setZoomLevel(3.0);
+    QVERIFY(item.sampleCurveVisibleLocked());
+    QVERIFY(item.m_cacheDirty);
+
+    QPainter curvePainter(&canvas);
+    item.paint(&curvePainter);
+    curvePainter.end();
+    QVERIFY(!item.m_cacheDirty);
+
+    item.setZoomLevel(4.0);
+    QVERIFY(!item.samplePointsVisibleLocked());
+    QVERIFY(!item.m_cacheDirty);
+
+    item.setZoomLevel(5.0);
+    QVERIFY(item.samplePointsVisibleLocked());
+    QVERIFY(item.m_cacheDirty);
     item.m_requestTimer.stop();
 }
 

@@ -272,6 +272,8 @@ void WaveformEditorItem::setZoomLevel(double value) {
         QMutexLocker lock(&m_stateMutex);
         value = std::clamp(value, 1.0, maximumZoomLevelLocked());
         if (std::abs(m_zoomLevel - value) < 0.0001) return;
+        const bool previousSampleCurve = sampleCurveVisibleLocked();
+        const bool previousSamplePoints = samplePointsVisibleLocked();
         const double previousPresentedZoom = m_presentedZoomLevel;
         m_zoomLevel = value;
         ++m_requestGeneration;
@@ -300,12 +302,18 @@ void WaveformEditorItem::setZoomLevel(double value) {
             && !m_cacheDirty
             && visibleStart >= m_cacheStartSeconds
             && visibleEnd <= m_cacheEndSeconds;
+        const bool samplePresentationChanged = !deferZoomOut
+            && (previousSampleCurve != sampleCurveVisibleLocked()
+                || previousSamplePoints != samplePointsVisibleLocked());
         if (!deferZoomOut && value < previousPresentedZoom) {
             m_zoomFallbackToOverview = !detailReady;
         } else if (!deferZoomOut && detailReady) {
             m_zoomFallbackToOverview = false;
         }
-        if (!deferZoomOut && !zoomingInInsideCache) invalidateCacheLocked();
+        if (!deferZoomOut
+            && (!zoomingInInsideCache || samplePresentationChanged)) {
+            invalidateCacheLocked();
+        }
     }
     emit zoomLevelChanged();
     if (presentationChanged) emit samplePointsVisibleChanged();
@@ -866,11 +874,19 @@ bool WaveformEditorItem::clampZoomToMaximumLocked() {
     return targetChanged;
 }
 
-double WaveformEditorItem::sampleSpacingPixelsLocked() const {
+double WaveformEditorItem::sampleSpacingPixelsLocked(
+    int pixelWidth, double visibleStart, double visibleEnd) const {
     if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return 0.0;
+    const double visiblePoints = (visibleEnd - visibleStart)
+        * static_cast<double>(std::max(1, m_detail.sampleRateHz));
+    return static_cast<double>(std::max(1, pixelWidth))
+        / std::max(1.0, visiblePoints);
+}
+
+double WaveformEditorItem::sampleSpacingPixelsLocked() const {
     const auto [start, end] = visibleRangeLocked();
-    const double visiblePoints = (end - start) * static_cast<double>(std::max(1, m_detail.sampleRateHz));
-    return width() / std::max(1.0, visiblePoints);
+    return sampleSpacingPixelsLocked(
+        std::max(1, static_cast<int>(std::floor(width()))), start, end);
 }
 
 bool WaveformEditorItem::samplePointsVisibleLocked() const {
@@ -2050,10 +2066,14 @@ void WaveformEditorItem::drawDetailSliceLocked(
     firstX = std::clamp(firstX, 0, width);
     lastX = std::clamp(lastX, firstX, width);
     if (detailSpan <= 0.0 || visibleSpan <= 0.0 || firstX >= lastX) return;
-    const bool sampleCurve = sampleCurveVisibleLocked();
-    const bool sampleMarkers = samplePointsVisibleLocked();
+    const double sampleSpacing = sampleSpacingPixelsLocked(
+        width, visibleStart, visibleEnd);
+    const bool sampleCurve = sampleSpacing + kGridAlignmentEpsilon
+        >= kSampleCurvePixelsPerSample;
+    const bool sampleMarkers = sampleSpacing + kGridAlignmentEpsilon
+        >= kSampleMarkerPixelsPerSample;
     const double sampleMarkerSize = std::clamp(
-        sampleSpacingPixelsLocked() * 0.75,
+        sampleSpacing * 0.75,
         kMinimumSampleMarkerSize,
         kMaximumSampleMarkerSize);
     const double secondsPerPixel = visibleSpan
