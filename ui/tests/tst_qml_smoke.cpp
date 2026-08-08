@@ -449,7 +449,8 @@ private slots:
     void waveformEditorKeepsOverlappingDetailDuringHandoff();
     void waveformEditorWideDetailCacheKeepsViewportDensity();
     void waveformEditorWholeTrackAcceptsDecodedEndpointTolerance();
-    void waveformEditorZoomOutUsesCompleteOverviewFallback();
+    void waveformEditorZoomOutDefersOverviewUntilDetailReady();
+    void waveformEditorDeferredZoomOutCommitsCompletedDetailCache();
     void waveformEditorZoomOutKeepsReadyDetail();
     void waveformEditorZoomInRetainsCoveredCacheWhileRefining();
     void waveformEditorSparseZoomDetailFallsBackUntilReady();
@@ -3961,7 +3962,7 @@ void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
     QVERIFY(waveformPixels > 200);
 }
 
-void QmlSmokeTest::waveformEditorZoomOutUsesCompleteOverviewFallback() {
+void QmlSmokeTest::waveformEditorZoomOutDefersOverviewUntilDetailReady() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -3983,15 +3984,66 @@ void QmlSmokeTest::waveformEditorZoomOutUsesCompleteOverviewFallback() {
     item.paint(&zoomedPainter);
     zoomedPainter.end();
 
+    item.setZoomLevel(3.0);
     item.setZoomLevel(1.0);
-    QVERIFY(item.m_zoomFallbackToOverview);
-    QImage fullCanvas(320, 180, QImage::Format_RGB32);
-    QPainter fullPainter(&fullCanvas);
-    item.paint(&fullPainter);
-    fullPainter.end();
 
-    QVERIFY(fullCanvas.pixelColor(20, 20).green() > 180);
-    QVERIFY(fullCanvas.pixelColor(300, 20).green() > 180);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(item.m_presentedZoomLevel, 5.0);
+    QVERIFY(item.m_zoomOutHandoffPending);
+    QVERIFY(!item.m_zoomFallbackToOverview);
+    QVERIFY(!item.m_cacheDirty);
+    const auto [presentedStart, presentedEnd] = item.visibleRangeLocked();
+    QCOMPARE(presentedEnd - presentedStart, 2.0);
+    const auto [requestStart, requestEnd] = item.detailRequestVisibleRangeLocked();
+    QCOMPARE(requestStart, 0.0);
+    QCOMPARE(requestEnd, 10.0);
+    item.m_requestTimer.stop();
+}
+
+void QmlSmokeTest::waveformEditorDeferredZoomOutCommitsCompletedDetailCache() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 4.0;
+    item.m_detail.endSeconds = 6.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 200;
+    item.m_detail.extrema.assign(400, 0.25F);
+    item.setZoomLevel(5.0);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    item.setZoomLevel(1.0);
+    item.m_requestTimer.stop();
+    QVERIFY(item.m_zoomOutHandoffPending);
+
+    item.m_sampleRateHz = 640;
+    item.m_detail.sampleRateHz = 640;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 6'400;
+    item.m_detail.extrema.assign(12'800, 0.5F);
+    item.beginStagedCacheForRangeLocked(0.0, 10.0, true);
+    QVERIFY(!item.m_stagedCache.isNull());
+    QVERIFY(!item.advanceStagedCacheLocked());
+    QCOMPARE(item.m_presentedZoomLevel, 5.0);
+    while (!item.m_stagedCache.isNull()) {
+        item.advanceStagedCacheLocked();
+    }
+
+    QCOMPARE(item.m_presentedZoomLevel, 1.0);
+    QVERIFY(!item.m_zoomOutHandoffPending);
+    QVERIFY(!item.m_cacheDirty);
+    QCOMPARE(item.m_cacheStartSeconds, 0.0);
+    QCOMPARE(item.m_cacheEndSeconds, 10.0);
 }
 
 void QmlSmokeTest::waveformEditorZoomOutKeepsReadyDetail() {

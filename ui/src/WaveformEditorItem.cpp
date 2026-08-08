@@ -147,6 +147,8 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         ++m_requestGeneration;
         clearPendingRequestLocked();
         clearDetailLocked();
+        m_presentedZoomLevel = m_zoomLevel;
+        m_zoomOutHandoffPending = false;
         m_zoomFallbackToOverview = false;
         invalidateCacheLocked();
     }
@@ -159,7 +161,7 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
 }
 
 void WaveformEditorItem::setOverviewData(const QByteArray &value) {
-    { QMutexLocker lock(&m_stateMutex); if (m_overviewData == value) return; m_overviewData = value; invalidateCacheLocked(); }
+    { QMutexLocker lock(&m_stateMutex); if (m_overviewData == value) return; m_overviewData = value; if (!m_zoomOutHandoffPending) invalidateCacheLocked(); }
     emit overviewDataChanged(); update();
 }
 
@@ -174,10 +176,12 @@ void WaveformEditorItem::setPositionSeconds(double value) {
         m_positionSeconds = value;
         m_positionUpdatedAt = std::chrono::steady_clock::now();
         const auto [start, end] = visibleRangeLocked();
-        request = !detailOrPendingRequestCoversLocked(start, end);
+        const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
+        request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
         const bool rangeMoved = std::abs(previousRange.first - start) > 0.0001
             || std::abs(previousRange.second - end) > 0.0001;
-        cacheNeedsUpdate = rangeMoved
+        cacheNeedsUpdate = !m_zoomOutHandoffPending
+            && rangeMoved
             && (m_cacheDirty
                 || start < m_cacheStartSeconds
                 || end > m_cacheEndSeconds);
@@ -205,34 +209,55 @@ void WaveformEditorItem::setPlaying(bool value) {
 }
 
 void WaveformEditorItem::setDurationSeconds(double value) {
-    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); ++m_requestGeneration; clearPendingRequestLocked(); clearDetailLocked(); m_zoomFallbackToOverview = false; invalidateCacheLocked(); }
+    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); m_presentedZoomLevel = m_zoomLevel; m_zoomOutHandoffPending = false; ++m_requestGeneration; clearPendingRequestLocked(); clearDetailLocked(); m_zoomFallbackToOverview = false; invalidateCacheLocked(); }
     emit durationSecondsChanged(); emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
 }
 
 void WaveformEditorItem::setZoomLevel(double value) {
+    bool presentationChanged = false;
     {
         QMutexLocker lock(&m_stateMutex);
         value = std::clamp(value, 1.0, maximumZoomLevelLocked());
         if (std::abs(m_zoomLevel - value) < 0.0001) return;
-        const double previousZoom = m_zoomLevel;
+        const double previousPresentedZoom = m_presentedZoomLevel;
         m_zoomLevel = value;
         ++m_requestGeneration;
         clearPendingRequestLocked();
-        const auto [visibleStart, visibleEnd] = visibleRangeLocked();
-        const bool zoomingInInsideCache = value > previousZoom
+        clearStagedCacheLocked();
+        const auto [visibleStart, visibleEnd] = visibleRangeForZoomLocked(value);
+        const bool detailReady = detailCoversRangeLocked(visibleStart, visibleEnd)
+            && detailResolutionCoversLocked(visibleStart, visibleEnd);
+        const auto [presentedStart, presentedEnd] = visibleRangeLocked();
+        const bool canHoldPresentation = !m_cacheDirty
+            && presentedStart >= m_cacheStartSeconds
+            && presentedEnd <= m_cacheEndSeconds;
+        const bool deferZoomOut = value < previousPresentedZoom
+            && !detailReady
+            && canHoldPresentation;
+        m_zoomOutHandoffPending = deferZoomOut;
+        if (deferZoomOut) {
+            m_zoomFallbackToOverview = false;
+        } else {
+            m_presentedZoomLevel = value;
+            presentationChanged = std::abs(
+                m_presentedZoomLevel - previousPresentedZoom) >= 0.0001;
+        }
+        const bool zoomingInInsideCache = !deferZoomOut
+            && value > previousPresentedZoom
             && !m_cacheDirty
             && visibleStart >= m_cacheStartSeconds
             && visibleEnd <= m_cacheEndSeconds;
-        const bool detailReady = detailCoversRangeLocked(visibleStart, visibleEnd)
-            && detailResolutionCoversLocked(visibleStart, visibleEnd);
-        if (value < previousZoom) {
+        if (!deferZoomOut && value < previousPresentedZoom) {
             m_zoomFallbackToOverview = !detailReady;
-        } else if (detailReady) {
+        } else if (!deferZoomOut && detailReady) {
             m_zoomFallbackToOverview = false;
         }
-        if (!zoomingInInsideCache) invalidateCacheLocked();
+        if (!deferZoomOut && !zoomingInInsideCache) invalidateCacheLocked();
     }
-    emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
+    emit zoomLevelChanged();
+    if (presentationChanged) emit samplePointsVisibleChanged();
+    scheduleDetailRequest();
+    update();
 }
 
 void WaveformEditorItem::setZoomEnabled(bool value) { { QMutexLocker lock(&m_stateMutex); if (m_zoomEnabled == value) return; m_zoomEnabled = value; } emit zoomEnabledChanged(); }
@@ -284,6 +309,8 @@ void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF 
     if (newGeometry.size() != oldGeometry.size()) {
         {
             QMutexLocker lock(&m_stateMutex);
+            m_presentedZoomLevel = m_zoomLevel;
+            m_zoomOutHandoffPending = false;
             ++m_requestGeneration;
             clearPendingRequestLocked();
             invalidateCacheLocked();
@@ -355,7 +382,7 @@ void WaveformEditorItem::requestDetailWindow() {
     {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return;
-        const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+        const auto [visibleStart, visibleEnd] = detailRequestVisibleRangeLocked();
         std::tie(requestStart, requestEnd) = requestRangeLocked(visibleStart, visibleEnd);
         path = m_sourcePath;
         points = detailRequestPointCountLocked(requestStart, requestEnd);
@@ -447,22 +474,32 @@ void WaveformEditorItem::requestDetailWindow() {
                 m_detail = std::move(next);
                 zoomChanged = clampZoomToMaximumLocked();
                 pointsChanged = oldPointsVisible != samplePointsVisibleLocked();
-                const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+                const auto [visibleStart, visibleEnd] = detailRequestVisibleRangeLocked();
                 const bool detailReady = detailCoversRangeLocked(
                     visibleStart, visibleEnd)
                     && detailResolutionCoversLocked(visibleStart, visibleEnd);
                 const bool replaceOverviewFallback = m_zoomFallbackToOverview
                     && detailReady;
                 if (replaceOverviewFallback) m_zoomFallbackToOverview = false;
+                const bool deferredZoomStage = m_zoomOutHandoffPending
+                    && detailReady;
+                if (deferredZoomStage) {
+                    beginStagedCacheForRangeLocked(
+                        visibleStart, visibleEnd, true);
+                }
+                const auto [presentedStart, presentedEnd] = visibleRangeLocked();
                 const bool cacheCoversViewport = !m_cacheDirty
-                    && visibleStart >= m_cacheStartSeconds
-                    && visibleEnd <= m_cacheEndSeconds;
-                const bool stageReplacement = m_playing
+                    && presentedStart >= m_cacheStartSeconds
+                    && presentedEnd <= m_cacheEndSeconds;
+                const bool stageReplacement = !deferredZoomStage
+                    && !m_zoomOutHandoffPending
+                    && m_playing
                     && detailReady
                     && !samplePointsVisibleLocked()
                     && cacheCoversViewport;
                 if (stageReplacement) beginStagedCacheLocked();
-                if (!stageReplacement
+                if (!deferredZoomStage
+                    && !stageReplacement
                     && (firstDetail || channelsChanged || zoomChanged
                         || replaceOverviewFallback
                         || m_detail.framesPerPoint < previousFramesPerPoint)) {
@@ -572,13 +609,24 @@ bool WaveformEditorItem::detailResolutionCoversLocked(
         * visibleSpan / detailSpan;
     return visiblePoints >= requiredVisibleDetailPointsLocked(visibleSpan) * 0.9;
 }
-std::pair<double, double> WaveformEditorItem::visibleRangeLocked() const {
+std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
+    double zoomLevel) const {
     if (m_durationSeconds <= 0.0) return {0.0, 0.0};
-    const double span = m_durationSeconds / std::max(1.0, m_zoomLevel);
+    const double span = m_durationSeconds / std::max(1.0, zoomLevel);
     if (span >= m_durationSeconds * 0.9999) return {0.0, m_durationSeconds};
     double start = displayedPositionSecondsLocked() - span * 0.5;
     start = std::clamp(start, 0.0, m_durationSeconds - span);
     return {start, start + span};
+}
+
+std::pair<double, double> WaveformEditorItem::visibleRangeLocked() const {
+    return visibleRangeForZoomLocked(m_presentedZoomLevel);
+}
+
+std::pair<double, double> WaveformEditorItem::detailRequestVisibleRangeLocked() const {
+    return m_zoomOutHandoffPending
+        ? visibleRangeForZoomLocked(m_zoomLevel)
+        : visibleRangeLocked();
 }
 
 std::pair<double, double> WaveformEditorItem::requestRangeLocked(
@@ -630,7 +678,7 @@ double WaveformEditorItem::requiredVisibleDetailPointsLocked(
 
 int WaveformEditorItem::detailRequestPointCountLocked(
     double requestStart, double requestEnd) const {
-    const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+    const auto [visibleStart, visibleEnd] = detailRequestVisibleRangeLocked();
     const double visibleSpan = std::max(0.000'000'001, visibleEnd - visibleStart);
     const double requestSpan = std::max(visibleSpan, requestEnd - requestStart);
     const double required = requiredVisibleDetailPointsLocked(visibleSpan)
@@ -676,13 +724,21 @@ double WaveformEditorItem::maximumZoomLevelLocked() const {
 }
 
 bool WaveformEditorItem::clampZoomToMaximumLocked() {
-    const double clamped = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked());
-    if (std::abs(m_zoomLevel - clamped) < 0.0001) return false;
-    m_zoomLevel = clamped;
+    const double maximum = maximumZoomLevelLocked();
+    const double clampedTarget = std::clamp(m_zoomLevel, 1.0, maximum);
+    const double clampedPresentation = std::clamp(
+        m_presentedZoomLevel, 1.0, maximum);
+    const bool targetChanged = std::abs(m_zoomLevel - clampedTarget) >= 0.0001;
+    const bool presentationChanged = std::abs(
+        m_presentedZoomLevel - clampedPresentation) >= 0.0001;
+    if (!targetChanged && !presentationChanged) return false;
+    m_zoomLevel = clampedTarget;
+    m_presentedZoomLevel = clampedPresentation;
+    if (m_zoomLevel >= m_presentedZoomLevel) m_zoomOutHandoffPending = false;
     ++m_requestGeneration;
     clearPendingRequestLocked();
     invalidateCacheLocked();
-    return true;
+    return targetChanged;
 }
 
 bool WaveformEditorItem::samplePointsVisibleLocked() const {
@@ -780,9 +836,11 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         QMutexLocker lock(&m_stateMutex);
         if (!m_playing) return;
         const auto [start, end] = visibleRangeLocked();
-        request = !detailOrPendingRequestCoversLocked(start, end);
+        const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
+        request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
         const bool direct = renderDetailDirectlyLocked(start, end);
-        if (!direct
+        if (!m_zoomOutHandoffPending
+            && !direct
             && (m_cacheDirty
                 || start < m_cacheStartSeconds
                 || end > m_cacheEndSeconds)) {
@@ -802,7 +860,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
                 m_profile.frameInitialized = true;
             }
             m_profile.lastFrame = profileNow;
-            profileZoom = m_zoomLevel;
+            profileZoom = m_presentedZoomLevel;
             profileSpan = end - start;
             profileDirect = direct;
             profileCacheDirty = m_cacheDirty;
@@ -831,6 +889,15 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
 }
 
 void WaveformEditorItem::invalidateCacheLocked() {
+    if (m_zoomOutHandoffPending) {
+        const auto [targetStart, targetEnd] = visibleRangeForZoomLocked(
+            m_zoomLevel);
+        m_presentedZoomLevel = m_zoomLevel;
+        m_zoomOutHandoffPending = false;
+        m_zoomFallbackToOverview = !detailCoversRangeLocked(
+            targetStart, targetEnd)
+            || !detailResolutionCoversLocked(targetStart, targetEnd);
+    }
     m_cacheDirty = true;
     clearStagedCacheLocked();
 }
@@ -840,10 +907,17 @@ void WaveformEditorItem::clearStagedCacheLocked() {
     m_stagedCacheStartSeconds = 0.0;
     m_stagedCacheEndSeconds = 0.0;
     m_stagedCacheNextX = 0;
+    m_stagedCacheCommitsDeferredZoom = false;
 }
 
 void WaveformEditorItem::beginStagedCacheLocked() {
     const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+    beginStagedCacheForRangeLocked(visibleStart, visibleEnd, false);
+}
+
+void WaveformEditorItem::beginStagedCacheForRangeLocked(
+    double visibleStart, double visibleEnd,
+    bool commitsDeferredZoom) {
     if (!detailCoversRangeLocked(visibleStart, visibleEnd)
         || !detailResolutionCoversLocked(visibleStart, visibleEnd)) {
         clearStagedCacheLocked();
@@ -866,18 +940,19 @@ void WaveformEditorItem::beginStagedCacheLocked() {
     m_stagedCacheStartSeconds = renderStart;
     m_stagedCacheEndSeconds = renderEnd;
     m_stagedCacheNextX = 0;
+    m_stagedCacheCommitsDeferredZoom = commitsDeferredZoom;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profile.enabled) ++m_profile.stagedCacheStarts;
 #endif
 }
 
-void WaveformEditorItem::advanceStagedCacheLocked() {
+bool WaveformEditorItem::advanceStagedCacheLocked() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profile.lastStagedCacheMs = 0.0;
     m_profile.lastStagedCacheColumns = 0;
     const auto profileStageStarted = std::chrono::steady_clock::now();
 #endif
-    if (m_stagedCache.isNull()) return;
+    if (m_stagedCache.isNull()) return false;
     const int firstX = m_stagedCacheNextX;
     const int lastX = std::min(
         m_stagedCache.width(), firstX + kStagedCacheColumnsPerPaint);
@@ -910,9 +985,13 @@ void WaveformEditorItem::advanceStagedCacheLocked() {
         m_profile.lastStagedCacheColumns = lastX - firstX;
     }
 #endif
-    if (m_stagedCacheNextX < m_stagedCache.width()) return;
+    if (m_stagedCacheNextX < m_stagedCache.width()) return false;
 
-    const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+    const bool commitsDeferredZoom = m_stagedCacheCommitsDeferredZoom;
+    const auto [visibleStart, visibleEnd] = commitsDeferredZoom
+        ? visibleRangeForZoomLocked(m_zoomLevel)
+        : visibleRangeLocked();
+    bool presentationCommitted = false;
     if (visibleStart >= m_stagedCacheStartSeconds
         && visibleEnd <= m_stagedCacheEndSeconds) {
         m_cache = std::move(m_stagedCache);
@@ -921,11 +1000,25 @@ void WaveformEditorItem::advanceStagedCacheLocked() {
         m_cachedViewportWidth = renderPixelWidthLocked();
         m_cachedViewportHeight = m_cache.height();
         m_cacheDirty = false;
+        if (commitsDeferredZoom) {
+            m_presentedZoomLevel = m_zoomLevel;
+            m_zoomOutHandoffPending = false;
+            m_zoomFallbackToOverview = false;
+            presentationCommitted = true;
+        }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profile.enabled) ++m_profile.stagedCacheSwaps;
 #endif
     }
     clearStagedCacheLocked();
+    if (commitsDeferredZoom
+        && !presentationCommitted
+        && m_zoomOutHandoffPending
+        && detailCoversRangeLocked(visibleStart, visibleEnd)
+        && detailResolutionCoversLocked(visibleStart, visibleEnd)) {
+        beginStagedCacheForRangeLocked(visibleStart, visibleEnd, true);
+    }
+    return presentationCommitted;
 }
 
 int WaveformEditorItem::displayedChannelCountLocked() const {
@@ -965,16 +1058,18 @@ void WaveformEditorItem::paint(QPainter *painter) {
     int fpsValue = 0;
     bool showFps = false;
     bool directDetail = false;
+    bool presentationCommitted = false;
+    bool stagingContinues = false;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
     const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
     {
         QMutexLocker lock(&m_stateMutex);
+        presentationCommitted = advanceStagedCacheLocked();
         std::tie(visibleStart, visibleEnd) = visibleRangeLocked();
-        advanceStagedCacheLocked();
         directDetail = renderDetailDirectlyLocked(visibleStart, visibleEnd);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         profileEnabled = m_profile.enabled;
-        profileZoom = m_zoomLevel;
+        profileZoom = m_presentedZoomLevel;
         profileSpan = visibleEnd - visibleStart;
         const auto [firstPoint, lastPoint] = detailPointRangeLocked(
             visibleStart, visibleEnd);
@@ -1006,9 +1101,11 @@ void WaveformEditorItem::paint(QPainter *painter) {
         cacheEnd = m_cacheEndSeconds;
         channels = displayedChannelCountLocked();
         showFps = m_showFpsOverlay;
+        stagingContinues = !m_stagedCache.isNull();
         if (showFps) updateFpsEstimateLocked();
         fpsValue = m_fpsValue;
     }
+    if (presentationCommitted) emit samplePointsVisibleChanged();
     if (!directDetail) {
         const double cacheSpan = cacheEnd - cacheStart;
         if (cacheSpan > 0.0 && visibleEnd > visibleStart) {
@@ -1180,6 +1277,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         }
     }
 #endif
+    if (stagingContinues) update();
 }
 
 void WaveformEditorItem::rebuildCacheLocked(int width, int height) {

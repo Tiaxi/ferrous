@@ -163,7 +163,9 @@ private:
     bool detailOrPendingRequestCoversLocked(double startSeconds, double endSeconds) const;
     bool detailCoversRangeLocked(double startSeconds, double endSeconds) const;
     bool detailResolutionCoversLocked(double startSeconds, double endSeconds) const;
+    std::pair<double, double> visibleRangeForZoomLocked(double zoomLevel) const;
     std::pair<double, double> visibleRangeLocked() const;
+    std::pair<double, double> detailRequestVisibleRangeLocked() const;
     std::pair<double, double> requestRangeLocked(
         double visibleStart, double visibleEnd) const;
     double requiredVisibleDetailPointsLocked(double visibleSpan) const;
@@ -185,7 +187,9 @@ private:
     void invalidateCacheLocked();
     void clearStagedCacheLocked();
     void beginStagedCacheLocked();
-    void advanceStagedCacheLocked();
+    void beginStagedCacheForRangeLocked(
+        double visibleStart, double visibleEnd, bool commitsDeferredZoom);
+    bool advanceStagedCacheLocked();
     void rebuildCacheLocked(int width, int height);
     void drawGridLocked(QPainter &painter, int width, int height,
                         double visibleStart, double visibleEnd, int channels) const;
@@ -212,6 +216,8 @@ private:
     std::chrono::steady_clock::time_point m_positionUpdatedAt;
     double m_durationSeconds{0.0};
     double m_zoomLevel{1.0};
+    double m_presentedZoomLevel{1.0};
+    bool m_zoomOutHandoffPending{false};
     bool m_playing{false};
     bool m_zoomEnabled{true};
     bool m_gridEnabled{false};
@@ -237,6 +243,7 @@ private:
     double m_stagedCacheStartSeconds{0.0};
     double m_stagedCacheEndSeconds{0.0};
     int m_stagedCacheNextX{0};
+    bool m_stagedCacheCommitsDeferredZoom{false};
     quint64 m_requestGeneration{0};
     bool m_requestInFlight{false};
     double m_requestedStartSeconds{0.0};
