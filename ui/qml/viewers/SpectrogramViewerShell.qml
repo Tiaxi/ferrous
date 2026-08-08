@@ -17,6 +17,18 @@ Item {
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
+    property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
+    readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+
+    function noteFullscreenPointerActivity(x, y) {
+        fullscreenControlsAutoHide.pointerMoved(x, y)
+    }
+
+    Components.FullscreenControlsAutoHide {
+        id: fullscreenControlsAutoHide
+        objectName: "spectrogramFullscreenControlsAutoHide"
+        active: root.viewerOpen
+    }
 
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
     onUseWholeScreenViewerModeChanged: {
@@ -71,13 +83,20 @@ Item {
         }
 
         Components.ViewerCloseButton {
+            objectName: "spectrogramPopupCloseButton"
             z: 20
             anchors.top: parent.top
             anchors.right: parent.right
             anchors.margins: 12
+            visible: root.fullscreenControlsVisible
             fillColor: Qt.rgba(0, 0, 0, 0.45)
             borderColor: Qt.rgba(1, 1, 1, 0.24)
             onClicked: root.closeViewer()
+
+            HoverHandler {
+                onPointChanged: root.noteFullscreenPointerActivity(
+                    point.scenePosition.x, point.scenePosition.y)
+            }
         }
 
         Rectangle {
@@ -148,13 +167,20 @@ Item {
         }
 
         Components.ViewerCloseButton {
+            objectName: "spectrogramFullscreenCloseButton"
             z: 20
             anchors.top: parent.top
             anchors.right: parent.right
             anchors.margins: 12
+            visible: root.fullscreenControlsVisible
             fillColor: Qt.rgba(0, 0, 0, 0.45)
             borderColor: Qt.rgba(1, 1, 1, 0.24)
             onClicked: root.closeViewer()
+
+            HoverHandler {
+                onPointChanged: root.noteFullscreenPointerActivity(
+                    point.scenePosition.x, point.scenePosition.y)
+            }
         }
 
         Rectangle {

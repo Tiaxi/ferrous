@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QQuickItem>
 #include <QQuickWindow>
 #include <QSGSimpleTextureNode>
 #include <QQmlComponent>
@@ -335,6 +336,18 @@ QObject *findObjectByStringProperty(QObject *root, const char *propertyName, con
     return nullptr;
 }
 
+QQuickItem *findQuickItemByObjectName(QQuickItem *root, const QString &objectName) {
+    if (root->objectName() == objectName) {
+        return root;
+    }
+    for (QQuickItem *child : root->childItems()) {
+        if (QQuickItem *match = findQuickItemByObjectName(child, objectName)) {
+            return match;
+        }
+    }
+    return nullptr;
+}
+
 QObject *createQmlObjectFromSource(
     QQmlEngine &engine,
     const QByteArray &qmlSource,
@@ -368,6 +381,8 @@ private slots:
     void cleanupTestCase();
     void loadsMainQmlWithFallbackBridge();
     void loadsExtractedQmlSlicesWithFallbackProps();
+    void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
+    void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
     void mainWindowContentStartsBelowMenuBar();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -977,6 +992,181 @@ Item {
 }
 )QML"), baseUrl, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
+}
+
+void QmlSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "viewers" as Viewers
+
+ApplicationWindow {
+    id: windowRoot
+    width: 640
+    height: 480
+    visible: true
+
+    Viewers.SpectrogramViewerShell {
+        objectName: "spectrogramViewerShell"
+        anchors.fill: parent
+        windowRoot: windowRoot
+        viewerOpen: true
+        useWholeScreenViewerMode: true
+        popupTransitionMs: 0
+        titleText: "Ferrous"
+        closeViewer: function() {}
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *autoHide = root->findChild<QObject *>(
+        QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QObject *shell = root->findChild<QObject *>(QStringLiteral("spectrogramViewerShell"));
+    QObject *fullscreenCloseButton = root->findChild<QObject *>(
+        QStringLiteral("spectrogramFullscreenCloseButton"));
+    QVERIFY(autoHide != nullptr);
+    QVERIFY(shell != nullptr);
+    QVERIFY(fullscreenCloseButton != nullptr);
+    QCOMPARE(autoHide->property("hideDelay").toInt(), 5000);
+    QVERIFY(autoHide->property("active").toBool());
+    QVERIFY(fullscreenCloseButton->property("visible").toBool());
+
+    autoHide->setProperty("hideDelay", 40);
+    const auto reportPointerPosition = [autoHide](double x, double y) {
+        return QMetaObject::invokeMethod(
+            autoHide,
+            "pointerMoved",
+            Q_ARG(QVariant, QVariant::fromValue(x)),
+            Q_ARG(QVariant, QVariant::fromValue(y)));
+    };
+    QVERIFY(reportPointerPosition(100.0, 80.0));
+    QTRY_VERIFY_WITH_TIMEOUT(!fullscreenCloseButton->property("visible").toBool(), 500);
+
+    // Hover ownership can change when a control disappears, producing a
+    // duplicate point notification without physical cursor movement. It must
+    // not wake the controls or restart the timer.
+    QVERIFY(reportPointerPosition(100.0, 80.0));
+    QVERIFY(!fullscreenCloseButton->property("visible").toBool());
+
+    QVERIFY(reportPointerPosition(101.0, 80.0));
+    QVERIFY(fullscreenCloseButton->property("visible").toBool());
+    QTest::qWait(20);
+    QVERIFY(fullscreenCloseButton->property("visible").toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(!fullscreenCloseButton->property("visible").toBool(), 500);
+
+    shell->setProperty("viewerOpen", false);
+    QVERIFY(!autoHide->property("active").toBool());
+    QVERIFY(autoHide->property("controlsVisible").toBool());
+}
+
+void QmlSmokeTest::spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "viewers" as Viewers
+
+Item {
+    width: 640
+    height: 320
+
+    QtObject {
+        id: bridge
+        property string playbackState: "Stopped"
+        property int spectrogramViewMode: 1
+        property int spectrogramDisplayMode: 0
+        property real dbRange: 90
+        property bool logScale: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: true
+        property bool showSpectrogramScale: true
+        property bool spectrogramZoomEnabled: true
+        property int channelButtonsVisibility: 2
+        property int soloedChannel: -1
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelMuted(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) {}
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) {}
+        function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+    }
+
+    Viewers.SpectrogramSurface {
+        id: surface
+        objectName: "spectrogramSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *surface = root->findChild<QObject *>(QStringLiteral("spectrogramSurface"));
+    QVERIFY(surface != nullptr);
+    const QVariantMap descriptor{
+        {QStringLiteral("label"), QStringLiteral("L")},
+        {QStringLiteral("showLabel"), true},
+        {QStringLiteral("muted"), false},
+        {QStringLiteral("channelIndex"), 0},
+    };
+    surface->setProperty("channelDescriptors", QVariantList{descriptor});
+
+    QQuickItem *surfaceItem = qobject_cast<QQuickItem *>(surface);
+    QVERIFY(surfaceItem != nullptr);
+    QTRY_VERIFY(findQuickItemByObjectName(
+                    surfaceItem, QStringLiteral("spectrogramPaneItem"))
+                != nullptr);
+    auto *spectrogramItem = qobject_cast<SpectrogramItem *>(findQuickItemByObjectName(
+        surfaceItem, QStringLiteral("spectrogramPaneItem")));
+    QQuickItem *channelMarker = findQuickItemByObjectName(
+        surfaceItem, QStringLiteral("spectrogramChannelMarker"));
+    QQuickItem *muteButton = findQuickItemByObjectName(
+        surfaceItem, QStringLiteral("spectrogramMuteButton"));
+    QQuickItem *soloButton = findQuickItemByObjectName(
+        surfaceItem, QStringLiteral("spectrogramSoloButton"));
+    QQuickItem *pointerArea = findQuickItemByObjectName(
+        surfaceItem, QStringLiteral("spectrogramSurfacePointerArea"));
+    QVERIFY(spectrogramItem != nullptr);
+    QVERIFY(channelMarker != nullptr);
+    QVERIFY(muteButton != nullptr);
+    QVERIFY(soloButton != nullptr);
+    QVERIFY(pointerArea != nullptr);
+    QTRY_VERIFY(channelMarker->property("visible").toBool());
+    QTRY_VERIFY(muteButton->property("visible").toBool());
+    QTRY_VERIFY(soloButton->property("visible").toBool());
+    QTRY_VERIFY(spectrogramItem->crosshairEnabled());
+    QCOMPARE(surface->property("pointerCursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
+    QCOMPARE(pointerArea->property("cursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
+
+    surface->setProperty("interactiveOverlaysVisible", false);
+    QTRY_VERIFY(!muteButton->property("visible").toBool());
+    QTRY_VERIFY(!soloButton->property("visible").toBool());
+    QTRY_VERIFY(!spectrogramItem->crosshairEnabled());
+    QVERIFY(channelMarker->property("visible").toBool());
+    QCOMPARE(surface->property("pointerCursorShape").toInt(), static_cast<int>(Qt::BlankCursor));
+    QCOMPARE(pointerArea->property("cursorShape").toInt(), static_cast<int>(Qt::BlankCursor));
+
+    surface->setProperty("interactiveOverlaysVisible", true);
+    QTRY_VERIFY(muteButton->property("visible").toBool());
+    QTRY_VERIFY(soloButton->property("visible").toBool());
+    QTRY_VERIFY(spectrogramItem->crosshairEnabled());
+    QVERIFY(channelMarker->property("visible").toBool());
+    QCOMPARE(surface->property("pointerCursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
+    QCOMPARE(pointerArea->property("cursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
 }
 
 void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {

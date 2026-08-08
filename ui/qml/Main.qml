@@ -1040,6 +1040,8 @@ ApplicationWindow {
         visible: parent !== null
         anchors.fill: parent
         viewerMode: viewerController.spectrogramViewerOpen
+        interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
+        pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
         uiBridge: root.uiBridge
         positionSeconds: playbackController.spectrogramPositionSeconds
         seekCommitted: playbackController.seekCommitted

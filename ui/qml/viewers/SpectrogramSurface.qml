@@ -13,6 +13,11 @@ Item {
     property var seekCommitted: null
 
     property bool viewerMode: false
+    property bool interactiveOverlaysVisible: true
+    property var pointerActivity: null
+    readonly property int pointerCursorShape: root.interactiveOverlaysVisible
+        ? Qt.ArrowCursor
+        : Qt.BlankCursor
     property var channelDescriptors: []
     property double _crosshairSharedX: -1.0
     property double _widgetZoomLevel: 1.0
@@ -68,6 +73,12 @@ Item {
 
     function placeholderDescriptors() {
         return descriptorsForChannelCount(0)
+    }
+
+    function notePointerActivity(x, y) {
+        if (root.pointerActivity) {
+            root.pointerActivity(x, y)
+        }
     }
 
     function sameDescriptors(next) {
@@ -185,6 +196,17 @@ Item {
 
     Component.onCompleted: resetForCurrentMode()
 
+    MouseArea {
+        objectName: "spectrogramSurfacePointerArea"
+        anchors.fill: parent
+        acceptedButtons: Qt.NoButton
+        hoverEnabled: true
+        cursorShape: root.pointerCursorShape
+        onPositionChanged: function(mouse) {
+            root.notePointerActivity(mouse.x, mouse.y)
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: root.channelDescriptors.length > 1 ? 2 : 0
@@ -208,6 +230,7 @@ Item {
 
                 SpectrogramItem {
                     id: spectrogramPaneItem
+                    objectName: "spectrogramPaneItem"
                     anchors.fill: parent
                     channelMuted: modelData.muted || false
                     maxColumns: Math.max(Math.floor(width), Screen.desktopAvailableWidth)
@@ -219,6 +242,7 @@ Item {
                     playing: (root.uiBridge.playbackState || "") === "Playing"
                     displayMode: root.uiBridge.spectrogramDisplayMode
                     crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
+                        && root.interactiveOverlaysVisible
                     gridEnabled: root.uiBridge.showSpectrogramScale
                     showTimeLabels: index === spectrogramRepeater.count - 1
                     crosshairSharedX: root._crosshairSharedX
@@ -271,7 +295,8 @@ Item {
                             root.seekCommitted(seconds)
                         }
                     }
-                    // Pane-level hover detection for M/S button visibility.
+                    // Pane-level hover detection for M/S button visibility and
+                    // viewer pointer-idle tracking.
                     // Attached to SpectrogramItem (not the parent Item) because
                     // SpectrogramItem accepts hover events for crosshair overlay,
                     // so a HoverHandler on the parent never sees hover.
@@ -279,6 +304,9 @@ Item {
                     // hoverMoveEvent.
                     HoverHandler {
                         id: paneHover
+                        cursorShape: root.pointerCursorShape
+                        onPointChanged: root.notePointerActivity(
+                            point.scenePosition.x, point.scenePosition.y)
                     }
                 }
 
@@ -289,8 +317,15 @@ Item {
                     spacing: 4
                     visible: modelData.showLabel
 
+                    HoverHandler {
+                        cursorShape: root.pointerCursorShape
+                        onPointChanged: root.notePointerActivity(
+                            point.scenePosition.x, point.scenePosition.y)
+                    }
+
                     // Channel label (always visible).
                     Rectangle {
+                        objectName: "spectrogramChannelMarker"
                         width: labelText.implicitWidth + 8
                         height: labelText.implicitHeight + 2
                         radius: 4
@@ -313,10 +348,12 @@ Item {
 
                     // M (mute) button.
                     Rectangle {
+                        objectName: "spectrogramMuteButton"
                         property bool active: spectrogramPaneItem.channelMuted
                         visible: {
                             const vis = root.uiBridge.channelButtonsVisibility
-                            return vis === 2 || (vis === 1 && paneHover.hovered)
+                            return root.interactiveOverlaysVisible
+                                && (vis === 2 || (vis === 1 && paneHover.hovered))
                         }
                         width: muteText.implicitWidth + 10
                         height: muteText.implicitHeight + 2
@@ -350,10 +387,12 @@ Item {
 
                     // S (solo) button.
                     Rectangle {
+                        objectName: "spectrogramSoloButton"
                         property bool active: root.uiBridge.soloedChannel === modelData.channelIndex
                         visible: {
                             const vis = root.uiBridge.channelButtonsVisibility
-                            return vis === 2 || (vis === 1 && paneHover.hovered)
+                            return root.interactiveOverlaysVisible
+                                && (vis === 2 || (vis === 1 && paneHover.hovered))
                         }
                         width: soloText.implicitWidth + 10
                         height: soloText.implicitHeight + 2
