@@ -28,10 +28,7 @@ constexpr int kMaximumDetailPoints = 65'536;
 constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
-constexpr auto kStagedCacheBudget = std::chrono::microseconds(750);
-constexpr int kMaximumStagedRenderColumnsPerPaint = 256;
-constexpr int kStagedCacheCopyChunkRows = 8;
-constexpr int kMaximumStagedCopyRowsPerPaint = 64;
+constexpr int kStagedCacheColumnsPerPaint = 128;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
 constexpr double kPositionRegressionToleranceSeconds = 0.03;
 constexpr double kPositionSeekJumpSeconds = 0.75;
@@ -111,11 +108,7 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     setAntialiasing(false);
     setOpaquePainting(true);
     setFillColor(kBackground);
-    // Qt 6.9+ routes FramebufferObject through the OpenGL QPainter engine.
-    // Reparenting and resizing this item between the widget and fullscreen
-    // surfaces can leave unrelated framebuffer contents in that target.  The
-    // raster target owns an isolated QImage and uploads only its result.
-    setRenderTarget(QQuickPaintedItem::Image);
+    setRenderTarget(QQuickPaintedItem::FramebufferObject);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
@@ -477,7 +470,6 @@ void WaveformEditorItem::requestDetailWindow() {
         double profileZoom = 1.0;
         bool profileFallback = false;
         int profileStagedWidth = 0;
-        int profileStagedReuse = 0;
         double profileStagedSecondsPerPixel = 0.0;
 #endif
         {
@@ -541,7 +533,6 @@ void WaveformEditorItem::requestDetailWindow() {
                     visibleStart, visibleEnd);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 profileStagedWidth = m_stagedCache.width();
-                profileStagedReuse = m_stagedCacheCopyWidth;
                 profileStagedSecondsPerPixel = m_stagedCacheSecondsPerPixel;
                 if (profileEnabled) {
                     ++m_profile.detailHandoffs;
@@ -561,7 +552,7 @@ void WaveformEditorItem::requestDetailWindow() {
             const char *status = stale ? "stale" : (parseFailed ? "parse_failed" : "accepted");
             std::fprintf(
                 stderr,
-                "[ui-waveform-editor] detail_result gen=%llu status=%s elapsed_ms=%.3f bytes=%lld returned=%.6f..%.6f points=%d frames_per_point=%u channels=%d rate=%d zoom=%.3f overview_fallback=%d followup=%d stage_width=%d stage_reuse=%d stage_seconds_per_px=%.9f\n",
+                "[ui-waveform-editor] detail_result gen=%llu status=%s elapsed_ms=%.3f bytes=%lld returned=%.6f..%.6f points=%d frames_per_point=%u channels=%d rate=%d zoom=%.3f overview_fallback=%d followup=%d stage_width=%d stage_seconds_per_px=%.9f\n",
                 static_cast<unsigned long long>(generation),
                 status,
                 profileDecodeMs,
@@ -576,7 +567,6 @@ void WaveformEditorItem::requestDetailWindow() {
                 profileFallback ? 1 : 0,
                 requestFollowup ? 1 : 0,
                 profileStagedWidth,
-                profileStagedReuse,
                 profileStagedSecondsPerPixel);
         }
 #endif
@@ -867,10 +857,6 @@ std::pair<int, int> WaveformEditorItem::detailPointRangeLocked(
     };
 }
 
-int WaveformEditorItem::stagedCacheRenderChunkColumns(int height) {
-    return std::clamp(11'520 / std::max(1, height), 8, 64);
-}
-
 void WaveformEditorItem::updateFpsEstimateLocked() {
     const auto now = std::chrono::steady_clock::now();
     if (!m_fpsInitialized) {
@@ -1004,10 +990,6 @@ void WaveformEditorItem::clearStagedCacheLocked() {
     m_stagedCacheSecondsPerPixel = 0.0;
     m_stagedCacheFramesPerPoint = 0;
     m_stagedCacheDisplayedChannels = 0;
-    m_stagedCacheCopySourceX = 0;
-    m_stagedCacheCopyWidth = 0;
-    m_stagedCacheCopyNextRow = 0;
-    m_stagedCacheCopiedColumns = 0;
     m_stagedCacheNextX = 0;
     m_stagedCacheCommitsDeferredZoom = false;
 }
@@ -1036,32 +1018,10 @@ void WaveformEditorItem::beginStagedCacheForRangeLocked(
     m_stagedCacheSecondsPerPixel = grid.secondsPerPixel;
     m_stagedCacheFramesPerPoint = m_detail.framesPerPoint;
     m_stagedCacheDisplayedChannels = displayedChannelCountLocked();
-    const double pixelTolerance = std::max(
-        1.0e-12, grid.secondsPerPixel * 1.0e-7);
-    const bool canReuseCache = !m_cacheDirty
-        && !m_cache.isNull()
-        && m_cache.format() == QImage::Format_RGB32
-        && m_cache.height() == renderHeight
-        && m_cacheFramesPerPoint == m_detail.framesPerPoint
-        && m_cacheDisplayedChannels == m_stagedCacheDisplayedChannels
-        && std::abs(m_cacheSecondsPerPixel - grid.secondsPerPixel)
-            <= pixelTolerance
-        && grid.startSeconds + pixelTolerance >= m_cacheStartSeconds;
-    if (canReuseCache) {
-        // Normal playback moves forward at a fixed zoom.  Preserve its exact
-        // rasterized overlap and render only the newly exposed right edge.
-        const double sourceOffset = (grid.startSeconds - m_cacheStartSeconds)
-            / grid.secondsPerPixel;
-        const int sourceX = static_cast<int>(std::llround(sourceOffset));
-        const bool sourceIsPixelAligned = std::abs(
-            sourceOffset - static_cast<double>(sourceX)) <= 1.0e-5;
-        if (sourceIsPixelAligned && sourceX >= 0 && sourceX < m_cache.width()) {
-            m_stagedCacheCopySourceX = sourceX;
-            m_stagedCacheCopyWidth = std::min(
-                grid.width, m_cache.width() - sourceX);
-        }
-    }
-    m_stagedCacheNextX = m_stagedCacheCopyWidth;
+    // Render every replacement from decoded extrema. Mixing copied pixels
+    // from an older cache with newly rendered columns caused the raster
+    // corruption introduced by the overlap-reuse optimization.
+    m_stagedCacheNextX = 0;
     m_stagedCacheCommitsDeferredZoom = commitsDeferredZoom;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profile.enabled) ++m_profile.stagedCacheStarts;
@@ -1075,81 +1035,34 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
     const auto profileStageStarted = std::chrono::steady_clock::now();
 #endif
     if (m_stagedCache.isNull()) return false;
-    const auto stageStarted = std::chrono::steady_clock::now();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     int processedColumns = 0;
-    int copiedRowsThisPaint = 0;
-    while (m_stagedCacheCopyWidth > 0
-        && m_stagedCacheCopyNextRow < m_stagedCache.height()
-        && copiedRowsThisPaint < kMaximumStagedCopyRowsPerPaint) {
-        const int copyRows = std::min({
-            kStagedCacheCopyChunkRows,
-            m_stagedCache.height() - m_stagedCacheCopyNextRow,
-            kMaximumStagedCopyRowsPerPaint - copiedRowsThisPaint,
-        });
-        const qsizetype copyBytes = static_cast<qsizetype>(m_stagedCacheCopyWidth)
-            * static_cast<qsizetype>(sizeof(QRgb));
-        for (int row = 0; row < copyRows; ++row) {
-            const int y = m_stagedCacheCopyNextRow + row;
-            std::memcpy(
-                m_stagedCache.scanLine(y),
-                m_cache.constScanLine(y)
-                    + static_cast<qsizetype>(m_stagedCacheCopySourceX)
-                        * sizeof(QRgb),
-                static_cast<std::size_t>(copyBytes));
-        }
-        m_stagedCacheCopyNextRow += copyRows;
-        copiedRowsThisPaint += copyRows;
-        processedColumns += std::max(
-            1,
-            static_cast<int>(std::ceil(
-                static_cast<double>(m_stagedCacheCopyWidth * copyRows)
-                / static_cast<double>(m_stagedCache.height()))));
-        if (std::chrono::steady_clock::now() - stageStarted
-            >= kStagedCacheBudget) {
-            break;
-        }
-    }
-    if (m_stagedCacheCopyWidth == 0
-        || m_stagedCacheCopyNextRow >= m_stagedCache.height()) {
-        m_stagedCacheCopiedColumns = m_stagedCacheCopyWidth;
-    }
-    if (m_stagedCacheCopiedColumns >= m_stagedCacheCopyWidth
-        && m_stagedCacheNextX < m_stagedCache.width()
-        && std::chrono::steady_clock::now() - stageStarted
-            < kStagedCacheBudget) {
-        const int renderChunkColumns = stagedCacheRenderChunkColumns(
-            m_stagedCache.height());
+#endif
+    if (m_stagedCacheNextX < m_stagedCache.width()) {
         QPainter painter(&m_stagedCache);
         painter.setRenderHint(QPainter::Antialiasing, false);
-        // The deadline, rather than the cache width, bounds work per display
-        // frame.  Small tall-image chunks keep any single draw below budget.
-        while (m_stagedCacheNextX < m_stagedCache.width()
-            && processedColumns < kMaximumStagedRenderColumnsPerPaint) {
-            const int firstX = m_stagedCacheNextX;
-            const int lastX = std::min(
-                m_stagedCache.width(), firstX + renderChunkColumns);
-            painter.fillRect(
-                QRect(firstX, 0, lastX - firstX, m_stagedCache.height()),
-                kBackground);
-            painter.setClipRect(
-                QRect(firstX, 0, lastX - firstX, m_stagedCache.height()),
-                Qt::ReplaceClip);
-            drawDetailSliceLocked(
-                painter,
-                m_stagedCache.width(),
-                m_stagedCache.height(),
-                m_stagedCacheStartSeconds,
-                m_stagedCacheEndSeconds,
-                m_stagedCacheDisplayedChannels,
-                firstX,
-                lastX);
-            m_stagedCacheNextX = lastX;
-            processedColumns += lastX - firstX;
-            if (std::chrono::steady_clock::now() - stageStarted
-                >= kStagedCacheBudget) {
-                break;
-            }
-        }
+        const int firstX = m_stagedCacheNextX;
+        const int lastX = std::min(
+            m_stagedCache.width(), firstX + kStagedCacheColumnsPerPaint);
+        painter.fillRect(
+            QRect(firstX, 0, lastX - firstX, m_stagedCache.height()),
+            kBackground);
+        painter.setClipRect(
+            QRect(firstX, 0, lastX - firstX, m_stagedCache.height()),
+            Qt::ReplaceClip);
+        drawDetailSliceLocked(
+            painter,
+            m_stagedCache.width(),
+            m_stagedCache.height(),
+            m_stagedCacheStartSeconds,
+            m_stagedCacheEndSeconds,
+            m_stagedCacheDisplayedChannels,
+            firstX,
+            lastX);
+        m_stagedCacheNextX = lastX;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        processedColumns = lastX - firstX;
+#endif
         painter.end();
     }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -1161,11 +1074,9 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
             m_profile.maximumStagedCacheMs, stageMs);
         m_profile.lastStagedCacheMs = stageMs;
         m_profile.lastStagedCacheColumns = processedColumns;
-        m_profile.lastStagedCacheCopyRows = copiedRowsThisPaint;
     }
 #endif
-    if (m_stagedCacheCopiedColumns < m_stagedCacheCopyWidth
-        || m_stagedCacheNextX < m_stagedCache.width()) {
+    if (m_stagedCacheNextX < m_stagedCache.width()) {
         return false;
     }
 
@@ -1260,7 +1171,6 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool profileOverviewFallback = false;
     double profileStagedCacheMs = 0.0;
     int profileStagedCacheColumns = 0;
-    int profileStagedCacheCopyRows = 0;
 #endif
     QImage cache;
     double visibleStart = 0.0;
@@ -1299,7 +1209,6 @@ void WaveformEditorItem::paint(QPainter *painter) {
         profileOverviewFallback = m_zoomFallbackToOverview;
         profileStagedCacheMs = m_profile.lastStagedCacheMs;
         profileStagedCacheColumns = m_profile.lastStagedCacheColumns;
-        profileStagedCacheCopyRows = m_profile.lastStagedCacheCopyRows;
         profileRebuiltCache = !directDetail
             && (m_cacheDirty
                 || m_cachedViewportWidth != renderPixelWidthLocked()
@@ -1472,7 +1381,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         if (logSpike) {
             std::fprintf(
                 stderr,
-                "[ui-waveform-editor] paint_spike ms=%.3f zoom=%.3f span=%.6f mode=%s visible_points=%d detail_points=%d frames_per_point=%u fallback=%d cache_rebuilt=%d rebuild_ms=%.3f stage_ms=%.3f stage_columns=%d stage_copy_rows=%d cache=%dx%d viewport=%dx%d\n",
+                "[ui-waveform-editor] paint_spike ms=%.3f zoom=%.3f span=%.6f mode=%s visible_points=%d detail_points=%d frames_per_point=%u fallback=%d cache_rebuilt=%d rebuild_ms=%.3f stage_ms=%.3f stage_columns=%d cache=%dx%d viewport=%dx%d\n",
                 paintMs,
                 profileZoom,
                 profileSpan,
@@ -1485,7 +1394,6 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 profileRebuildMs,
                 profileStagedCacheMs,
                 profileStagedCacheColumns,
-                profileStagedCacheCopyRows,
                 profileCacheWidth,
                 profileCacheHeight,
                 canvasWidth,

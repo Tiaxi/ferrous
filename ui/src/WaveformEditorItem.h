@@ -137,7 +137,6 @@ private:
         double maximumStagedCacheMs{0.0};
         double lastStagedCacheMs{0.0};
         int lastStagedCacheColumns{0};
-        int lastStagedCacheCopyRows{0};
         double maximumFrameGapMs{0.0};
         double decodeMs{0.0};
         double maximumDecodeMs{0.0};
@@ -195,7 +194,6 @@ private:
     double detailPointTimeLocked(int point) const;
     std::pair<int, int> detailPointRangeLocked(
         double visibleStart, double visibleEnd) const;
-    static int stagedCacheRenderChunkColumns(int height);
     void updateFpsEstimateLocked();
     void bindWindowFrameLoop(QQuickWindow *window);
     void handleWindowFrameSwapped();
@@ -265,10 +263,6 @@ private:
     double m_stagedCacheSecondsPerPixel{0.0};
     quint32 m_stagedCacheFramesPerPoint{0};
     int m_stagedCacheDisplayedChannels{0};
-    int m_stagedCacheCopySourceX{0};
-    int m_stagedCacheCopyWidth{0};
-    int m_stagedCacheCopyNextRow{0};
-    int m_stagedCacheCopiedColumns{0};
     int m_stagedCacheNextX{0};
     bool m_stagedCacheCommitsDeferredZoom{false};
     quint64 m_requestGeneration{0};
