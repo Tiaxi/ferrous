@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -79,6 +80,21 @@ double selectTimeInterval(double span, int width) {
     }
     return candidates[std::size(candidates) - 1];
 }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+bool shouldLogProfileSpike(
+    std::chrono::steady_clock::time_point *last,
+    std::chrono::steady_clock::time_point now,
+    double cooldownSeconds = 0.25) {
+    if (last == nullptr) return false;
+    if (*last != std::chrono::steady_clock::time_point{}
+        && std::chrono::duration<double>(now - *last).count() < cooldownSeconds) {
+        return false;
+    }
+    *last = now;
+    return true;
+}
+#endif
 }
 
 WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
@@ -92,6 +108,14 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     m_requestTimer.setSingleShot(true);
     m_requestTimer.setInterval(40);
     m_positionUpdatedAt = std::chrono::steady_clock::now();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    m_profile.enabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_WAVEFORM")
+        || qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
+        || qEnvironmentVariableIsSet("FERROUS_PROFILE");
+    if (m_profile.enabled) {
+        m_profile.lastSummary = std::chrono::steady_clock::now();
+    }
+#endif
     connect(&m_requestTimer, &QTimer::timeout, this, &WaveformEditorItem::requestDetailWindow);
     connect(this, &QQuickItem::windowChanged, this, &WaveformEditorItem::bindWindowFrameLoop);
 }
@@ -122,6 +146,7 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         ++m_requestGeneration;
         clearPendingRequestLocked();
         clearDetailLocked();
+        m_zoomFallbackToOverview = false;
         invalidateCacheLocked();
     }
     emit sourcePathChanged();
@@ -170,13 +195,16 @@ void WaveformEditorItem::setPlaying(bool value) {
         if (m_playing) m_positionSeconds = displayedPositionSecondsLocked();
         m_playing = value;
         m_positionUpdatedAt = now;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (value) m_profile.frameInitialized = false;
+#endif
     }
     emit playingChanged();
     update();
 }
 
 void WaveformEditorItem::setDurationSeconds(double value) {
-    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); ++m_requestGeneration; clearPendingRequestLocked(); clearDetailLocked(); invalidateCacheLocked(); }
+    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); ++m_requestGeneration; clearPendingRequestLocked(); clearDetailLocked(); m_zoomFallbackToOverview = false; invalidateCacheLocked(); }
     emit durationSecondsChanged(); emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
 }
 
@@ -185,10 +213,17 @@ void WaveformEditorItem::setZoomLevel(double value) {
         QMutexLocker lock(&m_stateMutex);
         value = std::clamp(value, 1.0, maximumZoomLevelLocked());
         if (std::abs(m_zoomLevel - value) < 0.0001) return;
+        const double previousZoom = m_zoomLevel;
         m_zoomLevel = value;
         ++m_requestGeneration;
         clearPendingRequestLocked();
-        invalidateCacheLocked();
+        const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+        const bool zoomingInInsideCache = value > previousZoom
+            && !m_cacheDirty
+            && visibleStart >= m_cacheStartSeconds
+            && visibleEnd <= m_cacheEndSeconds;
+        if (value < previousZoom) m_zoomFallbackToOverview = true;
+        if (!zoomingInInsideCache) invalidateCacheLocked();
     }
     emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
 }
@@ -300,8 +335,16 @@ void WaveformEditorItem::requestDetailWindow() {
     double requestStart = 0.0;
     double requestEnd = 0.0;
     int points = 0;
-    int requestRenderWidth = 0;
     quint64 generation = 0;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    bool profileEnabled = false;
+    double profileZoom = 1.0;
+    double profileVisibleStart = 0.0;
+    double profileVisibleEnd = 0.0;
+    int profileRenderWidth = 0;
+    int profileWidth = 0;
+    int profileHeight = 0;
+#endif
     {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return;
@@ -315,11 +358,41 @@ void WaveformEditorItem::requestDetailWindow() {
         m_requestedEndSeconds = requestEnd;
         m_requestedMaxPoints = points;
         m_requestedRenderWidth = renderPixelWidthLocked();
-        requestRenderWidth = m_requestedRenderWidth;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        profileEnabled = m_profile.enabled;
+        profileZoom = m_zoomLevel;
+        profileVisibleStart = visibleStart;
+        profileVisibleEnd = visibleEnd;
+        profileRenderWidth = m_requestedRenderWidth;
+        profileWidth = static_cast<int>(std::floor(width()));
+        profileHeight = static_cast<int>(std::floor(height()));
+        if (profileEnabled) ++m_profile.detailRequests;
+#endif
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    const auto profileRequestStarted = std::chrono::steady_clock::now();
+    if (profileEnabled) {
+        std::fprintf(
+            stderr,
+            "[ui-waveform-editor] detail_request gen=%llu zoom=%.3f visible=%.6f..%.6f request=%.6f..%.6f max_points=%d render_px=%d size=%dx%d\n",
+            static_cast<unsigned long long>(generation),
+            profileZoom,
+            profileVisibleStart,
+            profileVisibleEnd,
+            requestStart,
+            requestEnd,
+            points,
+            profileRenderWidth,
+            profileWidth,
+            profileHeight);
+    }
+#endif
     auto *watcher = new QFutureWatcher<QByteArray>(this);
     connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [
-        this, watcher, generation, requestRenderWidth
+        this, watcher, generation
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        , profileRequestStarted
+#endif
     ]() {
         const QByteArray bytes = watcher->result();
         watcher->deleteLater();
@@ -330,30 +403,92 @@ void WaveformEditorItem::requestDetailWindow() {
         bool pointsChanged = false;
         bool zoomChanged = false;
         bool requestFollowup = false;
+        bool stale = false;
+        bool parseFailed = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        const double profileDecodeMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - profileRequestStarted).count();
+        const double profileReturnedStart = next.startSeconds;
+        const double profileReturnedEnd = next.endSeconds;
+        const int profileReturnedPoints = next.pointCount;
+        const quint32 profileReturnedFramesPerPoint = next.framesPerPoint;
+        const int profileReturnedChannels = next.channelCount;
+        const int profileReturnedRate = next.sampleRateHz;
+        bool profileEnabled = false;
+        double profileZoom = 1.0;
+        bool profileFallback = false;
+#endif
         {
             QMutexLocker lock(&m_stateMutex);
-            if (generation != m_requestGeneration) return;
-            clearPendingRequestLocked();
-            if (!parsed) return;
-            const bool oldPointsVisible = samplePointsVisibleLocked();
-            const bool firstDetail = m_detail.pointCount == 0;
-            const quint32 previousFramesPerPoint = m_detail.framesPerPoint;
-            channelsChanged = m_channelCount != next.channelCount;
-            rateChanged = m_sampleRateHz != next.sampleRateHz;
-            m_channelCount = next.channelCount;
-            m_sampleRateHz = next.sampleRateHz;
-            m_detail = std::move(next);
-            m_detailRenderWidth = requestRenderWidth;
-            zoomChanged = clampZoomToMaximumLocked();
-            pointsChanged = oldPointsVisible != samplePointsVisibleLocked();
-            if (firstDetail || channelsChanged || zoomChanged
-                || m_detail.framesPerPoint < previousFramesPerPoint) {
-                invalidateCacheLocked();
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            profileEnabled = m_profile.enabled;
+#endif
+            stale = generation != m_requestGeneration;
+            if (!stale) {
+                clearPendingRequestLocked();
+                parseFailed = !parsed;
             }
-            const auto [visibleStart, visibleEnd] = visibleRangeLocked();
-            requestFollowup = !detailOrPendingRequestCoversLocked(
-                visibleStart, visibleEnd);
+            if (!stale && !parseFailed) {
+                const bool oldPointsVisible = samplePointsVisibleLocked();
+                const bool firstDetail = m_detail.pointCount == 0;
+                const quint32 previousFramesPerPoint = m_detail.framesPerPoint;
+                channelsChanged = m_channelCount != next.channelCount;
+                rateChanged = m_sampleRateHz != next.sampleRateHz;
+                m_channelCount = next.channelCount;
+                m_sampleRateHz = next.sampleRateHz;
+                m_detail = std::move(next);
+                zoomChanged = clampZoomToMaximumLocked();
+                pointsChanged = oldPointsVisible != samplePointsVisibleLocked();
+                const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+                const bool detailReady = detailCoversRangeLocked(
+                    visibleStart, visibleEnd)
+                    && detailResolutionCoversLocked(visibleStart, visibleEnd);
+                const bool replaceOverviewFallback = m_zoomFallbackToOverview
+                    && detailReady;
+                if (replaceOverviewFallback) m_zoomFallbackToOverview = false;
+                if (firstDetail || channelsChanged || zoomChanged
+                    || replaceOverviewFallback
+                    || m_detail.framesPerPoint < previousFramesPerPoint) {
+                    invalidateCacheLocked();
+                }
+                requestFollowup = !detailOrPendingRequestCoversLocked(
+                    visibleStart, visibleEnd);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+                if (profileEnabled) {
+                    ++m_profile.detailHandoffs;
+                    m_profile.decodeMs += profileDecodeMs;
+                    m_profile.maximumDecodeMs = std::max(
+                        m_profile.maximumDecodeMs, profileDecodeMs);
+                }
+#endif
+            }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+            profileZoom = m_zoomLevel;
+            profileFallback = m_zoomFallbackToOverview;
+#endif
         }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (profileEnabled) {
+            const char *status = stale ? "stale" : (parseFailed ? "parse_failed" : "accepted");
+            std::fprintf(
+                stderr,
+                "[ui-waveform-editor] detail_result gen=%llu status=%s elapsed_ms=%.3f bytes=%lld returned=%.6f..%.6f points=%d frames_per_point=%u channels=%d rate=%d zoom=%.3f overview_fallback=%d followup=%d\n",
+                static_cast<unsigned long long>(generation),
+                status,
+                profileDecodeMs,
+                static_cast<long long>(bytes.size()),
+                profileReturnedStart,
+                profileReturnedEnd,
+                profileReturnedPoints,
+                profileReturnedFramesPerPoint,
+                profileReturnedChannels,
+                profileReturnedRate,
+                profileZoom,
+                profileFallback ? 1 : 0,
+                requestFollowup ? 1 : 0);
+        }
+#endif
+        if (stale || parseFailed) return;
         if (channelsChanged) emit channelCountChanged();
         if (rateChanged) emit sampleRateHzChanged();
         if (zoomChanged) emit zoomLevelChanged();
@@ -366,7 +501,6 @@ void WaveformEditorItem::requestDetailWindow() {
 
 void WaveformEditorItem::clearDetailLocked() {
     m_detail = DetailWindow{};
-    m_detailRenderWidth = 0;
     m_channelCount = 0;
     m_sampleRateHz = 0;
 }
@@ -390,7 +524,7 @@ double WaveformEditorItem::displayedPositionSecondsLocked() const {
 bool WaveformEditorItem::detailOrPendingRequestCoversLocked(
     double startSeconds, double endSeconds) const {
     const double visibleSpan = std::max(0.0, endSeconds - startSeconds);
-    const double requestMargin = std::max(visibleSpan, kMinimumDetailMarginSeconds);
+    const double requestMargin = detailRequestMarginLocked(visibleSpan);
     const double safetyMargin = requestMargin * 0.6;
     const double coveredStart = std::max(0.0, startSeconds - safetyMargin);
     const double coveredEnd = std::min(m_durationSeconds, endSeconds + safetyMargin);
@@ -421,8 +555,7 @@ bool WaveformEditorItem::detailResolutionCoversLocked(
     const double visiblePoints = static_cast<double>(m_detail.pointCount)
         * visibleSpan / detailSpan;
     return visiblePoints >= static_cast<double>(renderPixelWidthLocked())
-            * kDetailPointsPerPixel * 0.9
-        || m_detailRenderWidth >= renderPixelWidthLocked();
+        * kDetailPointsPerPixel * 0.9;
 }
 std::pair<double, double> WaveformEditorItem::visibleRangeLocked() const {
     if (m_durationSeconds <= 0.0) return {0.0, 0.0};
@@ -436,11 +569,22 @@ std::pair<double, double> WaveformEditorItem::visibleRangeLocked() const {
 std::pair<double, double> WaveformEditorItem::requestRangeLocked(
     double visibleStart, double visibleEnd) const {
     const double visibleSpan = std::max(0.0, visibleEnd - visibleStart);
-    const double margin = std::max(visibleSpan, kMinimumDetailMarginSeconds);
+    const double margin = detailRequestMarginLocked(visibleSpan);
     return {
         std::max(0.0, visibleStart - margin),
         std::min(m_durationSeconds, visibleEnd + margin),
     };
+}
+
+double WaveformEditorItem::detailRequestMarginLocked(double visibleSpan) const {
+    const double preferredMargin = std::max(
+        visibleSpan, kMinimumDetailMarginSeconds);
+    const double densityLimitedSpan = visibleSpan
+        * static_cast<double>(kMaximumDetailPoints)
+        / (static_cast<double>(renderPixelWidthLocked()) * kDetailPointsPerPixel);
+    const double maximumMargin = std::max(
+        0.0, (densityLimitedSpan - visibleSpan) * 0.5);
+    return std::min(preferredMargin, maximumMargin);
 }
 
 int WaveformEditorItem::detailRequestPointCountLocked(
@@ -556,18 +700,67 @@ void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
 void WaveformEditorItem::handleWindowFrameSwapped() {
     if (!isVisible()) return;
     bool request = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    const auto profileNow = std::chrono::steady_clock::now();
+    bool profileLogGap = false;
+    double profileGapMs = 0.0;
+    double profileZoom = 1.0;
+    double profileSpan = 0.0;
+    bool profileDirect = false;
+    bool profileCacheDirty = false;
+    double profileCacheStart = 0.0;
+    double profileCacheEnd = 0.0;
+#endif
     {
         QMutexLocker lock(&m_stateMutex);
         if (!m_playing) return;
         const auto [start, end] = visibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(start, end);
-        if (!renderDetailDirectlyLocked(start, end)
+        const bool direct = renderDetailDirectlyLocked(start, end);
+        if (!direct
             && (m_detail.pointCount == 0
             || start < m_cacheStartSeconds
             || end > m_cacheEndSeconds)) {
             invalidateCacheLocked();
         }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (m_profile.enabled) {
+            if (m_profile.frameInitialized) {
+                profileGapMs = std::chrono::duration<double, std::milli>(
+                    profileNow - m_profile.lastFrame).count();
+                m_profile.maximumFrameGapMs = std::max(
+                    m_profile.maximumFrameGapMs, profileGapMs);
+                profileLogGap = profileGapMs >= 8.0
+                    && shouldLogProfileSpike(
+                        &m_profile.lastFrameGapSpike, profileNow);
+            } else {
+                m_profile.frameInitialized = true;
+            }
+            m_profile.lastFrame = profileNow;
+            profileZoom = m_zoomLevel;
+            profileSpan = end - start;
+            profileDirect = direct;
+            profileCacheDirty = m_cacheDirty;
+            profileCacheStart = m_cacheStartSeconds;
+            profileCacheEnd = m_cacheEndSeconds;
+        }
+#endif
     }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (profileLogGap) {
+        std::fprintf(
+            stderr,
+            "[ui-waveform-editor] frame_gap ms=%.3f zoom=%.3f span=%.6f mode=%s cache_dirty=%d cache=%.6f..%.6f request=%d\n",
+            profileGapMs,
+            profileZoom,
+            profileSpan,
+            profileDirect ? "direct" : "cached",
+            profileCacheDirty ? 1 : 0,
+            profileCacheStart,
+            profileCacheEnd,
+            request ? 1 : 0);
+    }
+#endif
     if (request) scheduleDetailRequest();
     update();
 }
@@ -584,6 +777,17 @@ bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
 }
 
 void WaveformEditorItem::paint(QPainter *painter) {
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    const auto profilePaintStarted = std::chrono::steady_clock::now();
+    bool profileEnabled = false;
+    bool profileRebuiltCache = false;
+    double profileZoom = 1.0;
+    double profileSpan = 0.0;
+    int profileVisiblePoints = 0;
+    int profileDetailPoints = 0;
+    quint32 profileFramesPerPoint = 0;
+    bool profileOverviewFallback = false;
+#endif
     QImage cache;
     double visibleStart = 0.0;
     double visibleEnd = 0.0;
@@ -603,6 +807,21 @@ void WaveformEditorItem::paint(QPainter *painter) {
         QMutexLocker lock(&m_stateMutex);
         std::tie(visibleStart, visibleEnd) = visibleRangeLocked();
         directDetail = renderDetailDirectlyLocked(visibleStart, visibleEnd);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        profileEnabled = m_profile.enabled;
+        profileZoom = m_zoomLevel;
+        profileSpan = visibleEnd - visibleStart;
+        const auto [firstPoint, lastPoint] = detailPointRangeLocked(
+            visibleStart, visibleEnd);
+        profileVisiblePoints = lastPoint - firstPoint;
+        profileDetailPoints = m_detail.pointCount;
+        profileFramesPerPoint = m_detail.framesPerPoint;
+        profileOverviewFallback = m_zoomFallbackToOverview;
+        profileRebuiltCache = !directDetail
+            && (m_cacheDirty
+                || m_cachedViewportWidth != renderPixelWidthLocked()
+                || m_cachedViewportHeight != canvasHeight);
+#endif
         if (directDetail) {
             painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
             drawDetailLocked(
@@ -655,16 +874,142 @@ void WaveformEditorItem::paint(QPainter *painter) {
         drawCrosshair(*painter, canvasWidth, canvasHeight, visibleStart, visibleEnd);
     }
     if (showFps && fpsValue > 0) drawFpsOverlay(*painter, canvasWidth, fpsValue);
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (profileEnabled) {
+        const auto profilePaintEnded = std::chrono::steady_clock::now();
+        const double paintMs = std::chrono::duration<double, std::milli>(
+            profilePaintEnded - profilePaintStarted).count();
+        bool logSpike = false;
+        bool logSummary = false;
+        double summarySeconds = 0.0;
+        quint64 summaryPaints = 0;
+        quint64 summaryDirectPaints = 0;
+        quint64 summaryCachedPaints = 0;
+        quint64 summaryCacheRebuilds = 0;
+        quint64 summaryDetailRequests = 0;
+        quint64 summaryDetailHandoffs = 0;
+        double summaryPaintMs = 0.0;
+        double summaryMaximumPaintMs = 0.0;
+        double summaryCacheRebuildMs = 0.0;
+        double summaryMaximumCacheRebuildMs = 0.0;
+        double summaryMaximumFrameGapMs = 0.0;
+        double summaryDecodeMs = 0.0;
+        double summaryMaximumDecodeMs = 0.0;
+        double profileRebuildMs = 0.0;
+        int profileCacheWidth = 0;
+        int profileCacheHeight = 0;
+        {
+            QMutexLocker lock(&m_stateMutex);
+            ++m_profile.paints;
+            if (directDetail) {
+                ++m_profile.directPaints;
+            } else {
+                ++m_profile.cachedPaints;
+            }
+            m_profile.paintMs += paintMs;
+            m_profile.maximumPaintMs = std::max(
+                m_profile.maximumPaintMs, paintMs);
+            logSpike = paintMs >= 3.0
+                && shouldLogProfileSpike(
+                    &m_profile.lastPaintSpike, profilePaintEnded);
+            summarySeconds = std::chrono::duration<double>(
+                profilePaintEnded - m_profile.lastSummary).count();
+            logSummary = summarySeconds >= 1.0;
+            profileRebuildMs = profileRebuiltCache
+                ? m_profile.lastCacheRebuildMs
+                : 0.0;
+            profileCacheWidth = m_cache.width();
+            profileCacheHeight = m_cache.height();
+            if (logSummary) {
+                summaryPaints = m_profile.paints;
+                summaryDirectPaints = m_profile.directPaints;
+                summaryCachedPaints = m_profile.cachedPaints;
+                summaryCacheRebuilds = m_profile.cacheRebuilds;
+                summaryDetailRequests = m_profile.detailRequests;
+                summaryDetailHandoffs = m_profile.detailHandoffs;
+                summaryPaintMs = m_profile.paintMs;
+                summaryMaximumPaintMs = m_profile.maximumPaintMs;
+                summaryCacheRebuildMs = m_profile.cacheRebuildMs;
+                summaryMaximumCacheRebuildMs = m_profile.maximumCacheRebuildMs;
+                summaryMaximumFrameGapMs = m_profile.maximumFrameGapMs;
+                summaryDecodeMs = m_profile.decodeMs;
+                summaryMaximumDecodeMs = m_profile.maximumDecodeMs;
+                m_profile.lastSummary = profilePaintEnded;
+                m_profile.paints = 0;
+                m_profile.directPaints = 0;
+                m_profile.cachedPaints = 0;
+                m_profile.cacheRebuilds = 0;
+                m_profile.detailRequests = 0;
+                m_profile.detailHandoffs = 0;
+                m_profile.paintMs = 0.0;
+                m_profile.maximumPaintMs = 0.0;
+                m_profile.cacheRebuildMs = 0.0;
+                m_profile.maximumCacheRebuildMs = 0.0;
+                m_profile.maximumFrameGapMs = 0.0;
+                m_profile.decodeMs = 0.0;
+                m_profile.maximumDecodeMs = 0.0;
+            }
+        }
+        if (logSpike) {
+            std::fprintf(
+                stderr,
+                "[ui-waveform-editor] paint_spike ms=%.3f zoom=%.3f span=%.6f mode=%s visible_points=%d detail_points=%d frames_per_point=%u fallback=%d cache_rebuilt=%d rebuild_ms=%.3f cache=%dx%d viewport=%dx%d\n",
+                paintMs,
+                profileZoom,
+                profileSpan,
+                directDetail ? "direct" : "cached",
+                profileVisiblePoints,
+                profileDetailPoints,
+                profileFramesPerPoint,
+                profileOverviewFallback ? 1 : 0,
+                profileRebuiltCache ? 1 : 0,
+                profileRebuildMs,
+                profileCacheWidth,
+                profileCacheHeight,
+                canvasWidth,
+                canvasHeight);
+        }
+        if (logSummary) {
+            std::fprintf(
+                stderr,
+                "[ui-waveform-editor] summary seconds=%.3f paints=%llu direct=%llu cached=%llu paint_ms=%.3f avg_ms=%.3f max_ms=%.3f rebuilds=%llu rebuild_ms=%.3f rebuild_max_ms=%.3f frame_gap_max_ms=%.3f requests=%llu handoffs=%llu decode_ms=%.3f decode_max_ms=%.3f zoom=%.3f span=%.6f\n",
+                summarySeconds,
+                static_cast<unsigned long long>(summaryPaints),
+                static_cast<unsigned long long>(summaryDirectPaints),
+                static_cast<unsigned long long>(summaryCachedPaints),
+                summaryPaintMs,
+                summaryPaints > 0
+                    ? summaryPaintMs / static_cast<double>(summaryPaints)
+                    : 0.0,
+                summaryMaximumPaintMs,
+                static_cast<unsigned long long>(summaryCacheRebuilds),
+                summaryCacheRebuildMs,
+                summaryMaximumCacheRebuildMs,
+                summaryMaximumFrameGapMs,
+                static_cast<unsigned long long>(summaryDetailRequests),
+                static_cast<unsigned long long>(summaryDetailHandoffs),
+                summaryDecodeMs,
+                summaryMaximumDecodeMs,
+                profileZoom,
+                profileSpan);
+        }
+    }
+#endif
 }
 
 void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     if (!m_cacheDirty && m_cachedViewportWidth == width && m_cachedViewportHeight == height) return;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    const auto profileRebuildStarted = std::chrono::steady_clock::now();
+#endif
     const auto [visibleStart, visibleEnd] = visibleRangeLocked();
     double renderStart = visibleStart;
     double renderEnd = visibleEnd;
     const bool detailCoversViewport = detailCoversRangeLocked(
         visibleStart, visibleEnd);
-    if (detailCoversViewport) {
+    const bool detailReady = detailCoversViewport
+        && detailResolutionCoversLocked(visibleStart, visibleEnd);
+    if (detailReady) {
         const double visibleSpan = visibleEnd - visibleStart;
         renderStart = std::max(m_detail.startSeconds, visibleStart - visibleSpan);
         renderEnd = std::min(m_detail.endSeconds, visibleEnd + visibleSpan);
@@ -684,8 +1029,12 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     QPainter painter(&m_cache);
     painter.setRenderHint(QPainter::Antialiasing, false);
     const int channels = displayedChannelCountLocked();
-    if (detailCoversViewport) {
+    if (detailReady) {
         drawDetailLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
+    } else if (m_zoomFallbackToOverview
+               || (detailCoversViewport
+                   && !detailResolutionCoversLocked(visibleStart, visibleEnd))) {
+        drawOverviewLocked(painter, renderWidth, height, renderStart, renderEnd, channels);
     } else {
         const bool detailOverlapsViewport = m_detail.pointCount > 0
             && visibleStart < m_detail.endSeconds
@@ -702,6 +1051,17 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     m_cacheStartSeconds = renderStart;
     m_cacheEndSeconds = renderEnd;
     m_cacheDirty = false;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    if (m_profile.enabled) {
+        const double rebuildMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - profileRebuildStarted).count();
+        ++m_profile.cacheRebuilds;
+        m_profile.cacheRebuildMs += rebuildMs;
+        m_profile.maximumCacheRebuildMs = std::max(
+            m_profile.maximumCacheRebuildMs, rebuildMs);
+        m_profile.lastCacheRebuildMs = rebuildMs;
+    }
+#endif
 }
 
 void WaveformEditorItem::drawChannelSeparators(
@@ -713,6 +1073,25 @@ void WaveformEditorItem::drawChannelSeparators(
             static_cast<double>(channel) * height / channels));
         painter.drawLine(0, y, width - 1, y);
     }
+}
+
+QPainterPath WaveformEditorItem::buildSamplePath(const QPolygonF &samples) {
+    QPainterPath path;
+    if (samples.isEmpty()) return path;
+    path.moveTo(samples.constFirst());
+    if (samples.size() == 1) return path;
+    for (qsizetype index = 0; index + 1 < samples.size(); ++index) {
+        const QPointF p0 = index > 0 ? samples.at(index - 1) : samples.at(index);
+        const QPointF p1 = samples.at(index);
+        const QPointF p2 = samples.at(index + 1);
+        const QPointF p3 = index + 2 < samples.size()
+            ? samples.at(index + 2)
+            : samples.at(index + 1);
+        const QPointF control1 = p1 + (p2 - p0) / 6.0;
+        const QPointF control2 = p2 - (p3 - p1) / 6.0;
+        path.cubicTo(control1, control2, p2);
+    }
+    return path;
 }
 
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,
@@ -870,7 +1249,7 @@ void WaveformEditorItem::drawDetailLocked(QPainter &painter, int width, int heig
         }
         if (points && polyline.size() > 1) {
             painter.setRenderHint(QPainter::Antialiasing, true);
-            painter.drawPolyline(polyline);
+            painter.drawPath(buildSamplePath(polyline));
             painter.setBrush(color);
             for (const QPointF &point : polyline) painter.drawRect(QRectF(point.x() - 1.5, point.y() - 1.5, 3.0, 3.0));
             painter.setRenderHint(QPainter::Antialiasing, false);

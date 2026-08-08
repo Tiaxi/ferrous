@@ -125,7 +125,7 @@ Options:
   --no-build        Skip cmake build step
   --no-run          Only configure/build; do not launch UI
   --spectrogram-instrumentation
-                    Build with FERROUS_ENABLE_PROFILE_LOGS=ON and export FERROUS_PROFILE_UI=1 on launch
+                    Build with UI profiling logs and export FERROUS_PROFILE_UI=1 on launch
   --profile-logs    Alias for --spectrogram-instrumentation
   --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
   --nuke-session    Delete saved playlist/session (${XDG_CONFIG_HOME:-\$HOME/.config}/ferrous/session.json)
@@ -231,7 +231,7 @@ fi
 if [[ ${DO_RUN} -eq 1 ]]; then
     if [[ ${ENABLE_PROFILE_LOGS} -eq 1 ]]; then
         export FERROUS_PROFILE_UI="${FERROUS_PROFILE_UI:-1}"
-        echo "Spectrogram instrumentation/profiling enabled (FERROUS_PROFILE_UI=${FERROUS_PROFILE_UI})."
+        echo "UI instrumentation/profiling enabled (FERROUS_PROFILE_UI=${FERROUS_PROFILE_UI})."
     fi
     if [[ ${ENABLE_COREDUMP} -eq 1 ]]; then
         ulimit -c unlimited || true

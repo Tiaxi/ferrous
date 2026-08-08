@@ -5,7 +5,9 @@
 #include <QByteArray>
 #include <QImage>
 #include <QMutex>
+#include <QPainterPath>
 #include <QPointF>
+#include <QPolygonF>
 #include <QQuickPaintedItem>
 #include <QString>
 #include <QTimer>
@@ -109,6 +111,31 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
 
 private:
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    struct ProfileState {
+        bool enabled{false};
+        bool frameInitialized{false};
+        std::chrono::steady_clock::time_point lastSummary{};
+        std::chrono::steady_clock::time_point lastFrame{};
+        std::chrono::steady_clock::time_point lastFrameGapSpike{};
+        std::chrono::steady_clock::time_point lastPaintSpike{};
+        quint64 paints{0};
+        quint64 directPaints{0};
+        quint64 cachedPaints{0};
+        quint64 cacheRebuilds{0};
+        quint64 detailRequests{0};
+        quint64 detailHandoffs{0};
+        double paintMs{0.0};
+        double maximumPaintMs{0.0};
+        double cacheRebuildMs{0.0};
+        double maximumCacheRebuildMs{0.0};
+        double lastCacheRebuildMs{0.0};
+        double maximumFrameGapMs{0.0};
+        double decodeMs{0.0};
+        double maximumDecodeMs{0.0};
+    };
+#endif
+
     struct DetailWindow {
         int sampleRateHz{0};
         int channelCount{0};
@@ -133,6 +160,7 @@ private:
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> requestRangeLocked(
         double visibleStart, double visibleEnd) const;
+    double detailRequestMarginLocked(double visibleSpan) const;
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
     int renderPixelWidthLocked() const;
     double maximumZoomLevelLocked() const;
@@ -150,6 +178,7 @@ private:
                         double visibleStart, double visibleEnd, int channels) const;
     static void drawChannelSeparators(
         QPainter &painter, int width, int height, int channels);
+    static QPainterPath buildSamplePath(const QPolygonF &samples);
     void drawOverviewLocked(QPainter &painter, int width, int height,
                             double visibleStart, double visibleEnd, int channels) const;
     void drawDetailLocked(QPainter &painter, int width, int height,
@@ -181,7 +210,7 @@ private:
     bool m_hoverActive{false};
     QPointF m_hoverPosition;
     DetailWindow m_detail;
-    int m_detailRenderWidth{0};
+    bool m_zoomFallbackToOverview{false};
     QImage m_cache;
     bool m_cacheDirty{true};
     int m_cachedViewportWidth{0};
@@ -202,4 +231,7 @@ private:
     QMetaObject::Connection m_frameSwappedConnection;
     QMetaObject::Connection m_windowVisibilityConnection;
     QTimer m_requestTimer;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    ProfileState m_profile;
+#endif
 };
