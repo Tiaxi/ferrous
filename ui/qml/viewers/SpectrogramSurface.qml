@@ -81,6 +81,13 @@ Item {
         }
     }
 
+    function channelButtonsVisible(paneHovered, controlsHovered) {
+        const visibility = root.uiBridge.channelButtonsVisibility
+        return root.interactiveOverlaysVisible
+            && (visibility === 2
+                || (visibility === 1 && (paneHovered || controlsHovered)))
+    }
+
     function sameDescriptors(next) {
         if (root.channelDescriptors.length !== next.length) {
             return false
@@ -316,8 +323,10 @@ Item {
                     anchors.margins: 8
                     spacing: 4
                     visible: modelData.showLabel
+                    z: 1
 
                     HoverHandler {
+                        id: channelControlsHover
                         cursorShape: root.pointerCursorShape
                         onPointChanged: root.notePointerActivity(
                             point.scenePosition.x, point.scenePosition.y)
@@ -350,11 +359,8 @@ Item {
                     Rectangle {
                         objectName: "spectrogramMuteButton"
                         property bool active: spectrogramPaneItem.channelMuted
-                        visible: {
-                            const vis = root.uiBridge.channelButtonsVisibility
-                            return root.interactiveOverlaysVisible
-                                && (vis === 2 || (vis === 1 && paneHover.hovered))
-                        }
+                        visible: root.channelButtonsVisible(
+                            paneHover.hovered, channelControlsHover.hovered)
                         width: muteText.implicitWidth + 10
                         height: muteText.implicitHeight + 2
                         radius: 3
@@ -375,8 +381,11 @@ Item {
                         }
 
                         MouseArea {
+                            objectName: "spectrogramMuteMouseArea"
                             anchors.fill: parent
                             acceptedButtons: Qt.AllButtons
+                            hoverEnabled: true
+                            preventStealing: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: function(mouse) {
                                 if (mouse.button === Qt.LeftButton)
@@ -389,11 +398,8 @@ Item {
                     Rectangle {
                         objectName: "spectrogramSoloButton"
                         property bool active: root.uiBridge.soloedChannel === modelData.channelIndex
-                        visible: {
-                            const vis = root.uiBridge.channelButtonsVisibility
-                            return root.interactiveOverlaysVisible
-                                && (vis === 2 || (vis === 1 && paneHover.hovered))
-                        }
+                        visible: root.channelButtonsVisible(
+                            paneHover.hovered, channelControlsHover.hovered)
                         width: soloText.implicitWidth + 10
                         height: soloText.implicitHeight + 2
                         radius: 3
@@ -414,8 +420,11 @@ Item {
                         }
 
                         MouseArea {
+                            objectName: "spectrogramSoloMouseArea"
                             anchors.fill: parent
                             acceptedButtons: Qt.AllButtons
+                            hoverEnabled: true
+                            preventStealing: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: function(mouse) {
                                 if (mouse.button === Qt.LeftButton)

@@ -142,7 +142,12 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     setAntialiasing(false);
     setOpaquePainting(true);
     setFillColor(kBackground);
-    setRenderTarget(QQuickPaintedItem::FramebufferObject);
+    // Keep QPainter off the scene graph's OpenGL framebuffer.  The waveform
+    // surface is shown/hidden and moved between widget and fullscreen windows;
+    // queued FBO draw commands can otherwise outlive the owning render target.
+    // The image target gives each paint an isolated raster which Qt uploads
+    // after painting has finished.
+    setRenderTarget(QQuickPaintedItem::Image);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
