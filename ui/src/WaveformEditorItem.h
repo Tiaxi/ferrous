@@ -185,6 +185,8 @@ private:
     bool detailOrPendingRequestCoversLocked(double startSeconds, double endSeconds) const;
     bool detailCoversRangeLocked(double startSeconds, double endSeconds) const;
     bool detailResolutionCoversLocked(double startSeconds, double endSeconds) const;
+    bool detailResolutionCoversPixelSpanLocked(
+        double startSeconds, double endSeconds, int pixelWidth) const;
     std::pair<double, double> visibleRangeForZoomLocked(double zoomLevel) const;
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> detailRequestVisibleRangeLocked() const;

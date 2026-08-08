@@ -4334,19 +4334,28 @@ void QmlSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
     item.m_zoomLevel = 4.0;
     item.m_presentedZoomLevel = 4.0;
     item.m_playing = true;
-    item.m_sampleRateHz = 1'000;
+    item.m_sampleRateHz = 44'100;
     item.m_channelCount = 2;
-    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.sampleRateHz = 44'100;
     item.m_detail.channelCount = 2;
     item.m_detail.startSeconds = 0.0;
     item.m_detail.endSeconds = 10.0;
-    item.m_detail.framesPerPoint = 1;
-    item.m_detail.pointCount = 10'000;
-    item.m_detail.extrema.assign(40'000, 0.25F);
+    item.m_detail.framesPerPoint = 88;
+    item.m_detail.pointCount = 5'000;
+    item.m_detail.extrema.assign(20'000, 0.25F);
 
     const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
     QVERIFY(item.playbackTilesEligibleLocked(visibleStart, visibleEnd));
     item.preparePlaybackTilesLocked(visibleStart, visibleEnd, 180);
+
+    const double tileDuration = item.m_playbackTileSecondsPerPixel * 64.0;
+    const qint64 firstTile = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + 1.0e-9));
+    const double firstTileStart = static_cast<double>(firstTile) * tileDuration;
+    QVERIFY(!item.detailResolutionCoversLocked(
+        firstTileStart, firstTileStart + tileDuration));
+    QVERIFY(item.detailResolutionCoversPixelSpanLocked(
+        firstTileStart, firstTileStart + tileDuration, 64));
 
     QCOMPARE(item.renderMissingPlaybackTilesLocked(
         visibleStart, visibleEnd, 180, 2), 2);

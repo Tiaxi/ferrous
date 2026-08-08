@@ -637,12 +637,26 @@ bool WaveformEditorItem::detailCoversRangeLocked(
 }
 bool WaveformEditorItem::detailResolutionCoversLocked(
     double startSeconds, double endSeconds) const {
+    return detailResolutionCoversPixelSpanLocked(
+        startSeconds, endSeconds, renderPixelWidthLocked());
+}
+
+bool WaveformEditorItem::detailResolutionCoversPixelSpanLocked(
+    double startSeconds, double endSeconds, int pixelWidth) const {
     const double detailSpan = m_detail.endSeconds - m_detail.startSeconds;
     const double visibleSpan = endSeconds - startSeconds;
     if (m_detail.pointCount <= 0 || detailSpan <= 0.0 || visibleSpan <= 0.0) return false;
     const double visiblePoints = static_cast<double>(m_detail.pointCount)
         * visibleSpan / detailSpan;
-    return visiblePoints >= requiredVisibleDetailPointsLocked(visibleSpan) * 0.9;
+    double requiredPoints = static_cast<double>(std::max(1, pixelWidth))
+        * kDetailPointsPerPixel;
+    if (m_detail.sampleRateHz > 0) {
+        const double availableSamples = visibleSpan
+            * static_cast<double>(m_detail.sampleRateHz);
+        requiredPoints = std::max(
+            1.0, std::min(requiredPoints, availableSamples));
+    }
+    return visiblePoints >= requiredPoints * 0.9;
 }
 std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
     double zoomLevel) const {
@@ -1598,19 +1612,10 @@ int WaveformEditorItem::renderMissingPlaybackTilesLocked(
         const double contentStart = std::max(0.0, tileStart);
         const double contentEnd = std::min(m_durationSeconds, tileEnd);
         if (contentEnd <= contentStart
-            || !detailCoversRangeLocked(contentStart, contentEnd)
-            || !detailResolutionCoversLocked(contentStart, contentEnd)) {
+            || !detailCoversRangeLocked(contentStart, contentEnd)) {
             continue;
         }
 
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        const auto tileStarted = std::chrono::steady_clock::now();
-#endif
-        QImage tileImage(
-            kPlaybackTileWidth, height, QImage::Format_RGB32);
-        tileImage.fill(kBackground);
-        QPainter tilePainter(&tileImage);
-        tilePainter.setRenderHint(QPainter::Antialiasing, false);
         const int firstX = std::clamp(
             static_cast<int>(std::floor(
                 (contentStart - tileStart) / tileDuration
@@ -1623,6 +1628,20 @@ int WaveformEditorItem::renderMissingPlaybackTilesLocked(
                 * static_cast<double>(kPlaybackTileWidth))),
             firstX,
             kPlaybackTileWidth);
+        const int contentPixelWidth = std::max(1, lastX - firstX);
+        if (!detailResolutionCoversPixelSpanLocked(
+                contentStart, contentEnd, contentPixelWidth)) {
+            continue;
+        }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        const auto tileStarted = std::chrono::steady_clock::now();
+#endif
+        QImage tileImage(
+            kPlaybackTileWidth, height, QImage::Format_RGB32);
+        tileImage.fill(kBackground);
+        QPainter tilePainter(&tileImage);
+        tilePainter.setRenderHint(QPainter::Antialiasing, false);
         drawDetailSliceLocked(
             tilePainter,
             kPlaybackTileWidth,
