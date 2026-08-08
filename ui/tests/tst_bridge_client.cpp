@@ -110,6 +110,7 @@ private slots:
     void asyncImageFileDetailsAcceptsImageProviderUrl();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void testMutedChannelsMaskDecoding();
+    void currentTrackChannelsExposesDecodedMetadata();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
@@ -1079,6 +1080,16 @@ void BridgeClientTest::testMutedChannelsMaskDecoding()
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.playback.mutedChannelsMask, quint64(0b10101));
+}
+
+void BridgeClientTest::currentTrackChannelsExposesDecodedMetadata()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_currentTrackChannels = 6;
+
+    QCOMPARE(client.currentTrackChannels(), 6);
+    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("5.1"));
 }
 
 void BridgeClientTest::testSoloChannelCommandEncoding()

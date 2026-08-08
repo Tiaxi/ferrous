@@ -23,6 +23,11 @@ QtObject {
     property string comparisonCandidateInfoSource: ""
     property string comparisonLabel: ""
     property bool spectrogramViewerOpen: false
+    property int visualizationMode: 0
+
+    function setVisualizationMode(mode) {
+        root.visualizationMode = Math.max(0, Math.min(1, mode))
+    }
 
     function closeAlbumArtViewer() {
         root.albumArtViewerOpen = false

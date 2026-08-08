@@ -183,6 +183,7 @@ ApplicationWindow {
         property string currentTrackFormatLabel: ""
         property string currentTrackChannelLayoutText: ""
         property string currentTrackChannelLayoutIconKey: ""
+        property int currentTrackChannels: 0
         property int currentTrackSampleRateHz: 0
         property int currentTrackBitDepth: 0
         property int currentTrackCurrentBitrateKbps: 0
@@ -202,6 +203,7 @@ ApplicationWindow {
         property bool showSpectrogramScale: false
         property bool spectrogramZoomEnabled: true
         property int soloedChannel: -1
+        property double mutedChannelsMask: 0
         property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
         property bool lastFmScrobblingEnabled: false
@@ -621,12 +623,18 @@ ApplicationWindow {
     }
     Action {
         id: resetSpectrogramAction
-        text: "Reset Spectrogram View"
-        onTriggered: spectrogramSurface.resetForCurrentMode()
+        text: "Reset Visualization View"
+        onTriggered: {
+            if (viewerController.visualizationMode === 0) {
+                spectrogramSurface.resetForCurrentMode()
+            } else {
+                waveformSurface.waveformItem.resetZoom()
+            }
+        }
     }
     Action {
         id: showFpsOverlayAction
-        text: "Show Spectrogram FPS"
+        text: "Show Visualization FPS"
         checkable: true
         checked: uiBridge.showFps
         onTriggered: uiBridge.setShowFps(checked)
@@ -1025,13 +1033,15 @@ ApplicationWindow {
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: 220
                     openViewer: viewerController.openSpectrogramViewer
+                    visualizationMode: viewerController.visualizationMode
+                    setVisualizationMode: viewerController.setVisualizationMode
                 }
             }
         }
     }
 
-    Viewers.SpectrogramSurface {
-        id: spectrogramSurface
+    Item {
+        id: visualizationSurface
         parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
                 ? spectrogramViewerShell.windowHost
@@ -1039,12 +1049,29 @@ ApplicationWindow {
             : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
-        viewerMode: viewerController.spectrogramViewerOpen
-        interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
-        pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
-        uiBridge: root.uiBridge
-        positionSeconds: playbackController.spectrogramPositionSeconds
-        seekCommitted: playbackController.seekCommitted
+
+        Viewers.SpectrogramSurface {
+            id: spectrogramSurface
+            anchors.fill: parent
+            visible: viewerController.visualizationMode === 0
+            viewerMode: viewerController.spectrogramViewerOpen
+            interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
+            pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
+            uiBridge: root.uiBridge
+            positionSeconds: playbackController.spectrogramPositionSeconds
+            seekCommitted: playbackController.seekCommitted
+        }
+
+        Viewers.WaveformSurface {
+            id: waveformSurface
+            anchors.fill: parent
+            visible: viewerController.visualizationMode === 1
+            interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
+            pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
+            uiBridge: root.uiBridge
+            positionSeconds: playbackController.spectrogramPositionSeconds
+            seekCommitted: playbackController.seekCommitted
+        }
     }
 
     Viewers.SpectrogramViewerShell {
@@ -1055,6 +1082,8 @@ ApplicationWindow {
         popupTransitionMs: root.uiPopupTransitionMs
         titleText: root.title
         closeViewer: viewerController.closeSpectrogramViewer
+        visualizationMode: viewerController.visualizationMode
+        setVisualizationMode: viewerController.setVisualizationMode
     }
 
     Dialogs.ItunesArtworkDialog {

@@ -6,6 +6,8 @@
 #include <QHoverEvent>
 #include <QImage>
 #include <QMouseEvent>
+#include <QPaintDevice>
+#include <QPaintEngine>
 #include <QPainter>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -13,6 +15,7 @@
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QJSValue>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QScopedPointer>
@@ -23,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
@@ -31,10 +35,77 @@
 #define private public
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformItem.h"
+#include "../src/WaveformEditorItem.h"
 #undef private
 #undef protected
 
 namespace {
+
+class CompositionRecordingPaintEngine final : public QPaintEngine {
+public:
+    CompositionRecordingPaintEngine()
+        : QPaintEngine(QPaintEngine::AlphaBlend
+                       | QPaintEngine::PorterDuff
+                       | QPaintEngine::PainterPaths) {}
+
+    bool begin(QPaintDevice *device) override {
+        setPaintDevice(device);
+        setActive(true);
+        return true;
+    }
+
+    bool end() override {
+        setActive(false);
+        return true;
+    }
+
+    void updateState(const QPaintEngineState &state) override {
+        if (state.state() & QPaintEngine::DirtyCompositionMode) {
+            compositionModes.push_back(state.compositionMode());
+        }
+    }
+
+    void drawLines(const QLine *, int) override {}
+    void drawPixmap(const QRectF &, const QPixmap &, const QRectF &) override {}
+    Type type() const override { return QPaintEngine::User; }
+
+    QVector<QPainter::CompositionMode> compositionModes;
+};
+
+class CompositionRecordingPaintDevice final : public QPaintDevice {
+public:
+    QPaintEngine *paintEngine() const override {
+        return const_cast<CompositionRecordingPaintEngine *>(&engine);
+    }
+
+    mutable CompositionRecordingPaintEngine engine;
+
+protected:
+    int metric(PaintDeviceMetric metric) const override {
+        switch (metric) {
+        case PdmWidth:
+        case PdmWidthMM:
+        case PdmHeight:
+        case PdmHeightMM:
+            return 64;
+        case PdmDpiX:
+        case PdmDpiY:
+        case PdmPhysicalDpiX:
+        case PdmPhysicalDpiY:
+            return 96;
+        case PdmDevicePixelRatio:
+            return 1;
+        case PdmDevicePixelRatioScaled:
+            return static_cast<int>(QPaintDevice::devicePixelRatioFScale());
+        case PdmNumColors:
+            return 16'777'216;
+        case PdmDepth:
+            return 32;
+        default:
+            return 0;
+        }
+    }
+};
 
 struct BinaryTreeRow {
     quint8 rowType{0};
@@ -383,6 +454,8 @@ private slots:
     void loadsExtractedQmlSlicesWithFallbackProps();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
+    void spectrogramHoverChannelButtonsRemainClickable();
+    void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void mainWindowContentStartsBelowMenuBar();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -429,6 +502,59 @@ private slots:
     void spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals();
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
+    void waveformEditorParsesSignedSampleWindow();
+    void waveformEditorSampleMarkersRequireSampleResolution();
+    void waveformEditorFormatsViewportDuration();
+    void waveformEditorConnectsSamplesBeforeMarkers();
+    void waveformEditorScrollsInsideCachedDetailWithoutRebuild();
+    void waveformEditorUsesChannelHintBeforeDetailArrives();
+    void waveformEditorCoalescesPlaybackRequestsWithoutStarvingTimer();
+    void waveformEditorPendingWindowSuppressesDuplicateRequest();
+    void waveformEditorZoomSupersedesCoarsePendingRequest();
+    void waveformEditorResizeRaisesDetailRequestDensity();
+    void waveformEditorDeepZoomRequestPreservesViewportDensity();
+    void waveformEditorQuantizesRequestForRequiredBinDensity();
+    void waveformEditorFullscreenRequestStaysInTargetBin();
+    void waveformEditorFullscreenSampleCurveRequestsRawFramesEarly();
+    void waveformEditorSampleViewPrefetchesUsefulSpan();
+    void waveformEditorPrefetchesBeforeDetailBoundary();
+    void waveformEditorKeepsOverlappingDetailDuringHandoff();
+    void waveformEditorWideDetailCacheKeepsViewportDensity();
+    void waveformEditorWholeTrackAcceptsDecodedEndpointTolerance();
+    void waveformEditorZoomOutDefersOverviewUntilDetailReady();
+    void waveformEditorDeferredZoomOutCommitsCompletedDetailCache();
+    void waveformEditorZoomOutKeepsReadyDetail();
+    void waveformEditorZoomInRetainsCoveredCacheWhileRefining();
+    void waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoundaries();
+    void waveformEditorSparseZoomDetailFallsBackUntilReady();
+    void waveformEditorSeparatesChannelPanes();
+    void waveformEditorRestrictsDetailWorkToVisiblePoints();
+    void waveformEditorDetailPointsUseAbsoluteSampleTimes();
+    void waveformEditorReusesSameSizedCache();
+    void waveformEditorCacheHandoffsKeepAbsolutePixelGrid();
+    void waveformEditorReplacementCacheDoesNotReuseOldRaster();
+    void waveformEditorBuildsPlaybackTilesWithinFrameBudget();
+    void waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs();
+    void waveformEditorBuildsReplacementCacheIncrementally();
+    void waveformEditorPaintDefersGuiContinuation();
+    void waveformEditorZoomedPlaybackUsesScrollingCache();
+    void waveformEditorPlaybackOverviewCacheHasForwardHeadroom();
+    void waveformEditorCachedPaintClearsUncoveredPixels();
+    void waveformEditorPausedDetailReplacesOverviewCache();
+    void waveformEditorPlaybackHeartbeatDoesNotMoveBackward();
+    void waveformEditorHoverDrawsCrosshairAndReadouts();
+    void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
+    void waveformEditorSampleViewRepaintsCrosshairCleanly();
+    void waveformEditorSampleViewUsesSmoothInterpolation();
+    void waveformEditorSampleViewDoesNotFillLaterChannels();
+    void waveformEditorReclampsZoomForDecodedSampleRate();
+    void waveformEditorRulersFollowGridSetting();
+    void waveformEditorRulersRemainVisibleWhenZoomed();
+    void waveformEditorPlayheadIsThinAndNeutral();
+    void waveformEditorReferenceLineContrastsWaveform();
+    void waveformEditorContrastLinesUseFboSafeCompositionModes();
+    void waveformEditorFpsOverlayTracksPaintRate();
+    void waveformEditorUsesSafeRasterTargetAndNativeFrameInterpolation();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
@@ -508,6 +634,7 @@ private slots:
 
 void QmlSmokeTest::initTestCase() {
     previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
 }
 
 void QmlSmokeTest::init() {
@@ -545,6 +672,37 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QObject *libraryView = qvariant_cast<QObject *>(root->property("libraryViewRef"));
     QVERIFY2(libraryView != nullptr, "Main.qml did not publish the library view ref");
     QCOMPARE(qvariant_cast<QObject *>(libraryView->property("model")), static_cast<QObject *>(&libraryModel));
+
+    auto *window = qobject_cast<QQuickWindow *>(root);
+    QVERIFY(window != nullptr);
+    QObject *modeSwitch = nullptr;
+    const QList<QObject *> modeSwitches = root->findChildren<QObject *>(
+        QStringLiteral("visualizationModeSwitch"));
+    for (QObject *candidate : modeSwitches) {
+        auto *item = qobject_cast<QQuickItem *>(candidate);
+        if (item != nullptr && item->window() == window && item->isVisible()) {
+            modeSwitch = candidate;
+            break;
+        }
+    }
+    QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
+    QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
+    QVERIFY(modeSwitch->property("width").toDouble() <= 50.0);
+    QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
+    QCOMPARE(modeSwitch->property("opacity").toDouble(), 0.0);
+    auto *modeSwitchItem = qobject_cast<QQuickItem *>(modeSwitch);
+    QVERIFY(modeSwitchItem != nullptr);
+    QVERIFY(modeSwitch->setProperty("proximityHovered", true));
+    QTRY_VERIFY(modeSwitch->property("opacity").toDouble() > 0.95);
+    QVERIFY(modeSwitch->setProperty("controlsVisible", false));
+    QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
+    QVERIFY(modeSwitch->setProperty("controlsVisible", true));
+    QTRY_VERIFY(modeSwitch->property("opacity").toDouble() < 0.05);
+    QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
+    QVERIFY(setMode.isCallable());
+    setMode.call(QJSValueList{QJSValue(1)});
+    QTRY_COMPARE(modeSwitch->property("selectedMode").toInt(), 1);
+    setMode.call(QJSValueList{QJSValue(0)});
 
     bool invoked = QMetaObject::invokeMethod(root, "openItunesArtworkDialog");
     QVERIFY(invoked);
@@ -608,6 +766,7 @@ Item {
         property string currentTrackGenre: ""
         property var currentTrackYear: null
         property int currentTrackNumber: 0
+        property int currentTrackChannels: 0
         property var itunesArtworkResults: []
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
@@ -1167,6 +1326,207 @@ Item {
     QVERIFY(channelMarker->property("visible").toBool());
     QCOMPARE(surface->property("pointerCursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
     QCOMPARE(pointerArea->property("cursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
+}
+
+void QmlSmokeTest::spectrogramHoverChannelButtonsRemainClickable() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "viewers" as Viewers
+
+Window {
+    width: 640
+    height: 320
+    visible: true
+
+    QtObject {
+        id: bridge
+        objectName: "channelButtonBridge"
+        property string playbackState: "Stopped"
+        property int spectrogramViewMode: 1
+        property int spectrogramDisplayMode: 0
+        property real dbRange: 90
+        property bool logScale: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: true
+        property bool showSpectrogramScale: true
+        property bool spectrogramZoomEnabled: true
+        property int channelButtonsVisibility: 1
+        property int soloedChannel: -1
+        property int muteCalls: 0
+        property int soloCalls: 0
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelMuted(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) {}
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) {}
+        function toggleChannelMute(channelIndex) { ++muteCalls }
+        function soloChannel(channelIndex) { ++soloCalls }
+    }
+
+    Viewers.SpectrogramSurface {
+        id: surface
+        objectName: "clickableSpectrogramSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    auto *surface = qobject_cast<QQuickItem *>(root->findChild<QObject *>(
+        QStringLiteral("clickableSpectrogramSurface")));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("channelButtonBridge"));
+    QVERIFY(surface != nullptr);
+    QVERIFY(bridge != nullptr);
+    surface->setProperty("channelDescriptors", QVariantList{QVariantMap{
+        {QStringLiteral("label"), QStringLiteral("L")},
+        {QStringLiteral("showLabel"), true},
+        {QStringLiteral("muted"), false},
+        {QStringLiteral("channelIndex"), 0},
+    }});
+
+    QQuickItem *muteButton = nullptr;
+    QQuickItem *soloButton = nullptr;
+    QQuickItem *muteMouseArea = nullptr;
+    QQuickItem *soloMouseArea = nullptr;
+    QTRY_VERIFY([&]() {
+        muteButton = findQuickItemByObjectName(
+            surface, QStringLiteral("spectrogramMuteButton"));
+        soloButton = findQuickItemByObjectName(
+            surface, QStringLiteral("spectrogramSoloButton"));
+        muteMouseArea = findQuickItemByObjectName(
+            surface, QStringLiteral("spectrogramMuteMouseArea"));
+        soloMouseArea = findQuickItemByObjectName(
+            surface, QStringLiteral("spectrogramSoloMouseArea"));
+        // The surface initially creates a label-free placeholder delegate.
+        // Wait until the descriptor above has replaced it; its mute control
+        // follows the visible channel label instead of starting at x=8.
+        return muteButton != nullptr && soloButton != nullptr
+            && muteMouseArea != nullptr && soloMouseArea != nullptr
+            && muteMouseArea->mapToScene(QPointF(0, 0)).x() > 20.0;
+    }());
+
+    // Hover the pane to reveal the controls, then move onto each control.
+    // The row's own hover must keep it visible until the click is released.
+    QTest::mouseMove(window, QPoint(320, 160));
+    QTRY_VERIFY(muteButton->isVisible());
+    const QPoint muteCenter = muteMouseArea->mapToScene(QPointF(
+        muteMouseArea->width() * 0.5, muteMouseArea->height() * 0.5)).toPoint();
+    QTest::mouseMove(window, muteCenter);
+    QTRY_VERIFY(muteButton->isVisible());
+    QTRY_VERIFY_WITH_TIMEOUT(
+        muteMouseArea->property("containsMouse").toBool(), 250);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, muteCenter);
+    QTRY_COMPARE(bridge->property("muteCalls").toInt(), 1);
+
+    const QPoint soloCenter = soloMouseArea->mapToScene(QPointF(
+        soloMouseArea->width() * 0.5, soloMouseArea->height() * 0.5)).toPoint();
+    QTest::mouseMove(window, soloCenter);
+    QTRY_VERIFY(soloButton->isVisible());
+    QTRY_VERIFY(soloMouseArea->property("containsMouse").toBool());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, soloCenter);
+    QTRY_COMPARE(bridge->property("soloCalls").toInt(), 1);
+}
+
+void QmlSmokeTest::waveformSurfaceFollowsSharedChannelAndOverlaySettings() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "viewers" as Viewers
+
+Item {
+    width: 640
+    height: 320
+
+    QtObject {
+        id: bridge
+        objectName: "waveformBridge"
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        property var waveformPeaksPacked: ""
+        property real durationSeconds: 10
+        property int spectrogramViewMode: 1
+        property bool spectrogramZoomEnabled: true
+        property bool showSpectrogramScale: true
+        property bool showSpectrogramCrosshair: true
+        property bool showFps: true
+        property int currentTrackChannels: 2
+        property var mutedChannelsMask: 0
+        property int soloedChannel: -1
+        property int channelButtonsVisibility: 2
+        function isChannelMuted(channelIndex) { return false }
+        function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+    }
+
+    Viewers.WaveformSurface {
+        id: surface
+        objectName: "waveformSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *surface = root->findChild<QObject *>(QStringLiteral("waveformSurface"));
+    auto *waveform = root->findChild<WaveformEditorItem *>(
+        QStringLiteral("waveformEditorItem"));
+    QVERIFY(surface != nullptr);
+    QVERIFY(waveform != nullptr);
+    QTRY_COMPARE(waveform->viewMode(), 1);
+    QTRY_COMPARE(waveform->channelCount(), 2);
+    QTRY_VERIFY(waveform->gridEnabled());
+    QTRY_VERIFY(waveform->crosshairEnabled());
+    QTRY_VERIFY(waveform->showFpsOverlay());
+    QVERIFY(!waveform->playing());
+
+    QObject *durationIndicator = root->findChild<QObject *>(
+        QStringLiteral("waveformViewportDurationIndicator"));
+    QObject *durationText = root->findChild<QObject *>(
+        QStringLiteral("waveformViewportDurationText"));
+    QVERIFY(durationIndicator != nullptr);
+    QVERIFY(durationText != nullptr);
+    QVERIFY(!durationIndicator->property("visible").toBool());
+    waveform->setZoomLevel(2.0);
+    QTRY_VERIFY(durationIndicator->property("visible").toBool());
+    QTRY_COMPARE(
+        durationText->property("text").toString(),
+        QStringLiteral("00:05"));
+    waveform->setZoomLevel(20.0);
+    QTRY_COMPARE(
+        durationText->property("text").toString(),
+        QStringLiteral("500 ms"));
+    waveform->resetZoom();
+    QTRY_VERIFY(!durationIndicator->property("visible").toBool());
+
+    QObject *hoverHandler = root->findChild<QObject *>(
+        QStringLiteral("waveformSurfaceHoverHandler"));
+    QVERIFY(hoverHandler != nullptr);
+    QCOMPARE(hoverHandler->parent(), surface);
+
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("waveformBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(waveform->playing());
+
+    surface->setProperty("interactiveOverlaysVisible", false);
+    QTRY_VERIFY(!waveform->crosshairEnabled());
 }
 
 void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
@@ -3470,6 +3830,1590 @@ void QmlSmokeTest::waveformPeakUpdatesInvalidateChangedSuffix() {
     QVERIFY(item.m_cacheDirty);
     QVERIFY(item.m_dirtyRect.x() >= 160);
     QCOMPARE(item.m_dirtyRect.height(), 24);
+}
+
+void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
+    const auto appendF64 = [](QByteArray &out, double value) {
+        quint64 bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendLe<quint64>(out, bits);
+    };
+    const auto appendF32 = [](QByteArray &out, float value) {
+        quint32 bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendLe<quint32>(out, bits);
+    };
+    QByteArray frame;
+    frame.append("WVF1", 4);
+    appendLe<quint32>(frame, 48'000);
+    appendLe<quint16>(frame, 2);
+    appendLe<quint16>(frame, 0);
+    appendF64(frame, 1.0);
+    appendF64(frame, 1.000'041'666'666'666'7);
+    appendLe<quint32>(frame, 1);
+    appendLe<quint32>(frame, 2);
+    appendF32(frame, -0.75F);
+    appendF32(frame, -0.75F);
+    appendF32(frame, 0.25F);
+    appendF32(frame, 0.25F);
+    appendF32(frame, 0.5F);
+    appendF32(frame, 0.5F);
+    appendF32(frame, -0.125F);
+    appendF32(frame, -0.125F);
+
+    WaveformEditorItem::DetailWindow window;
+    QVERIFY(WaveformEditorItem::parseWindow(frame, &window));
+    QCOMPARE(window.sampleRateHz, 48'000);
+    QCOMPARE(window.channelCount, 2);
+    QCOMPARE(window.framesPerPoint, quint32(1));
+    QCOMPARE(window.pointCount, 2);
+    QCOMPARE(window.extrema.at(0), -0.75F);
+    QCOMPARE(window.extrema.at(6), -0.125F);
+}
+
+void QmlSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.pointCount = 100;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.extrema.assign(200, 0.0F);
+    item.setZoomLevel(1.0);
+    QVERIFY(item.samplePointsVisible());
+
+    item.m_detail.framesPerPoint = 2;
+    QVERIFY(!item.samplePointsVisible());
+}
+
+void QmlSmokeTest::waveformEditorFormatsViewportDuration() {
+    WaveformEditorItem item;
+    QCOMPARE(item.formatViewportDuration(245.2), QStringLiteral("04:05"));
+    QCOMPARE(item.formatViewportDuration(1.0), QStringLiteral("00:01"));
+    QCOMPARE(item.formatViewportDuration(0.834), QStringLiteral("834 ms"));
+    QCOMPARE(item.formatViewportDuration(0.0004), QStringLiteral("1 ms"));
+    QCOMPARE(item.formatViewportDuration(0.0), QStringLiteral("0 ms"));
+}
+
+void QmlSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setPositionSeconds(0.5);
+    item.m_sampleRateHz = 1'000;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 1'000;
+    item.m_detail.extrema.reserve(2'000);
+    for (int sample = 0; sample < 1'000; ++sample) {
+        const float value = static_cast<float>(
+            std::sin(static_cast<double>(sample) * 0.075));
+        item.m_detail.extrema.push_back(value);
+        item.m_detail.extrema.push_back(value);
+    }
+    item.setZoomLevel(3.0);
+
+    QVERIFY(item.sampleCurveVisibleLocked());
+    QVERIFY(!item.samplePointsVisibleLocked());
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    QVERIFY(!item.renderDetailDirectlyLocked(visibleStart, visibleEnd));
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.drawDetailLocked(
+        painter, canvas.width(), canvas.height(),
+        visibleStart, visibleEnd, 1);
+    painter.end();
+
+    int occupiedColumns = 0;
+    for (int x = 0; x < canvas.width(); ++x) {
+        bool occupied = false;
+        for (int y = 0; y < canvas.height(); ++y) {
+            const QColor pixel = canvas.pixelColor(x, y);
+            if (pixel.green() > 100 && pixel.green() > pixel.red() * 2) {
+                occupied = true;
+                break;
+            }
+        }
+        if (occupied) ++occupiedColumns;
+    }
+    QVERIFY(occupiedColumns > 390);
+
+    constexpr double pixelsPerSample = 1.2;
+    const double tileDuration = 64.0
+        / (pixelsPerSample * item.m_detail.sampleRateHz);
+    const double tileStart = tileDuration;
+    QImage tile(64, 180, QImage::Format_RGB32);
+    tile.fill(Qt::black);
+    QPainter tilePainter(&tile);
+    item.drawDetailSliceLocked(
+        tilePainter, tile.width(), tile.height(),
+        tileStart, tileStart + tileDuration, 1, 0, tile.width());
+    tilePainter.end();
+    for (const int edgeX : {0, tile.width() - 1}) {
+        bool edgeOccupied = false;
+        for (int y = 0; y < tile.height(); ++y) {
+            const QColor pixel = tile.pixelColor(edgeX, y);
+            if (pixel.green() > 100 && pixel.green() > pixel.red() * 2) {
+                edgeOccupied = true;
+                break;
+            }
+        }
+        QVERIFY2(edgeOccupied, "connected sample tiles must meet at both edges");
+    }
+
+    // Match the fullscreen handoff edge: samples separated by roughly 3.6
+    // pixels should have compact point markers without forcing an expensive
+    // direct repaint on every frame.
+    item.setZoomLevel(9.0);
+    QVERIFY(item.samplePointsVisibleLocked());
+    const auto [markerStart, markerEnd] = item.visibleRangeLocked();
+    QVERIFY(!item.renderDetailDirectlyLocked(markerStart, markerEnd));
+
+    item.setZoomLevel(10.0);
+    QVERIFY(item.samplePointsVisibleLocked());
+    const auto [directStart, directEnd] = item.visibleRangeLocked();
+    QVERIFY(item.renderDetailDirectlyLocked(directStart, directEnd));
+}
+
+void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.pointCount = 1'000;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.extrema.assign(2'000, 0.0F);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(2.0);
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    QVERIFY(!item.m_cacheDirty);
+    QCOMPARE(item.m_cacheStartSeconds, 0.0);
+    QCOMPARE(item.m_cacheEndSeconds, 10.0);
+
+    item.setPositionSeconds(5.1);
+    QVERIFY(!item.m_cacheDirty);
+}
+
+void QmlSmokeTest::waveformEditorUsesChannelHintBeforeDetailArrives() {
+    WaveformEditorItem item;
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+
+    QCOMPARE(item.channelCount(), 2);
+
+    item.m_channelCount = 6;
+    QCOMPARE(item.channelCount(), 6);
+}
+
+void QmlSmokeTest::waveformEditorCoalescesPlaybackRequestsWithoutStarvingTimer() {
+    WaveformEditorItem item;
+    item.scheduleDetailRequest();
+    QVERIFY(item.m_requestTimer.isActive());
+    const int initialRemaining = item.m_requestTimer.remainingTime();
+
+    QTest::qWait(25);
+    item.scheduleDetailRequest();
+
+    QVERIFY(item.m_requestTimer.isActive());
+    QVERIFY(item.m_requestTimer.remainingTime() < initialRemaining - 10);
+}
+
+void QmlSmokeTest::waveformEditorPendingWindowSuppressesDuplicateRequest() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(10.0);
+    item.m_requestTimer.stop();
+    item.m_requestInFlight = true;
+    item.m_requestedStartSeconds = 0.0;
+    item.m_requestedEndSeconds = 10.0;
+    item.m_requestedMaxPoints = 1'200;
+    item.m_requestedRenderWidth = 400;
+
+    item.setPositionSeconds(2.0);
+
+    QVERIFY(!item.m_requestTimer.isActive());
+}
+
+void QmlSmokeTest::waveformEditorZoomSupersedesCoarsePendingRequest() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(10.0);
+    item.m_requestTimer.stop();
+    item.m_requestInFlight = true;
+    item.m_requestedStartSeconds = 0.0;
+    item.m_requestedEndSeconds = 10.0;
+    item.m_requestedMaxPoints = 1'200;
+    item.m_requestedRenderWidth = 400;
+
+    item.setZoomLevel(4.0);
+
+    QVERIFY(!item.m_requestInFlight);
+    QVERIFY(item.m_requestTimer.isActive());
+    QCOMPARE(item.zoomLevel(), 4.0);
+}
+
+void QmlSmokeTest::waveformEditorResizeRaisesDetailRequestDensity() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(100.0);
+    item.setPositionSeconds(50.0);
+    item.setZoomLevel(4.0);
+    const auto [smallStart, smallEnd] = item.requestRangeLocked(37.5, 62.5);
+    const int smallRequest = item.detailRequestPointCountLocked(smallStart, smallEnd);
+    item.m_detail.startSeconds = smallStart;
+    item.m_detail.endSeconds = smallEnd;
+    item.m_detail.framesPerPoint = 2;
+    item.m_detail.pointCount = smallRequest;
+    QVERIFY(item.detailResolutionCoversLocked(37.5, 62.5));
+
+    item.setWidth(1'200);
+    const auto [largeStart, largeEnd] = item.requestRangeLocked(37.5, 62.5);
+    const int largeRequest = item.detailRequestPointCountLocked(largeStart, largeEnd);
+
+    QVERIFY(largeRequest >= smallRequest * 3);
+    QVERIFY(!item.detailResolutionCoversLocked(37.5, 62.5));
+}
+
+void QmlSmokeTest::waveformEditorDeepZoomRequestPreservesViewportDensity() {
+    WaveformEditorItem item;
+    item.setWidth(3'440);
+    item.setDurationSeconds(240.0);
+    item.setPositionSeconds(120.0);
+    item.setZoomLevel(8'301.0);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(
+        visibleStart, visibleEnd);
+    const double visibleSpan = visibleEnd - visibleStart;
+    const double requestSpan = requestEnd - requestStart;
+    const double maximumDensitySpan = visibleSpan * 65'536.0
+        / (3'440.0 * 4.0);
+
+    QVERIFY(requestSpan <= maximumDensitySpan + 0.000'001);
+    QVERIFY(requestSpan > visibleSpan);
+}
+
+void QmlSmokeTest::waveformEditorQuantizesRequestForRequiredBinDensity() {
+    WaveformEditorItem item;
+    item.setWidth(1'183);
+    item.setDurationSeconds(257.133333);
+    item.setPositionSeconds(46.3);
+    item.m_sampleRateHz = 44'100;
+    item.setZoomLevel(1'726.76);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(
+        visibleStart, visibleEnd);
+    const int requestedPoints = item.detailRequestPointCountLocked(
+        requestStart, requestEnd);
+    const double requestFrames = std::ceil(
+        (requestEnd - requestStart) * 44'100.0);
+    const double framesPerPoint = std::ceil(
+        requestFrames / static_cast<double>(requestedPoints));
+    const double returnedPoints = std::ceil(requestFrames / framesPerPoint);
+    const double visiblePoints = returnedPoints
+        * (visibleEnd - visibleStart) / (requestEnd - requestStart);
+
+    QVERIFY(requestedPoints > 20'621);
+    QVERIFY(visiblePoints >= item.requiredVisibleDetailPointsLocked(
+        visibleEnd - visibleStart) * 0.9);
+}
+
+void QmlSmokeTest::waveformEditorFullscreenRequestStaysInTargetBin() {
+    WaveformEditorItem item;
+    item.setWidth(3'440);
+    item.setDurationSeconds(257.133333);
+    item.setPositionSeconds(72.0);
+    item.m_sampleRateHz = 44'100;
+    item.setZoomLevel(475.06);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(
+        visibleStart, visibleEnd);
+    const int requestedPoints = item.detailRequestPointCountLocked(
+        requestStart, requestEnd);
+    const double requestFrames = std::ceil(
+        (requestEnd - requestStart) * 44'100.0);
+    const double framesPerPoint = std::ceil(
+        requestFrames / static_cast<double>(requestedPoints));
+    const double returnedPoints = std::ceil(requestFrames / framesPerPoint);
+    const double visiblePoints = returnedPoints
+        * (visibleEnd - visibleStart) / (requestEnd - requestStart);
+
+    QCOMPARE(framesPerPoint, 1.0);
+    QVERIFY(requestedPoints <= 65'536);
+    QVERIFY(visiblePoints >= item.requiredVisibleDetailPointsLocked(
+        visibleEnd - visibleStart) * 0.9);
+}
+
+void QmlSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
+    WaveformEditorItem item;
+    item.setWidth(3'440);
+    item.setDurationSeconds(257.133333);
+    item.setPositionSeconds(8.9);
+    item.m_sampleRateHz = 44'100;
+    item.setZoomLevel(185.409);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(
+        visibleStart, visibleEnd);
+    const double visibleSpan = visibleEnd - visibleStart;
+    const double requestFrames = std::ceil(
+        (requestEnd - requestStart) * 44'100.0);
+    const int requestedPoints = item.detailRequestPointCountLocked(
+        requestStart, requestEnd);
+
+    QVERIFY(visibleSpan > 1.38);
+    QVERIFY(visibleSpan < 1.40);
+    QVERIFY(item.sampleCurveRequestedForPixelSpanLocked(
+        3'440, visibleStart, visibleEnd));
+    QVERIFY(requestEnd - requestStart > visibleSpan);
+    QVERIFY(requestFrames <= 65'536.0);
+    QVERIFY(static_cast<double>(requestedPoints) >= requestFrames);
+
+    item.m_detail.sampleRateHz = 44'100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = requestStart;
+    item.m_detail.endSeconds = requestEnd;
+    item.m_detail.framesPerPoint = 2;
+    item.m_detail.pointCount = requestedPoints / 2;
+    item.m_detail.extrema.assign(
+        static_cast<std::size_t>(item.m_detail.pointCount) * 2U, 0.25F);
+    QVERIFY(!item.detailResolutionCoversLocked(visibleStart, visibleEnd));
+
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = requestedPoints;
+    item.m_detail.extrema.assign(
+        static_cast<std::size_t>(item.m_detail.pointCount) * 2U, 0.25F);
+    QVERIFY(item.detailResolutionCoversLocked(visibleStart, visibleEnd));
+}
+
+void QmlSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
+    WaveformEditorItem item;
+    item.setWidth(1'183);
+    item.setDurationSeconds(257.133333);
+    item.setPositionSeconds(40.0);
+    item.m_sampleRateHz = 44'100;
+    item.setZoomLevel(76'683.55);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(
+        visibleStart, visibleEnd);
+
+    QVERIFY(visibleEnd - visibleStart < 0.004);
+    QVERIFY(requestEnd - requestStart > 1.4);
+    const int requestedPoints = item.detailRequestPointCountLocked(
+        requestStart, requestEnd);
+    QVERIFY(requestedPoints > 60'000);
+    QVERIFY(requestedPoints <= 65'536);
+}
+
+void QmlSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(10.0);
+    item.setZoomLevel(10.0);
+    item.setPositionSeconds(5.0);
+    item.m_requestTimer.stop();
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 3.5;
+    item.m_detail.endSeconds = 6.5;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 300;
+    item.m_detail.extrema.assign(600, 0.0F);
+
+    item.setPositionSeconds(5.5);
+
+    QVERIFY(item.visibleRangeLocked().second < item.m_detail.endSeconds);
+    QVERIFY(item.m_requestTimer.isActive());
+}
+
+void QmlSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(2.0);
+    item.m_requestTimer.stop();
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 4.0;
+    item.m_detail.endSeconds = 6.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 200;
+    item.m_detail.extrema.assign(400, 0.5F);
+    item.invalidateCacheLocked();
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    int waveformPixels = 0;
+    for (int y = 20; y < 160; ++y) {
+        for (int x = 120; x < 200; ++x) {
+            const QColor pixel(canvas.pixel(x, y));
+            if (pixel.green() > 100 && pixel.red() < 100) ++waveformPixels;
+        }
+    }
+    QVERIFY(waveformPixels > 20);
+    QCOMPARE(canvas.pixelColor(150, 20), QColor(5, 9, 7));
+}
+
+void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 48'000;
+    item.m_detail.extrema.assign(96'000, 0.25F);
+    item.setZoomLevel(4.0);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QVERIFY(item.m_cache.width() >= 959);
+    QVERIFY(item.m_cache.width() <= 961);
+    QVERIFY(item.m_cacheEndSeconds - item.m_cacheStartSeconds > 7.49);
+    QVERIFY(item.m_cacheEndSeconds - item.m_cacheStartSeconds < 7.51);
+}
+
+void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0 - 1.5 / 48'000.0;
+    item.m_detail.framesPerPoint = 375;
+    item.m_detail.pointCount = 1'280;
+    item.m_detail.extrema.assign(2'560, 0.5F);
+    QVERIFY(item.detailCoversRangeLocked(0.0, 10.0));
+    QVERIFY(item.detailOrPendingRequestCoversLocked(0.0, 10.0));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    int waveformPixels = 0;
+    for (int y = 44; y <= 47; ++y) {
+        for (int x = 20; x < 300; ++x) {
+            const QColor pixel(canvas.pixel(x, y));
+            if (pixel.green() > 180 && pixel.red() < 100) ++waveformPixels;
+        }
+    }
+    QVERIFY(waveformPixels > 200);
+}
+
+void QmlSmokeTest::waveformEditorZoomOutDefersOverviewUntilDetailReady() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 4.0;
+    item.m_detail.endSeconds = 6.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 200;
+    item.m_detail.extrema.assign(400, 0.25F);
+    item.setZoomLevel(5.0);
+
+    QImage zoomedCanvas(320, 180, QImage::Format_RGB32);
+    QPainter zoomedPainter(&zoomedCanvas);
+    item.paint(&zoomedPainter);
+    zoomedPainter.end();
+
+    item.setZoomLevel(3.0);
+    item.setZoomLevel(1.0);
+
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(item.m_presentedZoomLevel, 5.0);
+    QVERIFY(item.m_zoomOutHandoffPending);
+    QVERIFY(!item.m_zoomFallbackToOverview);
+    QVERIFY(!item.m_cacheDirty);
+    const auto [presentedStart, presentedEnd] = item.visibleRangeLocked();
+    QCOMPARE(presentedEnd - presentedStart, 2.0);
+    const auto [requestStart, requestEnd] = item.detailRequestVisibleRangeLocked();
+    QCOMPARE(requestStart, 0.0);
+    QCOMPARE(requestEnd, 10.0);
+    item.m_requestTimer.stop();
+}
+
+void QmlSmokeTest::waveformEditorDeferredZoomOutCommitsCompletedDetailCache() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 4.0;
+    item.m_detail.endSeconds = 6.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 200;
+    item.m_detail.extrema.assign(400, 0.25F);
+    item.setZoomLevel(5.0);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    item.setZoomLevel(1.0);
+    item.m_requestTimer.stop();
+    QVERIFY(item.m_zoomOutHandoffPending);
+
+    item.m_sampleRateHz = 640;
+    item.m_detail.sampleRateHz = 640;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 6'400;
+    item.m_detail.extrema.assign(12'800, 0.5F);
+    item.beginStagedCacheForRangeLocked(0.0, 10.0, true);
+    QVERIFY(!item.m_stagedCache.isNull());
+    QVERIFY(!item.advanceStagedCacheLocked());
+    QCOMPARE(item.m_presentedZoomLevel, 5.0);
+    while (!item.m_stagedCache.isNull()) {
+        item.advanceStagedCacheLocked();
+    }
+
+    QCOMPARE(item.m_presentedZoomLevel, 1.0);
+    QVERIFY(!item.m_zoomOutHandoffPending);
+    QVERIFY(!item.m_cacheDirty);
+    QCOMPARE(item.m_cacheStartSeconds, 0.0);
+    QCOMPARE(item.m_cacheEndSeconds, 10.0);
+}
+
+void QmlSmokeTest::waveformEditorZoomOutKeepsReadyDetail() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.m_sampleRateHz = 640;
+    item.m_detail.sampleRateHz = 640;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 6'400;
+    item.m_detail.extrema.assign(12'800, 0.25F);
+    item.setZoomLevel(5.0);
+    QVERIFY(!item.m_zoomFallbackToOverview);
+
+    item.setZoomLevel(2.0);
+
+    QVERIFY(!item.m_zoomFallbackToOverview);
+}
+
+void QmlSmokeTest::waveformEditorZoomInRetainsCoveredCacheWhileRefining() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    QVERIFY(!item.m_cacheDirty);
+
+    item.setZoomLevel(4.0);
+
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(!item.m_zoomFallbackToOverview);
+    item.m_requestTimer.stop();
+}
+
+void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoundaries() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setPositionSeconds(0.5);
+    item.m_sampleRateHz = 12'000;
+    item.m_detail.sampleRateHz = 12'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 12'000;
+    item.m_detail.extrema.assign(24'000, 0.25F);
+    item.setZoomLevel(1.5);
+    QVERIFY(!item.playing());
+    QVERIFY(!item.sampleCurveVisibleLocked());
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    QVERIFY(!item.m_cacheDirty);
+
+    // At about 0.067 pixels per sample this exercises the early raw handoff:
+    // use the connected raw-sample curve instead of visible extrema bars.
+    item.setZoomLevel(2.0);
+    QVERIFY(item.sampleCurveVisibleLocked());
+    QVERIFY(item.m_cacheDirty);
+
+    QPainter curvePainter(&canvas);
+    item.paint(&curvePainter);
+    curvePainter.end();
+    QVERIFY(!item.m_cacheDirty);
+
+    item.setZoomLevel(4.0);
+    QVERIFY(!item.samplePointsVisibleLocked());
+    // Sample curves are rasterized at their exact seconds-per-pixel scale;
+    // zooming further within the curve regime must not magnify the old cache.
+    QVERIFY(item.m_cacheDirty);
+
+    QPainter sharperCurvePainter(&canvas);
+    item.paint(&sharperCurvePainter);
+    sharperCurvePainter.end();
+    QVERIFY(!item.m_cacheDirty);
+
+    item.setZoomLevel(75.0);
+    QVERIFY(item.samplePointsVisibleLocked());
+    QVERIFY(item.m_cacheDirty);
+    item.m_requestTimer.stop();
+}
+
+void QmlSmokeTest::waveformEditorSparseZoomDetailFallsBackUntilReady() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(100.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 4.5;
+    item.m_detail.endSeconds = 5.5;
+    item.m_detail.framesPerPoint = 480;
+    item.m_detail.pointCount = 100;
+    item.m_detail.extrema.assign(200, 0.0F);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+
+    QVERIFY(item.detailCoversRangeLocked(visibleStart, visibleEnd));
+    QVERIFY(!item.detailResolutionCoversLocked(visibleStart, visibleEnd));
+    QVERIFY(!item.renderDetailDirectlyLocked(visibleStart, visibleEnd));
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QVERIFY(canvas.pixelColor(30, 20).green() > 180);
+    QVERIFY(canvas.pixelColor(370, 20).green() > 180);
+}
+
+void QmlSmokeTest::waveformEditorSeparatesChannelPanes() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QCOMPARE(canvas.pixelColor(160, 90), QColor(79, 94, 86));
+    QVERIFY(canvas.pixelColor(160, 89).green() > 180);
+    QVERIFY(canvas.pixelColor(160, 91).green() > 180);
+}
+
+void QmlSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setDurationSeconds(10.0);
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 4.75;
+    item.m_detail.endSeconds = 5.25;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 24'000;
+    item.m_detail.extrema.assign(48'000, 0.0F);
+
+    const auto [first, last] = item.detailPointRangeLocked(4.999, 5.001);
+
+    QVERIFY(first > 11'000);
+    QVERIFY(last < 13'000);
+    QVERIFY(last - first < 110);
+}
+
+void QmlSmokeTest::waveformEditorDetailPointsUseAbsoluteSampleTimes() {
+    WaveformEditorItem item;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.framesPerPoint = 4;
+    item.m_detail.pointCount = 50;
+    item.m_detail.startSeconds = 0.04;
+    item.m_detail.endSeconds = 2.03;
+
+    const double sharedBinTime = item.detailPointTimeLocked(1);
+    QVERIFY(std::abs(sharedBinTime - 0.095) < 0.000'001);
+
+    item.m_detail.startSeconds = 0.08;
+    item.m_detail.endSeconds = 2.07;
+    QVERIFY(std::abs(item.detailPointTimeLocked(0) - sharedBinTime) < 0.000'001);
+}
+
+void QmlSmokeTest::waveformEditorReusesSameSizedCache() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter firstPainter(&canvas);
+    item.paint(&firstPainter);
+    firstPainter.end();
+    const uchar *firstBuffer = item.m_cache.constBits();
+
+    item.invalidateCacheLocked();
+    QPainter secondPainter(&canvas);
+    item.paint(&secondPainter);
+    secondPainter.end();
+
+    QCOMPARE(item.m_cache.constBits(), firstBuffer);
+}
+
+void QmlSmokeTest::waveformEditorCacheHandoffsKeepAbsolutePixelGrid() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(100);
+    item.setDurationSeconds(10.0);
+    item.m_sampleRateHz = 1'000;
+    item.m_channelCount = 1;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_zoomLevel = 5.0;
+    item.m_presentedZoomLevel = 5.0;
+    item.m_positionSeconds = 3.37;
+    item.m_detail.extrema.reserve(20'000);
+    for (int point = 0; point < item.m_detail.pointCount; ++point) {
+        const float minimum = -static_cast<float>((point % 17) + 1) / 20.0F;
+        const float maximum = static_cast<float>((point % 23) + 1) / 25.0F;
+        item.m_detail.extrema.push_back(minimum);
+        item.m_detail.extrema.push_back(maximum);
+    }
+
+    const auto firstGrid = item.cacheGridForRangeLocked(2.0, 4.0, 0.0, 10.0);
+    const auto secondGrid = item.cacheGridForRangeLocked(2.37, 4.37, 0.0, 10.0);
+    QCOMPARE(firstGrid.secondsPerPixel, secondGrid.secondsPerPixel);
+    const double pixelOffset = (secondGrid.startSeconds - firstGrid.startSeconds)
+        / firstGrid.secondsPerPixel;
+    const int firstSourceX = static_cast<int>(std::llround(pixelOffset));
+    QVERIFY(std::abs(pixelOffset - static_cast<double>(firstSourceX)) < 0.000'001);
+
+    QImage firstCache(firstGrid.width, 100, QImage::Format_RGB32);
+    firstCache.fill(QColor(5, 9, 7));
+    QPainter firstPainter(&firstCache);
+    item.drawDetailLocked(
+        firstPainter, firstGrid.width, 100,
+        firstGrid.startSeconds, firstGrid.endSeconds, 1);
+    firstPainter.end();
+
+    QImage secondCache(secondGrid.width, 100, QImage::Format_RGB32);
+    secondCache.fill(QColor(5, 9, 7));
+    QPainter secondPainter(&secondCache);
+    item.drawDetailLocked(
+        secondPainter, secondGrid.width, 100,
+        secondGrid.startSeconds, secondGrid.endSeconds, 1);
+    secondPainter.end();
+
+    const int overlapWidth = std::min(
+        secondCache.width(), firstCache.width() - firstSourceX);
+    QVERIFY(overlapWidth > 0);
+    for (int y = 0; y < firstCache.height(); ++y) {
+        const auto *firstLine = reinterpret_cast<const QRgb *>(
+            firstCache.constScanLine(y));
+        const auto *secondLine = reinterpret_cast<const QRgb *>(
+            secondCache.constScanLine(y));
+        // QPainter may quantize antialias coverage by one value where a path
+        // meets an image boundary. Interior overlap must remain bit-exact;
+        // tile-edge continuity is covered separately with rendered edges.
+        for (int x = 1; x + 1 < overlapWidth; ++x) {
+            QVERIFY2(
+                secondLine[x] == firstLine[firstSourceX + x],
+                qPrintable(QStringLiteral(
+                    "overlap mismatch x=%1 y=%2 first=%3 second=%4")
+                    .arg(x)
+                    .arg(y)
+                    .arg(firstLine[firstSourceX + x], 0, 16)
+                    .arg(secondLine[x], 0, 16)));
+        }
+    }
+
+    item.m_cache = firstCache;
+    item.m_cacheDirty = false;
+    item.m_cacheStartSeconds = firstGrid.startSeconds;
+    item.m_cacheEndSeconds = firstGrid.endSeconds;
+    item.m_cacheSecondsPerPixel = firstGrid.secondsPerPixel;
+    item.m_cacheFramesPerPoint = item.m_detail.framesPerPoint;
+    item.m_cacheDisplayedChannels = 1;
+    item.beginStagedCacheForRangeLocked(2.37, 4.37, false);
+
+    QCOMPARE(item.m_stagedCacheNextX, 0);
+
+    for (int iteration = 0;
+         iteration < 20 && !item.m_stagedCache.isNull();
+         ++iteration) {
+        item.advanceStagedCacheLocked();
+    }
+    QVERIFY(item.m_stagedCache.isNull());
+    QCOMPARE(item.m_cache.size(), secondCache.size());
+    for (int y = 0; y < item.m_cache.height(); ++y) {
+        const auto *actual = reinterpret_cast<const QRgb *>(
+            item.m_cache.constScanLine(y));
+        const auto *expected = reinterpret_cast<const QRgb *>(
+            secondCache.constScanLine(y));
+        for (int x = 0; x < item.m_cache.width(); ++x) {
+            QCOMPARE(actual[x], expected[x]);
+        }
+    }
+}
+
+void QmlSmokeTest::waveformEditorReplacementCacheDoesNotReuseOldRaster() {
+    WaveformEditorItem item;
+    item.setWidth(1'000);
+    item.setHeight(1'440);
+    item.setDurationSeconds(10.0);
+    item.m_sampleRateHz = 1'000;
+    item.m_channelCount = 1;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.assign(20'000, 0.25F);
+    item.rebuildCacheLocked(1'000, 1'440);
+    const QImage oldCache = item.m_cache;
+
+    item.beginStagedCacheLocked();
+
+    QVERIFY(!item.m_stagedCache.isNull());
+    QCOMPARE(item.m_stagedCacheNextX, 0);
+    QVERIFY(item.m_stagedCache.constBits() != oldCache.constBits());
+}
+
+void QmlSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_positionSeconds = 5.0;
+    item.m_zoomLevel = 4.0;
+    item.m_presentedZoomLevel = 4.0;
+    item.m_playing = true;
+    item.m_sampleRateHz = 44'100;
+    item.m_channelCount = 2;
+    item.m_detail.sampleRateHz = 44'100;
+    item.m_detail.channelCount = 2;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 88;
+    item.m_detail.pointCount = 5'000;
+    item.m_detail.extrema.assign(20'000, 0.25F);
+
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    QVERIFY(item.playbackTilesEligibleLocked(visibleStart, visibleEnd));
+    item.preparePlaybackTilesLocked(visibleStart, visibleEnd, 180);
+
+    const double tileDuration = item.m_playbackTileSecondsPerPixel * 64.0;
+    const qint64 firstTile = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + 1.0e-9));
+    const double firstTileStart = static_cast<double>(firstTile) * tileDuration;
+    QVERIFY(!item.detailResolutionCoversLocked(
+        firstTileStart, firstTileStart + tileDuration));
+    QVERIFY(item.detailResolutionCoversPixelSpanLocked(
+        firstTileStart, firstTileStart + tileDuration, 64));
+
+    QCOMPARE(item.renderMissingPlaybackTilesLocked(
+        visibleStart, visibleEnd, 180, 2), 2);
+    QCOMPARE(item.m_playbackTiles.size(), 2U);
+    QVERIFY(!item.playbackTilesCoverLocked(visibleStart, visibleEnd));
+
+    while (!item.playbackTilesCoverLocked(visibleStart, visibleEnd)) {
+        const int rendered = item.renderMissingPlaybackTilesLocked(
+            visibleStart, visibleEnd, 180, 2);
+        QVERIFY(rendered > 0);
+        QVERIFY(rendered <= 2);
+    }
+    const auto paints = item.playbackTilePaintsLocked(
+        visibleStart, visibleEnd, 320);
+    QVERIFY(!paints.empty());
+    for (const auto &paint : paints) {
+        QCOMPARE(paint.image.width(), 64);
+        QCOMPARE(paint.image.height(), 180);
+    }
+
+    const double shiftedStart = visibleStart + 6.0 * tileDuration;
+    const double shiftedEnd = visibleEnd + 6.0 * tileDuration;
+    const int catchUpBudget = item.playbackTileRenderBudgetLocked(
+        shiftedStart, shiftedEnd);
+    QVERIFY(catchUpBudget > 2);
+    QVERIFY(catchUpBudget <= 8);
+    QCOMPARE(item.renderMissingPlaybackTilesLocked(
+        shiftedStart, shiftedEnd, 180, catchUpBudget), catchUpBudget);
+    QVERIFY(item.playbackTilesCoverLocked(shiftedStart, shiftedEnd));
+}
+
+void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_positionSeconds = 5.0;
+    item.m_zoomLevel = 4.0;
+    item.m_presentedZoomLevel = 4.0;
+    item.m_playing = true;
+    item.m_sampleRateHz = 1'000;
+    item.m_channelCount = 1;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.assign(20'000, 0.25F);
+
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    item.preparePlaybackTilesLocked(visibleStart, visibleEnd, 180);
+    while (!item.playbackTilesCoverLocked(visibleStart, visibleEnd)) {
+        QVERIFY(item.renderMissingPlaybackTilesLocked(
+            visibleStart, visibleEnd, 180, 2) > 0);
+    }
+    const auto originalTiles = item.m_playbackTiles;
+
+    item.m_detail.startSeconds = 1.0;
+    item.m_detail.endSeconds = 9.0;
+    item.m_detail.pointCount = 8'000;
+    item.m_detail.extrema.assign(16'000, 0.5F);
+    item.preparePlaybackTilesLocked(visibleStart, visibleEnd, 180);
+
+    QCOMPARE(item.m_playbackTiles.size(), originalTiles.size());
+    for (const auto &[tileIndex, originalTile] : originalTiles) {
+        const auto current = item.m_playbackTiles.find(tileIndex);
+        QVERIFY(current != item.m_playbackTiles.end());
+        QCOMPARE(
+            current->second.image.cacheKey(),
+            originalTile.image.cacheKey());
+    }
+
+    item.m_cacheDirty = false;
+    item.m_cacheStartSeconds = 0.0;
+    item.m_cacheEndSeconds = 1.0;
+    item.m_detail = {};
+    QVERIFY(item.playbackTilesEligibleLocked(visibleStart, visibleEnd));
+    item.setPositionSeconds(5.01);
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(!item.m_playbackTiles.empty());
+}
+
+void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter initialPainter(&canvas);
+    item.paint(&initialPainter);
+    initialPainter.end();
+    const uchar *initialCache = item.m_cache.constBits();
+
+    item.setZoomLevel(4.0);
+    item.m_sampleRateHz = 48'000;
+    item.m_channelCount = 1;
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 96;
+    item.m_detail.pointCount = 5'000;
+    item.m_detail.extrema.resize(10'000);
+    for (int point = 0; point < item.m_detail.pointCount; ++point) {
+        item.m_detail.extrema[static_cast<std::size_t>(point) * 2U] = -0.5F;
+        item.m_detail.extrema[static_cast<std::size_t>(point) * 2U + 1U] = 0.5F;
+    }
+
+    item.beginStagedCacheLocked();
+    QVERIFY(!item.m_stagedCache.isNull());
+    item.advanceStagedCacheLocked();
+    QCOMPARE(item.m_cache.constBits(), initialCache);
+    for (int iteration = 0; iteration < 20 && !item.m_stagedCache.isNull(); ++iteration) {
+        item.advanceStagedCacheLocked();
+    }
+
+    QVERIFY(item.m_stagedCache.isNull());
+    QVERIFY(item.m_cache.constBits() != initialCache);
+    QVERIFY(item.m_cache.width() >= 959);
+    QVERIFY(item.m_cache.width() <= 961);
+    QVERIFY(!item.m_cacheDirty);
+}
+
+void QmlSmokeTest::waveformEditorPaintDefersGuiContinuation() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.m_stagedCache = QImage(320, 180, QImage::Format_RGB32);
+    item.m_stagedCache.fill(QColor(54, 225, 161));
+    item.m_stagedCacheStartSeconds = 0.0;
+    item.m_stagedCacheEndSeconds = 1.0;
+    item.m_stagedCacheSecondsPerPixel = 1.0 / 320.0;
+    item.m_stagedCacheNextX = item.m_stagedCache.width();
+    item.m_stagedCacheCommitsDeferredZoom = true;
+    item.m_zoomLevel = 1.0;
+    item.m_presentedZoomLevel = 2.0;
+    item.m_zoomOutHandoffPending = true;
+    item.m_durationSeconds = 1.0;
+
+    QSignalSpy samplePointsSpy(
+        &item, &WaveformEditorItem::samplePointsVisibleChanged);
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QCOMPARE(samplePointsSpy.count(), 0);
+    QVERIFY(item.m_guiContinuationQueued.load(std::memory_order_acquire));
+    QTRY_COMPARE(samplePointsSpy.count(), 1);
+    QVERIFY(!item.m_guiContinuationQueued.load(std::memory_order_acquire));
+
+    item.m_stagedCache = QImage(320, 180, QImage::Format_RGB32);
+    item.m_stagedCacheNextX = 0;
+    QPainter continuationPainter(&canvas);
+    item.paint(&continuationPainter);
+    continuationPainter.end();
+
+    QVERIFY(!item.m_stagedCache.isNull());
+    QVERIFY(item.m_guiRepaintPending.load(std::memory_order_acquire));
+    QVERIFY(item.m_guiContinuationQueued.load(std::memory_order_acquire));
+    QTRY_VERIFY(!item.m_guiContinuationQueued.load(std::memory_order_acquire));
+    QVERIFY(!item.m_guiRepaintPending.load(std::memory_order_acquire));
+}
+
+void QmlSmokeTest::waveformEditorZoomedPlaybackUsesScrollingCache() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(10.0);
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 3.5;
+    item.m_detail.endSeconds = 6.5;
+    item.m_detail.framesPerPoint = 90;
+    item.m_detail.pointCount = 4'800;
+    item.m_detail.extrema.assign(9'600, 0.25F);
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+
+    QVERIFY(!item.samplePointsVisibleLocked());
+    QVERIFY(!item.renderDetailDirectlyLocked(visibleStart, visibleEnd));
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(!item.m_cache.isNull());
+}
+
+void QmlSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(10.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
+    item.m_playing = true;
+    item.m_positionUpdatedAt = std::chrono::steady_clock::now();
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    const double visibleSpan = visibleEnd - visibleStart;
+
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(item.m_cacheEndSeconds > visibleEnd + visibleSpan * 1.6);
+    item.setPositionSeconds(5.5);
+    QVERIFY(!item.m_cacheDirty);
+}
+
+void QmlSmokeTest::waveformEditorCachedPaintClearsUncoveredPixels() {
+    WaveformEditorItem item;
+    item.setWidth(100);
+    item.setHeight(100);
+    item.setDurationSeconds(10.0);
+    item.m_requestTimer.stop();
+    item.m_cache = QImage(100, 100, QImage::Format_RGB32);
+    item.m_cache.fill(QColor(54, 225, 161));
+    item.m_cacheDirty = false;
+    item.m_cachedViewportWidth = 100;
+    item.m_cachedViewportHeight = 100;
+    item.m_cacheStartSeconds = 5.0;
+    item.m_cacheEndSeconds = 15.0;
+    item.m_cacheSecondsPerPixel = 0.1;
+
+    QImage canvas(100, 100, QImage::Format_RGB32);
+    canvas.fill(QColor(255, 0, 255));
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QCOMPARE(canvas.pixelColor(10, 20), QColor(5, 9, 7));
+    QCOMPARE(canvas.pixelColor(75, 20), QColor(54, 225, 161));
+}
+
+void QmlSmokeTest::waveformEditorPausedDetailReplacesOverviewCache() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
+    item.m_requestTimer.stop();
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+    QCOMPARE(item.m_cacheFramesPerPoint, quint32{0});
+
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 4;
+    item.m_detail.pointCount = 2'500;
+    item.m_detail.extrema.assign(5'000, 0.25F);
+
+    QVERIFY(item.detailResultRequiresImmediateCacheRefreshLocked(
+        false, false, false, false, 4, true));
+}
+
+void QmlSmokeTest::waveformEditorPlaybackHeartbeatDoesNotMoveBackward() {
+    WaveformEditorItem item;
+    item.setDurationSeconds(30.0);
+    item.m_requestTimer.stop();
+    item.m_playing = true;
+    item.m_positionSeconds = 10.0;
+    item.m_positionUpdatedAt = std::chrono::steady_clock::now()
+        - std::chrono::milliseconds(200);
+    const double before = item.displayedPositionSecondsLocked();
+
+    item.setPositionSeconds(before - 0.12);
+    const double after = item.displayedPositionSecondsLocked();
+
+    QVERIFY2(
+        after >= before - 0.01,
+        qPrintable(QStringLiteral("before=%1 after=%2")
+            .arg(before, 0, 'f', 6)
+            .arg(after, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setCrosshairEnabled(true);
+
+    QImage baseline(320, 180, QImage::Format_RGB32);
+    baseline.fill(Qt::black);
+    QPainter baselinePainter(&baseline);
+    item.paint(&baselinePainter);
+    baselinePainter.end();
+
+    item.setHoverPosition(137.0, 53.0, true);
+    QImage hovered(320, 180, QImage::Format_RGB32);
+    hovered.fill(Qt::black);
+    QPainter hoverPainter(&hovered);
+    item.paint(&hoverPainter);
+    hoverPainter.end();
+
+    int changedPixels = 0;
+    for (int y = 0; y < hovered.height(); ++y) {
+        for (int x = 0; x < hovered.width(); ++x) {
+            if (hovered.pixel(x, y) != baseline.pixel(x, y)) ++changedPixels;
+        }
+    }
+    QVERIFY(changedPixels > 250);
+}
+
+void QmlSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
+    QCOMPARE(
+        WaveformEditorItem::formatCrosshairTime(28.98),
+        QStringLiteral("0:28.980"));
+    QCOMPARE(
+        WaveformEditorItem::formatCrosshairTime(3'723.004),
+        QStringLiteral("1:02:03.004"));
+
+    constexpr int width = 1'183;
+    constexpr int height = 318;
+    constexpr int cursorX = 563;
+    constexpr int cursorY = 137;
+    constexpr int valueWidth = 42;
+    constexpr int timeWidth = 48;
+    constexpr int textHeight = 12;
+    const auto [valueRect, timeRect] =
+        WaveformEditorItem::crosshairLabelRects(
+            width, height, cursorX, cursorY,
+            valueWidth, timeWidth, textHeight);
+
+    QCOMPARE(valueRect.right(), width - 3);
+    QCOMPARE(valueRect.y(), cursorY - textHeight / 2);
+    QCOMPARE(timeRect.x(), cursorX - timeWidth / 2);
+    QCOMPARE(timeRect.bottom(), height - 3);
+    QCOMPARE(valueRect.size(), QSize(valueWidth + 6, textHeight + 6));
+    QCOMPARE(timeRect.size(), QSize(timeWidth + 6, textHeight + 6));
+}
+
+void QmlSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setPositionSeconds(0.5);
+    item.setCrosshairEnabled(true);
+    item.m_sampleRateHz = 100;
+    item.m_detail.sampleRateHz = 100;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 100;
+    item.m_detail.extrema.assign(200, 0.0F);
+    item.setZoomLevel(item.maximumZoomLevel());
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    QVERIFY(item.renderDetailDirectlyLocked(visibleStart, visibleEnd));
+
+    QImage baseline(400, 180, QImage::Format_RGB32);
+    baseline.fill(Qt::black);
+    QPainter baselinePainter(&baseline);
+    item.paint(&baselinePainter);
+    baselinePainter.end();
+
+    QImage reused = baseline.copy();
+    item.setHoverPosition(80.0, 40.0, true);
+    QPainter firstPainter(&reused);
+    item.paint(&firstPainter);
+    firstPainter.end();
+    item.setHoverPosition(240.0, 110.0, true);
+    QPainter secondPainter(&reused);
+    item.paint(&secondPainter);
+    secondPainter.end();
+
+    for (int y = 4; y < 90; ++y) {
+        QCOMPARE(reused.pixelColor(80, y), baseline.pixelColor(80, y));
+    }
+}
+
+void QmlSmokeTest::waveformEditorSampleViewUsesSmoothInterpolation() {
+    const QPolygonF samples{
+        QPointF(0.0, 90.0),
+        QPointF(10.0, 20.0),
+        QPointF(20.0, 160.0),
+        QPointF(30.0, 90.0),
+    };
+
+    const QPainterPath path = WaveformEditorItem::buildSamplePath(samples);
+
+    QCOMPARE(path.elementCount(), 10);
+    QCOMPARE(path.elementAt(1).type, QPainterPath::CurveToElement);
+    QCOMPARE(path.elementAt(4).type, QPainterPath::CurveToElement);
+    QCOMPARE(path.currentPosition(), samples.constLast());
+}
+
+void QmlSmokeTest::waveformEditorSampleViewDoesNotFillLaterChannels() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setViewMode(1);
+    item.m_sampleRateHz = 4;
+    item.m_channelCount = 2;
+    item.m_detail.sampleRateHz = 4;
+    item.m_detail.channelCount = 2;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 4;
+    const std::array<float, 4> rightSamples = {0.0F, 0.8F, 0.8F, 0.0F};
+    for (float rightSample : rightSamples) {
+        item.m_detail.extrema.insert(
+            item.m_detail.extrema.end(),
+            {0.0F, 0.0F, rightSample, rightSample});
+    }
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QCOMPARE(canvas.pixelColor(200, 120), QColor(5, 9, 7));
+}
+
+void QmlSmokeTest::waveformEditorReclampsZoomForDecodedSampleRate() {
+    WaveformEditorItem item;
+    item.setWidth(100);
+    item.setDurationSeconds(100.0);
+    item.setZoomLevel(item.maximumZoomLevel());
+    QVERIFY(item.zoomLevel() > 100'000.0);
+
+    item.m_sampleRateHz = 1'000;
+    QVERIFY(item.clampZoomToMaximumLocked());
+
+    QCOMPARE(item.zoomLevel(), 8'000.0);
+    QVERIFY(item.m_cacheDirty);
+}
+
+void QmlSmokeTest::waveformEditorRulersFollowGridSetting() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
+    const auto countRulerPixels = [&item]() {
+        QImage canvas(320, 180, QImage::Format_RGB32);
+        canvas.fill(Qt::black);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        int rulerPixels = 0;
+        for (int y = 0; y < canvas.height(); ++y) {
+            for (int x = 260; x < canvas.width(); ++x) {
+                const QColor pixel(canvas.pixel(x, y));
+                const int maximum = std::max({pixel.red(), pixel.green(), pixel.blue()});
+                const int minimum = std::min({pixel.red(), pixel.green(), pixel.blue()});
+                if (minimum > 80 && maximum - minimum < 40) ++rulerPixels;
+            }
+        }
+        return rulerPixels;
+    };
+
+    item.setGridEnabled(false);
+    const int hiddenRulerPixels = countRulerPixels();
+    item.setGridEnabled(true);
+    const int visibleRulerPixels = countRulerPixels();
+
+    QVERIFY(hiddenRulerPixels < 10);
+    QVERIFY(visibleRulerPixels > hiddenRulerPixels + 20);
+}
+
+void QmlSmokeTest::waveformEditorRulersRemainVisibleWhenZoomed() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.assign(20'000, 0.5F);
+    item.setZoomLevel(4.0);
+    item.setGridEnabled(true);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    int rulerPixels = 0;
+    for (int y = 0; y < 160; ++y) {
+        for (int x = 290; x < 320; ++x) {
+            const QColor pixel(canvas.pixel(x, y));
+            const int maximum = std::max({pixel.red(), pixel.green(), pixel.blue()});
+            const int minimum = std::min({pixel.red(), pixel.green(), pixel.blue()});
+            if (minimum > 80 && maximum - minimum < 40) ++rulerPixels;
+        }
+    }
+    QVERIFY(rulerPixels > 30);
+}
+
+void QmlSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    const QColor playhead(canvas.pixel(160, 40));
+    const QColor left(canvas.pixel(159, 40));
+    const QColor right(canvas.pixel(161, 40));
+    QVERIFY(std::abs(playhead.red() - playhead.green()) < 12);
+    QVERIFY(playhead.red() > left.red());
+    QCOMPARE(left, right);
+}
+
+void QmlSmokeTest::waveformEditorReferenceLineContrastsWaveform() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    QByteArray overview(1'024, static_cast<char>(0));
+    std::fill(
+        overview.begin() + overview.size() / 2,
+        overview.end(),
+        static_cast<char>(255));
+    item.setOverviewData(overview);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    const QColor background(canvas.pixel(80, 89));
+    const QColor lineOnBackground(canvas.pixel(80, 90));
+    const QColor waveform(canvas.pixel(240, 89));
+    const QColor lineOnWaveform(canvas.pixel(240, 90));
+    const auto luminance = [](const QColor &color) {
+        return 0.2126 * color.red()
+            + 0.7152 * color.green()
+            + 0.0722 * color.blue();
+    };
+    QVERIFY(lineOnBackground != background);
+    QVERIFY(luminance(lineOnWaveform) < luminance(waveform));
+    QVERIFY(lineOnWaveform != waveform);
+}
+
+void QmlSmokeTest::waveformEditorContrastLinesUseFboSafeCompositionModes() {
+    CompositionRecordingPaintDevice device;
+    QPainter painter(&device);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    WaveformEditorItem::drawContrastingLine(
+        painter,
+        QLine(8, 8, 56, 8),
+        QColor(190, 190, 200, 150),
+        QColor(8, 18, 14, 235));
+    QCOMPARE(painter.compositionMode(), QPainter::CompositionMode_Source);
+    painter.end();
+
+    QVERIFY(!device.engine.compositionModes.isEmpty());
+    for (const QPainter::CompositionMode mode
+         : std::as_const(device.engine.compositionModes)) {
+        QVERIFY2(
+            mode <= QPainter::CompositionMode_Plus,
+            "FBO waveform overlays must avoid advanced OpenGL blend modes");
+    }
+}
+
+void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setShowFpsOverlay(true);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    for (int frame = 0; frame < 50; ++frame) {
+        canvas.fill(Qt::black);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        QTest::qWait(5);
+    }
+
+    QVERIFY(item.m_fpsValue > 0);
+    int overlayPixels = 0;
+    int rightmostOverlayPixel = -1;
+    for (int y = 0; y < 20; ++y) {
+        for (int x = 220; x < canvas.width(); ++x) {
+            const QColor pixel(canvas.pixel(x, y));
+            if (pixel.red() > 80 && pixel.green() > 80 && pixel.blue() > 80) {
+                ++overlayPixels;
+                rightmostOverlayPixel = std::max(rightmostOverlayPixel, x);
+            }
+        }
+    }
+    QVERIFY(overlayPixels > 10);
+    QVERIFY(rightmostOverlayPixel >= canvas.width() - 12);
+}
+
+void QmlSmokeTest::waveformEditorUsesSafeRasterTargetAndNativeFrameInterpolation() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(2.0);
+
+    QCOMPARE(item.renderTarget(), QQuickPaintedItem::Image);
+    QVERIFY(item.opaquePainting());
+    QCOMPARE(item.fillColor(), QColor(5, 9, 7));
+    QCOMPARE(
+        item.performanceHints(),
+        QQuickPaintedItem::PerformanceHints{});
+
+    item.setPlaying(true);
+    const double before = item.visibleRangeLocked().first;
+    QTest::qWait(20);
+    const double after = item.visibleRangeLocked().first;
+    QVERIFY(after > before + 0.01);
 }
 
 void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {

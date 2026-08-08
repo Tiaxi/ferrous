@@ -14,6 +14,8 @@ Item {
     required property int popupTransitionMs
     required property string titleText
     required property var closeViewer
+    property int visualizationMode: 0
+    property var setVisualizationMode: function(mode) {}
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
@@ -99,6 +101,17 @@ Item {
             }
         }
 
+        Components.VisualizationModeSwitch {
+            z: 20
+            anchors.top: parent.top
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.margins: 12
+            controlsVisible: root.fullscreenControlsVisible
+            selectedMode: root.visualizationMode
+            setMode: root.setVisualizationMode
+            pointerActivity: root.noteFullscreenPointerActivity
+        }
+
         Rectangle {
             anchors.fill: parent
             color: "#0b0b0f"
@@ -181,6 +194,18 @@ Item {
                 onPointChanged: root.noteFullscreenPointerActivity(
                     point.scenePosition.x, point.scenePosition.y)
             }
+        }
+
+
+        Components.VisualizationModeSwitch {
+            z: 20
+            anchors.top: parent.top
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.margins: 12
+            controlsVisible: root.fullscreenControlsVisible
+            selectedMode: root.visualizationMode
+            setMode: root.setVisualizationMode
+            pointerActivity: root.noteFullscreenPointerActivity
         }
 
         Rectangle {

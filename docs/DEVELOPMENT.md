@@ -151,4 +151,17 @@ With a profile-enabled build, these runtime toggles become active:
 
 - `FERROUS_PROFILE_UI=1`
 - `FERROUS_PROFILE=1`
+- `FERROUS_PROFILE_WAVEFORM=1` (waveform editor only)
 - `FERROUS_SEARCH_PROFILE=1`
+
+For the desktop UI, the convenience launcher configures, builds, and enables
+the instrumentation in one command:
+
+```bash
+./scripts/run-ui.sh --profile-logs
+```
+
+Waveform editor entries use the `[ui-waveform-editor]` prefix and include
+frame gaps, paint/cache timings, detail request latency, resolution, zoom,
+and visible-window coverage. Console output is also copied to the diagnostics
+log shown by **Help > Diagnostics**.

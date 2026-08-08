@@ -1058,6 +1058,53 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_free_buffer(ptr: *mut c_uchar, l
 }
 
 #[no_mangle]
+/// Decode one waveform viewport at display resolution.
+///
+/// # Safety
+///
+/// `path_ptr` must point to `path_len` readable UTF-8 bytes for this call.
+/// If `len_out` is non-null it must be writable for one `usize`.
+pub unsafe extern "C" fn ferrous_ffi_waveform_window(
+    path_ptr: *const c_uchar,
+    path_len: usize,
+    start_seconds: f64,
+    end_seconds: f64,
+    max_points: u32,
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        *len_out = 0;
+    }
+    if path_ptr.is_null() || path_len == 0 || max_points == 0 {
+        return std::ptr::null_mut();
+    }
+    let Ok(path_text) = std::str::from_utf8(std::slice::from_raw_parts(path_ptr, path_len)) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(window) = crate::analysis::decode_waveform_window(
+        &PathBuf::from(path_text),
+        start_seconds,
+        end_seconds,
+        usize::try_from(max_points).unwrap_or(usize::MAX),
+    ) else {
+        return std::ptr::null_mut();
+    };
+    into_raw_buffer(encode_waveform_window(&window), len_out)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer returned by
+/// [`ferrous_ffi_waveform_window`] and not yet freed.
+pub unsafe extern "C" fn ferrous_ffi_waveform_window_free(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// Each `(ptr, len)` pair must point to `len` readable bytes for the
@@ -1101,6 +1148,33 @@ fn into_raw_buffer(bytes: Vec<u8>, len_out: *mut usize) -> *mut c_uchar {
         }
     }
     ptr
+}
+
+fn encode_waveform_window(window: &crate::analysis::WaveformWindow) -> Vec<u8> {
+    const HEADER_BYTES: usize = 36;
+    let mut bytes =
+        Vec::with_capacity(HEADER_BYTES.saturating_add(window.extrema.len().saturating_mul(4)));
+    bytes.extend_from_slice(b"WVF1");
+    bytes.extend_from_slice(&window.sample_rate_hz.to_le_bytes());
+    bytes.extend_from_slice(&window.channel_count.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&window.start_seconds.to_le_bytes());
+    bytes.extend_from_slice(&window.end_seconds.to_le_bytes());
+    bytes.extend_from_slice(&window.frames_per_point.to_le_bytes());
+    let values_per_channel = if window.channel_count == 0 {
+        0
+    } else {
+        window.extrema.len() / (usize::from(window.channel_count) * 2)
+    };
+    bytes.extend_from_slice(
+        &u32::try_from(values_per_channel)
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    for value in &window.extrema {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String> {

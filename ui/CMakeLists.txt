@@ -9,7 +9,7 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-option(FERROUS_ENABLE_PROFILE_LOGS "Compile spectrogram instrumentation and profiling log output into binaries" OFF)
+option(FERROUS_ENABLE_PROFILE_LOGS "Compile UI instrumentation and profiling log output into binaries" OFF)
 option(FERROUS_WARNINGS_AS_ERRORS "Fail UI builds on compiler warnings" ON)
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
@@ -75,6 +75,7 @@ qt_add_executable(ferrous
     src/SpectrogramItem.cpp
     src/WindowActivation.cpp
     src/WaveformItem.cpp
+    src/WaveformEditorItem.cpp
 )
 
 target_include_directories(ferrous PRIVATE src)
@@ -103,6 +104,7 @@ qt_add_qml_module(ferrous
         qml/components/TrackMetadataCard.qml
         qml/components/UiPalette.qml
         qml/components/ViewerCloseButton.qml
+        qml/components/VisualizationModeSwitch.qml
         qml/controllers/GlobalSearchController.qml
         qml/controllers/LibraryController.qml
         qml/controllers/PlaybackController.qml
@@ -133,6 +135,7 @@ qt_add_qml_module(ferrous
         qml/viewers/AlbumArtViewerShell.qml
         qml/viewers/SpectrogramSurface.qml
         qml/viewers/SpectrogramViewerShell.qml
+        qml/viewers/WaveformSurface.qml
     RESOURCES
         qml/assets/channel-mono.svg
         qml/assets/channel-stereo.svg
@@ -201,6 +204,7 @@ if(BUILD_TESTING)
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
         src/WaveformItem.cpp
+        src/WaveformEditorItem.cpp
     )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
     add_dependencies(ferrous_qml_smoke_tests ferrous_rust_bridge)
@@ -269,6 +273,7 @@ if(BUILD_TESTING)
         src/SpectrogramItem.cpp
         src/WindowActivation.cpp
         src/WaveformItem.cpp
+        src/WaveformEditorItem.cpp
     )
     target_include_directories(ferrous_bridge_client_tests PRIVATE src)
     add_dependencies(ferrous_bridge_client_tests ferrous_rust_bridge)
