@@ -476,7 +476,7 @@ private slots:
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
     void waveformEditorFpsOverlayTracksPaintRate();
-    void waveformEditorUsesFramebufferAndNativeFrameInterpolation();
+    void waveformEditorUsesRasterTargetAndNativeFrameInterpolation();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
@@ -4734,14 +4734,14 @@ void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
     QVERIFY(overlayPixels > 10);
 }
 
-void QmlSmokeTest::waveformEditorUsesFramebufferAndNativeFrameInterpolation() {
+void QmlSmokeTest::waveformEditorUsesRasterTargetAndNativeFrameInterpolation() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setDurationSeconds(10.0);
     item.setPositionSeconds(5.0);
     item.setZoomLevel(2.0);
 
-    QCOMPARE(item.renderTarget(), QQuickPaintedItem::FramebufferObject);
+    QCOMPARE(item.renderTarget(), QQuickPaintedItem::Image);
     QVERIFY(item.opaquePainting());
     QCOMPARE(item.fillColor(), QColor(5, 9, 7));
     QCOMPARE(

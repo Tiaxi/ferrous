@@ -111,7 +111,11 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     setAntialiasing(false);
     setOpaquePainting(true);
     setFillColor(kBackground);
-    setRenderTarget(QQuickPaintedItem::FramebufferObject);
+    // Qt 6.9+ routes FramebufferObject through the OpenGL QPainter engine.
+    // Reparenting and resizing this item between the widget and fullscreen
+    // surfaces can leave unrelated framebuffer contents in that target.  The
+    // raster target owns an isolated QImage and uploads only its result.
+    setRenderTarget(QQuickPaintedItem::Image);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
@@ -1244,8 +1248,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool stagingContinues = false;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
     const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
-    // The Qt 6.9+ FBO target uses the OpenGL paint engine. Replace the body
-    // pixels instead of blending with preserved framebuffer contents; the
+    // Replace body pixels rather than blending with the previous raster; the
     // overlays switch back to source-over below for their intended alpha.
     painter->setCompositionMode(QPainter::CompositionMode_Source);
     {
