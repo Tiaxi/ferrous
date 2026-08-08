@@ -9,11 +9,13 @@
 #include <QPointF>
 #include <QPolygonF>
 #include <QQuickPaintedItem>
+#include <QRectF>
 #include <QString>
 #include <QTimer>
 
 #include <atomic>
 #include <chrono>
+#include <map>
 #include <vector>
 
 class QHoverEvent;
@@ -140,6 +142,9 @@ private:
         double maximumFrameGapMs{0.0};
         double decodeMs{0.0};
         double maximumDecodeMs{0.0};
+        quint64 tileRenders{0};
+        double tileRenderMs{0.0};
+        double maximumTileRenderMs{0.0};
     };
 #endif
 
@@ -158,6 +163,15 @@ private:
         double endSeconds{0.0};
         double secondsPerPixel{0.0};
         int width{0};
+    };
+
+    struct PlaybackTile {
+        QImage image;
+    };
+
+    struct PlaybackTilePaint {
+        QImage image;
+        QRectF target;
     };
 
     static QByteArray decodeWindow(
@@ -206,6 +220,17 @@ private:
     void queueGuiContinuationFromPaint(
         bool notifySamplePointsChanged, bool requestRepaint);
     void rebuildCacheLocked(int width, int height);
+    bool playbackTilesEligibleLocked(
+        double visibleStart, double visibleEnd) const;
+    void clearPlaybackTilesLocked();
+    void preparePlaybackTilesLocked(
+        double visibleStart, double visibleEnd, int height);
+    int renderMissingPlaybackTilesLocked(
+        double visibleStart, double visibleEnd, int height, int tileBudget);
+    bool playbackTilesCoverLocked(
+        double visibleStart, double visibleEnd) const;
+    std::vector<PlaybackTilePaint> playbackTilePaintsLocked(
+        double visibleStart, double visibleEnd, int canvasWidth) const;
     void drawGridLocked(QPainter &painter, int width, int height,
                         double visibleStart, double visibleEnd, int channels) const;
     static void drawChannelSeparators(
@@ -265,6 +290,11 @@ private:
     int m_stagedCacheDisplayedChannels{0};
     int m_stagedCacheNextX{0};
     bool m_stagedCacheCommitsDeferredZoom{false};
+    std::map<qint64, PlaybackTile> m_playbackTiles;
+    double m_playbackTileSecondsPerPixel{0.0};
+    int m_playbackTileHeight{0};
+    quint32 m_playbackTileFramesPerPoint{0};
+    int m_playbackTileDisplayedChannels{0};
     quint64 m_requestGeneration{0};
     bool m_requestInFlight{false};
     double m_requestedStartSeconds{0.0};

@@ -460,6 +460,8 @@ private slots:
     void waveformEditorReusesSameSizedCache();
     void waveformEditorCacheHandoffsKeepAbsolutePixelGrid();
     void waveformEditorReplacementCacheDoesNotReuseOldRaster();
+    void waveformEditorBuildsPlaybackTilesWithinFrameBudget();
+    void waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs();
     void waveformEditorBuildsReplacementCacheIncrementally();
     void waveformEditorPaintDefersGuiContinuation();
     void waveformEditorZoomedPlaybackUsesScrollingCache();
@@ -4321,6 +4323,101 @@ void QmlSmokeTest::waveformEditorReplacementCacheDoesNotReuseOldRaster() {
     QVERIFY(!item.m_stagedCache.isNull());
     QCOMPARE(item.m_stagedCacheNextX, 0);
     QVERIFY(item.m_stagedCache.constBits() != oldCache.constBits());
+}
+
+void QmlSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_positionSeconds = 5.0;
+    item.m_zoomLevel = 4.0;
+    item.m_presentedZoomLevel = 4.0;
+    item.m_playing = true;
+    item.m_sampleRateHz = 1'000;
+    item.m_channelCount = 2;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 2;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.assign(40'000, 0.25F);
+
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    QVERIFY(item.playbackTilesEligibleLocked(visibleStart, visibleEnd));
+    item.preparePlaybackTilesLocked(visibleStart, visibleEnd, 180);
+
+    QCOMPARE(item.renderMissingPlaybackTilesLocked(
+        visibleStart, visibleEnd, 180, 2), 2);
+    QCOMPARE(item.m_playbackTiles.size(), 2U);
+    QVERIFY(!item.playbackTilesCoverLocked(visibleStart, visibleEnd));
+
+    while (!item.playbackTilesCoverLocked(visibleStart, visibleEnd)) {
+        const int rendered = item.renderMissingPlaybackTilesLocked(
+            visibleStart, visibleEnd, 180, 2);
+        QVERIFY(rendered > 0);
+        QVERIFY(rendered <= 2);
+    }
+    const auto paints = item.playbackTilePaintsLocked(
+        visibleStart, visibleEnd, 320);
+    QVERIFY(!paints.empty());
+    for (const auto &paint : paints) {
+        QCOMPARE(paint.image.width(), 64);
+        QCOMPARE(paint.image.height(), 180);
+    }
+}
+
+void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_positionSeconds = 5.0;
+    item.m_zoomLevel = 4.0;
+    item.m_presentedZoomLevel = 4.0;
+    item.m_playing = true;
+    item.m_sampleRateHz = 1'000;
+    item.m_channelCount = 1;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.assign(20'000, 0.25F);
+
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    item.preparePlaybackTilesLocked(visibleStart, visibleEnd, 180);
+    while (!item.playbackTilesCoverLocked(visibleStart, visibleEnd)) {
+        QVERIFY(item.renderMissingPlaybackTilesLocked(
+            visibleStart, visibleEnd, 180, 2) > 0);
+    }
+    const auto originalTiles = item.m_playbackTiles;
+
+    item.m_detail.startSeconds = 1.0;
+    item.m_detail.endSeconds = 9.0;
+    item.m_detail.pointCount = 8'000;
+    item.m_detail.extrema.assign(16'000, 0.5F);
+    item.preparePlaybackTilesLocked(visibleStart, visibleEnd, 180);
+
+    QCOMPARE(item.m_playbackTiles.size(), originalTiles.size());
+    for (const auto &[tileIndex, originalTile] : originalTiles) {
+        const auto current = item.m_playbackTiles.find(tileIndex);
+        QVERIFY(current != item.m_playbackTiles.end());
+        QCOMPARE(
+            current->second.image.cacheKey(),
+            originalTile.image.cacheKey());
+    }
+
+    item.m_cacheDirty = false;
+    item.m_cacheStartSeconds = 0.0;
+    item.m_cacheEndSeconds = 1.0;
+    item.m_detail = {};
+    QVERIFY(item.playbackTilesEligibleLocked(visibleStart, visibleEnd));
+    item.setPositionSeconds(5.01);
+    QVERIFY(!item.m_cacheDirty);
+    QVERIFY(!item.m_playbackTiles.empty());
 }
 
 void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {

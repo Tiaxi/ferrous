@@ -29,6 +29,9 @@ constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
 constexpr int kStagedCacheColumnsPerPaint = 128;
+constexpr int kPlaybackTileWidth = 64;
+constexpr int kPlaybackTilesPerPaint = 2;
+constexpr int kPlaybackTilePrefetch = 2;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
 constexpr double kPositionRegressionToleranceSeconds = 0.03;
 constexpr double kPositionSeekJumpSeconds = 0.75;
@@ -198,7 +201,9 @@ void WaveformEditorItem::setPositionSeconds(double value) {
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
         const bool rangeMoved = std::abs(previousRange.first - start) > 0.0001
             || std::abs(previousRange.second - end) > 0.0001;
+        const bool tiledPlayback = playbackTilesEligibleLocked(start, end);
         cacheNeedsUpdate = !m_zoomOutHandoffPending
+            && !tiledPlayback
             && rangeMoved
             && (m_cacheDirty
                 || start < m_cacheStartSeconds
@@ -516,6 +521,8 @@ void WaveformEditorItem::requestDetailWindow() {
                     && m_playing
                     && detailReady
                     && !samplePointsVisibleLocked()
+                    && !playbackTilesEligibleLocked(
+                        presentedStart, presentedEnd)
                     && cacheCoversViewport;
                 if (stageReplacement) beginStagedCacheLocked();
                 if (!deferredZoomStage
@@ -920,8 +927,10 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
         const bool direct = renderDetailDirectlyLocked(start, end);
+        const bool tiledPlayback = playbackTilesEligibleLocked(start, end);
         if (!m_zoomOutHandoffPending
             && !direct
+            && !tiledPlayback
             && (m_cacheDirty
                 || start < m_cacheStartSeconds
                 || end > m_cacheEndSeconds)) {
@@ -981,6 +990,7 @@ void WaveformEditorItem::invalidateCacheLocked() {
     }
     m_cacheDirty = true;
     clearStagedCacheLocked();
+    clearPlaybackTilesLocked();
 }
 
 void WaveformEditorItem::clearStagedCacheLocked() {
@@ -1185,6 +1195,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
     int fpsValue = 0;
     bool showFps = false;
     bool directDetail = false;
+    bool playbackTilesComplete = false;
+    [[maybe_unused]] int playbackTilesRendered = 0;
+    std::vector<PlaybackTilePaint> playbackTilePaints;
     bool presentationCommitted = false;
     bool stagingContinues = false;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
@@ -1220,8 +1233,31 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 *painter, canvasWidth, canvasHeight,
                 visibleStart, visibleEnd, displayedChannelCountLocked());
         } else {
-            rebuildCacheLocked(renderPixelWidthLocked(), canvasHeight);
-            cache = m_cache;
+            const bool tiledPlayback = playbackTilesEligibleLocked(
+                visibleStart, visibleEnd);
+            const bool currentDetailReady =
+                detailCoversRangeLocked(visibleStart, visibleEnd)
+                && detailResolutionCoversLocked(visibleStart, visibleEnd)
+                && m_detail.framesPerPoint > 0;
+            if (tiledPlayback && currentDetailReady) {
+                preparePlaybackTilesLocked(
+                    visibleStart, visibleEnd, canvasHeight);
+                playbackTilesRendered = renderMissingPlaybackTilesLocked(
+                    visibleStart,
+                    visibleEnd,
+                    canvasHeight,
+                    kPlaybackTilesPerPaint);
+            }
+            if (tiledPlayback) {
+                playbackTilesComplete = playbackTilesCoverLocked(
+                    visibleStart, visibleEnd);
+                playbackTilePaints = playbackTilePaintsLocked(
+                    visibleStart, visibleEnd, canvasWidth);
+            }
+            if (!playbackTilesComplete) {
+                rebuildCacheLocked(renderPixelWidthLocked(), canvasHeight);
+                cache = m_cache;
+            }
         }
         hover = m_hoverPosition;
         hoverActive = m_hoverActive;
@@ -1238,7 +1274,12 @@ void WaveformEditorItem::paint(QPainter *painter) {
     if (!directDetail) {
         bool cachePaintCoversCanvas = false;
         bool cachePainted = false;
-        if (cacheSecondsPerPixel > 0.0 && visibleEnd > visibleStart) {
+        if (playbackTilesComplete) {
+            painter->fillRect(
+                QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+            cachePaintCoversCanvas = true;
+            cachePainted = true;
+        } else if (cacheSecondsPerPixel > 0.0 && visibleEnd > visibleStart) {
             const double sourceX = (visibleStart - cacheStart)
                 / cacheSecondsPerPixel;
             const double sourceWidth = (visibleEnd - visibleStart)
@@ -1267,6 +1308,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
         if (!cachePainted) {
             painter->fillRect(
                 QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+        }
+        for (const PlaybackTilePaint &tile : playbackTilePaints) {
+            painter->drawImage(tile.target, tile.image);
         }
     }
     painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
@@ -1315,6 +1359,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
         double summaryMaximumFrameGapMs = 0.0;
         double summaryDecodeMs = 0.0;
         double summaryMaximumDecodeMs = 0.0;
+        quint64 summaryTileRenders = 0;
+        double summaryTileRenderMs = 0.0;
+        double summaryMaximumTileRenderMs = 0.0;
         double profileRebuildMs = 0.0;
         int profileCacheWidth = 0;
         int profileCacheHeight = 0;
@@ -1358,6 +1405,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 summaryMaximumFrameGapMs = m_profile.maximumFrameGapMs;
                 summaryDecodeMs = m_profile.decodeMs;
                 summaryMaximumDecodeMs = m_profile.maximumDecodeMs;
+                summaryTileRenders = m_profile.tileRenders;
+                summaryTileRenderMs = m_profile.tileRenderMs;
+                summaryMaximumTileRenderMs = m_profile.maximumTileRenderMs;
                 m_profile.lastSummary = profilePaintEnded;
                 m_profile.paints = 0;
                 m_profile.directPaints = 0;
@@ -1376,12 +1426,15 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 m_profile.maximumFrameGapMs = 0.0;
                 m_profile.decodeMs = 0.0;
                 m_profile.maximumDecodeMs = 0.0;
+                m_profile.tileRenders = 0;
+                m_profile.tileRenderMs = 0.0;
+                m_profile.maximumTileRenderMs = 0.0;
             }
         }
         if (logSpike) {
             std::fprintf(
                 stderr,
-                "[ui-waveform-editor] paint_spike ms=%.3f zoom=%.3f span=%.6f mode=%s visible_points=%d detail_points=%d frames_per_point=%u fallback=%d cache_rebuilt=%d rebuild_ms=%.3f stage_ms=%.3f stage_columns=%d cache=%dx%d viewport=%dx%d\n",
+                "[ui-waveform-editor] paint_spike ms=%.3f zoom=%.3f span=%.6f mode=%s visible_points=%d detail_points=%d frames_per_point=%u fallback=%d cache_rebuilt=%d rebuild_ms=%.3f stage_ms=%.3f stage_columns=%d tiles_rendered=%d cache=%dx%d viewport=%dx%d\n",
                 paintMs,
                 profileZoom,
                 profileSpan,
@@ -1394,6 +1447,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 profileRebuildMs,
                 profileStagedCacheMs,
                 profileStagedCacheColumns,
+                playbackTilesRendered,
                 profileCacheWidth,
                 profileCacheHeight,
                 canvasWidth,
@@ -1402,7 +1456,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         if (logSummary) {
             std::fprintf(
                 stderr,
-                "[ui-waveform-editor] summary seconds=%.3f paints=%llu direct=%llu cached=%llu paint_ms=%.3f avg_ms=%.3f max_ms=%.3f rebuilds=%llu rebuild_ms=%.3f rebuild_max_ms=%.3f stage_starts=%llu stage_swaps=%llu stage_ms=%.3f stage_max_ms=%.3f frame_gap_max_ms=%.3f requests=%llu handoffs=%llu decode_ms=%.3f decode_max_ms=%.3f zoom=%.3f span=%.6f\n",
+                "[ui-waveform-editor] summary seconds=%.3f paints=%llu direct=%llu cached=%llu paint_ms=%.3f avg_ms=%.3f max_ms=%.3f rebuilds=%llu rebuild_ms=%.3f rebuild_max_ms=%.3f stage_starts=%llu stage_swaps=%llu stage_ms=%.3f stage_max_ms=%.3f tile_renders=%llu tile_ms=%.3f tile_max_ms=%.3f frame_gap_max_ms=%.3f requests=%llu handoffs=%llu decode_ms=%.3f decode_max_ms=%.3f zoom=%.3f span=%.6f\n",
                 summarySeconds,
                 static_cast<unsigned long long>(summaryPaints),
                 static_cast<unsigned long long>(summaryDirectPaints),
@@ -1419,6 +1473,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 static_cast<unsigned long long>(summaryStagedCacheSwaps),
                 summaryStagedCacheMs,
                 summaryMaximumStagedCacheMs,
+                static_cast<unsigned long long>(summaryTileRenders),
+                summaryTileRenderMs,
+                summaryMaximumTileRenderMs,
                 summaryMaximumFrameGapMs,
                 static_cast<unsigned long long>(summaryDetailRequests),
                 static_cast<unsigned long long>(summaryDetailHandoffs),
@@ -1432,6 +1489,216 @@ void WaveformEditorItem::paint(QPainter *painter) {
     if (presentationCommitted || stagingContinues) {
         queueGuiContinuationFromPaint(presentationCommitted, stagingContinues);
     }
+}
+
+bool WaveformEditorItem::playbackTilesEligibleLocked(
+    double visibleStart, double visibleEnd) const {
+    if (!m_playing
+        || m_presentedZoomLevel <= 1.0001
+        || renderDetailDirectlyLocked(visibleStart, visibleEnd)) {
+        return false;
+    }
+    const bool detailReady = detailCoversRangeLocked(visibleStart, visibleEnd)
+        && detailResolutionCoversLocked(visibleStart, visibleEnd)
+        && m_detail.framesPerPoint > 0;
+    if (detailReady) return true;
+
+    // Keep complete presentation tiles alive while the next detail window is
+    // in flight. Falling back to the monolithic cache here would briefly show
+    // its coarser level between two otherwise compatible tile presentations.
+    const int renderWidth = renderPixelWidthLocked();
+    const double secondsPerPixel = (visibleEnd - visibleStart)
+        / static_cast<double>(std::max(1, renderWidth));
+    const double tolerance = std::max(1.0e-12, secondsPerPixel * 1.0e-7);
+    return !m_playbackTiles.empty()
+        && std::abs(m_playbackTileSecondsPerPixel - secondsPerPixel)
+            <= tolerance
+        && m_playbackTileHeight
+            == std::max(1, static_cast<int>(std::floor(height())))
+        && m_playbackTileDisplayedChannels == displayedChannelCountLocked()
+        && playbackTilesCoverLocked(visibleStart, visibleEnd);
+}
+
+void WaveformEditorItem::clearPlaybackTilesLocked() {
+    m_playbackTiles.clear();
+    m_playbackTileSecondsPerPixel = 0.0;
+    m_playbackTileHeight = 0;
+    m_playbackTileFramesPerPoint = 0;
+    m_playbackTileDisplayedChannels = 0;
+}
+
+void WaveformEditorItem::preparePlaybackTilesLocked(
+    double visibleStart, double visibleEnd, int height) {
+    const int renderWidth = renderPixelWidthLocked();
+    const double secondsPerPixel = (visibleEnd - visibleStart)
+        / static_cast<double>(std::max(1, renderWidth));
+    const int channels = displayedChannelCountLocked();
+    const double tolerance = std::max(
+        1.0e-12, secondsPerPixel * 1.0e-7);
+    const bool compatible = !m_playbackTiles.empty()
+        && std::abs(m_playbackTileSecondsPerPixel - secondsPerPixel)
+            <= tolerance
+        && m_playbackTileHeight == height
+        && m_playbackTileFramesPerPoint == m_detail.framesPerPoint
+        && m_playbackTileDisplayedChannels == channels;
+    if (!compatible) {
+        clearPlaybackTilesLocked();
+        m_playbackTileSecondsPerPixel = secondsPerPixel;
+        m_playbackTileHeight = height;
+        m_playbackTileFramesPerPoint = m_detail.framesPerPoint;
+        m_playbackTileDisplayedChannels = channels;
+    }
+}
+
+int WaveformEditorItem::renderMissingPlaybackTilesLocked(
+    double visibleStart, double visibleEnd, int height, int tileBudget) {
+    if (tileBudget <= 0 || m_playbackTileSecondsPerPixel <= 0.0) {
+        return 0;
+    }
+    const double tileDuration = m_playbackTileSecondsPerPixel
+        * static_cast<double>(kPlaybackTileWidth);
+    if (tileDuration <= 0.0) return 0;
+
+    const qint64 firstVisible = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + kGridAlignmentEpsilon));
+    const qint64 lastVisible = static_cast<qint64>(std::floor(
+        std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
+    const qint64 firstWanted = firstVisible - kPlaybackTilePrefetch;
+    const qint64 lastWanted = lastVisible + kPlaybackTilePrefetch;
+
+    for (auto iterator = m_playbackTiles.begin();
+         iterator != m_playbackTiles.end();) {
+        if (iterator->first < firstWanted - kPlaybackTilePrefetch
+            || iterator->first > lastWanted + kPlaybackTilePrefetch) {
+            iterator = m_playbackTiles.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+
+    std::vector<qint64> candidates;
+    candidates.reserve(static_cast<std::size_t>(
+        std::max<qint64>(0, lastWanted - firstWanted + 1)));
+    for (qint64 tile = firstVisible; tile <= lastVisible; ++tile) {
+        candidates.push_back(tile);
+    }
+    for (int margin = 1; margin <= kPlaybackTilePrefetch; ++margin) {
+        candidates.push_back(firstVisible - margin);
+        candidates.push_back(lastVisible + margin);
+    }
+
+    int rendered = 0;
+    for (const qint64 tileIndex : candidates) {
+        if (rendered >= tileBudget
+            || m_playbackTiles.contains(tileIndex)) {
+            continue;
+        }
+        const double tileStart = static_cast<double>(tileIndex) * tileDuration;
+        const double tileEnd = tileStart + tileDuration;
+        const double contentStart = std::max(0.0, tileStart);
+        const double contentEnd = std::min(m_durationSeconds, tileEnd);
+        if (contentEnd <= contentStart
+            || !detailCoversRangeLocked(contentStart, contentEnd)
+            || !detailResolutionCoversLocked(contentStart, contentEnd)) {
+            continue;
+        }
+
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        const auto tileStarted = std::chrono::steady_clock::now();
+#endif
+        QImage tileImage(
+            kPlaybackTileWidth, height, QImage::Format_RGB32);
+        tileImage.fill(kBackground);
+        QPainter tilePainter(&tileImage);
+        tilePainter.setRenderHint(QPainter::Antialiasing, false);
+        const int firstX = std::clamp(
+            static_cast<int>(std::floor(
+                (contentStart - tileStart) / tileDuration
+                * static_cast<double>(kPlaybackTileWidth))),
+            0,
+            kPlaybackTileWidth);
+        const int lastX = std::clamp(
+            static_cast<int>(std::ceil(
+                (contentEnd - tileStart) / tileDuration
+                * static_cast<double>(kPlaybackTileWidth))),
+            firstX,
+            kPlaybackTileWidth);
+        drawDetailSliceLocked(
+            tilePainter,
+            kPlaybackTileWidth,
+            height,
+            tileStart,
+            tileEnd,
+            m_playbackTileDisplayedChannels,
+            firstX,
+            lastX);
+        tilePainter.end();
+        m_playbackTiles.emplace(
+            tileIndex, PlaybackTile{std::move(tileImage)});
+        ++rendered;
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+        if (m_profile.enabled) {
+            const double tileMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - tileStarted).count();
+            ++m_profile.tileRenders;
+            m_profile.tileRenderMs += tileMs;
+            m_profile.maximumTileRenderMs = std::max(
+                m_profile.maximumTileRenderMs, tileMs);
+        }
+#endif
+    }
+    return rendered;
+}
+
+bool WaveformEditorItem::playbackTilesCoverLocked(
+    double visibleStart, double visibleEnd) const {
+    if (m_playbackTileSecondsPerPixel <= 0.0 || visibleEnd <= visibleStart) {
+        return false;
+    }
+    const double tileDuration = m_playbackTileSecondsPerPixel
+        * static_cast<double>(kPlaybackTileWidth);
+    const qint64 first = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + kGridAlignmentEpsilon));
+    const qint64 last = static_cast<qint64>(std::floor(
+        std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
+    for (qint64 tile = first; tile <= last; ++tile) {
+        if (!m_playbackTiles.contains(tile)) return false;
+    }
+    return true;
+}
+
+std::vector<WaveformEditorItem::PlaybackTilePaint>
+WaveformEditorItem::playbackTilePaintsLocked(
+    double visibleStart, double visibleEnd, int canvasWidth) const {
+    std::vector<PlaybackTilePaint> paints;
+    if (m_playbackTileSecondsPerPixel <= 0.0
+        || visibleEnd <= visibleStart || canvasWidth <= 0) {
+        return paints;
+    }
+    const double visibleSpan = visibleEnd - visibleStart;
+    const double tileDuration = m_playbackTileSecondsPerPixel
+        * static_cast<double>(kPlaybackTileWidth);
+    const qint64 first = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + kGridAlignmentEpsilon));
+    const qint64 last = static_cast<qint64>(std::floor(
+        std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
+    paints.reserve(static_cast<std::size_t>(std::max<qint64>(0, last - first + 1)));
+    for (qint64 tileIndex = first; tileIndex <= last; ++tileIndex) {
+        const auto iterator = m_playbackTiles.find(tileIndex);
+        if (iterator == m_playbackTiles.end()) continue;
+        const double tileStart = static_cast<double>(tileIndex) * tileDuration;
+        paints.push_back(PlaybackTilePaint{
+            iterator->second.image,
+            QRectF(
+                (tileStart - visibleStart) / visibleSpan
+                    * static_cast<double>(canvasWidth),
+                0.0,
+                tileDuration / visibleSpan
+                    * static_cast<double>(canvasWidth),
+                static_cast<double>(m_playbackTileHeight)),
+        });
+    }
+    return paints;
 }
 
 void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
