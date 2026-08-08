@@ -470,6 +470,7 @@ private slots:
     void waveformEditorPausedDetailReplacesOverviewCache();
     void waveformEditorPlaybackHeartbeatDoesNotMoveBackward();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
+    void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
     void waveformEditorSampleViewDoesNotFillLaterChannels();
@@ -477,6 +478,7 @@ private slots:
     void waveformEditorRulersFollowGridSetting();
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
+    void waveformEditorReferenceLineContrastsWaveform();
     void waveformEditorFpsOverlayTracksPaintRate();
     void waveformEditorUsesRasterTargetAndNativeFrameInterpolation();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
@@ -597,10 +599,31 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QVERIFY2(libraryView != nullptr, "Main.qml did not publish the library view ref");
     QCOMPARE(qvariant_cast<QObject *>(libraryView->property("model")), static_cast<QObject *>(&libraryModel));
 
-    QObject *modeSwitch = root->findChild<QObject *>(QStringLiteral("visualizationModeSwitch"));
+    auto *window = qobject_cast<QQuickWindow *>(root);
+    QVERIFY(window != nullptr);
+    QObject *modeSwitch = nullptr;
+    const QList<QObject *> modeSwitches = root->findChildren<QObject *>(
+        QStringLiteral("visualizationModeSwitch"));
+    for (QObject *candidate : modeSwitches) {
+        auto *item = qobject_cast<QQuickItem *>(candidate);
+        if (item != nullptr && item->window() == window && item->isVisible()) {
+            modeSwitch = candidate;
+            break;
+        }
+    }
     QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
     QVERIFY(modeSwitch->property("width").toDouble() <= 50.0);
+    QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
+    QCOMPARE(modeSwitch->property("opacity").toDouble(), 0.0);
+    auto *modeSwitchItem = qobject_cast<QQuickItem *>(modeSwitch);
+    QVERIFY(modeSwitchItem != nullptr);
+    QVERIFY(modeSwitch->setProperty("proximityHovered", true));
+    QTRY_VERIFY(modeSwitch->property("opacity").toDouble() > 0.95);
+    QVERIFY(modeSwitch->setProperty("controlsVisible", false));
+    QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
+    QVERIFY(modeSwitch->setProperty("controlsVisible", true));
+    QTRY_VERIFY(modeSwitch->property("opacity").toDouble() < 0.05);
     QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
     QVERIFY(setMode.isCallable());
     setMode.call(QJSValueList{QJSValue(1)});
@@ -4375,6 +4398,16 @@ void QmlSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
         QCOMPARE(paint.image.width(), 64);
         QCOMPARE(paint.image.height(), 180);
     }
+
+    const double shiftedStart = visibleStart + 6.0 * tileDuration;
+    const double shiftedEnd = visibleEnd + 6.0 * tileDuration;
+    const int catchUpBudget = item.playbackTileRenderBudgetLocked(
+        shiftedStart, shiftedEnd);
+    QVERIFY(catchUpBudget > 2);
+    QVERIFY(catchUpBudget <= 8);
+    QCOMPARE(item.renderMissingPlaybackTilesLocked(
+        shiftedStart, shiftedEnd, 180, catchUpBudget), catchUpBudget);
+    QVERIFY(item.playbackTilesCoverLocked(shiftedStart, shiftedEnd));
 }
 
 void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
@@ -4666,6 +4699,34 @@ void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
     QVERIFY(changedPixels > 250);
 }
 
+void QmlSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
+    QCOMPARE(
+        WaveformEditorItem::formatCrosshairTime(28.98),
+        QStringLiteral("0:28.980"));
+    QCOMPARE(
+        WaveformEditorItem::formatCrosshairTime(3'723.004),
+        QStringLiteral("1:02:03.004"));
+
+    constexpr int width = 1'183;
+    constexpr int height = 318;
+    constexpr int cursorX = 563;
+    constexpr int cursorY = 137;
+    constexpr int valueWidth = 42;
+    constexpr int timeWidth = 48;
+    constexpr int textHeight = 12;
+    const auto [valueRect, timeRect] =
+        WaveformEditorItem::crosshairLabelRects(
+            width, height, cursorX, cursorY,
+            valueWidth, timeWidth, textHeight);
+
+    QCOMPARE(valueRect.right(), width - 3);
+    QCOMPARE(valueRect.y(), cursorY - textHeight / 2);
+    QCOMPARE(timeRect.x(), cursorX - timeWidth / 2);
+    QCOMPARE(timeRect.bottom(), height - 3);
+    QCOMPARE(valueRect.size(), QSize(valueWidth + 6, textHeight + 6));
+    QCOMPARE(timeRect.size(), QSize(timeWidth + 6, textHeight + 6));
+}
+
 void QmlSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
     WaveformEditorItem item;
     item.setWidth(400);
@@ -4853,6 +4914,38 @@ void QmlSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
     QCOMPARE(left, right);
 }
 
+void QmlSmokeTest::waveformEditorReferenceLineContrastsWaveform() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    QByteArray overview(1'024, static_cast<char>(0));
+    std::fill(
+        overview.begin() + overview.size() / 2,
+        overview.end(),
+        static_cast<char>(255));
+    item.setOverviewData(overview);
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    const QColor background(canvas.pixel(80, 89));
+    const QColor lineOnBackground(canvas.pixel(80, 90));
+    const QColor waveform(canvas.pixel(240, 89));
+    const QColor lineOnWaveform(canvas.pixel(240, 90));
+    const auto luminance = [](const QColor &color) {
+        return 0.2126 * color.red()
+            + 0.7152 * color.green()
+            + 0.0722 * color.blue();
+    };
+    QVERIFY(lineOnBackground != background);
+    QVERIFY(luminance(lineOnWaveform) < luminance(waveform));
+    QVERIFY(lineOnWaveform != waveform);
+}
+
 void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
     WaveformEditorItem item;
     item.setWidth(320);
@@ -4871,15 +4964,18 @@ void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
 
     QVERIFY(item.m_fpsValue > 0);
     int overlayPixels = 0;
+    int rightmostOverlayPixel = -1;
     for (int y = 0; y < 20; ++y) {
-        for (int x = 220; x < 290; ++x) {
+        for (int x = 220; x < canvas.width(); ++x) {
             const QColor pixel(canvas.pixel(x, y));
             if (pixel.red() > 80 && pixel.green() > 80 && pixel.blue() > 80) {
                 ++overlayPixels;
+                rightmostOverlayPixel = std::max(rightmostOverlayPixel, x);
             }
         }
     }
     QVERIFY(overlayPixels > 10);
+    QVERIFY(rightmostOverlayPixel >= canvas.width() - 12);
 }
 
 void QmlSmokeTest::waveformEditorUsesRasterTargetAndNativeFrameInterpolation() {

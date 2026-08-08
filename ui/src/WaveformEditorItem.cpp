@@ -31,6 +31,7 @@ constexpr double kMinimumDetailMarginSeconds = 0.75;
 constexpr int kStagedCacheColumnsPerPaint = 128;
 constexpr int kPlaybackTileWidth = 64;
 constexpr int kPlaybackTilesPerPaint = 2;
+constexpr int kMaximumPlaybackTilesPerPaint = 8;
 constexpr int kPlaybackTilePrefetch = 2;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
 constexpr double kPositionRegressionToleranceSeconds = 0.03;
@@ -73,6 +74,27 @@ QString formatTime(double seconds, double span) {
     return QStringLiteral("%1:%2")
         .arg(minutes)
         .arg(static_cast<int>(remainder), 2, 10, QLatin1Char('0'));
+}
+
+QString formatTimePrecise(double seconds) {
+    seconds = std::max(0.0, seconds);
+    const int totalMs = static_cast<int>(std::round(seconds * 1000.0));
+    const int milliseconds = totalMs % 1000;
+    const int totalSeconds = totalMs / 1000;
+    const int hours = totalSeconds / 3600;
+    const int minutes = (totalSeconds % 3600) / 60;
+    const int secondsPart = totalSeconds % 60;
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3.%4")
+            .arg(hours)
+            .arg(minutes, 2, 10, QLatin1Char('0'))
+            .arg(secondsPart, 2, 10, QLatin1Char('0'))
+            .arg(milliseconds, 3, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2.%3")
+        .arg(minutes)
+        .arg(secondsPart, 2, 10, QLatin1Char('0'))
+        .arg(milliseconds, 3, 10, QLatin1Char('0'));
 }
 
 double selectTimeInterval(double span, int width) {
@@ -1260,7 +1282,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
                     visibleStart,
                     visibleEnd,
                     canvasHeight,
-                    kPlaybackTilesPerPaint);
+                    playbackTileRenderBudgetLocked(
+                        visibleStart, visibleEnd));
             }
             if (tiledPlayback) {
                 playbackTilesComplete = playbackTilesCoverLocked(
@@ -1340,7 +1363,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
         QPen playheadPen(kPlayhead);
         playheadPen.setWidth(0);
         painter->setPen(playheadPen);
+        painter->setCompositionMode(QPainter::CompositionMode_Difference);
         painter->drawLine(x, 0, x, canvasHeight - 1);
+        painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
     }
     if (crosshair && hoverActive) {
         QMutexLocker lock(&m_stateMutex);
@@ -1669,6 +1694,25 @@ int WaveformEditorItem::renderMissingPlaybackTilesLocked(
     return rendered;
 }
 
+int WaveformEditorItem::playbackTileRenderBudgetLocked(
+    double visibleStart, double visibleEnd) const {
+    if (m_playbackTileSecondsPerPixel <= 0.0 || visibleEnd <= visibleStart) {
+        return kPlaybackTilesPerPaint;
+    }
+    const double tileDuration = m_playbackTileSecondsPerPixel
+        * static_cast<double>(kPlaybackTileWidth);
+    const qint64 first = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + kGridAlignmentEpsilon));
+    const qint64 last = static_cast<qint64>(std::floor(
+        std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
+    int missing = 0;
+    for (qint64 tile = first; tile <= last; ++tile) {
+        if (!m_playbackTiles.contains(tile)) ++missing;
+    }
+    return std::clamp(
+        missing, kPlaybackTilesPerPaint, kMaximumPlaybackTilesPerPaint);
+}
+
 bool WaveformEditorItem::playbackTilesCoverLocked(
     double visibleStart, double visibleEnd) const {
     if (m_playbackTileSecondsPerPixel <= 0.0 || visibleEnd <= visibleStart) {
@@ -1822,8 +1866,32 @@ QPainterPath WaveformEditorItem::buildSamplePath(const QPolygonF &samples) {
     return path;
 }
 
+QString WaveformEditorItem::formatCrosshairTime(double seconds) {
+    return formatTimePrecise(seconds);
+}
+
+std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
+    int width, int height, int x, int y,
+    int valueTextWidth, int timeTextWidth, int textHeight) {
+    constexpr int padding = 3;
+    const QRect valueRect(
+        width - valueTextWidth - 2 * padding - 2,
+        std::clamp(y - textHeight / 2, 0, height - textHeight - 2 * padding),
+        valueTextWidth + 2 * padding,
+        textHeight + 2 * padding);
+    const QRect timeRect(
+        std::clamp(x - timeTextWidth / 2, 0, width - timeTextWidth - 2 * padding),
+        height - textHeight - 2 * padding - 2,
+        timeTextWidth + 2 * padding,
+        textHeight + 2 * padding);
+    return {valueRect, timeRect};
+}
+
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,
                                          double visibleStart, double visibleEnd, int channels) const {
+    const QPainter::CompositionMode originalComposition =
+        painter.compositionMode();
+    painter.setCompositionMode(QPainter::CompositionMode_Difference);
     painter.setPen(QPen(kCenterLine, 1.0));
     for (int channel = 0; channel < channels; ++channel) {
         const double top = static_cast<double>(channel) * height / channels;
@@ -1834,6 +1902,7 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
             width - 1,
             static_cast<int>((top + bottom) * 0.5));
     }
+    painter.setCompositionMode(originalComposition);
     if (!m_gridEnabled) return;
 
     QFont font;
@@ -2014,7 +2083,10 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
                                         double visibleStart, double visibleEnd) const {
     const int x = std::clamp(static_cast<int>(m_hoverPosition.x()), 0, width - 1);
     const int y = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
-    QPen pen(QColor(235, 241, 237, 150)); pen.setStyle(Qt::DotLine); painter.setPen(pen);
+    QPen pen(QColor(255, 255, 255, 140));
+    pen.setStyle(Qt::DotLine);
+    pen.setWidthF(1.0);
+    painter.setPen(pen);
     painter.drawLine(x, 0, x, height - 1); painter.drawLine(0, y, width - 1, y);
     const double time = visibleStart + static_cast<double>(x) / std::max(1, width - 1) * (visibleEnd - visibleStart);
     const int channels = displayedChannelCountLocked();
@@ -2022,13 +2094,30 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const double localY = std::fmod(static_cast<double>(y), channelHeight);
     const double amplitude = std::clamp(std::abs((channelHeight * 0.5 - localY) / (channelHeight * 0.5)), 0.0, 1.0);
     const QString dbText = amplitude <= 0.00001 ? QStringLiteral("-∞ dB") : QStringLiteral("%1 dB").arg(20.0 * std::log10(amplitude), 0, 'f', 1);
-    const QString timeText = formatTime(time, visibleEnd - visibleStart);
-    QFont font; font.setPixelSize(10); painter.setFont(font); const QFontMetrics metrics(font);
-    painter.setPen(QColor(234, 240, 236)); painter.setBrush(QColor(0, 0, 0, 190));
-    const QRect dbRect(width - metrics.horizontalAdvance(dbText) - 10, std::clamp(y - metrics.height(), 0, height - metrics.height() - 4), metrics.horizontalAdvance(dbText) + 8, metrics.height() + 4);
-    painter.drawRect(dbRect); painter.drawText(dbRect.adjusted(4, 2, -4, -2), Qt::AlignLeft | Qt::AlignVCenter, dbText);
-    const QRect timeRect(std::clamp(x - metrics.horizontalAdvance(timeText) / 2 - 4, 0, width - metrics.horizontalAdvance(timeText) - 8), height - metrics.height() - 4, metrics.horizontalAdvance(timeText) + 8, metrics.height() + 4);
-    painter.drawRect(timeRect); painter.drawText(timeRect.adjusted(4, 2, -4, -2), Qt::AlignLeft | Qt::AlignVCenter, timeText);
+    const QString timeText = formatCrosshairTime(time);
+    QFont font;
+    font.setPixelSize(10);
+    painter.setFont(font);
+    const QFontMetrics metrics(font);
+    const int dbWidth = metrics.horizontalAdvance(dbText);
+    const int timeWidth = metrics.horizontalAdvance(timeText);
+    const int textHeight = metrics.height();
+    const auto [dbRect, timeRect] = crosshairLabelRects(
+        width, height, x, y, dbWidth, timeWidth, textHeight);
+    constexpr int padding = 3;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 10, 160));
+    painter.drawRoundedRect(dbRect, 3, 3);
+    painter.drawRoundedRect(timeRect, 3, 3);
+    painter.setPen(QColor(255, 255, 255, 220));
+    painter.drawText(
+        dbRect.x() + padding,
+        dbRect.y() + padding + metrics.ascent(),
+        dbText);
+    painter.drawText(
+        timeRect.x() + padding,
+        timeRect.bottom() - padding - metrics.descent(),
+        timeText);
 }
 
 void WaveformEditorItem::drawFpsOverlay(QPainter &painter, int width, int fpsValue) {
@@ -2039,7 +2128,7 @@ void WaveformEditorItem::drawFpsOverlay(QPainter &painter, int width, int fpsVal
     const QFontMetrics metrics(font);
     painter.setPen(kOverlay);
     painter.drawText(
-        std::max(4, width - metrics.horizontalAdvance(text) - 34),
+        std::max(4, width - metrics.horizontalAdvance(text) - 8),
         metrics.ascent() + 4,
         text);
 }

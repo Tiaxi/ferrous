@@ -10,8 +10,32 @@ Row {
     required property var setMode
     property bool controlsVisible: true
     property var pointerActivity: null
+    property bool proximityHovered: false
     spacing: 1
     visible: controlsVisible
+    opacity: controlsVisible && proximityHovered ? 1 : 0
+    onControlsVisibleChanged: {
+        if (!controlsVisible) {
+            proximityHovered = false
+        }
+    }
+
+    Behavior on opacity {
+        NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+    }
+
+    HoverHandler {
+        id: proximityHover
+        enabled: root.controlsVisible
+        margin: 24
+        onHoveredChanged: root.proximityHovered = hovered
+        onPointChanged: {
+            if (root.pointerActivity) {
+                root.pointerActivity(
+                    point.scenePosition.x, point.scenePosition.y)
+            }
+        }
+    }
 
     Repeater {
         model: ["Spectrogram", "Waveform"]
@@ -81,6 +105,7 @@ Row {
 
             MouseArea {
                 anchors.fill: parent
+                enabled: root.opacity > 0.5
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onEntered: button.hovered = true

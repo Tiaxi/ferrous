@@ -229,6 +229,8 @@ private:
         double visibleStart, double visibleEnd, int height);
     int renderMissingPlaybackTilesLocked(
         double visibleStart, double visibleEnd, int height, int tileBudget);
+    int playbackTileRenderBudgetLocked(
+        double visibleStart, double visibleEnd) const;
     bool playbackTilesCoverLocked(
         double visibleStart, double visibleEnd) const;
     std::vector<PlaybackTilePaint> playbackTilePaintsLocked(
@@ -238,6 +240,10 @@ private:
     static void drawChannelSeparators(
         QPainter &painter, int width, int height, int channels);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
+    static QString formatCrosshairTime(double seconds);
+    static std::pair<QRect, QRect> crosshairLabelRects(
+        int width, int height, int x, int y,
+        int valueTextWidth, int timeTextWidth, int textHeight);
     void drawOverviewLocked(QPainter &painter, int width, int height,
                             double visibleStart, double visibleEnd, int channels) const;
     void drawDetailLocked(QPainter &painter, int width, int height,
