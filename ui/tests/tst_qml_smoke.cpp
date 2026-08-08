@@ -444,11 +444,13 @@ private slots:
     void waveformEditorPrefetchesBeforeDetailBoundary();
     void waveformEditorKeepsOverlappingDetailDuringHandoff();
     void waveformEditorWideDetailCacheKeepsViewportDensity();
+    void waveformEditorWholeTrackAcceptsDecodedEndpointTolerance();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
-    void waveformEditorRulersRemainVisibleWithoutGrid();
+    void waveformEditorRulersFollowGridSetting();
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
     void waveformEditorFpsOverlayTracksPaintRate();
+    void waveformEditorUsesFramebufferAndNativeFrameInterpolation();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
@@ -1216,6 +1218,8 @@ Item {
 
     QtObject {
         id: bridge
+        objectName: "waveformBridge"
+        property string playbackState: "Stopped"
         property string currentTrackPath: ""
         property var waveformPeaksPacked: ""
         property real durationSeconds: 10
@@ -1253,11 +1257,17 @@ Item {
     QTRY_VERIFY(waveform->gridEnabled());
     QTRY_VERIFY(waveform->crosshairEnabled());
     QTRY_VERIFY(waveform->showFpsOverlay());
+    QVERIFY(!waveform->playing());
 
     QObject *hoverHandler = root->findChild<QObject *>(
         QStringLiteral("waveformSurfaceHoverHandler"));
     QVERIFY(hoverHandler != nullptr);
     QCOMPARE(hoverHandler->parent(), surface);
+
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("waveformBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(waveform->playing());
 
     surface->setProperty("interactiveOverlaysVisible", false);
     QTRY_VERIFY(!waveform->crosshairEnabled());
@@ -3786,6 +3796,7 @@ void QmlSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
         }
     }
     QVERIFY(waveformPixels > 20);
+    QCOMPARE(canvas.pixelColor(150, 20), QColor(5, 9, 7));
 }
 
 void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
@@ -3811,6 +3822,38 @@ void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
     QVERIFY(item.m_cache.width() >= 959);
     QVERIFY(item.m_cache.width() <= 961);
     QVERIFY(item.m_cacheEndSeconds - item.m_cacheStartSeconds < 0.31);
+}
+
+void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.m_detail.sampleRateHz = 48'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0 - 0.5 / 48'000.0;
+    item.m_detail.framesPerPoint = 2;
+    item.m_detail.pointCount = 1'280;
+    item.m_detail.extrema.assign(2'560, 0.5F);
+    item.m_detailRenderWidth = 320;
+
+    QVERIFY(item.detailCoversRangeLocked(0.0, 10.0));
+
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    int waveformPixels = 0;
+    for (int y = 44; y <= 47; ++y) {
+        for (int x = 20; x < 300; ++x) {
+            const QColor pixel(canvas.pixel(x, y));
+            if (pixel.green() > 180 && pixel.red() < 100) ++waveformPixels;
+        }
+    }
+    QVERIFY(waveformPixels > 200);
 }
 
 void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
@@ -3842,30 +3885,37 @@ void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
     QVERIFY(changedPixels > 250);
 }
 
-void QmlSmokeTest::waveformEditorRulersRemainVisibleWithoutGrid() {
+void QmlSmokeTest::waveformEditorRulersFollowGridSetting() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
     item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
-    item.setGridEnabled(false);
-
-    QImage canvas(320, 180, QImage::Format_RGB32);
-    canvas.fill(Qt::black);
-    QPainter painter(&canvas);
-    item.paint(&painter);
-    painter.end();
-
-    int rulerPixels = 0;
-    for (int y = 0; y < canvas.height(); ++y) {
-        for (int x = 260; x < canvas.width(); ++x) {
-            const QColor pixel(canvas.pixel(x, y));
-            const int maximum = std::max({pixel.red(), pixel.green(), pixel.blue()});
-            const int minimum = std::min({pixel.red(), pixel.green(), pixel.blue()});
-            if (minimum > 80 && maximum - minimum < 40) ++rulerPixels;
+    const auto countRulerPixels = [&item]() {
+        QImage canvas(320, 180, QImage::Format_RGB32);
+        canvas.fill(Qt::black);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        int rulerPixels = 0;
+        for (int y = 0; y < canvas.height(); ++y) {
+            for (int x = 260; x < canvas.width(); ++x) {
+                const QColor pixel(canvas.pixel(x, y));
+                const int maximum = std::max({pixel.red(), pixel.green(), pixel.blue()});
+                const int minimum = std::min({pixel.red(), pixel.green(), pixel.blue()});
+                if (minimum > 80 && maximum - minimum < 40) ++rulerPixels;
+            }
         }
-    }
-    QVERIFY(rulerPixels > 50);
+        return rulerPixels;
+    };
+
+    item.setGridEnabled(false);
+    const int hiddenRulerPixels = countRulerPixels();
+    item.setGridEnabled(true);
+    const int visibleRulerPixels = countRulerPixels();
+
+    QVERIFY(hiddenRulerPixels < 10);
+    QVERIFY(visibleRulerPixels > hiddenRulerPixels + 20);
 }
 
 void QmlSmokeTest::waveformEditorRulersRemainVisibleWhenZoomed() {
@@ -3882,6 +3932,7 @@ void QmlSmokeTest::waveformEditorRulersRemainVisibleWhenZoomed() {
     item.m_detail.pointCount = 10'000;
     item.m_detail.extrema.assign(20'000, 0.5F);
     item.setZoomLevel(4.0);
+    item.setGridEnabled(true);
 
     QImage canvas(320, 180, QImage::Format_RGB32);
     canvas.fill(Qt::black);
@@ -3949,6 +4000,23 @@ void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
         }
     }
     QVERIFY(overlayPixels > 10);
+}
+
+void QmlSmokeTest::waveformEditorUsesFramebufferAndNativeFrameInterpolation() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setZoomLevel(2.0);
+
+    QCOMPARE(item.renderTarget(), QQuickPaintedItem::FramebufferObject);
+    QVERIFY(item.performanceHints().testFlag(QQuickPaintedItem::FastFBOResizing));
+
+    item.setPlaying(true);
+    const double before = item.visibleRangeLocked().first;
+    QTest::qWait(20);
+    const double after = item.visibleRangeLocked().first;
+    QVERIFY(after > before + 0.01);
 }
 
 void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {

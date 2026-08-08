@@ -41,6 +41,7 @@ Item {
         overviewData: root.uiBridge.waveformPeaksPacked
         positionSeconds: root.positionSeconds
         durationSeconds: root.uiBridge.durationSeconds
+        playing: (root.uiBridge.playbackState || "") === "Playing"
         zoomEnabled: root.uiBridge.spectrogramZoomEnabled
         gridEnabled: root.uiBridge.showSpectrogramScale
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair

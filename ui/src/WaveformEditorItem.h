@@ -16,6 +16,7 @@
 class QHoverEvent;
 class QMouseEvent;
 class QPainter;
+class QQuickWindow;
 class QWheelEvent;
 
 class WaveformEditorItem : public QQuickPaintedItem {
@@ -25,6 +26,7 @@ class WaveformEditorItem : public QQuickPaintedItem {
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
     Q_PROPERTY(double zoomLevel READ zoomLevel WRITE setZoomLevel NOTIFY zoomLevelChanged)
+    Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
@@ -50,6 +52,8 @@ public:
     void setDurationSeconds(double value);
     double zoomLevel() const;
     void setZoomLevel(double value);
+    bool playing() const;
+    void setPlaying(bool value);
     bool zoomEnabled() const;
     void setZoomEnabled(bool value);
     bool gridEnabled() const;
@@ -82,6 +86,7 @@ signals:
     void positionSecondsChanged();
     void durationSecondsChanged();
     void zoomLevelChanged();
+    void playingChanged();
     void zoomEnabledChanged();
     void gridEnabledChanged();
     void crosshairEnabledChanged();
@@ -121,7 +126,9 @@ private:
     void requestDetailWindow();
     void clearDetailLocked();
     void clearPendingRequestLocked();
+    double displayedPositionSecondsLocked() const;
     bool detailOrPendingRequestCoversLocked(double startSeconds, double endSeconds) const;
+    bool detailCoversRangeLocked(double startSeconds, double endSeconds) const;
     bool detailResolutionCoversLocked(double startSeconds, double endSeconds) const;
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> requestRangeLocked(
@@ -131,6 +138,8 @@ private:
     double maximumZoomLevelLocked() const;
     bool samplePointsVisibleLocked() const;
     void updateFpsEstimateLocked();
+    void bindWindowFrameLoop(QQuickWindow *window);
+    void handleWindowFrameSwapped();
     void invalidateCacheLocked();
     void rebuildCacheLocked(int width, int height);
     void drawGridLocked(QPainter &painter, int width, int height,
@@ -149,8 +158,10 @@ private:
     QString m_sourcePath;
     QByteArray m_overviewData;
     double m_positionSeconds{0.0};
+    std::chrono::steady_clock::time_point m_positionUpdatedAt;
     double m_durationSeconds{0.0};
     double m_zoomLevel{1.0};
+    bool m_playing{false};
     bool m_zoomEnabled{true};
     bool m_gridEnabled{false};
     bool m_crosshairEnabled{false};
@@ -182,5 +193,7 @@ private:
     int m_fpsAccumFrames{0};
     double m_fpsAccumSeconds{0.0};
     std::chrono::steady_clock::time_point m_lastFrameTime;
+    QMetaObject::Connection m_frameSwappedConnection;
+    QMetaObject::Connection m_windowVisibilityConnection;
     QTimer m_requestTimer;
 };
