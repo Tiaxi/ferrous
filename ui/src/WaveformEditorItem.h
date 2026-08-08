@@ -10,6 +10,7 @@
 #include <QString>
 #include <QTimer>
 
+#include <chrono>
 #include <vector>
 
 class QHoverEvent;
@@ -27,6 +28,7 @@ class WaveformEditorItem : public QQuickPaintedItem {
     Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
+    Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     Q_PROPERTY(int viewMode READ viewMode WRITE setViewMode NOTIFY viewModeChanged)
     Q_PROPERTY(qulonglong mutedChannelsMask READ mutedChannelsMask WRITE setMutedChannelsMask NOTIFY mutedChannelsMaskChanged)
     Q_PROPERTY(int soloedChannel READ soloedChannel WRITE setSoloedChannel NOTIFY soloedChannelChanged)
@@ -54,6 +56,8 @@ public:
     void setGridEnabled(bool value);
     bool crosshairEnabled() const;
     void setCrosshairEnabled(bool value);
+    bool showFpsOverlay() const;
+    void setShowFpsOverlay(bool value);
     int viewMode() const;
     void setViewMode(int value);
     qulonglong mutedChannelsMask() const;
@@ -81,6 +85,7 @@ signals:
     void zoomEnabledChanged();
     void gridEnabledChanged();
     void crosshairEnabledChanged();
+    void showFpsOverlayChanged();
     void viewModeChanged();
     void mutedChannelsMaskChanged();
     void soloedChannelChanged();
@@ -117,9 +122,15 @@ private:
     void clearDetailLocked();
     void clearPendingRequestLocked();
     bool detailOrPendingRequestCoversLocked(double startSeconds, double endSeconds) const;
+    bool detailResolutionCoversLocked(double startSeconds, double endSeconds) const;
     std::pair<double, double> visibleRangeLocked() const;
+    std::pair<double, double> requestRangeLocked(
+        double visibleStart, double visibleEnd) const;
+    int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
+    int renderPixelWidthLocked() const;
     double maximumZoomLevelLocked() const;
     bool samplePointsVisibleLocked() const;
+    void updateFpsEstimateLocked();
     void invalidateCacheLocked();
     void rebuildCacheLocked(int width, int height);
     void drawGridLocked(QPainter &painter, int width, int height,
@@ -130,6 +141,7 @@ private:
                           double visibleStart, double visibleEnd, int channels) const;
     void drawCrosshair(QPainter &painter, int width, int height,
                        double visibleStart, double visibleEnd) const;
+    static void drawFpsOverlay(QPainter &painter, int width, int fpsValue);
     int displayedChannelCountLocked() const;
     bool channelIsMutedLocked(int channel) const;
 
@@ -142,6 +154,7 @@ private:
     bool m_zoomEnabled{true};
     bool m_gridEnabled{false};
     bool m_crosshairEnabled{false};
+    bool m_showFpsOverlay{false};
     int m_viewMode{0};
     qulonglong m_mutedChannelsMask{0};
     int m_soloedChannel{-1};
@@ -151,6 +164,7 @@ private:
     bool m_hoverActive{false};
     QPointF m_hoverPosition;
     DetailWindow m_detail;
+    int m_detailRenderWidth{0};
     QImage m_cache;
     bool m_cacheDirty{true};
     int m_cachedViewportWidth{0};
@@ -162,5 +176,11 @@ private:
     double m_requestedStartSeconds{0.0};
     double m_requestedEndSeconds{0.0};
     int m_requestedMaxPoints{0};
+    int m_requestedRenderWidth{0};
+    bool m_fpsInitialized{false};
+    int m_fpsValue{0};
+    int m_fpsAccumFrames{0};
+    double m_fpsAccumSeconds{0.0};
+    std::chrono::steady_clock::time_point m_lastFrameTime;
     QTimer m_requestTimer;
 };

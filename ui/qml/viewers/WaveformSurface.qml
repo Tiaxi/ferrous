@@ -45,6 +45,7 @@ Item {
         gridEnabled: root.uiBridge.showSpectrogramScale
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
             && root.interactiveOverlaysVisible
+        showFpsOverlay: root.uiBridge.showFps
         viewMode: root.uiBridge.spectrogramViewMode
         channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
         mutedChannelsMask: root.uiBridge.mutedChannelsMask
@@ -54,19 +55,20 @@ Item {
                 root.seekCommitted(seconds)
             }
         }
+    }
 
-        HoverHandler {
-            id: waveformHover
-            cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
-            onPointChanged: {
-                waveform.setHoverPosition(point.position.x, point.position.y, hovered)
-                if (root.pointerActivity) {
-                    root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
-                }
+    HoverHandler {
+        id: waveformHover
+        objectName: "waveformSurfaceHoverHandler"
+        cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
+        onPointChanged: {
+            waveform.setHoverPosition(point.position.x, point.position.y, hovered)
+            if (root.pointerActivity) {
+                root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
             }
-            onHoveredChanged: waveform.setHoverPosition(
-                point.position.x, point.position.y, hovered)
         }
+        onHoveredChanged: waveform.setHoverPosition(
+            point.position.x, point.position.y, hovered)
     }
 
     Repeater {

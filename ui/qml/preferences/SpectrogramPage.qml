@@ -147,7 +147,7 @@ ScrollView {
                 }
 
                 CheckBox {
-                    text: "Show Spectrogram FPS Overlay"
+                    text: "Show Visualization FPS Overlay"
                     focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.showFps
                     onToggled: root.uiBridge.setShowFps(checked)

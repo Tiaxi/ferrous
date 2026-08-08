@@ -634,7 +634,7 @@ ApplicationWindow {
     }
     Action {
         id: showFpsOverlayAction
-        text: "Show Spectrogram FPS"
+        text: "Show Visualization FPS"
         checkable: true
         checked: uiBridge.showFps
         onTriggered: uiBridge.setShowFps(checked)
