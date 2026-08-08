@@ -123,6 +123,8 @@ private:
         quint64 directPaints{0};
         quint64 cachedPaints{0};
         quint64 cacheRebuilds{0};
+        quint64 stagedCacheStarts{0};
+        quint64 stagedCacheSwaps{0};
         quint64 detailRequests{0};
         quint64 detailHandoffs{0};
         double paintMs{0.0};
@@ -130,6 +132,10 @@ private:
         double cacheRebuildMs{0.0};
         double maximumCacheRebuildMs{0.0};
         double lastCacheRebuildMs{0.0};
+        double stagedCacheMs{0.0};
+        double maximumStagedCacheMs{0.0};
+        double lastStagedCacheMs{0.0};
+        int lastStagedCacheColumns{0};
         double maximumFrameGapMs{0.0};
         double decodeMs{0.0};
         double maximumDecodeMs{0.0};
@@ -160,6 +166,7 @@ private:
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> requestRangeLocked(
         double visibleStart, double visibleEnd) const;
+    double requiredVisibleDetailPointsLocked(double visibleSpan) const;
     double detailRequestMarginLocked(double visibleSpan) const;
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
     int renderPixelWidthLocked() const;
@@ -173,6 +180,9 @@ private:
     void bindWindowFrameLoop(QQuickWindow *window);
     void handleWindowFrameSwapped();
     void invalidateCacheLocked();
+    void clearStagedCacheLocked();
+    void beginStagedCacheLocked();
+    void advanceStagedCacheLocked();
     void rebuildCacheLocked(int width, int height);
     void drawGridLocked(QPainter &painter, int width, int height,
                         double visibleStart, double visibleEnd, int channels) const;
@@ -183,6 +193,9 @@ private:
                             double visibleStart, double visibleEnd, int channels) const;
     void drawDetailLocked(QPainter &painter, int width, int height,
                           double visibleStart, double visibleEnd, int channels) const;
+    void drawDetailSliceLocked(QPainter &painter, int width, int height,
+                               double visibleStart, double visibleEnd, int channels,
+                               int firstX, int lastX) const;
     void drawCrosshair(QPainter &painter, int width, int height,
                        double visibleStart, double visibleEnd) const;
     static void drawFpsOverlay(QPainter &painter, int width, int fpsValue);
@@ -217,6 +230,10 @@ private:
     int m_cachedViewportHeight{0};
     double m_cacheStartSeconds{0.0};
     double m_cacheEndSeconds{0.0};
+    QImage m_stagedCache;
+    double m_stagedCacheStartSeconds{0.0};
+    double m_stagedCacheEndSeconds{0.0};
+    int m_stagedCacheNextX{0};
     quint64 m_requestGeneration{0};
     bool m_requestInFlight{false};
     double m_requestedStartSeconds{0.0};
