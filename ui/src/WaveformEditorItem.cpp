@@ -1206,6 +1206,37 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
     return presentationCommitted;
 }
 
+void WaveformEditorItem::queueGuiContinuationFromPaint(
+    bool notifySamplePointsChanged, bool requestRepaint) {
+    if (notifySamplePointsChanged) {
+        m_samplePointsNotificationPending.store(true, std::memory_order_release);
+    }
+    if (requestRepaint) {
+        m_guiRepaintPending.store(true, std::memory_order_release);
+    }
+    bool expected = false;
+    if (!m_guiContinuationQueued.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    // paint() runs on Qt Quick's render thread. Queue all QObject and item
+    // activity back to this item's GUI thread instead of mutating Qt Quick's
+    // frame lifecycle while the scene graph is recording the current frame.
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            m_guiContinuationQueued.store(false, std::memory_order_release);
+            if (m_samplePointsNotificationPending.exchange(
+                    false, std::memory_order_acq_rel)) {
+                emit samplePointsVisibleChanged();
+            }
+            if (m_guiRepaintPending.exchange(false, std::memory_order_acq_rel)) {
+                update();
+            }
+        },
+        Qt::QueuedConnection);
+}
+
 int WaveformEditorItem::displayedChannelCountLocked() const {
     const int sourceChannels = m_channelCount > 0 ? m_channelCount : m_channelCountHint;
     return m_viewMode == 0 ? 1 : std::max(1, sourceChannels);
@@ -1295,7 +1326,6 @@ void WaveformEditorItem::paint(QPainter *painter) {
         if (showFps) updateFpsEstimateLocked();
         fpsValue = m_fpsValue;
     }
-    if (presentationCommitted) emit samplePointsVisibleChanged();
     if (!directDetail) {
         bool cachePaintCoversCanvas = false;
         bool cachePainted = false;
@@ -1491,7 +1521,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
         }
     }
 #endif
-    if (stagingContinues) update();
+    if (presentationCommitted || stagingContinues) {
+        queueGuiContinuationFromPaint(presentationCommitted, stagingContinues);
+    }
 }
 
 void WaveformEditorItem::rebuildCacheLocked(int width, int height) {

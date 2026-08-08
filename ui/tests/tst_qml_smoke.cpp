@@ -462,6 +462,7 @@ private slots:
     void waveformEditorFullscreenStagingUsesSmallRenderChunks();
     void waveformEditorFullscreenOverlapCopyIsSplitAcrossFrames();
     void waveformEditorBuildsReplacementCacheIncrementally();
+    void waveformEditorPaintDefersGuiContinuation();
     void waveformEditorZoomedPlaybackUsesScrollingCache();
     void waveformEditorPlaybackOverviewCacheHasForwardHeadroom();
     void waveformEditorCachedPaintClearsUncoveredPixels();
@@ -4364,6 +4365,47 @@ void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {
     QVERIFY(item.m_cache.width() >= 959);
     QVERIFY(item.m_cache.width() <= 961);
     QVERIFY(!item.m_cacheDirty);
+}
+
+void QmlSmokeTest::waveformEditorPaintDefersGuiContinuation() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.m_stagedCache = QImage(320, 180, QImage::Format_RGB32);
+    item.m_stagedCache.fill(QColor(54, 225, 161));
+    item.m_stagedCacheStartSeconds = 0.0;
+    item.m_stagedCacheEndSeconds = 1.0;
+    item.m_stagedCacheSecondsPerPixel = 1.0 / 320.0;
+    item.m_stagedCacheNextX = item.m_stagedCache.width();
+    item.m_stagedCacheCommitsDeferredZoom = true;
+    item.m_zoomLevel = 1.0;
+    item.m_presentedZoomLevel = 2.0;
+    item.m_zoomOutHandoffPending = true;
+    item.m_durationSeconds = 1.0;
+
+    QSignalSpy samplePointsSpy(
+        &item, &WaveformEditorItem::samplePointsVisibleChanged);
+    QImage canvas(320, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QCOMPARE(samplePointsSpy.count(), 0);
+    QVERIFY(item.m_guiContinuationQueued.load(std::memory_order_acquire));
+    QTRY_COMPARE(samplePointsSpy.count(), 1);
+    QVERIFY(!item.m_guiContinuationQueued.load(std::memory_order_acquire));
+
+    item.m_stagedCache = QImage(320, 180, QImage::Format_RGB32);
+    item.m_stagedCacheNextX = 0;
+    QPainter continuationPainter(&canvas);
+    item.paint(&continuationPainter);
+    continuationPainter.end();
+
+    QVERIFY(!item.m_stagedCache.isNull());
+    QVERIFY(item.m_guiRepaintPending.load(std::memory_order_acquire));
+    QVERIFY(item.m_guiContinuationQueued.load(std::memory_order_acquire));
+    QTRY_VERIFY(!item.m_guiContinuationQueued.load(std::memory_order_acquire));
+    QVERIFY(!item.m_guiRepaintPending.load(std::memory_order_acquire));
 }
 
 void QmlSmokeTest::waveformEditorZoomedPlaybackUsesScrollingCache() {

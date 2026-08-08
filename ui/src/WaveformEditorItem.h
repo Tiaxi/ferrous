@@ -12,6 +12,7 @@
 #include <QString>
 #include <QTimer>
 
+#include <atomic>
 #include <chrono>
 #include <vector>
 
@@ -204,6 +205,8 @@ private:
     void beginStagedCacheForRangeLocked(
         double visibleStart, double visibleEnd, bool commitsDeferredZoom);
     bool advanceStagedCacheLocked();
+    void queueGuiContinuationFromPaint(
+        bool notifySamplePointsChanged, bool requestRepaint);
     void rebuildCacheLocked(int width, int height);
     void drawGridLocked(QPainter &painter, int width, int height,
                         double visibleStart, double visibleEnd, int channels) const;
@@ -282,6 +285,9 @@ private:
     QMetaObject::Connection m_frameSwappedConnection;
     QMetaObject::Connection m_windowVisibilityConnection;
     QTimer m_requestTimer;
+    std::atomic_bool m_guiContinuationQueued{false};
+    std::atomic_bool m_guiRepaintPending{false};
+    std::atomic_bool m_samplePointsNotificationPending{false};
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     ProfileState m_profile;
 #endif
