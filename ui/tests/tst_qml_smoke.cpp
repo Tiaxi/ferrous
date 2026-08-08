@@ -3857,8 +3857,18 @@ void QmlSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
         QVERIFY2(edgeOccupied, "connected sample tiles must meet at both edges");
     }
 
+    // Match the fullscreen handoff edge: samples separated by roughly 3.6
+    // pixels should have compact point markers without forcing an expensive
+    // direct repaint on every frame.
+    item.setZoomLevel(9.0);
+    QVERIFY(item.samplePointsVisibleLocked());
+    const auto [markerStart, markerEnd] = item.visibleRangeLocked();
+    QVERIFY(!item.renderDetailDirectlyLocked(markerStart, markerEnd));
+
     item.setZoomLevel(10.0);
     QVERIFY(item.samplePointsVisibleLocked());
+    const auto [directStart, directEnd] = item.visibleRangeLocked();
+    QVERIFY(item.renderDetailDirectlyLocked(directStart, directEnd));
 }
 
 void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {

@@ -204,6 +204,7 @@ private:
         double sourceStart, double sourceEnd) const;
     double maximumZoomLevelLocked() const;
     bool clampZoomToMaximumLocked();
+    double sampleSpacingPixelsLocked() const;
     bool sampleCurveVisibleLocked() const;
     bool samplePointsVisibleLocked() const;
     bool renderDetailDirectlyLocked(double visibleStart, double visibleEnd) const;

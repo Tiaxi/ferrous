@@ -28,7 +28,10 @@ constexpr int kMaximumDetailPoints = 65'536;
 constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
 constexpr double kSampleCurvePixelsPerSample = 1.0;
-constexpr double kSampleMarkerPixelsPerSample = 4.0;
+constexpr double kSampleMarkerPixelsPerSample = 2.0;
+constexpr double kDirectSamplePixelsPerSample = 4.0;
+constexpr double kMinimumSampleMarkerSize = 1.5;
+constexpr double kMaximumSampleMarkerSize = 3.0;
 constexpr int kSampleCurveBoundaryMarginPixels = 8;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
 constexpr int kStagedCacheColumnsPerPaint = 128;
@@ -863,27 +866,28 @@ bool WaveformEditorItem::clampZoomToMaximumLocked() {
     return targetChanged;
 }
 
-bool WaveformEditorItem::samplePointsVisibleLocked() const {
-    if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return false;
+double WaveformEditorItem::sampleSpacingPixelsLocked() const {
+    if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return 0.0;
     const auto [start, end] = visibleRangeLocked();
     const double visiblePoints = (end - start) * static_cast<double>(std::max(1, m_detail.sampleRateHz));
-    return width() / std::max(1.0, visiblePoints) + kGridAlignmentEpsilon
+    return width() / std::max(1.0, visiblePoints);
+}
+
+bool WaveformEditorItem::samplePointsVisibleLocked() const {
+    return sampleSpacingPixelsLocked() + kGridAlignmentEpsilon
         >= kSampleMarkerPixelsPerSample;
 }
 
 bool WaveformEditorItem::sampleCurveVisibleLocked() const {
-    if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return false;
-    const auto [start, end] = visibleRangeLocked();
-    const double visibleSamples = (end - start)
-        * static_cast<double>(std::max(1, m_detail.sampleRateHz));
-    return width() / std::max(1.0, visibleSamples) + kGridAlignmentEpsilon
+    return sampleSpacingPixelsLocked() + kGridAlignmentEpsilon
         >= kSampleCurvePixelsPerSample;
 }
 
 bool WaveformEditorItem::renderDetailDirectlyLocked(
     double visibleStart, double visibleEnd) const {
     if (!detailCoversRangeLocked(visibleStart, visibleEnd)) return false;
-    return samplePointsVisibleLocked()
+    return sampleSpacingPixelsLocked() + kGridAlignmentEpsilon
+            >= kDirectSamplePixelsPerSample
         && detailResolutionCoversLocked(visibleStart, visibleEnd);
 }
 
@@ -2048,6 +2052,10 @@ void WaveformEditorItem::drawDetailSliceLocked(
     if (detailSpan <= 0.0 || visibleSpan <= 0.0 || firstX >= lastX) return;
     const bool sampleCurve = sampleCurveVisibleLocked();
     const bool sampleMarkers = samplePointsVisibleLocked();
+    const double sampleMarkerSize = std::clamp(
+        sampleSpacingPixelsLocked() * 0.75,
+        kMinimumSampleMarkerSize,
+        kMaximumSampleMarkerSize);
     const double secondsPerPixel = visibleSpan
         / static_cast<double>(std::max(1, width));
     const int boundaryMargin = sampleCurve
@@ -2142,9 +2150,13 @@ void WaveformEditorItem::drawDetailSliceLocked(
             painter.drawPath(buildSamplePath(polyline));
             if (sampleMarkers) {
                 painter.setBrush(color);
+                const double markerOffset = sampleMarkerSize * 0.5;
                 for (const QPointF &point : polyline) {
                     painter.drawRect(QRectF(
-                        point.x() - 1.5, point.y() - 1.5, 3.0, 3.0));
+                        point.x() - markerOffset,
+                        point.y() - markerOffset,
+                        sampleMarkerSize,
+                        sampleMarkerSize));
                 }
             }
             painter.setRenderHint(QPainter::Antialiasing, false);
