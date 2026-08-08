@@ -39,13 +39,24 @@ impl WindowAccumulator {
         let requested_frames = end_frame.saturating_sub(start_frame).max(1);
         let point_limit = u64::try_from(max_points.clamp(1, MAX_WINDOW_POINTS)).unwrap_or(1);
         let frames_per_point = requested_frames.div_ceil(point_limit).max(1);
-        let point_count_u64 = requested_frames.div_ceil(frames_per_point);
+        // Anchor every aggregation bin to the track's absolute sample grid.
+        // Sliding windows with the same resolution must describe their shared
+        // samples identically or cache handoffs make the waveform pulse.
+        let remainder = start_frame % frames_per_point;
+        let aligned_start_frame = if remainder == 0 {
+            start_frame
+        } else {
+            start_frame.saturating_add(frames_per_point - remainder)
+        }
+        .min(end_frame.saturating_sub(1));
+        let aligned_frames = end_frame.saturating_sub(aligned_start_frame).max(1);
+        let point_count_u64 = aligned_frames.div_ceil(frames_per_point);
         let point_count = usize::try_from(point_count_u64)
             .unwrap_or(MAX_WINDOW_POINTS)
             .min(MAX_WINDOW_POINTS);
         let value_count = point_count.saturating_mul(channels);
         Self {
-            start_frame,
+            start_frame: aligned_start_frame,
             end_frame,
             frames_per_point,
             channels,
@@ -260,5 +271,22 @@ mod tests {
         assert!((window.extrema[1] - 0.25).abs() < 0.001);
         assert!((window.extrema[2] + 0.375).abs() < 0.001);
         assert!((window.extrema[3] - 0.125).abs() < 0.001);
+    }
+
+    #[test]
+    fn overlapping_windows_keep_shared_bins_sample_aligned() {
+        let samples = (0_i16..300_i16)
+            .map(|sample| sample.saturating_mul(100).saturating_sub(15_000))
+            .collect::<Vec<_>>();
+        let path = write_test_wave(&samples, 100, 1);
+        let first = decode_waveform_window(&path, 0.03, 2.03, 50).unwrap();
+        let second = decode_waveform_window(&path, 0.07, 2.07, 50).unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(first.frames_per_point, 4);
+        assert_eq!(second.frames_per_point, 4);
+        assert!((first.start_seconds - 0.04).abs() < 0.000_001);
+        assert!((second.start_seconds - 0.08).abs() < 0.000_001);
+        assert_eq!(first.extrema[2..98], second.extrema[0..96]);
     }
 }

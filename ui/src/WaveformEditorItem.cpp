@@ -1449,6 +1449,7 @@ void WaveformEditorItem::drawDetailSliceLocked(
         }
         if (points && polyline.size() > 1) {
             painter.setRenderHint(QPainter::Antialiasing, true);
+            painter.setBrush(Qt::NoBrush);
             painter.drawPath(buildSamplePath(polyline));
             painter.setBrush(color);
             for (const QPointF &point : polyline) painter.drawRect(QRectF(point.x() - 1.5, point.y() - 1.5, 3.0, 3.0));

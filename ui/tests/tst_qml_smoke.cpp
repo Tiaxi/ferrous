@@ -462,6 +462,7 @@ private slots:
     void waveformEditorHoverDrawsCrosshairAndReadouts();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
+    void waveformEditorSampleViewDoesNotFillLaterChannels();
     void waveformEditorReclampsZoomForDecodedSampleRate();
     void waveformEditorRulersFollowGridSetting();
     void waveformEditorRulersRemainVisibleWhenZoomed();
@@ -4305,6 +4306,35 @@ void QmlSmokeTest::waveformEditorSampleViewUsesSmoothInterpolation() {
     QCOMPARE(path.elementAt(1).type, QPainterPath::CurveToElement);
     QCOMPARE(path.elementAt(4).type, QPainterPath::CurveToElement);
     QCOMPARE(path.currentPosition(), samples.constLast());
+}
+
+void QmlSmokeTest::waveformEditorSampleViewDoesNotFillLaterChannels() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setViewMode(1);
+    item.m_sampleRateHz = 4;
+    item.m_channelCount = 2;
+    item.m_detail.sampleRateHz = 4;
+    item.m_detail.channelCount = 2;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 4;
+    const std::array<float, 4> rightSamples = {0.0F, 0.8F, 0.8F, 0.0F};
+    for (float rightSample : rightSamples) {
+        item.m_detail.extrema.insert(
+            item.m_detail.extrema.end(),
+            {0.0F, 0.0F, rightSample, rightSample});
+    }
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    QPainter painter(&canvas);
+    item.paint(&painter);
+    painter.end();
+
+    QCOMPARE(canvas.pixelColor(200, 120), QColor(5, 9, 7));
 }
 
 void QmlSmokeTest::waveformEditorReclampsZoomForDecodedSampleRate() {
