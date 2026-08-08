@@ -1,4 +1,4 @@
-%{!?ferrous_version:%global ferrous_version 0.1.12}
+%{!?ferrous_version:%global ferrous_version 0.1.13}
 %{!?ferrous_release:%global ferrous_release 0.local}
 %{!?ferrous_license:%global ferrous_license GPL-3.0-or-later}
 
