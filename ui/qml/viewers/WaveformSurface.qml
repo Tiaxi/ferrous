@@ -147,6 +147,7 @@ Item {
     }
 
     Rectangle {
+        objectName: "waveformViewportDurationIndicator"
         anchors.left: parent.left
         anchors.bottom: parent.bottom
         anchors.margins: 8
@@ -158,10 +159,10 @@ Item {
         border.color: Qt.rgba(1, 1, 1, 0.14)
         Text {
             id: zoomText
+            objectName: "waveformViewportDurationText"
             anchors.centerIn: parent
-            text: waveform.samplePointsVisible
-                ? "Sample view"
-                : waveform.zoomLevel.toFixed(waveform.zoomLevel < 10 ? 1 : 0) + "×"
+            text: waveform.formatViewportDuration(
+                waveform.durationSeconds / Math.max(1, waveform.zoomLevel))
             color: "#c8d0cb"
             font.pixelSize: 10
         }

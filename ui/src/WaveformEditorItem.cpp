@@ -27,6 +27,9 @@ constexpr int kWindowHeaderBytes = 36;
 constexpr int kMaximumDetailPoints = 65'536;
 constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
+constexpr double kSampleCurvePixelsPerSample = 1.0;
+constexpr double kSampleMarkerPixelsPerSample = 4.0;
+constexpr int kSampleCurveBoundaryMarginPixels = 8;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
 constexpr int kStagedCacheColumnsPerPaint = 128;
 constexpr int kPlaybackTileWidth = 64;
@@ -341,6 +344,24 @@ void WaveformEditorItem::setChannelCountHint(int value) {
 
 void WaveformEditorItem::resetZoom() { setZoomLevel(1.0); }
 double WaveformEditorItem::maximumZoomLevel() const { QMutexLocker lock(&m_stateMutex); return maximumZoomLevelLocked(); }
+
+QString WaveformEditorItem::formatViewportDuration(double seconds) const {
+    if (!std::isfinite(seconds) || seconds <= 0.0) {
+        return QStringLiteral("0 ms");
+    }
+    if (seconds < 1.0) {
+        const int milliseconds = std::clamp(
+            static_cast<int>(std::lround(seconds * 1000.0)), 1, 999);
+        return QStringLiteral("%1 ms").arg(milliseconds);
+    }
+    const qint64 totalSeconds = std::max<qint64>(
+        1, static_cast<qint64>(std::llround(seconds)));
+    const qint64 minutes = totalSeconds / 60;
+    const qint64 secondsPart = totalSeconds % 60;
+    return QStringLiteral("%1:%2")
+        .arg(minutes, 2, 10, QLatin1Char('0'))
+        .arg(secondsPart, 2, 10, QLatin1Char('0'));
+}
 
 void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
     {
@@ -846,7 +867,17 @@ bool WaveformEditorItem::samplePointsVisibleLocked() const {
     if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return false;
     const auto [start, end] = visibleRangeLocked();
     const double visiblePoints = (end - start) * static_cast<double>(std::max(1, m_detail.sampleRateHz));
-    return width() / std::max(1.0, visiblePoints) >= 4.0;
+    return width() / std::max(1.0, visiblePoints) + kGridAlignmentEpsilon
+        >= kSampleMarkerPixelsPerSample;
+}
+
+bool WaveformEditorItem::sampleCurveVisibleLocked() const {
+    if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return false;
+    const auto [start, end] = visibleRangeLocked();
+    const double visibleSamples = (end - start)
+        * static_cast<double>(std::max(1, m_detail.sampleRateHz));
+    return width() / std::max(1.0, visibleSamples) + kGridAlignmentEpsilon
+        >= kSampleCurvePixelsPerSample;
 }
 
 bool WaveformEditorItem::renderDetailDirectlyLocked(
@@ -2015,13 +2046,17 @@ void WaveformEditorItem::drawDetailSliceLocked(
     firstX = std::clamp(firstX, 0, width);
     lastX = std::clamp(lastX, firstX, width);
     if (detailSpan <= 0.0 || visibleSpan <= 0.0 || firstX >= lastX) return;
-    const bool points = samplePointsVisibleLocked();
+    const bool sampleCurve = sampleCurveVisibleLocked();
+    const bool sampleMarkers = samplePointsVisibleLocked();
     const double secondsPerPixel = visibleSpan
         / static_cast<double>(std::max(1, width));
+    const int boundaryMargin = sampleCurve
+        ? kSampleCurveBoundaryMarginPixels
+        : 1;
     const double sliceStart = visibleStart
-        + static_cast<double>(std::max(0, firstX - 1)) * secondsPerPixel;
+        + static_cast<double>(firstX - boundaryMargin) * secondsPerPixel;
     const double sliceEnd = visibleStart
-        + static_cast<double>(std::min(width, lastX + 1)) * secondsPerPixel;
+        + static_cast<double>(lastX + boundaryMargin) * secondsPerPixel;
     const auto [firstPoint, lastPoint] = detailPointRangeLocked(
         sliceStart, sliceEnd);
     const int sliceWidth = lastX - firstX;
@@ -2031,12 +2066,12 @@ void WaveformEditorItem::drawDetailSliceLocked(
         const double center = (top + bottom) * 0.5;
         const double half = (bottom - top) * 0.5 - 1.0;
         const QColor color = channelIsMutedLocked(displayChannel) ? kMutedWaveform : kWaveform;
-        painter.setPen(QPen(color, points ? 1.2 : 1.0));
+        painter.setPen(QPen(color, sampleMarkers ? 1.2 : 1.0));
         QPolygonF polyline;
         std::vector<float> pixelMinima;
         std::vector<float> pixelMaxima;
         std::vector<bool> pixelSeen;
-        if (points) {
+        if (sampleCurve) {
             polyline.reserve(lastPoint - firstPoint);
         } else {
             pixelMinima.assign(static_cast<std::size_t>(sliceWidth), 1.0F);
@@ -2045,16 +2080,26 @@ void WaveformEditorItem::drawDetailSliceLocked(
         }
         for (int point = firstPoint; point < lastPoint; ++point) {
             const double time = detailPointTimeLocked(point);
-            if (time < visibleStart || time >= visibleEnd) continue;
+            if (!sampleCurve
+                && (time < visibleStart || time >= visibleEnd)) {
+                continue;
+            }
             const double pixelPosition = (time - visibleStart)
                 / secondsPerPixel;
-            const int x = std::clamp(
-                points
-                    ? static_cast<int>(std::round(pixelPosition))
-                    : static_cast<int>(std::floor(
+            const int x = sampleCurve
+                ? static_cast<int>(std::round(pixelPosition))
+                : std::clamp(
+                    static_cast<int>(std::floor(
                         pixelPosition + kGridAlignmentEpsilon)),
-                0, width - 1);
-            if (x < firstX || x >= lastX) continue;
+                    0, width - 1);
+            if (sampleCurve) {
+                if (x < firstX - boundaryMargin
+                    || x >= lastX + boundaryMargin) {
+                    continue;
+                }
+            } else if (x < firstX || x >= lastX) {
+                continue;
+            }
             float minimum = 1.0F;
             float maximum = -1.0F;
             const int firstChannel = m_viewMode == 0 ? 0 : displayChannel;
@@ -2064,7 +2109,7 @@ void WaveformEditorItem::drawDetailSliceLocked(
                 minimum = std::min(minimum, m_detail.extrema[index]);
                 maximum = std::max(maximum, m_detail.extrema[index + 1]);
             }
-            if (points) {
+            if (sampleCurve) {
                 polyline.append(QPointF(
                     x, center - static_cast<double>(minimum) * half));
             } else {
@@ -2074,7 +2119,7 @@ void WaveformEditorItem::drawDetailSliceLocked(
                 pixelSeen[pixel] = true;
             }
         }
-        if (!points) {
+        if (!sampleCurve) {
             for (int x = firstX; x < lastX; ++x) {
                 const auto pixel = static_cast<std::size_t>(x - firstX);
                 if (!pixelSeen[pixel]) continue;
@@ -2087,13 +2132,23 @@ void WaveformEditorItem::drawDetailSliceLocked(
                         center - static_cast<double>(pixelMaxima[pixel]) * half)));
             }
         }
-        if (points && polyline.size() > 1) {
+        if (sampleCurve && polyline.size() > 1) {
+            painter.save();
+            painter.setClipRect(
+                QRect(firstX, 0, sliceWidth, height),
+                Qt::IntersectClip);
             painter.setRenderHint(QPainter::Antialiasing, true);
             painter.setBrush(Qt::NoBrush);
             painter.drawPath(buildSamplePath(polyline));
-            painter.setBrush(color);
-            for (const QPointF &point : polyline) painter.drawRect(QRectF(point.x() - 1.5, point.y() - 1.5, 3.0, 3.0));
+            if (sampleMarkers) {
+                painter.setBrush(color);
+                for (const QPointF &point : polyline) {
+                    painter.drawRect(QRectF(
+                        point.x() - 1.5, point.y() - 1.5, 3.0, 3.0));
+                }
+            }
             painter.setRenderHint(QPainter::Antialiasing, false);
+            painter.restore();
         }
     }
 }

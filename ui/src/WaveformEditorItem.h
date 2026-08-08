@@ -83,6 +83,7 @@ public:
 
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE double maximumZoomLevel() const;
+    Q_INVOKABLE QString formatViewportDuration(double seconds) const;
     Q_INVOKABLE void setHoverPosition(double x, double y, bool active);
 
     void paint(QPainter *painter) override;
@@ -203,6 +204,7 @@ private:
         double sourceStart, double sourceEnd) const;
     double maximumZoomLevelLocked() const;
     bool clampZoomToMaximumLocked();
+    bool sampleCurveVisibleLocked() const;
     bool samplePointsVisibleLocked() const;
     bool renderDetailDirectlyLocked(double visibleStart, double visibleEnd) const;
     bool detailResultRequiresImmediateCacheRefreshLocked(

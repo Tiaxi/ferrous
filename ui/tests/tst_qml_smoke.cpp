@@ -503,6 +503,8 @@ private slots:
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void waveformEditorParsesSignedSampleWindow();
     void waveformEditorSampleMarkersRequireSampleResolution();
+    void waveformEditorFormatsViewportDuration();
+    void waveformEditorConnectsSamplesBeforeMarkers();
     void waveformEditorScrollsInsideCachedDetailWithoutRebuild();
     void waveformEditorUsesChannelHintBeforeDetailArrives();
     void waveformEditorCoalescesPlaybackRequestsWithoutStarvingTimer();
@@ -1378,6 +1380,25 @@ Item {
     QTRY_VERIFY(waveform->crosshairEnabled());
     QTRY_VERIFY(waveform->showFpsOverlay());
     QVERIFY(!waveform->playing());
+
+    QObject *durationIndicator = root->findChild<QObject *>(
+        QStringLiteral("waveformViewportDurationIndicator"));
+    QObject *durationText = root->findChild<QObject *>(
+        QStringLiteral("waveformViewportDurationText"));
+    QVERIFY(durationIndicator != nullptr);
+    QVERIFY(durationText != nullptr);
+    QVERIFY(!durationIndicator->property("visible").toBool());
+    waveform->setZoomLevel(2.0);
+    QTRY_VERIFY(durationIndicator->property("visible").toBool());
+    QTRY_COMPARE(
+        durationText->property("text").toString(),
+        QStringLiteral("00:05"));
+    waveform->setZoomLevel(20.0);
+    QTRY_COMPARE(
+        durationText->property("text").toString(),
+        QStringLiteral("500 ms"));
+    waveform->resetZoom();
+    QTRY_VERIFY(!durationIndicator->property("visible").toBool());
 
     QObject *hoverHandler = root->findChild<QObject *>(
         QStringLiteral("waveformSurfaceHoverHandler"));
@@ -3753,6 +3774,91 @@ void QmlSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
 
     item.m_detail.framesPerPoint = 2;
     QVERIFY(!item.samplePointsVisible());
+}
+
+void QmlSmokeTest::waveformEditorFormatsViewportDuration() {
+    WaveformEditorItem item;
+    QCOMPARE(item.formatViewportDuration(245.2), QStringLiteral("04:05"));
+    QCOMPARE(item.formatViewportDuration(1.0), QStringLiteral("00:01"));
+    QCOMPARE(item.formatViewportDuration(0.834), QStringLiteral("834 ms"));
+    QCOMPARE(item.formatViewportDuration(0.0004), QStringLiteral("1 ms"));
+    QCOMPARE(item.formatViewportDuration(0.0), QStringLiteral("0 ms"));
+}
+
+void QmlSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(180);
+    item.setDurationSeconds(1.0);
+    item.setPositionSeconds(0.5);
+    item.m_sampleRateHz = 1'000;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 1;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 1'000;
+    item.m_detail.extrema.reserve(2'000);
+    for (int sample = 0; sample < 1'000; ++sample) {
+        const float value = static_cast<float>(
+            std::sin(static_cast<double>(sample) * 0.075));
+        item.m_detail.extrema.push_back(value);
+        item.m_detail.extrema.push_back(value);
+    }
+    item.setZoomLevel(3.0);
+
+    QVERIFY(item.sampleCurveVisibleLocked());
+    QVERIFY(!item.samplePointsVisibleLocked());
+    const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
+    QVERIFY(!item.renderDetailDirectlyLocked(visibleStart, visibleEnd));
+
+    QImage canvas(400, 180, QImage::Format_RGB32);
+    canvas.fill(Qt::black);
+    QPainter painter(&canvas);
+    item.drawDetailLocked(
+        painter, canvas.width(), canvas.height(),
+        visibleStart, visibleEnd, 1);
+    painter.end();
+
+    int occupiedColumns = 0;
+    for (int x = 0; x < canvas.width(); ++x) {
+        bool occupied = false;
+        for (int y = 0; y < canvas.height(); ++y) {
+            const QColor pixel = canvas.pixelColor(x, y);
+            if (pixel.green() > 100 && pixel.green() > pixel.red() * 2) {
+                occupied = true;
+                break;
+            }
+        }
+        if (occupied) ++occupiedColumns;
+    }
+    QVERIFY(occupiedColumns > 390);
+
+    constexpr double pixelsPerSample = 1.2;
+    const double tileDuration = 64.0
+        / (pixelsPerSample * item.m_detail.sampleRateHz);
+    const double tileStart = tileDuration;
+    QImage tile(64, 180, QImage::Format_RGB32);
+    tile.fill(Qt::black);
+    QPainter tilePainter(&tile);
+    item.drawDetailSliceLocked(
+        tilePainter, tile.width(), tile.height(),
+        tileStart, tileStart + tileDuration, 1, 0, tile.width());
+    tilePainter.end();
+    for (const int edgeX : {0, tile.width() - 1}) {
+        bool edgeOccupied = false;
+        for (int y = 0; y < tile.height(); ++y) {
+            const QColor pixel = tile.pixelColor(edgeX, y);
+            if (pixel.green() > 100 && pixel.green() > pixel.red() * 2) {
+                edgeOccupied = true;
+                break;
+            }
+        }
+        QVERIFY2(edgeOccupied, "connected sample tiles must meet at both edges");
+    }
+
+    item.setZoomLevel(10.0);
+    QVERIFY(item.samplePointsVisibleLocked());
 }
 
 void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
