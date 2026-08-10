@@ -1,3 +1,10 @@
+ferrous (0.1.14-1) unstable; urgency=low
+
+  * Inhibit display sleep while the fullscreen visualizer is active.
+  * Keep MPRIS pause capability available while playback is paused.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Mon, 10 Aug 2026 15:26:40 +0300
+
 ferrous (0.1.13-1) unstable; urgency=low
 
   * Add a high-performance waveform view with whole-track and sample-level zoom.
