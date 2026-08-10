@@ -310,7 +310,8 @@ bool MprisController::canPlay() const {
 }
 
 bool MprisController::canPause() const {
-    return normalizedPlaybackState(m_bridge) == QStringLiteral("Playing");
+    const QString state = normalizedPlaybackState(m_bridge);
+    return state == QStringLiteral("Playing") || state == QStringLiteral("Paused");
 }
 
 bool MprisController::canSeek() const {

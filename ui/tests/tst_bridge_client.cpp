@@ -118,7 +118,7 @@ private slots:
     void mprisRepublishesOnTrackMetadataChanged();
     void mprisRepublishesOnTrackIdentityChanged();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
-    void mprisCanPauseOnlyWhilePlaying();
+    void mprisCanPauseWhilePaused();
     void mprisControllerConstructionDoesNotCrash();
     void mprisArtUrlConvertsImageProviderToFileUrl();
     void spectrogramOverlaySettingsApplyFromSnapshot();
@@ -876,7 +876,7 @@ void BridgeClientTest::mprisPublishesPlaybackStateOnPlaybackSignal() {
 }
 
 
-void BridgeClientTest::mprisCanPauseOnlyWhilePlaying() {
+void BridgeClientTest::mprisCanPauseWhilePaused() {
     BridgeClient client;
     isolateBridgeClient(client);
     client.m_queueLength = 1;
@@ -888,7 +888,7 @@ void BridgeClientTest::mprisCanPauseOnlyWhilePlaying() {
     QCOMPARE(controller.canPause(), false);
 
     client.m_playbackState = QStringLiteral("Paused");
-    QCOMPARE(controller.canPause(), false);
+    QCOMPARE(controller.canPause(), true);
 
     client.m_playbackState = QStringLiteral("Playing");
     QCOMPARE(controller.canPause(), true);
