@@ -420,6 +420,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&spectrogramZoomEnabled)) {
         return false;
     }
+    quint8 preventDisplaySleepInFullscreen = 1;
+    if (!reader.atEnd() && !reader.readU8(&preventDisplaySleepInFullscreen)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -436,6 +440,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->showSpectrogramScale = showSpectrogramScale != 0;
     out->channelButtonsVisibility = std::clamp(static_cast<int>(channelButtonsVisibility), 0, 2);
     out->spectrogramZoomEnabled = spectrogramZoomEnabled != 0;
+    out->preventDisplaySleepInFullscreen = preventDisplaySleepInFullscreen != 0;
     return true;
 }
 

@@ -17,6 +17,7 @@ Item {
     property int visualizationMode: 0
     property var setVisualizationMode: function(mode) {}
     property var displaySleepInhibitor: null
+    property bool displaySleepInhibitionEnabled: true
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
@@ -25,6 +26,7 @@ Item {
     readonly property bool fullscreenDisplayActive:
         root.viewerOpen
         && root.useWholeScreenViewerMode
+        && root.displaySleepInhibitionEnabled
         && spectrogramFullscreenWindow.visibility === Window.FullScreen
 
     function syncDisplaySleepInhibition() {

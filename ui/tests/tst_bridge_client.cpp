@@ -964,31 +964,37 @@ void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
     // Defaults should be false.
     QCOMPARE(client.showSpectrogramCrosshair(), false);
     QCOMPARE(client.showSpectrogramScale(), false);
+    QCOMPARE(client.preventDisplaySleepInFullscreen(), true);
 
     // Apply a snapshot with both enabled.
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.settings.present = true;
     snapshot.settings.showSpectrogramCrosshair = true;
     snapshot.settings.showSpectrogramScale = true;
+    snapshot.settings.preventDisplaySleepInFullscreen = false;
     QVERIFY(client.processBinarySnapshot(snapshot));
 
     QCOMPARE(client.showSpectrogramCrosshair(), true);
     QCOMPARE(client.showSpectrogramScale(), true);
+    QCOMPARE(client.preventDisplaySleepInFullscreen(), false);
 
     // Apply a snapshot with both disabled.
     snapshot.settings.showSpectrogramCrosshair = false;
     snapshot.settings.showSpectrogramScale = false;
+    snapshot.settings.preventDisplaySleepInFullscreen = true;
     QVERIFY(client.processBinarySnapshot(snapshot));
 
     QCOMPARE(client.showSpectrogramCrosshair(), false);
     QCOMPARE(client.showSpectrogramScale(), false);
+    QCOMPARE(client.preventDisplaySleepInFullscreen(), true);
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
     // Build a settings section payload matching the Rust encode layout:
     // volume(f32), fftSize(u32), viewMode(u8), dbRange(f32),
     // logScale(u8), showFps(u8), sortMode(i32), sysMC(u8),
-    // viewerFS(u8), displayMode(u8), crosshair(u8), scale(u8).
+    // viewerFS(u8), displayMode(u8), crosshair(u8), scale(u8),
+    // channelButtons(u8), zoomEnabled(u8), preventDisplaySleep(u8).
     QByteArray settingsPayload;
     QDataStream ds(&settingsPayload, QIODevice::WriteOnly);
     ds.setByteOrder(QDataStream::LittleEndian);
@@ -1005,6 +1011,9 @@ void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
     ds << quint8(0);       // spectrogramDisplayMode
     ds << quint8(1);       // showSpectrogramCrosshair
     ds << quint8(1);       // showSpectrogramScale
+    ds << quint8(1);       // channelButtonsVisibility
+    ds << quint8(1);       // spectrogramZoomEnabled
+    ds << quint8(0);       // preventDisplaySleepInFullscreen
 
     // Wrap in a full snapshot packet:
     // header: magic(u32) + totalLength(u32) + sectionMask(u16) + reserved(u16)
@@ -1033,6 +1042,7 @@ void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
     QVERIFY(decoded.settings.present);
     QCOMPARE(decoded.settings.showSpectrogramCrosshair, true);
     QCOMPARE(decoded.settings.showSpectrogramScale, true);
+    QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, false);
     // Verify other fields survived too.
     QCOMPARE(decoded.settings.systemMediaControlsEnabled, true);
     QCOMPARE(decoded.settings.fftSize, 8192);
@@ -1230,6 +1240,7 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.settings.channelButtonsVisibility, 2);
+    QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, true);
 }
 
 void BridgeClientTest::searchModelDelegateTypeRoleIsExposed() {

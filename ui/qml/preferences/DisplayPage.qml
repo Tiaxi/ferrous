@@ -64,6 +64,14 @@ ScrollView {
 
                     Item { Layout.fillWidth: true }
                 }
+
+                CheckBox {
+                    objectName: "preventDisplaySleepInFullscreenCheckBox"
+                    text: "Prevent display sleep and dimming in fullscreen viewer"
+                    focusPolicy: Qt.NoFocus
+                    checked: root.uiBridge.preventDisplaySleepInFullscreen
+                    onToggled: root.uiBridge.setPreventDisplaySleepInFullscreen(checked)
+                }
             }
         }
     }

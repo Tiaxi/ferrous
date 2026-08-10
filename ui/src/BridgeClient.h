@@ -114,6 +114,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int spectrogramViewMode READ spectrogramViewMode NOTIFY snapshotChanged)
     Q_PROPERTY(int spectrogramDisplayMode READ spectrogramDisplayMode NOTIFY snapshotChanged)
     Q_PROPERTY(int viewerFullscreenMode READ viewerFullscreenMode NOTIFY snapshotChanged)
+    Q_PROPERTY(bool preventDisplaySleepInFullscreen READ preventDisplaySleepInFullscreen NOTIFY snapshotChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
     Q_PROPERTY(int repeatMode READ repeatMode NOTIFY snapshotChanged)
@@ -206,6 +207,7 @@ public:
     int spectrogramViewMode() const;
     int spectrogramDisplayMode() const;
     int viewerFullscreenMode() const;
+    bool preventDisplaySleepInFullscreen() const;
     double dbRange() const;
     bool logScale() const;
     int repeatMode() const;
@@ -270,6 +272,7 @@ public:
     Q_INVOKABLE void setSpectrogramViewMode(int value);
     Q_INVOKABLE void setSpectrogramDisplayMode(int value);
     Q_INVOKABLE void setViewerFullscreenMode(int value);
+    Q_INVOKABLE void setPreventDisplaySleepInFullscreen(bool value);
     Q_INVOKABLE void setDbRange(double value);
     Q_INVOKABLE void setLogScale(bool value);
     Q_INVOKABLE void setRepeatMode(int mode);
@@ -583,6 +586,7 @@ private:
     int m_spectrogramViewMode{0};
     int m_spectrogramDisplayMode{0};
     int m_viewerFullscreenMode{0};
+    bool m_preventDisplaySleepInFullscreen{true};
     double m_dbRange{132.0};
     bool m_logScale{false};
     int m_repeatMode{0};

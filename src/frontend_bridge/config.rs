@@ -235,6 +235,11 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.display.show_fps = x != 0;
                 }
             }
+            "prevent_display_sleep_in_fullscreen" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.display.prevent_display_sleep_in_fullscreen = x != 0;
+                }
+            }
             "show_spectrogram_crosshair" => {
                 if let Ok(x) = value.parse::<i32>() {
                     settings.display.show_spectrogram_crosshair = x != 0;
@@ -302,7 +307,7 @@ pub(super) fn save_settings(settings: &BridgeSettings) {
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
@@ -311,6 +316,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.db_range,
         i32::from(settings.display.log_scale),
         i32::from(settings.display.show_fps),
+        i32::from(settings.display.prevent_display_sleep_in_fullscreen),
         i32::from(settings.display.show_spectrogram_crosshair),
         i32::from(settings.display.show_spectrogram_scale),
         settings.display.channel_buttons_visibility,
@@ -344,6 +350,7 @@ mod tests {
             display: BridgeDisplaySettings {
                 log_scale: true,
                 show_fps: true,
+                prevent_display_sleep_in_fullscreen: false,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,
@@ -372,6 +379,7 @@ mod tests {
         assert!((parsed.db_range - 77.5).abs() < 0.0001);
         assert!(parsed.display.log_scale);
         assert!(parsed.display.show_fps);
+        assert!(!parsed.display.prevent_display_sleep_in_fullscreen);
         assert!(parsed.display.show_spectrogram_crosshair);
         assert!(parsed.display.show_spectrogram_scale);
         assert!(parsed.display.spectrogram_zoom_enabled);
@@ -412,6 +420,7 @@ mod tests {
             "volume=0.5\nfft_size=2048\nspectrogram_view_mode=per_channel\nviewer_fullscreen_mode=whole_screen\ndb_range=80\nlog_scale=1\nshow_fps=0\nlibrary_sort_mode=1\n",
         );
         assert!(settings.integrations.system_media_controls_enabled);
+        assert!(settings.display.prevent_display_sleep_in_fullscreen);
         assert_eq!(
             settings.spectrogram_view_mode,
             SpectrogramViewMode::PerChannel
@@ -428,6 +437,7 @@ mod tests {
             display: BridgeDisplaySettings {
                 log_scale: false,
                 show_fps: false,
+                prevent_display_sleep_in_fullscreen: true,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,

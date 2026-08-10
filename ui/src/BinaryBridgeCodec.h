@@ -84,6 +84,7 @@ enum CommandId : quint16 {
     CmdSetSpectrogramZoomEnabled = 56,
     CmdSetSpectrogramZoomLevel = 57,
     CmdSetSpectrogramWidgetWidth = 58,
+    CmdSetPreventDisplaySleepInFullscreen = 59,
 };
 
 struct DecodedPlayback {
@@ -175,6 +176,7 @@ struct DecodedSettings {
     bool showFps{false};
     int librarySortMode{0};
     bool systemMediaControlsEnabled{true};
+    bool preventDisplaySleepInFullscreen{true};
     bool showSpectrogramCrosshair{false};
     bool showSpectrogramScale{false};
     int channelButtonsVisibility{1};

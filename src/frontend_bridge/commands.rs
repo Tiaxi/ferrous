@@ -191,6 +191,15 @@ fn handle_load_settings_from_disk(state: &mut BridgeState, context: &mut BridgeC
     }
 }
 
+fn set_display_sleep_prevention(
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+    enabled: bool,
+) {
+    state.settings.display.prevent_display_sleep_in_fullscreen = enabled;
+    *context.settings_dirty = true;
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -233,6 +242,9 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::SetViewerFullscreenMode(mode) => {
             state.settings.viewer_fullscreen_mode = *mode;
             *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(enabled) => {
+            set_display_sleep_prevention(state, context, *enabled);
         }
         BridgeSettingsCommand::SetDbRange(value) => {
             state.settings.db_range = value.clamp(50.0, 150.0);
