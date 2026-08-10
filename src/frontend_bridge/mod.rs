@@ -200,6 +200,7 @@ pub enum BridgeSettingsCommand {
     SetSpectrogramViewMode(SpectrogramViewMode),
     SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     SetViewerFullscreenMode(ViewerFullscreenMode),
+    SetPreventDisplaySleepInFullscreen(bool),
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
@@ -371,6 +372,7 @@ pub struct BridgeSnapshot {
 pub struct BridgeDisplaySettings {
     pub log_scale: bool,
     pub show_fps: bool,
+    pub prevent_display_sleep_in_fullscreen: bool,
     pub show_spectrogram_crosshair: bool,
     pub show_spectrogram_scale: bool,
     pub channel_buttons_visibility: u8,
@@ -412,6 +414,7 @@ impl Default for BridgeSettings {
             display: BridgeDisplaySettings {
                 log_scale: false,
                 show_fps,
+                prevent_display_sleep_in_fullscreen: true,
                 show_spectrogram_crosshair: false,
                 show_spectrogram_scale: false,
                 channel_buttons_visibility: 1,

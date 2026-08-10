@@ -61,6 +61,10 @@ ApplicationWindow {
 
         ? tagEditor
         : tagEditorFallback
+    readonly property var displaySleepInhibitorApi:
+        (typeof displaySleepInhibitor !== "undefined" && displaySleepInhibitor)
+        ? displaySleepInhibitor
+        : null
     readonly property var globalSearchModelApi: (uiBridge
         && uiBridge.globalSearchModel
         && uiBridge.globalSearchModel.nextSelectableIndex)
@@ -195,6 +199,7 @@ ApplicationWindow {
         property int spectrogramViewMode: 0
         property int spectrogramDisplayMode: 0
         property int viewerFullscreenMode: 0
+        property bool preventDisplaySleepInFullscreen: true
         property bool logScale: false
         property int repeatMode: 0
         property bool shuffleEnabled: false
@@ -271,6 +276,7 @@ ApplicationWindow {
         function setSpectrogramViewMode(value) {}
         function setSpectrogramDisplayMode(value) {}
         function setViewerFullscreenMode(value) {}
+        function setPreventDisplaySleepInFullscreen(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
         function setRepeatMode(mode) {}
@@ -1084,6 +1090,8 @@ ApplicationWindow {
         closeViewer: viewerController.closeSpectrogramViewer
         visualizationMode: viewerController.visualizationMode
         setVisualizationMode: viewerController.setVisualizationMode
+        displaySleepInhibitor: root.displaySleepInhibitorApi
+        displaySleepInhibitionEnabled: root.uiBridge.preventDisplaySleepInFullscreen
     }
 
     Dialogs.ItunesArtworkDialog {

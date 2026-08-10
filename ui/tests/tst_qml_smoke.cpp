@@ -453,6 +453,7 @@ private slots:
     void loadsMainQmlWithFallbackBridge();
     void loadsExtractedQmlSlicesWithFallbackProps();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
+    void fullscreenVisualizationInhibitsDisplaySleepOnlyWhileActive();
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
     void spectrogramHoverChannelButtonsRemainClickable();
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
@@ -669,6 +670,11 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QObject *root = engine.rootObjects().constFirst();
     QVERIFY(root != nullptr);
 
+    QObject *preventDisplaySleepCheckBox = root->findChild<QObject *>(
+        QStringLiteral("preventDisplaySleepInFullscreenCheckBox"));
+    QVERIFY(preventDisplaySleepCheckBox != nullptr);
+    QVERIFY(preventDisplaySleepCheckBox->property("checked").toBool());
+
     QObject *libraryView = qvariant_cast<QObject *>(root->property("libraryViewRef"));
     QVERIFY2(libraryView != nullptr, "Main.qml did not publish the library view ref");
     QCOMPARE(qvariant_cast<QObject *>(libraryView->property("model")), static_cast<QObject *>(&libraryModel));
@@ -784,6 +790,7 @@ Item {
         property int soloedChannel: -1
         property int channelButtonsVisibility: 1
         property int viewerFullscreenMode: 0
+        property bool preventDisplaySleepInFullscreen: true
         property int libraryArtistCount: 0
         property int libraryAlbumCount: 0
         property int libraryTrackCount: 0
@@ -844,6 +851,7 @@ Item {
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
         function setViewerFullscreenMode(mode) {}
+        function setPreventDisplaySleepInFullscreen(value) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}
         function completeLastFmAuth() {}
@@ -1222,6 +1230,87 @@ ApplicationWindow {
     shell->setProperty("viewerOpen", false);
     QVERIFY(!autoHide->property("active").toBool());
     QVERIFY(autoHide->property("controlsVisible").toBool());
+}
+
+void QmlSmokeTest::fullscreenVisualizationInhibitsDisplaySleepOnlyWhileActive() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "viewers" as Viewers
+
+ApplicationWindow {
+    id: windowRoot
+    width: 640
+    height: 480
+    visible: true
+
+    QtObject {
+        id: sleepInhibitor
+        objectName: "sleepInhibitor"
+        property bool inhibited: false
+        property int updateCount: 0
+
+        function setInhibited(value) {
+            if (inhibited === value) {
+                return
+            }
+            inhibited = value
+            updateCount += 1
+        }
+    }
+
+    Viewers.SpectrogramViewerShell {
+        objectName: "spectrogramViewerShell"
+        anchors.fill: parent
+        windowRoot: windowRoot
+        viewerOpen: false
+        useWholeScreenViewerMode: true
+        popupTransitionMs: 0
+        titleText: "Ferrous"
+        closeViewer: function() {}
+        displaySleepInhibitor: sleepInhibitor
+        displaySleepInhibitionEnabled: true
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *shell = root->findChild<QObject *>(QStringLiteral("spectrogramViewerShell"));
+    QObject *sleepInhibitor = root->findChild<QObject *>(QStringLiteral("sleepInhibitor"));
+    QVERIFY(shell != nullptr);
+    QVERIFY(sleepInhibitor != nullptr);
+    QVERIFY(!sleepInhibitor->property("inhibited").toBool());
+
+    QVERIFY(shell->setProperty("viewerOpen", true));
+    QTRY_VERIFY(shell->property("fullscreenDisplayActive").toBool());
+    QTRY_VERIFY(sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 1);
+
+    QVERIFY(shell->setProperty("displaySleepInhibitionEnabled", false));
+    QTRY_VERIFY(!sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 2);
+
+    QVERIFY(shell->setProperty("displaySleepInhibitionEnabled", true));
+    QTRY_VERIFY(sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 3);
+
+    QVERIFY(shell->setProperty("useWholeScreenViewerMode", false));
+    QTRY_VERIFY(!shell->property("fullscreenDisplayActive").toBool());
+    QTRY_VERIFY(!sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 4);
+
+    QVERIFY(shell->setProperty("useWholeScreenViewerMode", true));
+    QTRY_VERIFY(sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 5);
+
+    QVERIFY(shell->setProperty("viewerOpen", false));
+    QTRY_VERIFY(!sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 6);
 }
 
 void QmlSmokeTest::spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers() {

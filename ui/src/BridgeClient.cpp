@@ -2122,6 +2122,10 @@ int BridgeClient::viewerFullscreenMode() const {
     return m_viewerFullscreenMode;
 }
 
+bool BridgeClient::preventDisplaySleepInFullscreen() const {
+    return m_preventDisplaySleepInFullscreen;
+}
+
 double BridgeClient::dbRange() const {
     return m_dbRange;
 }
@@ -2491,6 +2495,16 @@ void BridgeClient::setViewerFullscreenMode(int value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetViewerFullscreenMode,
         static_cast<quint8>(clamped)));
+}
+
+void BridgeClient::setPreventDisplaySleepInFullscreen(bool value) {
+    if (m_preventDisplaySleepInFullscreen != value) {
+        m_preventDisplaySleepInFullscreen = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetPreventDisplaySleepInFullscreen,
+        static_cast<quint8>(value)));
 }
 
 void BridgeClient::setDbRange(double value) {
@@ -5142,6 +5156,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         1);
     if (m_viewerFullscreenMode != viewerFullscreenMode) {
         m_viewerFullscreenMode = viewerFullscreenMode;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const bool preventDisplaySleepInFullscreen = snapshot.settings.present
+        ? snapshot.settings.preventDisplaySleepInFullscreen
+        : m_preventDisplaySleepInFullscreen;
+    if (m_preventDisplaySleepInFullscreen != preventDisplaySleepInFullscreen) {
+        m_preventDisplaySleepInFullscreen = preventDisplaySleepInFullscreen;
         changed = true;
         snapshotSignalChanged = true;
     }

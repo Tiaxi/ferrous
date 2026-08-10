@@ -1396,6 +1396,7 @@ fn parse_settings_command(
         44 => BridgeSettingsCommand::SetViewerFullscreenMode(ViewerFullscreenMode::from_i32(
             i32::from(reader.read_u8()?),
         )),
+        59 => BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -1934,6 +1935,15 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.display.spectrogram_zoom_enabled),
     );
+    push_u8(
+        &mut out,
+        u8::from(
+            snapshot
+                .settings
+                .display
+                .prevent_display_sleep_in_fullscreen,
+        ),
+    );
     out
 }
 
@@ -2289,6 +2299,7 @@ mod tests {
                 display: super::super::BridgeDisplaySettings {
                     log_scale: false,
                     show_fps: false,
+                    prevent_display_sleep_in_fullscreen: true,
                     show_spectrogram_crosshair: false,
                     show_spectrogram_scale: false,
                     channel_buttons_visibility: 1,
@@ -2470,6 +2481,16 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+
+        let cmd = parse_binary_command(&encode_command(59, &[0]))
+            .expect("parse")
+            .expect("command");
+        assert!(matches!(
+            cmd,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(
+                false
+            ))
+        ));
 
         let cmd = parse_binary_command(&encode_command(41, &[]))
             .expect("parse")
@@ -2785,6 +2806,10 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.settings.integrations.system_media_controls_enabled = false;
         snapshot.settings.viewer_fullscreen_mode = ViewerFullscreenMode::WholeScreen;
+        snapshot
+            .settings
+            .display
+            .prevent_display_sleep_in_fullscreen = false;
         let queue_section = compute_queue_section_data(&snapshot);
         let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
         let mut offset = 12usize;
@@ -2798,16 +2823,17 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 7 bytes: system_media_controls(0), viewer_fullscreen(1),
+        // Last 8 bytes: system_media_controls(0), viewer_fullscreen(1),
         // display_mode(0), crosshair(0), scale(0), channel_buttons_visibility(1),
-        // spectrogram_zoom_enabled(1)
-        assert_eq!(settings.iter().rev().nth(6).copied(), Some(0)); // system_media_controls
-        assert_eq!(settings.iter().rev().nth(5).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
-        assert_eq!(settings.iter().rev().nth(4).copied(), Some(0)); // display_mode
-        assert_eq!(settings.iter().rev().nth(3).copied(), Some(0)); // crosshair
-        assert_eq!(settings.iter().rev().nth(2).copied(), Some(0)); // scale
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // channel_buttons_visibility (default=1)
-        assert_eq!(settings.last().copied(), Some(1)); // spectrogram_zoom_enabled (default=true)
+        // spectrogram_zoom_enabled(1), prevent_display_sleep_in_fullscreen(0)
+        assert_eq!(settings.iter().rev().nth(7).copied(), Some(0)); // system_media_controls
+        assert_eq!(settings.iter().rev().nth(6).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
+        assert_eq!(settings.iter().rev().nth(5).copied(), Some(0)); // display_mode
+        assert_eq!(settings.iter().rev().nth(4).copied(), Some(0)); // crosshair
+        assert_eq!(settings.iter().rev().nth(3).copied(), Some(0)); // scale
+        assert_eq!(settings.iter().rev().nth(2).copied(), Some(1)); // channel_buttons_visibility (default=1)
+        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // spectrogram_zoom_enabled (default=true)
+        assert_eq!(settings.last().copied(), Some(0)); // prevent_display_sleep_in_fullscreen
     }
 
     #[test]
@@ -3368,7 +3394,8 @@ mod tests {
             // + db_range(4) + log_scale(1) + show_fps(1) + library_sort_mode(4)
             // + system_media_controls(1) + viewer_fullscreen(1)
             // + display_mode(1) + crosshair(1) + scale(1)
-            // + channel_buttons_visibility(1)
+            // + channel_buttons_visibility(1) + spectrogram_zoom_enabled(1)
+            // + prevent_display_sleep_in_fullscreen(1)
             let p = 4 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 1 + 1 + 1 + 1;
             result.settings_channel_buttons_visibility = s[p];
         }
