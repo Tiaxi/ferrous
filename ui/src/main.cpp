@@ -25,6 +25,7 @@
 #include "AppInstanceController.h"
 #include "CoverImageProvider.h"
 #include "DiagnosticsLog.h"
+#include "DisplaySleepInhibitor.h"
 #include "LibraryTreeModel.h"
 #include "MprisController.h"
 #include "SpectrogramItem.h"
@@ -268,6 +269,7 @@ int main(int argc, char *argv[]) {
         bridge.replaceWithPaths(paths);
     });
     MprisController mpris(&bridge);
+    DisplaySleepInhibitor displaySleepInhibitor;
     LibraryTreeModel libraryModel;
     TagEditorController tagEditor(&bridge);
     QQmlApplicationEngine engine;
@@ -278,6 +280,9 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &tagEditor);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("displaySleepInhibitor"),
+        &displaySleepInhibitor);
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
         QStringLiteral(FERROUS_APP_VERSION));
 

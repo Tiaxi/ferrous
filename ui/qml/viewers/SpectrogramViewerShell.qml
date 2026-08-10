@@ -16,11 +16,23 @@ Item {
     required property var closeViewer
     property int visualizationMode: 0
     property var setVisualizationMode: function(mode) {}
+    property var displaySleepInhibitor: null
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+    readonly property bool fullscreenDisplayActive:
+        root.viewerOpen
+        && root.useWholeScreenViewerMode
+        && spectrogramFullscreenWindow.visibility === Window.FullScreen
+
+    function syncDisplaySleepInhibition() {
+        if (root.displaySleepInhibitor
+                && root.displaySleepInhibitor.setInhibited) {
+            root.displaySleepInhibitor.setInhibited(root.fullscreenDisplayActive)
+        }
+    }
 
     function noteFullscreenPointerActivity(x, y) {
         fullscreenControlsAutoHide.pointerMoved(x, y)
@@ -33,6 +45,8 @@ Item {
     }
 
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
+    onFullscreenDisplayActiveChanged: root.syncDisplaySleepInhibition()
+    onDisplaySleepInhibitorChanged: root.syncDisplaySleepInhibition()
     onUseWholeScreenViewerModeChanged: {
         if (root.viewerOpen) {
             Qt.callLater(root.syncPresentation)
@@ -52,7 +66,16 @@ Item {
         }
     }
 
-    Component.onCompleted: Qt.callLater(root.syncPresentation)
+    Component.onCompleted: {
+        Qt.callLater(root.syncPresentation)
+        root.syncDisplaySleepInhibition()
+    }
+    Component.onDestruction: {
+        if (root.displaySleepInhibitor
+                && root.displaySleepInhibitor.setInhibited) {
+            root.displaySleepInhibitor.setInhibited(false)
+        }
+    }
 
     Popup {
         id: spectrogramViewer

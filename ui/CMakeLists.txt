@@ -65,6 +65,7 @@ qt_add_executable(ferrous
     src/main.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
+    src/DisplaySleepInhibitor.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
     src/GlobalSearchResultsModel.cpp
@@ -257,6 +258,22 @@ if(BUILD_TESTING)
     add_test(NAME ferrous_app_instance_tests COMMAND ferrous_app_instance_tests)
     set_tests_properties(ferrous_app_instance_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(ferrous_display_sleep_inhibitor_tests
+        tests/tst_display_sleep_inhibitor.cpp
+        src/DisplaySleepInhibitor.cpp
+    )
+    target_include_directories(ferrous_display_sleep_inhibitor_tests PRIVATE src)
+    target_link_libraries(ferrous_display_sleep_inhibitor_tests PRIVATE
+        Qt6::Core
+        Qt6::DBus
+        Qt6::Test
+    )
+    ferrous_enable_strict_warnings(ferrous_display_sleep_inhibitor_tests)
+    add_test(
+        NAME ferrous_display_sleep_inhibitor_tests
+        COMMAND ferrous_display_sleep_inhibitor_tests
     )
 
     qt_add_executable(ferrous_bridge_client_tests

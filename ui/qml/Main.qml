@@ -61,6 +61,10 @@ ApplicationWindow {
 
         ? tagEditor
         : tagEditorFallback
+    readonly property var displaySleepInhibitorApi:
+        (typeof displaySleepInhibitor !== "undefined" && displaySleepInhibitor)
+        ? displaySleepInhibitor
+        : null
     readonly property var globalSearchModelApi: (uiBridge
         && uiBridge.globalSearchModel
         && uiBridge.globalSearchModel.nextSelectableIndex)
@@ -1084,6 +1088,7 @@ ApplicationWindow {
         closeViewer: viewerController.closeSpectrogramViewer
         visualizationMode: viewerController.visualizationMode
         setVisualizationMode: viewerController.setVisualizationMode
+        displaySleepInhibitor: root.displaySleepInhibitorApi
     }
 
     Dialogs.ItunesArtworkDialog {
