@@ -1610,18 +1610,14 @@ impl GstPlaybackRuntime {
                 }
             }
             gst::MessageView::Eos(..) => {
-                if self.pending_eos_track_switch.swap(false, Ordering::AcqRel) {
-                    // Cross-format transition: about-to-finish advanced the
-                    // queue but didn't set the URI.  Do a full pipeline switch.
-                    let next = self.queue_state.lock().ok().and_then(|state| {
-                        let path = state.current()?;
-                        let index = state.current_index().unwrap_or(0);
-                        Some((path, index))
-                    });
-                    if let Some((path, index)) = next {
-                        self.switch_to_path(path, index, TrackChangeKind::Natural, true);
-                        return;
-                    }
+                let handoff_prepared = self.pending_eos_track_switch.swap(false, Ordering::AcqRel);
+                if let Some((path, index)) = resolve_eos_handoff(
+                    &self.queue_state,
+                    self.snapshot.current.as_deref(),
+                    handoff_prepared,
+                ) {
+                    self.switch_to_path(path, index, TrackChangeKind::Natural, true);
+                    return;
                 }
                 // Normal EOS: end of queue
                 self.playing_state_requested_at = None;
@@ -1981,6 +1977,34 @@ fn maybe_emit_natural_handoff(
         return Some((current_path, current_index));
     }
     None
+}
+
+/// Resolve the track to start when the pipeline reaches EOS.
+///
+/// A cross-format handoff has already advanced the queue in the
+/// `about-to-finish` callback. Otherwise, advance here only if the queue
+/// still points at the track that just ended. This second check catches a
+/// successor appended after `about-to-finish` found the queue empty.
+fn resolve_eos_handoff(
+    queue_state: &Arc<Mutex<GaplessQueue>>,
+    ended_path: Option<&Path>,
+    handoff_prepared: bool,
+) -> Option<(PathBuf, usize)> {
+    let Ok(mut state) = queue_state.lock() else {
+        return None;
+    };
+    if handoff_prepared {
+        let path = state.current()?;
+        let index = state.current_index().unwrap_or(0);
+        return Some((path, index));
+    }
+
+    if state.current().as_deref() != ended_path {
+        return None;
+    }
+    let path = state.next_natural()?;
+    let index = state.current_index().unwrap_or(0);
+    Some((path, index))
 }
 
 fn decode_interleaved_f32(bytes: &[u8]) -> Vec<f32> {
@@ -3018,6 +3042,44 @@ mod tests {
         queue.set_shuffle_enabled(true);
         assert_eq!(queue.next_natural().as_ref(), Some(&b));
         assert!(queue.next_natural().is_none());
+    }
+
+    #[test]
+    fn eos_handoff_advances_to_track_appended_after_about_to_finish() {
+        let first = PathBuf::from("/tmp/late_queue_a.flac");
+        let appended = PathBuf::from("/tmp/late_queue_b.flac");
+        let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
+        {
+            let mut queue = queue_state.lock().unwrap();
+            queue.set_queue(vec![first.clone()]);
+            assert!(
+                queue.next_natural().is_none(),
+                "about-to-finish initially sees the end of the queue"
+            );
+            queue.add_to_queue(vec![appended.clone()]);
+        }
+
+        let handoff = resolve_eos_handoff(&queue_state, Some(&first), false);
+
+        assert_eq!(handoff, Some((appended.clone(), 1)));
+        assert_eq!(queue_state.lock().unwrap().current(), Some(appended));
+    }
+
+    #[test]
+    fn prepared_eos_handoff_uses_already_advanced_track() {
+        let first = PathBuf::from("/tmp/prepared_queue_a.flac");
+        let prepared = PathBuf::from("/tmp/prepared_queue_b.ac3");
+        let later = PathBuf::from("/tmp/prepared_queue_c.dts");
+        let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
+        {
+            let mut queue = queue_state.lock().unwrap();
+            queue.set_queue(vec![first.clone(), prepared.clone(), later]);
+            assert_eq!(queue.next_natural(), Some(prepared.clone()));
+        }
+
+        let handoff = resolve_eos_handoff(&queue_state, Some(&first), true);
+
+        assert_eq!(handoff, Some((prepared, 1)));
     }
 
     /// When about-to-finish has advanced the queue (e.g. from A→B) but
