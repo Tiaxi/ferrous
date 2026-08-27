@@ -2427,6 +2427,7 @@ void BridgeClient::seek(double seconds) {
                 .arg(m_selectedQueueIndex));
     }
 #endif
+    reanchorCenteredSpectrogramsForExplicitPosition(target);
     m_pendingSeek = true;
     m_pendingSeekTargetSeconds = target;
     m_pendingSeekStartedAtMs = nowMs;
@@ -2664,6 +2665,18 @@ void BridgeClient::unregisterSpectrogramItem(QObject *item) {
     });
 }
 
+void BridgeClient::reanchorCenteredSpectrogramsForExplicitPosition(double seconds) {
+    m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
+        return route.item.isNull();
+    });
+    for (const SpectrogramRoute &route : std::as_const(m_spectrogramRoutes)) {
+        auto *item = qobject_cast<SpectrogramItem *>(route.item.data());
+        if (item != nullptr) {
+            item->applyExplicitSeekPosition(seconds);
+        }
+    }
+}
+
 void BridgeClient::setSystemMediaControlsEnabled(bool value) {
     if (m_systemMediaControlsEnabled != value) {
         m_systemMediaControlsEnabled = value;
@@ -2703,6 +2716,7 @@ void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;
     }
+    reanchorCenteredSpectrogramsForExplicitPosition(0.0);
     m_pendingSeek = false;
     m_pendingSeekTargetSeconds = 0.0;
     m_pendingSeekStartedAtMs = 0;
