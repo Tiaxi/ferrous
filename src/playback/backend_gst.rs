@@ -332,9 +332,7 @@ struct SmoothedPlaybackClock {
     anchor_position: Duration,
     anchor_instant: Instant,
     rate: f64,
-    learned_rate: f64,
     last_raw_position: Option<Duration>,
-    last_raw_instant: Option<Instant>,
     initialized: bool,
     mode: PlaybackClockMode,
 }
@@ -342,11 +340,8 @@ struct SmoothedPlaybackClock {
 impl SmoothedPlaybackClock {
     const SNAP_ERROR_SECONDS: f64 = 0.75;
     const IGNORE_ERROR_SECONDS: f64 = 0.012;
-    const RATE_ALPHA: f64 = 0.35;
     const PHASE_RECOVERY_HORIZON_SECONDS: f64 = 0.75;
     const PHASE_RATE_OFFSET_MAX: f64 = 0.10;
-    const RATE_LEARN_MIN: f64 = 0.9;
-    const RATE_LEARN_MAX: f64 = 1.1;
     const RATE_CLAMP_MIN: f64 = 0.92;
     const RATE_CLAMP_MAX: f64 = 1.10;
 
@@ -355,9 +350,7 @@ impl SmoothedPlaybackClock {
             anchor_position: Duration::ZERO,
             anchor_instant: now,
             rate: 1.0,
-            learned_rate: 1.0,
             last_raw_position: None,
-            last_raw_instant: None,
             initialized: false,
             mode: PlaybackClockMode::Discontinuity,
         }
@@ -382,9 +375,7 @@ impl SmoothedPlaybackClock {
         self.anchor_position = position;
         self.anchor_instant = now;
         self.rate = 1.0;
-        self.learned_rate = 1.0;
         self.last_raw_position = Some(position);
-        self.last_raw_instant = Some(now);
         self.initialized = true;
         self.mode = mode;
     }
@@ -425,38 +416,26 @@ impl SmoothedPlaybackClock {
             return raw_position;
         }
 
-        if let (Some(previous_raw), Some(previous_raw_instant)) =
-            (self.last_raw_position, self.last_raw_instant)
-        {
-            let sample_elapsed_seconds = now
-                .checked_duration_since(previous_raw_instant)
-                .unwrap_or(Duration::ZERO)
-                .as_secs_f64();
-            let sample_delta_seconds =
-                (raw_position.as_secs_f64() - previous_raw.as_secs_f64()).max(0.0);
-            if sample_elapsed_seconds >= 0.02 {
-                let measured_rate = sample_delta_seconds / sample_elapsed_seconds;
-                if (Self::RATE_LEARN_MIN..=Self::RATE_LEARN_MAX).contains(&measured_rate) {
-                    self.learned_rate = ((self.learned_rate * (1.0 - Self::RATE_ALPHA))
-                        + (measured_rate * Self::RATE_ALPHA))
-                        .clamp(Self::RATE_LEARN_MIN, Self::RATE_LEARN_MAX);
-                }
-            }
-        }
-
         let phase_rate_offset = if error_seconds.abs() <= Self::IGNORE_ERROR_SECONDS {
             0.0
         } else {
             (error_seconds / Self::PHASE_RECOVERY_HORIZON_SECONDS)
                 .clamp(-Self::PHASE_RATE_OFFSET_MAX, Self::PHASE_RATE_OFFSET_MAX)
         };
-        self.rate = (self.learned_rate + phase_rate_offset)
-            .clamp(Self::RATE_CLAMP_MIN, Self::RATE_CLAMP_MAX);
+        // Playback is fixed at the MPRIS/GStreamer nominal rate of 1.0.
+        // Do not infer a base rate from adjacent position queries: PCM
+        // positions advance on audio-buffer boundaries, so 44.1 kHz sources
+        // commonly alternate between four and five 1024-frame blocks per
+        // 100 ms poll. Accepting the four-block samples while rejecting the
+        // five-block catch-ups biases the learned rate toward 0.929x, making
+        // visual playback drift behind and then surge forward repeatedly.
+        // The bounded phase offset below is sufficient to absorb real clock
+        // error without converting packet cadence into a false playback rate.
+        self.rate = (1.0 + phase_rate_offset).clamp(Self::RATE_CLAMP_MIN, Self::RATE_CLAMP_MAX);
         let corrected = predicted;
         self.anchor_position = corrected;
         self.anchor_instant = now;
         self.last_raw_position = Some(raw_position);
-        self.last_raw_instant = Some(now);
         self.mode = PlaybackClockMode::Steady;
         corrected
     }
@@ -2813,6 +2792,36 @@ mod tests {
         assert!(
             remaining_error.abs() < 0.03,
             "modeled recovery should converge back near raw position, remaining error {remaining_error:.6}"
+        );
+    }
+
+    #[test]
+    fn smoothed_playback_clock_stays_synced_to_quantized_44k1_pcm_positions() {
+        let base = Instant::now();
+        let mut clock = SmoothedPlaybackClock::new(base);
+        clock.reset(Duration::ZERO, base);
+
+        const SAMPLE_RATE: u64 = 44_100;
+        const AUDIO_BUFFER_FRAMES: u64 = 1_024;
+        let mut modeled = Duration::ZERO;
+
+        // A 100 ms query cadence sees either four buffers (92.9 ms) or five
+        // buffers (116.1 ms). The media clock still advances at exactly 1x;
+        // only the reported position is quantized to the last buffer edge.
+        for tick in 1_u64..=200 {
+            let elapsed_nanos = tick * 100_000_000;
+            let elapsed_frames = elapsed_nanos * SAMPLE_RATE / 1_000_000_000;
+            let reported_frames = elapsed_frames / AUDIO_BUFFER_FRAMES * AUDIO_BUFFER_FRAMES;
+            let raw_position = Duration::from_nanos(reported_frames * 1_000_000_000 / SAMPLE_RATE);
+            modeled = clock
+                .update_playing_sample(raw_position, base + Duration::from_nanos(elapsed_nanos));
+        }
+
+        let ideal_position = Duration::from_secs(20);
+        let lag = ideal_position.saturating_sub(modeled).as_secs_f64();
+        assert!(
+            lag < 0.025,
+            "quantized 44.1 kHz positions must not bias the playback clock, lag={lag:.6}s"
         );
     }
 
