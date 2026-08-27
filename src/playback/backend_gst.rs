@@ -339,7 +339,10 @@ struct SmoothedPlaybackClock {
 
 impl SmoothedPlaybackClock {
     const SNAP_ERROR_SECONDS: f64 = 0.75;
-    const IGNORE_ERROR_SECONDS: f64 = 0.012;
+    // Uncompressed PCM position queries can trail the pipeline clock by one
+    // decode/output buffer and then catch up in a burst. Treat sub-buffer
+    // phase differences as measurement granularity, not real clock drift.
+    const IGNORE_ERROR_SECONDS: f64 = 0.100;
     const PHASE_RECOVERY_HORIZON_SECONDS: f64 = 0.75;
     const PHASE_RATE_OFFSET_MAX: f64 = 0.10;
     const RATE_CLAMP_MIN: f64 = 0.92;
@@ -2756,7 +2759,7 @@ mod tests {
     }
 
     #[test]
-    fn smoothed_playback_clock_recovers_burst_via_bounded_cadence() {
+    fn smoothed_playback_clock_ignores_sub_buffer_position_burst() {
         let base = Instant::now();
         let mut clock = SmoothedPlaybackClock::new(base);
         clock.reset(Duration::from_secs_f64(12.0), base);
@@ -2783,15 +2786,15 @@ mod tests {
             previous_modeled = modeled;
         }
 
+        let ideal_position = Duration::from_secs_f64(12.8);
+        let ideal_error = ideal_position.as_secs_f64() - modeled.as_secs_f64();
         assert!(
-            maximum_step < 0.05,
-            "modeled recovery should stay near realtime cadence, got max step {maximum_step:.6}"
+            maximum_step < 0.041,
+            "sub-buffer position bursts must not nudge visual cadence, max step {maximum_step:.6}"
         );
-        let final_raw = Duration::from_secs_f64(12.160 + (0.039 * 18.0));
-        let remaining_error = final_raw.as_secs_f64() - modeled.as_secs_f64();
         assert!(
-            remaining_error.abs() < 0.03,
-            "modeled recovery should converge back near raw position, remaining error {remaining_error:.6}"
+            ideal_error.abs() < 0.001,
+            "visual clock must remain on nominal time after a sub-buffer burst, error={ideal_error:.6}"
         );
     }
 
@@ -2823,6 +2826,41 @@ mod tests {
             lag < 0.025,
             "quantized 44.1 kHz positions must not bias the playback clock, lag={lag:.6}s"
         );
+    }
+
+    #[test]
+    fn smoothed_playback_clock_ignores_44k1_pcm_buffer_phase_wobble() {
+        let base = Instant::now();
+        let mut clock = SmoothedPlaybackClock::new(base);
+        clock.reset(Duration::ZERO, base);
+
+        const SAMPLE_RATE: u64 = 44_100;
+        const PCM_BUFFER_FRAMES: u64 = 4_096;
+        const POLL_NANOS: u64 = 40_000_000;
+        let mut previous_modeled = Duration::ZERO;
+        let mut maximum_step_error = 0.0_f64;
+
+        // The reported timestamp remains on the preceding ~92.9 ms PCM
+        // buffer edge, then jumps forward by a whole buffer. The visible
+        // clock must continue at a steady 1x instead of slowing before each
+        // jump and accelerating after it.
+        for tick in 1_u64..=250 {
+            let elapsed_nanos = tick * POLL_NANOS;
+            let elapsed_frames = elapsed_nanos * SAMPLE_RATE / 1_000_000_000;
+            let reported_frames = elapsed_frames / PCM_BUFFER_FRAMES * PCM_BUFFER_FRAMES;
+            let raw_position = Duration::from_nanos(reported_frames * 1_000_000_000 / SAMPLE_RATE);
+            let modeled = clock
+                .update_playing_sample(raw_position, base + Duration::from_nanos(elapsed_nanos));
+            let step = modeled.saturating_sub(previous_modeled).as_secs_f64();
+            maximum_step_error = maximum_step_error.max((step - 0.040).abs());
+            previous_modeled = modeled;
+        }
+
+        assert!(
+            maximum_step_error < 0.000_1,
+            "PCM timestamp phase wobble must not change visual cadence, max step error={maximum_step_error:.6}s"
+        );
+        assert_eq!(previous_modeled, Duration::from_secs(10));
     }
 
     #[test]
