@@ -1884,6 +1884,17 @@ fn session_flush_chunk(
         session.columns_produced += 1;
     }
 
+    session_emit_pending_chunk(session, event_tx, columns_produced_out);
+}
+
+/// Publish already-complete columns without finalizing the resampler's
+/// partial output interval. Temporary lookahead parks and token handoffs must
+/// preserve that interval so column indices remain derived from audio frames.
+fn session_emit_pending_chunk(
+    session: &mut SpectrogramSessionState,
+    event_tx: &Sender<AnalysisEvent>,
+    columns_produced_out: &AtomicU64,
+) {
     if session.chunk_columns > 0 {
         let coverage = seconds_from_frames(
             session.total_covered_samples,
@@ -1925,8 +1936,9 @@ fn session_flush_token(
     event_tx: &Sender<AnalysisEvent>,
     columns_produced_out: &AtomicU64,
 ) {
-    // Flush any partially accumulated data so it carries the new token.
-    session_flush_chunk(session, event_tx, columns_produced_out);
+    // Publish complete buffered columns so they carry the updated token.
+    // Preserve the partial resampler interval across the token handoff.
+    session_emit_pending_chunk(session, event_tx, columns_produced_out);
 
     // Emit a 0-column metadata chunk with the new token.
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
@@ -1957,7 +1969,7 @@ fn flush_chunk_before_lookahead_park(
     if session.display_mode == SpectrogramDisplayMode::Rolling {
         return;
     }
-    session_flush_chunk(session, event_tx, columns_produced_out);
+    session_emit_pending_chunk(session, event_tx, columns_produced_out);
 }
 
 /// Emit a finalize chunk carrying the actual decoded column count as
@@ -2339,6 +2351,29 @@ mod tests {
         assert_eq!(session.chunk_columns, 0);
         assert_eq!(session.chunk_start_index, 320);
         assert!(session.chunk_buf.is_empty());
+    }
+
+    #[test]
+    fn centered_mode_park_preserves_partial_resampler_interval() {
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Centered;
+        session.resamplers = vec![PeakHoldResampler::new(4.0)];
+
+        let spectrum = [1.0_f32];
+        for _ in 0..3 {
+            assert!(session.resamplers[0].push(&spectrum).is_none());
+        }
+
+        let cols_out = AtomicU64::new(0);
+        flush_chunk_before_lookahead_park(&mut session, &event_tx, &cols_out);
+
+        assert!(event_rx.try_recv().is_err());
+        assert_eq!(session.columns_produced, 256);
+        assert!(
+            session.resamplers[0].push(&spectrum).is_some(),
+            "parking must not turn a partial four-row interval into an extra column"
+        );
     }
 
     /// Helper: creates a minimal `SpectrogramSessionState` for command tests.
