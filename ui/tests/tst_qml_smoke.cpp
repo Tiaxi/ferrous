@@ -2972,7 +2972,8 @@ Item {
         objectName: "controller"
         uiBridge: bridge
         visualFeedsEnabled: true
-        seekPressed: false
+        // Keep the live timer from racing the explicit timestamps below.
+        seekPressed: true
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2981,22 +2982,28 @@ Item {
     QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
     QVERIFY(controller != nullptr);
 
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+    double nowMs = 1000.0;
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(nowMs))));
 
     QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
     QVERIFY(bridge != nullptr);
 
+    constexpr double heartbeatIntervalMs = 40.0;
+    constexpr double maximumRecoveryRate = 1.1;
     const std::array<double, 6> positions = {12.039, 12.079, 12.122, 12.165, 12.208, 12.251};
     double previousDisplayed = controller->property("displayedPositionSeconds").toDouble();
     double maximumStep = 0.0;
 
     for (double nextPosition : positions) {
-        QTest::qWait(40);
+        nowMs += heartbeatIntervalMs;
         bridge->setProperty("positionSeconds", nextPosition);
         QVERIFY(QMetaObject::invokeMethod(
             controller,
-            "handlePlaybackChanged",
+            "handlePlaybackChangedAtTime",
+            Q_ARG(QVariant, QVariant::fromValue(nowMs)),
             Q_ARG(QVariant, QVariant()),
             Q_ARG(QVariant, QVariant())));
         const double displayed = controller->property("displayedPositionSeconds").toDouble();
@@ -3005,7 +3012,7 @@ Item {
     }
 
     QVERIFY2(
-        maximumStep < 0.05,
+        maximumStep <= heartbeatIntervalMs / 1000.0 * maximumRecoveryRate + 0.000001,
         qPrintable(QStringLiteral("maximum_step=%1").arg(maximumStep, 0, 'f', 6)));
     const double displayedPosition = controller->property("displayedPositionSeconds").toDouble();
     const double backendPosition = bridge->property("positionSeconds").toDouble();
