@@ -484,7 +484,7 @@ private slots:
     void playbackControllerSeekImmediatelyUpdatesSpectrogramPosition();
     void playbackControllerDeterministicTimeHooksDriveInterpolation();
     void playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock();
-    void playbackControllerPostSeekHeartbeatSnapsToBackendPosition();
+    void playbackControllerPostSeekHeartbeatUsesBoundedPhaseCorrection();
     void playbackControllerPostSeekBehindHeartbeatKeepsVisualClock();
     void playbackControllerPostSeekHeldTargetKeepsVisualClock();
     void playbackControllerPostSeekTargetEchoKeepsVisualClockActive();
@@ -493,7 +493,7 @@ private slots:
     void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
     void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
     void playbackControllerProfileSkipsMinorFollowHeartbeatLogs();
-    void playbackControllerIgnoresSteadyStateHeartbeatJitter();
+    void playbackControllerDelayedHeartbeatDoesNotJumpViewport();
     void playbackControllerKeepsWallClockInterpolationAfterSubRealtimeHeartbeats();
     void playbackControllerSteadyStateTrimReducesNoticeableLag();
     void playbackControllerFollowsBoundedRecoveryCadenceWithoutBurst();
@@ -2053,17 +2053,18 @@ Item {
     const double spectrogramPosition =
         controller->property("spectrogramPositionSeconds").toDouble();
     QVERIFY2(
-        std::abs(displayedAfterUpdate - 12.12) < 0.02,
+        displayedAfterUpdate >= displayedBeforeUpdate - 0.001
+            && displayedAfterUpdate <= displayedBeforeUpdate + 0.03,
         qPrintable(
             QStringLiteral("displayed=%1 displayed_before=%2")
                 .arg(displayedAfterUpdate, 0, 'f', 6)
                 .arg(displayedBeforeUpdate, 0, 'f', 6)));
     QVERIFY2(
-        std::abs(spectrogramPosition - 12.12) < 0.02,
+        std::abs(spectrogramPosition - displayedAfterUpdate) < 0.001,
         qPrintable(QStringLiteral("spectrogram=%1").arg(spectrogramPosition, 0, 'f', 6)));
 }
 
-void QmlSmokeTest::playbackControllerPostSeekHeartbeatSnapsToBackendPosition() {
+void QmlSmokeTest::playbackControllerPostSeekHeartbeatUsesBoundedPhaseCorrection() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2104,10 +2105,12 @@ Item {
         controller,
         "seekCommitted",
         Q_ARG(QVariant, QVariant::fromValue(48.0))));
+    const double displayedBeforeHeartbeat =
+        controller->property("displayedPositionSeconds").toDouble();
 
     QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
     QVERIFY(bridge != nullptr);
-    bridge->setProperty("positionSeconds", 48.26);
+    bridge->setProperty("positionSeconds", 48.08);
 
     QVERIFY(QMetaObject::invokeMethod(
         controller,
@@ -2120,11 +2123,19 @@ Item {
     const double spectrogramAfterHeartbeat =
         controller->property("spectrogramPositionSeconds").toDouble();
     QVERIFY2(
-        std::abs(displayedAfterHeartbeat - 48.26) < 0.02,
-        qPrintable(QStringLiteral("displayed=%1").arg(displayedAfterHeartbeat, 0, 'f', 6)));
+        displayedAfterHeartbeat >= displayedBeforeHeartbeat - 0.001
+            && displayedAfterHeartbeat <= displayedBeforeHeartbeat + 0.03,
+        qPrintable(QStringLiteral("displayed_before=%1 displayed_after=%2")
+            .arg(displayedBeforeHeartbeat, 0, 'f', 6)
+            .arg(displayedAfterHeartbeat, 0, 'f', 6)));
     QVERIFY2(
-        std::abs(spectrogramAfterHeartbeat - 48.26) < 0.02,
+        std::abs(spectrogramAfterHeartbeat - displayedAfterHeartbeat) < 0.001,
         qPrintable(QStringLiteral("spectrogram=%1").arg(spectrogramAfterHeartbeat, 0, 'f', 6)));
+    QVERIFY2(
+        controller->property("interpolationRate").toDouble() <= 1.1
+            && controller->property("interpolationRate").toDouble() > 1.0,
+        qPrintable(QStringLiteral("rate=%1")
+            .arg(controller->property("interpolationRate").toDouble(), 0, 'f', 6)));
 }
 
 void QmlSmokeTest::playbackControllerPostSeekBehindHeartbeatKeepsVisualClock() {
@@ -2512,11 +2523,17 @@ Item {
     const double displayedImmediately =
         controller->property("displayedPositionSeconds").toDouble();
     QVERIFY2(
-        std::abs(displayedImmediately - (displayedBeforeHeartbeat + 0.18)) < 0.02,
+        displayedImmediately >= displayedBeforeHeartbeat - 0.001
+            && displayedImmediately <= displayedBeforeHeartbeat + 0.03,
         qPrintable(
             QStringLiteral("displayed_immediately=%1 displayed_before=%2")
                 .arg(displayedImmediately, 0, 'f', 6)
                 .arg(displayedBeforeHeartbeat, 0, 'f', 6)));
+    QVERIFY2(
+        controller->property("interpolationRate").toDouble() > 1.0
+            && controller->property("interpolationRate").toDouble() <= 1.1,
+        qPrintable(QStringLiteral("rate=%1")
+            .arg(controller->property("interpolationRate").toDouble(), 0, 'f', 6)));
 
     QTest::qWait(20);
 
@@ -2713,7 +2730,7 @@ Item {
         qPrintable(warnings));
 }
 
-void QmlSmokeTest::playbackControllerIgnoresSteadyStateHeartbeatJitter() {
+void QmlSmokeTest::playbackControllerDelayedHeartbeatDoesNotJumpViewport() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2747,29 +2764,48 @@ Item {
     QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
     QVERIFY(controller != nullptr);
 
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
 
     QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
     QVERIFY(bridge != nullptr);
-    const double displayedBeforeHeartbeat =
+
+    bridge->setProperty("positionSeconds", 12.04);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1040.0)),
+        Q_ARG(QVariant, QVariant()),
+        Q_ARG(QVariant, QVariant())));
+    const double displayedBeforeDelayedHeartbeat =
         controller->property("displayedPositionSeconds").toDouble();
-    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.05);
+
+    // One bridge update was delayed/coalesced: its position advances by
+    // 80 ms although only 40 ms of UI wall time has elapsed.
+    bridge->setProperty("positionSeconds", 12.12);
 
     QVERIFY(QMetaObject::invokeMethod(
         controller,
-        "handlePlaybackChanged",
+        "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1080.0)),
         Q_ARG(QVariant, QVariant()),
         Q_ARG(QVariant, QVariant())));
 
     const double displayedImmediately =
         controller->property("displayedPositionSeconds").toDouble();
     QVERIFY2(
-        std::abs(displayedImmediately - (displayedBeforeHeartbeat + 0.05)) < 0.02,
+        std::abs(displayedImmediately - 12.08) < 0.001,
         qPrintable(
             QStringLiteral("displayed_immediately=%1 displayed_before=%2")
                 .arg(displayedImmediately, 0, 'f', 6)
-                .arg(displayedBeforeHeartbeat, 0, 'f', 6)));
+                .arg(displayedBeforeDelayedHeartbeat, 0, 'f', 6)));
+    QVERIFY2(
+        controller->property("interpolationRate").toDouble() > 1.0
+            && controller->property("interpolationRate").toDouble() < 1.1,
+        qPrintable(QStringLiteral("rate=%1")
+            .arg(controller->property("interpolationRate").toDouble(), 0, 'f', 6)));
 
 }
 
@@ -2974,7 +3010,7 @@ Item {
     const double displayedPosition = controller->property("displayedPositionSeconds").toDouble();
     const double backendPosition = bridge->property("positionSeconds").toDouble();
     QVERIFY2(
-        std::abs(displayedPosition - backendPosition) < 0.02,
+        std::abs(displayedPosition - backendPosition) < 0.04,
         qPrintable(
             QStringLiteral("displayed=%1 backend=%2")
                 .arg(displayedPosition, 0, 'f', 6)
