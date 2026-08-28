@@ -28,10 +28,11 @@ QtObject {
     property bool interpolationActive: false
     property real interpolationRate: 1.0
     property bool visualSeekClockActive: false
-    readonly property real interpolationSnapThresholdSeconds: 0.75
+    readonly property real interpolationSnapThresholdSeconds: 0.2
     readonly property real profileHeartbeatLogThresholdSeconds: 0.1
-    readonly property real visualSeekBackwardToleranceSeconds: 0.03
-    readonly property real visualSeekCatchupRate: 0.85
+    readonly property real interpolationCorrectionHorizonSeconds: 0.75
+    readonly property real interpolationCorrectionDeadbandSeconds: 0.025
+    readonly property real interpolationRateCorrectionLimit: 0.1
 
     // Timer drives local interpolation at ~60 fps.
     property Timer interpolationTimer: Timer {
@@ -112,38 +113,40 @@ QtObject {
             : root.clampPositionToDuration(root.displayedPositionSeconds)
         const clampedPosition = root.clampPositionToDuration(incomingPosition)
         const error = clampedPosition - currentDisplayed
-        if (root.visualSeekClockActive
-                && clampedPosition + root.visualSeekBackwardToleranceSeconds < currentDisplayed) {
-            root.applyInterpolatedPosition(currentDisplayed)
-            root.resetInterpolationState(currentDisplayed, nowMs)
-            root.interpolationActive = true
-            root.interpolationRate = root.visualSeekCatchupRate
-            root.logPlaybackProfile(
-                "post_seek_visual_clock",
-                "incoming=" + clampedPosition.toFixed(3)
-                    + " displayed=" + currentDisplayed.toFixed(3)
-                    + " error_ms=" + Math.round(error * 1000))
-            return
-        }
-        if (root.visualSeekClockActive
-                && clampedPosition <= currentDisplayed + root.visualSeekBackwardToleranceSeconds) {
-            root.applyInterpolatedPosition(currentDisplayed)
-            root.resetInterpolationState(currentDisplayed, nowMs)
-            root.interpolationActive = true
-            root.interpolationRate = 1.0
-            return
-        }
         root.clearVisualSeekClock()
         const action = Math.abs(error) >= root.interpolationSnapThresholdSeconds ? "snap" : "follow"
-        root.applyInterpolatedPosition(clampedPosition)
-        root.resetInterpolationState(clampedPosition, nowMs)
+        let nextPosition = clampedPosition
+        let nextRate = 1.0
+        if (action === "follow") {
+            // Bridge delivery occasionally coalesces two position samples,
+            // producing a ~40 ms phase sawtooth even though audio remains at
+            // nominal speed. Keep the visual position continuous and correct
+            // only the phase outside a small transport-jitter deadband.
+            let correctionError = 0.0
+            if (error > root.interpolationCorrectionDeadbandSeconds) {
+                correctionError = error - root.interpolationCorrectionDeadbandSeconds
+            } else if (error < -root.interpolationCorrectionDeadbandSeconds) {
+                correctionError = error + root.interpolationCorrectionDeadbandSeconds
+            }
+            const correction = Math.max(
+                -root.interpolationRateCorrectionLimit,
+                Math.min(
+                    root.interpolationRateCorrectionLimit,
+                    correctionError / root.interpolationCorrectionHorizonSeconds))
+            nextPosition = currentDisplayed
+            nextRate += correction
+        }
+        root.applyInterpolatedPosition(nextPosition)
+        root.resetInterpolationState(nextPosition, nowMs)
         root.interpolationActive = true
+        root.interpolationRate = nextRate
         if (action !== "follow" || Math.abs(error) >= root.profileHeartbeatLogThresholdSeconds) {
             root.logPlaybackProfile(
                 "heartbeat",
                 "incoming=" + incomingPosition.toFixed(3)
                     + " displayed=" + currentDisplayed.toFixed(3)
                     + " error_ms=" + Math.round(error * 1000)
+                    + " rate=" + nextRate.toFixed(4)
                     + " action=" + action)
         }
     }
