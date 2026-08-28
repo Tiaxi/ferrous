@@ -61,6 +61,7 @@ public:
 
     double positionSeconds() const;
     void setPositionSeconds(double value);
+    void applyExplicitSeekPosition(double value);
 
     bool isPlaying() const;
     void setPlaying(bool value);

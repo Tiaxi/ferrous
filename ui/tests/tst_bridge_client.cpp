@@ -106,6 +106,8 @@ private slots:
     void clearDiagnosticsDropsPendingDiskWrites();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void seekPublishesOptimisticPositionAndExtendsPendingWindow();
+    void seekImmediatelyReanchorsRegisteredCenteredSpectrograms();
+    void playAtImmediatelyReanchorsRegisteredCenteredSpectrograms();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void asyncImageFileDetailsAcceptsImageProviderUrl();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
@@ -499,6 +501,53 @@ void BridgeClientTest::seekPublishesOptimisticPositionAndExtendsPendingWindow() 
     QVERIFY(client.m_pendingSeek);
     QVERIFY(client.m_pendingSeekUntilMs - client.m_pendingSeekStartedAtMs >= 2900);
     QCOMPARE(playbackSpy.count(), 1);
+}
+
+void BridgeClientTest::seekImmediatelyReanchorsRegisteredCenteredSpectrograms() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+    item.m_precomputedReady = true;
+    item.setPositionSeconds(120.0);
+    item.setPlaying(true);
+    client.registerSpectrogramItem(&item, 0);
+
+    // A position update near zero is ambiguous with a natural gapless
+    // handoff and therefore activates the defensive jump hold.
+    item.setPositionSeconds(0.0);
+    QVERIFY(item.m_positionJumpHoldActive);
+    QVERIFY(item.m_positionAnchorSeconds > 100.0);
+
+    // The explicit seek command disambiguates the update and must move both
+    // the centered viewport and playhead without waiting for reset data.
+    client.seek(0.0);
+
+    QVERIFY(!item.m_positionJumpHoldActive);
+    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);
+    QVERIFY(std::abs(item.m_positionSeconds) < 0.0001);
+}
+
+void BridgeClientTest::playAtImmediatelyReanchorsRegisteredCenteredSpectrograms() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    SpectrogramItem item;
+    item.setDisplayMode(1); // Centered
+    item.m_precomputedReady = true;
+    item.setPositionSeconds(120.0);
+    item.setPlaying(true);
+    client.registerSpectrogramItem(&item, 0);
+
+    item.setPositionSeconds(0.0);
+    QVERIFY(item.m_positionJumpHoldActive);
+
+    client.playAt(2);
+
+    QVERIFY(!item.m_positionJumpHoldActive);
+    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);
+    QVERIFY(std::abs(item.m_positionSeconds) < 0.0001);
 }
 
 void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {

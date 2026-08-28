@@ -536,6 +536,7 @@ private:
     void scheduleTrackMetadataChanged();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
+    void reanchorCenteredSpectrogramsForExplicitPosition(double seconds);
     void shutdownBridgeGracefully();
     static QString detectFileBrowserNameHeuristic();
     static QString detectFileBrowserName();

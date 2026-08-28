@@ -588,6 +588,32 @@ void SpectrogramItem::setPositionSeconds(double value) {
     // handleWindowAfterAnimating().
 }
 
+void SpectrogramItem::applyExplicitSeekPosition(double value) {
+    using Clock = std::chrono::steady_clock;
+    bool changed = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        // Rolling mode must wait for its restarted worker session because its
+        // ring is write-order history. Centered mode is random-access, so an
+        // explicit seek can move the viewport immediately. This separate path
+        // distinguishes a seek to 0 from a natural gapless position reset.
+        if (m_displayMode != 1) {
+            return;
+        }
+
+        const double clamped = std::max(0.0, value);
+        changed = m_positionJumpHoldActive
+            || !m_positionAnchorInitialized
+            || std::abs(m_positionSeconds - clamped) >= 0.0001;
+        m_positionJumpHoldActive = false;
+        setPositionAnchorLocked(clamped, Clock::now());
+    }
+    if (changed) {
+        emit positionSecondsChanged();
+        update();
+    }
+}
+
 bool SpectrogramItem::isPlaying() const {
     QMutexLocker lock(&m_stateMutex);
     return m_playing;
