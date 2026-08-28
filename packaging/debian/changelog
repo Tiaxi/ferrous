@@ -1,3 +1,11 @@
+ferrous (0.1.15-1) unstable; urgency=low
+
+  * Continue playback when tracks are added after reaching the end of the queue.
+  * Snap the centered spectrogram immediately on explicit seeks.
+  * Keep waveform and spectrogram visuals synchronized with smooth playback timing.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Fri, 28 Aug 2026 09:27:26 +0300
+
 ferrous (0.1.14-1) unstable; urgency=low
 
   * Inhibit display sleep while the fullscreen visualizer is active.
