@@ -413,12 +413,15 @@ impl FfiRuntime {
             }
         }
 
-        if let Some(tree_bytes) = latest_tree_bytes {
+        if let Some(tree_bytes) = latest_tree_bytes.as_ref() {
             self.push_library_tree_frame(tree_bytes.as_ref().clone());
         }
-        if let Some(snapshot) =
+        if let Some(mut snapshot) =
             latest_snapshot.map(|snapshot| merge_queue_snapshot(snapshot, latest_queue_snapshot))
         {
+            if latest_tree_bytes.is_some() {
+                snapshot.pre_built_tree_bytes = latest_tree_bytes;
+            }
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
             self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
             let queue_section = if snapshot.queue_included {
@@ -1345,6 +1348,15 @@ fn parse_library_ui_command(
             key: reader.read_u16_string()?,
             expanded: reader.read_u8()? != 0,
         },
+        60 => BridgeLibraryCommand::SetViewState {
+            selection_key: reader.read_u16_string()?,
+            anchor_key: reader.read_u16_string()?,
+            anchor_offset: match reader.read_f32()? {
+                value if value.is_finite() => value,
+                _ => return Err("library view anchor offset must be finite".to_string()),
+            },
+        },
+        61 => BridgeLibraryCommand::ShowTrackInLibrary(PathBuf::from(reader.read_u16_string()?)),
         36 => BridgeLibraryCommand::SetSearchQuery {
             seq: reader.read_u32()?,
             query: reader.read_u16_string()?,
@@ -1856,6 +1868,20 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         push_u16_string(&mut out, &root_str);
         push_u16_string(&mut out, &root.name);
     }
+    if snapshot.pre_built_tree_bytes.is_some() {
+        push_u16(&mut out, clamp_u16(snapshot.library_expanded_keys.len()));
+        for key in snapshot
+            .library_expanded_keys
+            .iter()
+            .take(usize::from(u16::MAX))
+        {
+            push_u16_string(&mut out, key);
+        }
+        push_u16_string(&mut out, &snapshot.library_view_selection_key);
+        push_u16_string(&mut out, &snapshot.library_view_anchor_key);
+        push_f32(&mut out, snapshot.library_view_anchor_offset);
+        push_u32(&mut out, snapshot.library_reveal_generation);
+    }
 
     out
 }
@@ -2285,6 +2311,11 @@ mod tests {
             queue_details: HashMap::new(),
             library_artist_count: 1,
             library_album_count: 1,
+            library_expanded_keys: vec!["artist|/music|Sample Artist".to_string()],
+            library_view_selection_key: "track|/music/a.flac".to_string(),
+            library_view_anchor_key: "artist|/music|Sample Artist".to_string(),
+            library_view_anchor_offset: 4.0,
+            library_reveal_generation: 0,
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
             queue_included: true,
             queue: vec![PathBuf::from("/music/a.flac")],
@@ -2607,6 +2638,45 @@ mod tests {
             }) => {
                 assert_eq!(parsed, key);
                 assert!(expanded);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_supports_library_view_state_and_reveal() {
+        let selection_key = "track|/music/Artist/Album/01.flac";
+        let anchor_key = "album|/music|Artist|Album";
+        let mut payload = Vec::new();
+        push_u16_string(&mut payload, selection_key);
+        push_u16_string(&mut payload, anchor_key);
+        push_f32(&mut payload, 5.5);
+
+        let cmd = parse_binary_command(&encode_command(60, &payload))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::SetViewState {
+                selection_key: parsed_selection,
+                anchor_key: parsed_anchor,
+                anchor_offset,
+            }) => {
+                assert_eq!(parsed_selection, selection_key);
+                assert_eq!(parsed_anchor, anchor_key);
+                assert!((anchor_offset - 5.5).abs() < f32::EPSILON);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let path = "/music/Artist/Album/01.flac";
+        let mut payload = Vec::new();
+        push_u16_string(&mut payload, path);
+        let cmd = parse_binary_command(&encode_command(61, &payload))
+            .expect("parse")
+            .expect("command");
+        match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::ShowTrackInLibrary(parsed)) => {
+                assert_eq!(parsed, PathBuf::from(path));
             }
             other => panic!("unexpected command: {other:?}"),
         }

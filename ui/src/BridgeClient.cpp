@@ -1632,29 +1632,6 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
             result.processedPrecomputedFrames);
     }
 
-    constexpr int kMaxTreeFramesPerPass = 4;
-    while (!result.budgetExhausted && result.processedTreeFrames < kMaxTreeFramesPerPass) {
-        if (markBudgetExhaustedIfNeeded()) {
-            break;
-        }
-        std::size_t len = 0;
-        std::uint32_t version = 0;
-        std::uint8_t *treePtr = ferrous_ffi_bridge_pop_library_tree(m_ffiBridge, &len, &version);
-        if (treePtr == nullptr || len == 0) {
-            break;
-        }
-        result.processedTreeFrames++;
-        const QByteArray treeBytes(
-            reinterpret_cast<const char *>(treePtr),
-            static_cast<qsizetype>(len));
-        ferrous_ffi_bridge_free_library_tree(treePtr, len);
-        const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
-            ? std::numeric_limits<int>::max()
-            : static_cast<int>(version);
-        applyLibraryTreeFrame(versionInt, treeBytes);
-    }
-    result.treeCapSaturated = result.processedTreeFrames >= kMaxTreeFramesPerPass;
-
     constexpr int kMaxSearchFramesPerPass = 4;
     while (!result.budgetExhausted && result.processedSearchFrames < kMaxSearchFramesPerPass) {
         if (markBudgetExhaustedIfNeeded()) {
@@ -1708,6 +1685,32 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         processBinarySnapshot(decoded);
     }
     result.eventCapSaturated = result.processedEvents >= kMaxEventsPerPass;
+
+    // Apply snapshots before their separately queued tree frame. The library
+    // frame signal can synchronously start QML model parsing, so its companion
+    // expanded keys and viewport anchor must already be visible to QML.
+    constexpr int kMaxTreeFramesPerPass = 4;
+    while (!result.budgetExhausted && result.processedTreeFrames < kMaxTreeFramesPerPass) {
+        if (markBudgetExhaustedIfNeeded()) {
+            break;
+        }
+        std::size_t len = 0;
+        std::uint32_t version = 0;
+        std::uint8_t *treePtr = ferrous_ffi_bridge_pop_library_tree(m_ffiBridge, &len, &version);
+        if (treePtr == nullptr || len == 0) {
+            break;
+        }
+        result.processedTreeFrames++;
+        const QByteArray treeBytes(
+            reinterpret_cast<const char *>(treePtr),
+            static_cast<qsizetype>(len));
+        ferrous_ffi_bridge_free_library_tree(treePtr, len);
+        const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(version);
+        applyLibraryTreeFrame(versionInt, treeBytes);
+    }
+    result.treeCapSaturated = result.processedTreeFrames >= kMaxTreeFramesPerPass;
 
     return result;
 }
@@ -2228,6 +2231,26 @@ int BridgeClient::libraryArtistCount() const {
 
 int BridgeClient::libraryAlbumCount() const {
     return m_libraryAlbumCount;
+}
+
+QStringList BridgeClient::libraryExpandedKeys() const {
+    return m_libraryExpandedKeys;
+}
+
+bool BridgeClient::libraryViewStateAvailable() const {
+    return m_libraryViewStateAvailable;
+}
+
+QString BridgeClient::libraryViewSelectionKey() const {
+    return m_libraryViewSelectionKey;
+}
+
+QString BridgeClient::libraryViewAnchorKey() const {
+    return m_libraryViewAnchorKey;
+}
+
+double BridgeClient::libraryViewAnchorOffset() const {
+    return m_libraryViewAnchorOffset;
 }
 
 QStringList BridgeClient::libraryRoots() const {
@@ -3033,6 +3056,30 @@ void BridgeClient::setLibraryNodeExpanded(const QString &key, bool expanded) {
         BinaryBridgeCodec::CmdSetNodeExpanded,
         normalized,
         expanded));
+}
+
+void BridgeClient::setLibraryViewState(
+    const QString &selectionKey,
+    const QString &anchorKey,
+    double anchorOffset) {
+    if (!std::isfinite(anchorOffset)) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandLibraryViewState(
+        BinaryBridgeCodec::CmdSetLibraryViewState,
+        selectionKey.trimmed(),
+        anchorKey.trimmed(),
+        static_cast<float>(std::clamp(anchorOffset, -24.0, 24.0))));
+}
+
+void BridgeClient::showTrackInLibrary(const QString &path) {
+    const QString normalized = normalizeLocalPathArg(path);
+    if (normalized.isEmpty()) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdShowTrackInLibrary,
+        normalized));
 }
 
 void BridgeClient::setLibrarySortMode(int mode) {
@@ -5360,6 +5407,41 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         snapshotSignalChanged = true;
     }
 
+    bool libraryRevealChanged = false;
+    if (snapshot.library.present && snapshot.library.viewStatePresent) {
+        if (!m_libraryViewStateAvailable) {
+            m_libraryViewStateAvailable = true;
+            changed = true;
+            snapshotSignalChanged = true;
+        }
+        if (m_libraryExpandedKeys != snapshot.library.expandedKeys) {
+            m_libraryExpandedKeys = snapshot.library.expandedKeys;
+            changed = true;
+            snapshotSignalChanged = true;
+        }
+        if (m_libraryViewSelectionKey != snapshot.library.viewSelectionKey) {
+            m_libraryViewSelectionKey = snapshot.library.viewSelectionKey;
+            changed = true;
+            snapshotSignalChanged = true;
+        }
+        if (m_libraryViewAnchorKey != snapshot.library.viewAnchorKey) {
+            m_libraryViewAnchorKey = snapshot.library.viewAnchorKey;
+            changed = true;
+            snapshotSignalChanged = true;
+        }
+        if (!qFuzzyCompare(
+                m_libraryViewAnchorOffset + 25.0,
+                snapshot.library.viewAnchorOffset + 25.0)) {
+            m_libraryViewAnchorOffset = snapshot.library.viewAnchorOffset;
+            changed = true;
+            snapshotSignalChanged = true;
+        }
+        if (m_libraryRevealGeneration != snapshot.library.revealGeneration) {
+            m_libraryRevealGeneration = snapshot.library.revealGeneration;
+            libraryRevealChanged = true;
+        }
+    }
+
     const QStringList rootPaths = snapshot.library.present ? snapshot.library.rootPaths : m_libraryRoots;
     if (m_libraryRoots != rootPaths) {
         m_libraryRoots = rootPaths;
@@ -5456,6 +5538,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     finishSnapshotSection(snapshotLibraryMs);
+    if (libraryRevealChanged) {
+        emit libraryRevealRequested(m_libraryExpandedKeys, m_libraryViewSelectionKey);
+    }
     if (playbackSignalChanged) {
         m_pollPlaybackChanged = true;
     }

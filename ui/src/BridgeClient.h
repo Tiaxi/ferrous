@@ -141,6 +141,11 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryArtistCount READ libraryArtistCount NOTIFY snapshotChanged)
     Q_PROPERTY(int libraryAlbumCount READ libraryAlbumCount NOTIFY snapshotChanged)
+    Q_PROPERTY(QStringList libraryExpandedKeys READ libraryExpandedKeys NOTIFY snapshotChanged)
+    Q_PROPERTY(bool libraryViewStateAvailable READ libraryViewStateAvailable NOTIFY snapshotChanged)
+    Q_PROPERTY(QString libraryViewSelectionKey READ libraryViewSelectionKey NOTIFY snapshotChanged)
+    Q_PROPERTY(QString libraryViewAnchorKey READ libraryViewAnchorKey NOTIFY snapshotChanged)
+    Q_PROPERTY(double libraryViewAnchorOffset READ libraryViewAnchorOffset NOTIFY snapshotChanged)
     Q_PROPERTY(QStringList libraryRoots READ libraryRoots NOTIFY snapshotChanged)
     Q_PROPERTY(QVariantList libraryRootEntries READ libraryRootEntries NOTIFY snapshotChanged)
     Q_PROPERTY(int librarySortMode READ librarySortMode NOTIFY snapshotChanged)
@@ -234,6 +239,11 @@ public:
     int libraryTrackCount() const;
     int libraryArtistCount() const;
     int libraryAlbumCount() const;
+    QStringList libraryExpandedKeys() const;
+    bool libraryViewStateAvailable() const;
+    QString libraryViewSelectionKey() const;
+    QString libraryViewAnchorKey() const;
+    double libraryViewAnchorOffset() const;
     QStringList libraryRoots() const;
     QVariantList libraryRootEntries() const;
     int librarySortMode() const;
@@ -323,6 +333,11 @@ public:
     Q_INVOKABLE void rescanLibraryRoot(const QString &path);
     Q_INVOKABLE void rescanAllLibraryRoots();
     Q_INVOKABLE void setLibraryNodeExpanded(const QString &key, bool expanded);
+    Q_INVOKABLE void setLibraryViewState(
+        const QString &selectionKey,
+        const QString &anchorKey,
+        double anchorOffset);
+    Q_INVOKABLE void showTrackInLibrary(const QString &path);
     Q_INVOKABLE void setLibrarySortMode(int mode);
     Q_INVOKABLE void setGlobalSearchQuery(const QString &query);
     Q_INVOKABLE void searchCurrentTrackArtworkSuggestions();
@@ -357,6 +372,7 @@ signals:
         quint64 trackToken, quint64 generation);
     void precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset);
     void libraryTreeFrameReceived(int version, const QByteArray &treeBytes);
+    void libraryRevealRequested(const QStringList &expandKeys, const QString &selectionKey);
     void globalSearchResultsChanged();
     void itunesArtworkChanged();
     void imageFileDetailsChanged(const QString &path);
@@ -625,6 +641,12 @@ private:
     int m_libraryTrackCount{0};
     int m_libraryArtistCount{0};
     int m_libraryAlbumCount{0};
+    QStringList m_libraryExpandedKeys;
+    bool m_libraryViewStateAvailable{false};
+    QString m_libraryViewSelectionKey;
+    QString m_libraryViewAnchorKey;
+    double m_libraryViewAnchorOffset{0.0};
+    quint32 m_libraryRevealGeneration{0};
     QStringList m_libraryRoots;
     QVariantList m_libraryRootEntries;
     int m_librarySortMode{0};

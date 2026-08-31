@@ -85,6 +85,8 @@ enum CommandId : quint16 {
     CmdSetSpectrogramZoomLevel = 57,
     CmdSetSpectrogramWidgetWidth = 58,
     CmdSetPreventDisplaySleepInFullscreen = 59,
+    CmdSetLibraryViewState = 60,
+    CmdShowTrackInLibrary = 61,
 };
 
 struct DecodedPlayback {
@@ -144,6 +146,12 @@ struct DecodedLibraryMeta {
     double etaSeconds{-1.0};
     QStringList rootPaths;
     QVector<DecodedLibraryRoot> rootEntries;
+    bool viewStatePresent{false};
+    QStringList expandedKeys;
+    QString viewSelectionKey;
+    QString viewAnchorKey;
+    double viewAnchorOffset{0.0};
+    quint32 revealGeneration{0};
 };
 
 struct DecodedMetadata {
@@ -246,6 +254,11 @@ QByteArray encodeCommandF64(quint16 cmdId, double value);
 QByteArray encodeCommandString(quint16 cmdId, const QString &value);
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
 QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag);
+QByteArray encodeCommandLibraryViewState(
+    quint16 cmdId,
+    const QString &selectionKey,
+    const QString &anchorKey,
+    float anchorOffset);
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 QByteArray encodeCommandMoveQueue(quint32 from, quint32 to);

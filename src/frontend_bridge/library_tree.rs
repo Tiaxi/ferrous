@@ -308,11 +308,13 @@ pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
 
     let roots = library.roots.clone();
     if roots.is_empty() {
-        expanded_keys.clear();
         return;
     }
 
     let mut valid: HashSet<String> = HashSet::new();
+    for root in &roots {
+        valid.insert(root_row_key(&root.path.to_string_lossy()));
+    }
     for track in &library.tracks {
         let Some(root) = pick_root_for_track(&roots, track) else {
             continue;
@@ -346,6 +348,14 @@ pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
 
         if components.len() > 2 {
             valid.insert(album_row_key(&root_key, &artist_name, &components[1]));
+        }
+        if components.len() > 3 {
+            valid.insert(section_row_key(
+                &root_key,
+                &artist_name,
+                &components[1],
+                &components[2],
+            ));
         }
     }
 
@@ -1605,6 +1615,19 @@ mod tests {
         assert!(expanded.contains("album|/music|Artist A|Album A"));
         assert!(!expanded.contains("artist|/music|Missing Artist"));
         assert!(!expanded.contains("album|/music|Artist A|Missing Album"));
+    }
+
+    #[test]
+    fn retain_valid_expanded_keys_waits_for_library_roots() {
+        let mut expanded = HashSet::from([
+            "artist|/music|Artist A".to_string(),
+            "album|/music|Artist A|Album A".to_string(),
+        ]);
+
+        retain_valid_expanded_keys(&LibrarySnapshot::default(), &mut expanded);
+
+        assert!(expanded.contains("artist|/music|Artist A"));
+        assert!(expanded.contains("album|/music|Artist A|Album A"));
     }
 
     #[test]

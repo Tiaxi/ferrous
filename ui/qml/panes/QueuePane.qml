@@ -302,6 +302,15 @@ Rectangle {
                     }
 
                     MenuItem {
+                        text: "Show in library"
+                        enabled: playlistContextMenu.rowIndex >= 0
+                        onTriggered: {
+                            const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
+                            root.libraryController.showTrackInLibrary(path || "")
+                        }
+                    }
+
+                    MenuItem {
                         text: "Edit Tags"
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: root.controller.openTagEditorForRow(playlistContextMenu.rowIndex)

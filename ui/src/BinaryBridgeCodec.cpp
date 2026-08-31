@@ -312,6 +312,33 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
         rootPaths.push_back(root.path);
         rootEntries.push_back(std::move(root));
     }
+    QStringList expandedKeys;
+    QString viewSelectionKey;
+    QString viewAnchorKey;
+    float viewAnchorOffset = 0.0f;
+    quint32 revealGeneration = 0;
+    bool viewStatePresent = false;
+    if (!reader.atEnd()) {
+        viewStatePresent = true;
+        quint16 expandedKeyCount = 0;
+        if (!reader.readU16(&expandedKeyCount)) {
+            return false;
+        }
+        expandedKeys.reserve(expandedKeyCount);
+        for (quint16 i = 0; i < expandedKeyCount; ++i) {
+            QString key;
+            if (!reader.readUtf8U16(&key)) {
+                return false;
+            }
+            expandedKeys.push_back(key);
+        }
+        if (!reader.readUtf8U16(&viewSelectionKey)
+            || !reader.readUtf8U16(&viewAnchorKey)
+            || !reader.readF32(&viewAnchorOffset)
+            || !reader.readU32(&revealGeneration)) {
+            return false;
+        }
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -332,6 +359,12 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     out->etaSeconds = static_cast<double>(etaSeconds);
     out->rootPaths = rootPaths;
     out->rootEntries = rootEntries;
+    out->viewStatePresent = viewStatePresent;
+    out->expandedKeys = expandedKeys;
+    out->viewSelectionKey = viewSelectionKey;
+    out->viewAnchorKey = viewAnchorKey;
+    out->viewAnchorOffset = static_cast<double>(viewAnchorOffset);
+    out->revealGeneration = revealGeneration;
     return true;
 }
 
@@ -535,6 +568,21 @@ QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool fla
     QByteArray payload;
     appendUtf8U16(payload, value);
     payload.append(flag ? '\x01' : '\x00');
+    return finalizeCommand(cmdId, payload);
+}
+
+QByteArray encodeCommandLibraryViewState(
+    quint16 cmdId,
+    const QString &selectionKey,
+    const QString &anchorKey,
+    float anchorOffset) {
+    QByteArray payload;
+    appendUtf8U16(payload, selectionKey);
+    appendUtf8U16(payload, anchorKey);
+    quint32 bits = 0;
+    static_assert(sizeof(anchorOffset) == sizeof(bits), "float size mismatch");
+    std::memcpy(&bits, &anchorOffset, sizeof(bits));
+    appendLe<quint32>(payload, bits);
     return finalizeCommand(cmdId, payload);
 }
 

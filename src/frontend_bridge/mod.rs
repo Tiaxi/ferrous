@@ -172,9 +172,15 @@ pub enum BridgeLibraryCommand {
         track_path: PathBuf,
         artwork_path: PathBuf,
     },
+    ShowTrackInLibrary(PathBuf),
     SetNodeExpanded {
         key: String,
         expanded: bool,
+    },
+    SetViewState {
+        selection_key: String,
+        anchor_key: String,
+        anchor_offset: f32,
     },
     SetSearchQuery {
         seq: u32,
@@ -358,6 +364,11 @@ pub struct BridgeSnapshot {
     pub(crate) queue_details: HashMap<PathBuf, IndexedTrack>,
     pub library_artist_count: usize,
     pub library_album_count: usize,
+    pub library_expanded_keys: Vec<String>,
+    pub library_view_selection_key: String,
+    pub library_view_anchor_key: String,
+    pub library_view_anchor_offset: f32,
+    pub library_reveal_generation: u32,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
     pub queue_included: bool,
     pub queue: Vec<PathBuf>,
@@ -443,6 +454,10 @@ pub(super) struct BridgeState {
     library_album_count: usize,
     pre_built_tree_bytes: Arc<Vec<u8>>,
     expanded_keys: HashSet<String>,
+    library_view_selection_key: String,
+    library_view_anchor_key: String,
+    library_view_anchor_offset: f32,
+    library_reveal_generation: u32,
     queue: Vec<PathBuf>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
@@ -511,6 +526,8 @@ impl BridgeState {
         metadata.current_bitrate_kbps = self
             .metadata
             .displayed_bitrate_kbps(self.playback.position.as_secs_f64());
+        let mut library_expanded_keys = self.expanded_keys.iter().cloned().collect::<Vec<_>>();
+        library_expanded_keys.sort_unstable();
         BridgeSnapshot {
             playback: self.playback.clone(),
             analysis: self.analysis.clone(),
@@ -519,6 +536,11 @@ impl BridgeState {
             queue_details: self.queue_details.clone(),
             library_artist_count: self.library_artist_count,
             library_album_count: self.library_album_count,
+            library_expanded_keys,
+            library_view_selection_key: self.library_view_selection_key.clone(),
+            library_view_anchor_key: self.library_view_anchor_key.clone(),
+            library_view_anchor_offset: self.library_view_anchor_offset,
+            library_reveal_generation: self.library_reveal_generation,
             pre_built_tree_bytes: if include_tree {
                 Some(self.pre_built_tree_bytes.clone())
             } else {
@@ -537,7 +559,9 @@ impl BridgeState {
     }
 
     fn rebuild_pre_built_tree(&mut self) {
-        library_tree::retain_valid_expanded_keys(&self.library, &mut self.expanded_keys);
+        if !self.library.scan_in_progress {
+            library_tree::retain_valid_expanded_keys(&self.library, &mut self.expanded_keys);
+        }
         (self.library_artist_count, self.library_album_count) =
             library_tree::compute_artist_album_counts(&self.library);
         self.pre_built_tree_bytes = Arc::new(library_tree::build_library_tree_flat_binary(
@@ -999,6 +1023,10 @@ impl BridgeLoopRuntime {
         cmd: BridgeCommand,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
+        let session_only = matches!(
+            &cmd,
+            BridgeCommand::Library(BridgeLibraryCommand::SetViewState { .. })
+        );
         let rebuild_tree =
             command_requires_tree_rebuild(&cmd, self.state.settings.library_sort_mode);
         let deferred_tree_rebuild = command_tree_rebuild_delay(&cmd);
@@ -1030,7 +1058,9 @@ impl BridgeLoopRuntime {
         }
         if changed {
             self.flags.session_dirty = true;
-            urgency = SnapshotUrgency::Immediate;
+            if !session_only {
+                urgency = SnapshotUrgency::Immediate;
+            }
             if refresh_queue_snapshot {
                 self.snapshot_plan.include_queue_in_next_snapshot = true;
             }
@@ -1530,6 +1560,7 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
         BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk)
         | BridgeCommand::Library(
             BridgeLibraryCommand::SetNodeExpanded { .. }
+            | BridgeLibraryCommand::ShowTrackInLibrary(_)
             | BridgeLibraryCommand::RefreshEditedPaths(_)
             | BridgeLibraryCommand::RefreshRenamedPaths(_),
         ) => true,
@@ -1716,6 +1747,7 @@ mod tests {
             selected_queue_index: Some(0),
             current_queue_index: Some(0),
             current_path: Some(p("/music/a.flac")),
+            ..SessionSnapshot::default()
         });
 
         let runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());

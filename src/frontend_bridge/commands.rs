@@ -389,6 +389,9 @@ fn handle_library_view_command(
             }
             Some(false)
         }
+        BridgeLibraryCommand::ShowTrackInLibrary(path) => {
+            Some(reveal_track_in_library(state, &path))
+        }
         BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
             let normalized = key.trim();
             if normalized.is_empty() {
@@ -400,6 +403,28 @@ fn handle_library_view_command(
                 state.expanded_keys.remove(normalized)
             })
         }
+        BridgeLibraryCommand::SetViewState {
+            selection_key,
+            anchor_key,
+            anchor_offset,
+        } => {
+            let selection_key = selection_key.trim();
+            let anchor_key = anchor_key.trim();
+            let anchor_offset = if anchor_offset.is_finite() {
+                anchor_offset.clamp(-24.0, 24.0)
+            } else {
+                0.0
+            };
+            let changed = state.library_view_selection_key != selection_key
+                || state.library_view_anchor_key != anchor_key
+                || (state.library_view_anchor_offset - anchor_offset).abs() > f32::EPSILON;
+            if changed {
+                state.library_view_selection_key = selection_key.to_string();
+                state.library_view_anchor_key = anchor_key.to_string();
+                state.library_view_anchor_offset = anchor_offset;
+            }
+            Some(changed)
+        }
         BridgeLibraryCommand::SetSearchQuery { seq, query } => {
             let _ = runtime.search_query_tx.send(SearchWorkerQuery {
                 seq,
@@ -410,6 +435,33 @@ fn handle_library_view_command(
         }
         _ => None,
     }
+}
+
+fn reveal_track_in_library(state: &mut BridgeState, path: &Path) -> bool {
+    let Some(track) = state.library.tracks.iter().find(|track| track.path == path) else {
+        return false;
+    };
+    let Some(tree_context) =
+        super::search::derive_tree_path_context(&track.path, &state.library.roots, &track.artist)
+    else {
+        return false;
+    };
+    state.expanded_keys.insert(tree_context.artist_key.clone());
+    if let Some(album_key) = tree_context.album_key {
+        state.expanded_keys.insert(album_key);
+    }
+    if let Some(section_key) = tree_context.section_key {
+        state.expanded_keys.insert(section_key);
+    }
+    state
+        .library_view_selection_key
+        .clone_from(&tree_context.track_key);
+    state
+        .library_view_anchor_key
+        .clone_from(&tree_context.track_key);
+    state.library_view_anchor_offset = 0.0;
+    state.library_reveal_generation = state.library_reveal_generation.wrapping_add(1);
+    true
 }
 
 fn handle_library_collection_command(
@@ -1376,6 +1428,53 @@ mod tests {
             .expect("write stub file");
     }
 
+    #[test]
+    fn show_track_in_library_expands_ancestors_and_selects_track() {
+        let root_path = p("/music");
+        let track_path = p("/music/Artist/Album/Disc 1/01.flac");
+        let mut state = BridgeState {
+            library: Arc::new(LibrarySnapshot {
+                roots: vec![LibraryRoot {
+                    path: root_path.clone(),
+                    name: String::new(),
+                }],
+                tracks: vec![LibraryTrack {
+                    path: track_path.clone(),
+                    root_path,
+                    artist: "Artist".to_string(),
+                    ..LibraryTrack::default()
+                }],
+                ..LibrarySnapshot::default()
+            }),
+            ..BridgeState::default()
+        };
+
+        assert!(reveal_track_in_library(&mut state, &track_path));
+        assert!(state.expanded_keys.contains("artist|/music|Artist"));
+        assert!(state.expanded_keys.contains("album|/music|Artist|Album"));
+        assert!(state
+            .expanded_keys
+            .contains("section|/music|Artist|Album|Disc 1"));
+        assert_eq!(
+            state.library_view_selection_key,
+            "track|/music/Artist/Album/Disc 1/01.flac"
+        );
+        assert_eq!(state.library_reveal_generation, 1);
+    }
+
+    #[test]
+    fn show_external_track_in_library_is_a_no_op() {
+        let mut state = BridgeState::default();
+
+        assert!(!reveal_track_in_library(
+            &mut state,
+            Path::new("/external/song.flac")
+        ));
+        assert!(state.expanded_keys.is_empty());
+        assert!(state.library_view_selection_key.is_empty());
+        assert_eq!(state.library_reveal_generation, 0);
+    }
+
     fn library_track(
         path: &str,
         root: &PathBuf,
@@ -1601,6 +1700,7 @@ mod tests {
             selected_queue_index: Some(0),
             current_queue_index: Some(0),
             current_path: Some(track.clone()),
+            ..SessionSnapshot::default()
         };
 
         apply_session_restore(&mut state, &playback, Some(&session));
