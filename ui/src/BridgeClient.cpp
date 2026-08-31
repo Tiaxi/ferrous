@@ -4762,6 +4762,25 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const int previousPlayingIndex = m_playingQueueIndex;
 #endif
 
+    // Stop resets the transport: the backend always reports position 0
+    // once stopped.  Re-anchor centered spectrograms immediately — before
+    // the queued playbackChanged cascade runs — so the playhead and
+    // viewport return to column 0 instead of lingering at the parked
+    // position.  Without this, restarting the same track activates the
+    // position jump hold against the stale anchor and the playhead crawls
+    // forward from where it parked until the hold times out before
+    // snapping to the real position.  Clear any pending seek window so it
+    // cannot suppress the stopped position below.  Rolling mode is
+    // untouched: its ring is write-order history and the decode worker
+    // restart on the next play re-anchors it.
+    if (snapshot.playback.present && isStopped && previousPlaybackState != nextState) {
+        m_pendingSeek = false;
+        m_pendingSeekTargetSeconds = 0.0;
+        m_pendingSeekStartedAtMs = 0;
+        m_pendingSeekUntilMs = 0;
+        reanchorCenteredSpectrogramsForExplicitPosition(0.0);
+    }
+
     if (snapshot.queue.present && !m_loggedStartupQueuePresent) {
         logDiagnostic(
             QStringLiteral("session"),
