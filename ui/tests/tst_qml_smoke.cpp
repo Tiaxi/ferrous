@@ -6563,9 +6563,11 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     constexpr int hopNormal = 1'024;
     constexpr int sampleRate = 44'100;
     constexpr int estZoomedOut = 1'247;
-    constexpr int estNormal = 12'467;
+    constexpr int estNormal = 13'618;
     constexpr int zoomedOutDecoded = 1'240;
     constexpr int normalDecoded = 2'755;
+    constexpr int staleStart = 11'611;
+    constexpr int staleDecoded = 1'943;
 
     // --- Phase 1: zoomed-out session (post-stop restart at 0) ---
     item.feedPrecomputedChunk(
@@ -6592,13 +6594,44 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     item.m_zoomLevel = 1.0;
     item.m_awaitingZoomData = true;
     item.feedPrecomputedChunk(
-        QByteArray(), bins, 0, 0, 0, estNormal,
+        QByteArray(), bins, 0, 0, staleStart, estNormal,
         sampleRate, hopNormal, false, true, token, true, 2);
-    for (int start = 0; start < normalDecoded; start += 32) {
-        QByteArray data(32 * bins, '\x40');
+    for (int offset = 0; offset < staleDecoded; offset += 32) {
+        const int cols = qMin(32, staleDecoded - offset);
+        QByteArray data(cols * bins, '\x40');
         item.feedPrecomputedChunk(
-            data, bins, 0, 32, start, estNormal,
+            data, bins, 0, cols, staleStart + offset, estNormal,
             sampleRate, hopNormal, false, false, token, false, 2);
+    }
+    // This mirrors the trace's bad backend window: it has more than a
+    // screenful of data and a very large max column, but none of the stopped
+    // viewport around column 0.  Keep the old non-black canvas frozen rather
+    // than accepting a fully black rebuild.
+    QCOMPARE(item.m_zoomFillActive, true);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(node != nullptr);
+    bool frozenCanvasHasContent = false;
+    for (int y = 0; y < item.m_canvas.height() && !frozenCanvasHasContent; ++y) {
+        for (int x = 0; x < item.m_canvas.width(); ++x) {
+            if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+                frozenCanvasHasContent = true;
+                break;
+            }
+        }
+    }
+    QVERIFY2(frozenCanvasHasContent,
+             "non-overlapping refill must preserve the previous visible canvas");
+
+    // Corrected backend restart for the stopped viewport.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, estNormal,
+        sampleRate, hopNormal, false, true, token, true, 3);
+    for (int start = 0; start < normalDecoded; start += 32) {
+        const int cols = qMin(32, normalDecoded - start);
+        QByteArray data(cols * bins, '\x40');
+        item.feedPrecomputedChunk(
+            data, bins, 0, cols, start, estNormal,
+            sampleRate, hopNormal, false, false, token, false, 3);
     }
     // The zoom-fill freeze must release once the ring covers the display
     // again, and the next paint must rebuild the canvas with content.
@@ -6609,6 +6642,17 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     QVERIFY2(item.m_canvasFilledCols > 0,
              qPrintable(QStringLiteral("canvas refill produced %1 columns")
                             .arg(item.m_canvasFilledCols)));
+    bool refilledCanvasHasContent = false;
+    for (int y = 0; y < item.m_canvas.height() && !refilledCanvasHasContent; ++y) {
+        for (int x = 0; x < item.m_canvas.width(); ++x) {
+            if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+                refilledCanvasHasContent = true;
+                break;
+            }
+        }
+    }
+    QVERIFY2(refilledCanvasHasContent,
+             "stopped zoom reset must render non-background spectrogram pixels");
     delete node;
 }
 
@@ -6629,7 +6673,10 @@ void QmlSmokeTest::spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail() {
     constexpr int sampleRate = 44'100;
     constexpr int hop = 10'240;           // deep zoom-out
     constexpr int totalEstimate = 1'247;  // 288 s track at hop 10240 (+fudge)
-    constexpr int decodedColumns = 500;   // refill in progress
+    // Within the old hard 64-column tolerance but still roughly 13 s from
+    // the estimate at this coarse hop.  A genuinely two-second tolerance
+    // must keep treating this as an in-progress refill.
+    constexpr int decodedColumns = totalEstimate - 57;
     constexpr quint64 token = 7;
 
     item.feedPrecomputedChunk(

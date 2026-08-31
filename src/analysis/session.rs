@@ -847,24 +847,7 @@ fn run_spectrogram_session(
     let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
     let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
 
-    // Publish the track duration (milliseconds) for the analysis thread.
-    // `total_columns` counts reference-hop columns over the effective-rate
-    // timeline (with a +64 STFT-edge fudge), so dividing by the
-    // reference-hop column rate recovers the file-metadata duration with
-    // the same slight overestimate the Qt-side `total_columns_estimate`
-    // carries — keeping lock/detach window math consistent across threads.
-    // 0 is only stored when the estimate is degenerate; the analysis
-    // thread treats 0 as "unknown" and falls back to centered-only margins.
-    let track_duration_ms = if effective_rate > 0 {
-        f64_to_u64_saturating(
-            f64::from(total_columns) * usize_to_f64_approx(REFERENCE_HOP)
-                / f64::from(effective_rate)
-                * 1000.0,
-        )
-    } else {
-        0
-    };
-    track_duration_ms_out.store(track_duration_ms, Ordering::Relaxed);
+    publish_track_duration_ms(total_columns, effective_rate, track_duration_ms_out);
 
     let actual_channel_count = match view_mode {
         SpectrogramViewMode::Downmix => 1,
@@ -1029,6 +1012,16 @@ fn run_spectrogram_session(
                     source = new_source;
                     session.track_token = track_token;
                     session.total_columns_estimate = new_est;
+                    // handle_track_change invalidates the outgoing duration
+                    // before dispatching ContinueWithFile.  A compatible
+                    // continuation stays inside this worker session, so it
+                    // must republish here; otherwise the duration remains
+                    // unknown for every later centered seek/zoom restart.
+                    publish_track_duration_ms(
+                        new_est,
+                        session.effective_rate,
+                        track_duration_ms_out,
+                    );
                     warmup_remaining = 0;
                     session.target_chunk_columns = 1;
                     session.session_start_time = std::time::Instant::now();
@@ -1105,6 +1098,27 @@ fn run_spectrogram_session(
             }
         }
     }
+}
+
+/// Publish the file-metadata duration represented by a reference-hop column
+/// estimate.  `total_columns` includes the same +64 STFT-edge allowance used
+/// by Qt's estimate, so retaining it keeps full-track-lock and EOF-detach math
+/// aligned across the worker and analysis threads.
+fn publish_track_duration_ms(
+    total_columns: u32,
+    effective_rate: u32,
+    track_duration_ms_out: &AtomicU64,
+) {
+    let duration_ms = if effective_rate > 0 {
+        f64_to_u64_saturating(
+            f64::from(total_columns) * usize_to_f64_approx(REFERENCE_HOP)
+                / f64::from(effective_rate)
+                * 1000.0,
+        )
+    } else {
+        0
+    };
+    track_duration_ms_out.store(duration_ms, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -2447,6 +2461,21 @@ mod tests {
             gst_duration_requeried: false,
             pending_continue: None,
         }
+    }
+
+    #[test]
+    fn continued_file_republishes_track_duration() {
+        // Compatible ContinueWithFile handoffs do not create a new worker
+        // session.  Publishing the next file's estimate must therefore
+        // replace the zero written by handle_track_change rather than leave
+        // centered restart math in its unknown-duration fallback.
+        let published_duration_ms = AtomicU64::new(0);
+
+        publish_track_duration_ms(2_000, 48_000, &published_duration_ms);
+        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 42_666);
+
+        publish_track_duration_ms(4_000, 48_000, &published_duration_ms);
+        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 85_333);
     }
 
     #[test]

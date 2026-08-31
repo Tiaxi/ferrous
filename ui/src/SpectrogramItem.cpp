@@ -93,8 +93,9 @@ bool centeredDecodedTailLooksFinal(
     // along with the decode head (the decoded tail lagging the playhead
     // makes the second condition below trivially true mid-fill).
     const qint64 eofSlackColumns = columnsPerSecond > 0.0
-        ? std::max<qint64>(64, static_cast<qint64>(columnsPerSecond * 2.0))
-        : 64;
+        ? std::max<qint64>(
+              1, static_cast<qint64>(std::ceil(columnsPerSecond * 2.0)))
+        : 1;
     return decodedColumnCount + eofSlackColumns >= estimatedColumnCount;
 }
 
@@ -1669,6 +1670,37 @@ void SpectrogramItem::feedPrecomputedChunk(
         const bool ringCoversDisplayRight =
             m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
 
+        // A large absolute max column does not prove that the ring contains
+        // the LEFT edge of this viewport.  In particular, a stale backend
+        // target can refill thousands of columns near EOF while the stopped
+        // Qt viewport is at column 0.  Releasing the freeze in that state
+        // rebuilds every requested pixel from missing slots and turns the
+        // widget fully black.  Require the active token to retain the
+        // viewport's first source column before handing off to the new zoom.
+        const int visibleWindowCols = static_cast<int>(std::ceil(
+            static_cast<double>(screenWidth)
+            / std::max(0.001, effectiveZoomLocked())));
+        const qint64 estimateCount = std::max<qint64>(
+            static_cast<qint64>(m_precomputedTotalColumnsEstimate), 1);
+        const qint64 nowCol = static_cast<qint64>(
+            std::max(0.0, m_positionSeconds) * cps);
+        qint64 displayLeftCol;
+        if (static_cast<qint64>(visibleWindowCols) * 100 / estimateCount >= 90) {
+            displayLeftCol = 0;
+        } else {
+            const qint64 halfWindowCols = visibleWindowCols / 2;
+            displayLeftCol = std::max<qint64>(0, nowCol - halfWindowCols);
+            const qint64 displayRightColForEstimate = std::min(
+                estimateCount - 1,
+                displayLeftCol + static_cast<qint64>(visibleWindowCols) - 1);
+            displayLeftCol = std::max<qint64>(
+                0,
+                displayRightColForEstimate
+                    - static_cast<qint64>(visibleWindowCols) + 1);
+        }
+        const bool ringCoversDisplayLeft =
+            ringSlotForDisplayIndexLocked(displayLeftCol, false) >= 0;
+
         // Decode tail-end: the STFT window truncates the last few
         // columns so maxCol+1 stops short of the estimate by ~20–30
         // columns.  At max zoom-out in wide fullscreen views,
@@ -1685,8 +1717,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
                 >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
 
-        if ((ringHasEnoughColumns && ringCoversDisplayRight)
-            || decodeReachedEnd) {
+        if (ringCoversDisplayLeft
+            && ((ringHasEnoughColumns && ringCoversDisplayRight)
+                || decodeReachedEnd)) {
             m_zoomFillActive = false;
             // Don't invalidateCanvas() here — the canvas must stay
             // non-null so the NEXT zoom transition can activate its

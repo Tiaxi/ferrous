@@ -583,6 +583,12 @@ impl AnalysisRuntimeState {
                 profile_eprintln!(
                     "[analysis] RestartCurrentTrack pos={position_seconds:.2} clear_history={clear_history}"
                 );
+                // RestartCurrentTrack is also the authoritative transport
+                // re-anchor used when playback stops.  Keep the canonical
+                // position in sync so a following zoom/view restart does not
+                // resurrect the pre-stop playhead and decode an unrelated
+                // window near EOF while Qt is rendering position 0.
+                self.last_spectrogram_position = position_seconds;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
@@ -1983,8 +1989,12 @@ mod tests {
     // decodes from the track start and parks after its lookahead), so the
     // UI can refill instead of staying black.
     #[test]
-    fn stopped_zoom_reset_pipeline_produces_data_chunks() {
-        let path = write_engine_test_wave(60, 8_000);
+    fn stopped_zoom_reset_pipeline_covers_stopped_viewport() {
+        // Long enough that the default-zoom viewport does not cover the
+        // whole track.  If RestartCurrentTrack(0) leaves the old 315 s
+        // position cached, the following zoom restart begins around 80 s
+        // and still emits plenty of data -- just none for viewport column 0.
+        let path = write_engine_test_wave(320, 8_000);
         let (engine, event_rx) = AnalysisEngine::new();
 
         engine.command(AnalysisCommand::SetTrack {
@@ -1998,7 +2008,7 @@ mod tests {
         ));
         engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(1_165));
         engine.command(AnalysisCommand::SetSpectrogramZoomLevel(0.1));
-        engine.command(AnalysisCommand::PositionUpdate(52.0));
+        engine.command(AnalysisCommand::PositionUpdate(315.0));
         let _ = drain_events(&event_rx, Duration::from_millis(600));
 
         eprintln!("=== STOP (RestartCurrentTrack at 0) ===");
@@ -2014,20 +2024,29 @@ mod tests {
         let reset_events = drain_events(&event_rx, Duration::from_millis(1_500));
         eprintln!("after zoom reset:\n{}", summarize(&reset_events));
 
-        let data_chunks = reset_events
+        let default_zoom_chunks = reset_events
             .iter()
             .filter(|e| {
                 matches!(
                     e,
                     AnalysisEvent::PrecomputedSpectrogramChunk(c)
                         if c.column_count > 0
+                            && usize::from(c.hop_size) == REFERENCE_HOP
                 )
             })
-            .count();
+            .collect::<Vec<_>>();
+        let covers_stopped_viewport = default_zoom_chunks.iter().any(|event| {
+            matches!(
+                event,
+                AnalysisEvent::PrecomputedSpectrogramChunk(c)
+                    if c.start_column_index == 0
+            )
+        });
         let _ = std::fs::remove_file(path);
         assert!(
-            data_chunks > 0,
-            "zoom reset while stopped should produce data chunks"
+            covers_stopped_viewport,
+            "zoom reset while stopped must decode column 0, got:\n{}",
+            summarize(&reset_events),
         );
     }
 
